@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+installers/
+*.exe
 
 # 生成/运行数据（不要提交到 GitHub）
 dataset/
