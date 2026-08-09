@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Kohya-SS LoRA 一键工具（Windows 桌面应用，画风 / 人物角色 双模式）
@@ -130,8 +130,17 @@ PARAM_TIPS = {
     "max_epochs": "最大训练轮数：轮数越多学得越久，够用就好。",
 }
 
+TRIGGER_HINT_CHARACTER = ("💡提示：填一个网上很少见到的英文单词，比如 my_oc01\n"
+                          "不要用 girl 这种普通单词！\n"
+                          "训练之后输入这个单词，就能画出这个人物。\n"
+                          "不填也可以正常训练。")
+TRIGGER_HINT_STYLE = ("💡提示：填一个网上很少见到的英文单词，比如 my_style01\n"
+                      "不要用 sketch 这种普通单词！\n"
+                      "⚠重要：你的训练图片不能全是同一个人，不然画风套不到别的东西上。\n"
+                      "训练之后输入这个单词，就能一键套用这个画风。\n"
+                      "不填也可以正常训练。")
 DATASET_TIPS = {
-    "style": "📌 数据集提示：建议 20~60 张图片，尽量多不同人物、不同姿态，避免五官固化。画风模式自动过滤强人物五官标签，不使用 trigger，不需要正则图。",
+    "style": "📌 数据集提示：建议 20~60 张图片，尽量多不同人物、不同姿态，避免五官固化。画风模式自动过滤强人物五官标签；可填画风专属触发词，不需要正则图。",
     "character": "📌 数据集提示：建议 15~30 张同一人物，多角度、不同服装，推荐设置唯一 trigger 触发词；可配合正则数据集防过拟合。",
 }
 
@@ -577,6 +586,8 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
     if not input_dir or not os.path.isdir(input_dir):
         raise RuntimeError("请选择图片文件夹")
     out = os.path.join(data_dir(), "dataset", "train" if mode == "style" else "train_character")
+    os.environ["TRIGGER_WORD"] = trigger or ""
+    os.environ["MODE"] = mode
     os.makedirs(out, exist_ok=True)
     logf(f"[预处理] 输入: {input_dir}")
     logf(f"[预处理] 输出: {out}  |  模式: {MODE_LABELS.get(mode, mode)}  |  分辨率 {size}px")
@@ -598,6 +609,8 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         if not wd14:
             cmd.append("--no-wd14")
     else:
+        if trigger:
+            cmd += ["--trigger", trigger]
         if dedup:
             cmd.append("--dedup")
     if square_crop:
@@ -1391,20 +1404,28 @@ class App:
         self.btn_pick_raw.pack(side="left")
         ttk.Label(data_row, text="（按左侧新手引导 ①②③④⑤ 顺序操作）", style="Hint.TLabel").pack(side="left", padx=(8, 0))
 
-        # ---- 人物模式专属控件（画风模式自动隐藏，带滑入动画） ----
-        self.char_slide = tk.Canvas(top, height=0, bg=ROOT_BG, highlightthickness=0)
-        self.char_frame = ttk.LabelFrame(self.char_slide, text="👤 人物模式专属设置（画风模式自动隐藏）", padding=8)
-        self._char_win = self.char_slide.create_window((0, 0), window=self.char_frame, anchor="nw")
-        self.char_slide.bind("<Configure>", lambda e: self.char_slide.itemconfigure(self._char_win, width=e.width))
-        r1 = ttk.Frame(self.char_frame)
+        # ---- Trigger 触发词（两种模式都显示；人物=角色名，画风=画风专属词） ----
+        self.trig_frame = ttk.LabelFrame(top, text="🔑 Trigger 触发词（可选）", padding=8)
+        r1 = ttk.Frame(self.trig_frame)
         r1.pack(fill="x")
         ttk.Label(r1, text="Trigger 触发词：").pack(side="left")
         self.trigger_var = tk.StringVar()
         self.trigger_entry = ttk.Entry(r1, textvariable=self.trigger_var, width=30)
         self.trigger_entry.pack(side="left", padx=(0, 6))
         ttk.Label(r1, text="（支持逗号分隔多个；自动插入每张标签最开头）", style="Hint.TLabel").pack(side="left")
+        self.trigger_hint_var = tk.StringVar()
+        self.trigger_hint = ttk.Label(self.trig_frame, textvariable=self.trigger_hint_var,
+                                      style="Hint.TLabel", justify="left", wraplength=660)
+        self.trigger_hint.pack(fill="x", pady=(4, 0))
+        self.trig_frame.pack(fill="x", pady=(4, 0))
+
+        # ---- 人物模式专属控件（正则数据集，画风模式自动隐藏，带滑入动画） ----
+        self.char_slide = tk.Canvas(top, height=0, bg=ROOT_BG, highlightthickness=0)
+        self.char_frame = ttk.LabelFrame(self.char_slide, text="👤 人物模式专属设置（正则数据集，画风模式自动隐藏）", padding=8)
+        self._char_win = self.char_slide.create_window((0, 0), window=self.char_frame, anchor="nw")
+        self.char_slide.bind("<Configure>", lambda e: self.char_slide.itemconfigure(self._char_win, width=e.width))
         r2 = ttk.Frame(self.char_frame)
-        r2.pack(fill="x", pady=(6, 0))
+        r2.pack(fill="x")
         ttk.Label(r2, text="正则数据集：").pack(side="left")
         self.reg_var = tk.StringVar()
         self.reg_entry = ttk.Entry(r2, textvariable=self.reg_var, width=44)
@@ -1663,7 +1684,7 @@ class App:
             (self.btn_guide_base, "第③步：选择底模（会自动识别 SD1.5 / SDXL）。"),
             (self.btn_guide_raw, "第④步：选择原始图片文件夹。"),
             (self.btn_one_click, "小白专用：自动过滤模糊/过小/损坏图 → 正方形裁剪 → 去重 → 打标签 → 开始训练，全程不用管。"),
-            (self.trigger_entry, "触发词：相当于角色的“名字”，推理时用它唤起角色。支持多个，用英文逗号分隔（如 ohwx, mychar）。"),
+            (self.trigger_entry, "触发词：相当于模型的“召唤词”。人物模式=角色名；画风模式=画风专属词。推理时用它唤起。支持多个，用英文逗号分隔（如 ohwx, mychar）。"),
             (self.reg_entry, "正则图：同一角色的参考图文件夹，训练时防止模型学过头（可选）。"),
             (self.btn_pick_reg, "选择正则数据集文件夹（人物模式可选）。"),
             (self.global_pos_entry, "附加全局正向提示词：训练时自动加到每张图片标签最前面（例如 masterpiece），不写进图片的 txt 文件，可留空。"),
@@ -2230,9 +2251,11 @@ class App:
         self.tip_var.set(tip)
         self._fade_tip()
         if self.mode == "character":
+            self.trigger_hint_var.set(TRIGGER_HINT_CHARACTER)
             self.btn_pre.configure(text="③ 数据预处理（人物）")
             self.btn_train.configure(text="⑥ 一键训练（人物 LoRA）")
         else:
+            self.trigger_hint_var.set(TRIGGER_HINT_STYLE)
             self.btn_pre.configure(text="③ 数据预处理（画风）")
             self.btn_train.configure(text="⑥ 一键训练（画风 LoRA）")
 

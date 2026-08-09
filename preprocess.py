@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Kohya-SS LoRA 数据集预处理脚本（Windows / 通用）
@@ -719,6 +719,21 @@ def main():
                     n_trig += 1
             print(f"[INFO] 已把 trigger「{trigger}」插入 {n_trig} 张图片的标签第一行")
 
+    # ---- 画风模式：同样支持画风专属触发词（插入每张 txt 第一行，不动 WD14 打标逻辑） ----
+    if mode == "style" and not args.no_caption and ok and trigger:
+        n_trig = 0
+        for f in sorted(os.listdir(output_dir)):
+            if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
+                continue
+            t = os.path.join(output_dir, os.path.splitext(f)[0] + ".txt")
+            if os.path.isfile(t):
+                with open(t, "r", encoding="utf-8") as fh:
+                    cur = fh.read()
+                with open(t, "w", encoding="utf-8") as fh:
+                    fh.write(insert_trigger(cur, trigger))
+                n_trig += 1
+        print(f"[INFO] 已把画风专属触发词「{trigger}」插入 {n_trig} 张图片的标签第一行")
+
     print()
     print("=" * 60)
     print(f"  处理成功: {ok}  |  跳过(已存在): {skipped}  |  重复: {dups}")
@@ -727,7 +742,8 @@ def main():
     print(f"  输出目录: {output_dir}")
     if ok and not args.no_caption:
         if mode == "style":
-            print("  每张图已生成同名 .txt caption（画风描述，已过滤人物五官/角色标签）")
+            print("  每张图已生成同名 .txt caption（画风描述，已过滤人物五官/角色标签" +
+                  ("，trigger 已插入" if trigger else "") + "）")
         else:
             print("  每张图已生成同名 .txt caption（人物标签完整保留" +
                   ("，trigger 已插入" if trigger else "") + "）")
