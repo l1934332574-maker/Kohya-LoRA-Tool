@@ -168,7 +168,7 @@ def run_stream(cmd, cwd=None, env=None, logf=print):
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         cwd=cwd, env=env, text=True, encoding="utf-8", errors="replace",
-        bufsize=1, creationflags=0,
+        bufsize=1, creationflags=subprocess.CREATE_NO_WINDOW,
     )
     for line in proc.stdout:
         if logf:

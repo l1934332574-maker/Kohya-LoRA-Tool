@@ -193,7 +193,7 @@ def _run_cmd(cmd, cwd=None, env=None, logf=print):
     try:
         proc = subprocess.Popen(
             cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            text=True, encoding="utf-8", errors="replace", bufsize=1, creationflags=0x08000000,
         )
     except Exception as e:
         logf(f"[ERROR] 无法启动进程: {e}")
