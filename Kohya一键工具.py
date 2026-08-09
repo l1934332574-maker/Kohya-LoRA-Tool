@@ -898,7 +898,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     except Exception as e:
         logf(f"[训练] 全局提示词注入失败，忽略（{e}）")
         global_dataset = None
-    data_dir = global_dataset or train_dir
+    dataset_dir = global_dataset or train_dir
     if global_dataset:
         logf(f"[训练] 已注入全局正向提示词，使用临时数据集: {global_dataset}")
 
@@ -907,12 +907,12 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         keep_tokens = max(1, len(split_triggers(params.get("trigger"))))
     import preprocess as _pp
     _pp.write_dataset_config(
-        data_dir, cfg_path, resolution=resolution,
+        dataset_dir, cfg_path, resolution=resolution,
         num_repeats=params.get("repeats", 5),
         reg_dir=(params.get("reg_dir") if mode == "character" else None),
         keep_tokens=keep_tokens,
     )
-    logf(f"[训练] 数据集: {data_dir}（{resolution}px, repeats={params.get('repeats', 5)}）")
+    logf(f"[训练] 数据集: {dataset_dir}（{resolution}px, repeats={params.get('repeats', 5)}）")
     if mode == "character" and params.get("reg_dir"):
         logf(f"[训练] 正则数据集: {params.get('reg_dir')}")
 
