@@ -953,21 +953,20 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         f"--network_dim={rank}", f"--network_alpha={alpha}",
         f"--learning_rate={unet_lr}", f"--unet_lr={unet_lr}", f"--text_encoder_lr={te_lr}",
     ]
-    if train_te:
-        cmd.append("--train_text_encoder")
-    else:
+    if not train_te:
         cmd.append("--network_train_unet_only")
     cmd += [
         "--optimizer_type=AdamW8bit", "--lr_scheduler=cosine", "--lr_warmup_steps=120",
         f"--max_train_epochs={epochs}",
         f"--train_batch_size={batch_size}", "--max_data_loader_n_workers=1",
         "--seed=1234", f"--mixed_precision={mixed}", "--cache_latents", "--cache_latents_to_disk",
-        "--cache_text_encoder_outputs",
         "--enable_bucket", "--bucket_no_upscale",
         f"--min_bucket_reso={min_bucket}", f"--max_bucket_reso={max_bucket}",
         "--bucket_reso_steps=64", "--caption_extension=.txt",
         f"--save_every_n_steps={save_every}", "--save_state",
     ]
+    if base_type == "sdxl":
+        cmd.append("--cache_text_encoder_outputs")
     if use_xformers:
         cmd.append("--xformers")
     else:
