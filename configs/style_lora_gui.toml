@@ -1,0 +1,62 @@
+﻿# ============================================================
+# Kohya-SS GUI 训练配置 —— 画风 LoRA（示例模板）
+# ============================================================
+# 说明：
+#   · 本文件是给 kohya 网页 UI（③ 启动 Web UI）用的“导入配置”示例模板，
+#     主程序「一键开始训练 / 一键训练」不依赖本文件（参数由主程序自动生成）。
+#   · 下面所有路径都是占位示例，导入到网页 UI 前请按你的实际机器修改。
+#   · SDXL 底模预设：rank16/alpha8/lr1.5e-4；SD1.5 底模请改 rank12/alpha6/lr3e-4
+#     并把分辨率改为 512。
+# ============================================================
+
+pretrained_model_name_or_path = "请填写底模绝对路径，例如 C:/path/to/your_model.safetensors"
+v2 = false
+v_parameterization = false
+sdxl = true
+network_module = "networks.lora"
+network_dim = 16
+network_alpha = 8
+
+learning_rate = 0.00015
+unet_lr = 0.00015
+network_train_unet_only = false
+lr_scheduler = "cosine"
+lr_warmup_steps = 120
+optimizer_type = "AdamW8bit"
+optimizer_args = []
+max_train_steps = ""
+max_train_epochs = 8
+epoch = 1
+train_batch_size = 1
+gradient_accumulation_steps = 1
+max_data_loader_n_workers = 1
+num_cpu_threads_per_process = 2
+seed = 1234
+
+dataset_config = "请填写 dataset_config.toml 绝对路径，例如 C:/path/to/configs/dataset_config.toml"
+tokenizer_cache_dir = "请填写 tokenizers 缓存目录（主程序会自动生成到 %APPDATA%\\KohyaLoraTool\\tokenizers）"
+caption_extension = ".txt"
+resolution = "1024,1024"
+enable_bucket = true
+bucket_no_upscale = true
+bucket_reso_steps = 64
+min_bucket_reso = 512
+max_bucket_reso = 2048
+shuffle_caption = false
+keep_tokens = 0
+
+cache_latents = true
+cache_latents_to_disk = true
+sdxl_cache_text_encoder_outputs = true
+mixed_precision = "bf16"
+save_precision = "bf16"
+save_model_as = "safetensors"
+output_name = "anime_style_lora"
+output_dir = "请填写输出目录（主程序会自动生成到 %APPDATA%\\KohyaLoraTool\\output）"
+logging_dir = "请填写日志目录（主程序会自动生成到 %APPDATA%\\KohyaLoraTool\\logs）"
+training_comment = "Style LoRA (SDXL) - anime cel shading (no character / no trigger word) rank16 alpha8 lr1.5e-4"
+gradient_checkpointing = true
+xformers = true
+save_every_n_epochs = 1
+save_every_n_steps = 0
+stop_text_encoder_training = 0

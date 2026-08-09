@@ -1,0 +1,33 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 生成/运行数据（不要提交到 GitHub）
+dataset/
+output/
+logs/
+models/
+tokenizers/
+sdxl_config/
+wd14_tagger_model/
+kohya_dir.txt
+configs/dataset_config.toml
+
+# PyInstaller 构建产物（生成物忽略，源码 spec/iss 保留）
+build_exe/work/
+build_exe/dist/
+build_exe/installer/*
+!build_exe/installer/installer.iss
+build/
+dist/
+*.spec.bak
+
+# 大文件/临时下载（不提交 GitHub）
+*.safetensors
+*.ckpt
+*.part
+
+# Windows 快捷方式（本机生成，不提交）
+*.lnk
+点这个安装.lnk

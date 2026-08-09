@@ -1,0 +1,27 @@
+﻿# ============================================================
+# LoRA 数据集配置 —— 示例模板（dataset_config.example.toml）
+# ------------------------------------------------------------
+# 说明：
+#   · 实际训练时，主程序会自动生成 configs/dataset_config.toml，
+#     无需手动编辑本文件。
+#   · 本示例仅用于展示 kohya 数据集配置格式；所有路径均为占位符，
+#     请勿直接使用。
+# ============================================================
+
+[general]
+caption_extension = ".txt"
+shuffle_caption = false
+keep_tokens = 0
+
+[[datasets]]
+resolution = 1024
+batch_size = 1
+enable_bucket = true
+bucket_no_upscale = true
+bucket_reso_steps = 64
+min_bucket_reso = 512
+max_bucket_reso = 2048
+
+  [[datasets.subsets]]
+  image_dir = "请填写训练图片文件夹绝对路径"
+  num_repeats = 5
