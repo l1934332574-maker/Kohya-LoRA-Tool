@@ -1382,8 +1382,10 @@ class App:
         self.btn_pick_base = ttk.Button(mode_row, text="选择底模文件…", command=self.cmd_pick_base)
         self.btn_pick_base.pack(side="left", padx=(0, 6))
         self.base_model_var = tk.StringVar()
-        self.base_model_lbl = ttk.Label(mode_row, textvariable=self.base_model_var, style="Hint.TLabel",
-                                        width=30, anchor="w")
+        self.base_disp_var = tk.StringVar()
+        self.base_disp_var.set("（未选择模型，点【选择底模文件…】或下载）")
+        self.base_model_lbl = ttk.Label(mode_row, textvariable=self.base_disp_var, style="Hint.TLabel",
+                                        width=34, anchor="w")
         self.base_model_lbl.pack(side="left", padx=(0, 6))
         self.btn_refresh_base = ttk.Button(mode_row, text="↻ 刷新", command=self.cmd_refresh_base)
         self.btn_refresh_base.pack(side="left", padx=(0, 4))
@@ -1678,7 +1680,7 @@ class App:
             (self.btn_refresh_base, "重新扫描默认模型文件夹，把新放入的底模列进下拉。"),
             (self.btn_open_base_dir, "打开默认底模存放文件夹（项目内 models\\base）。"),
             (self.btn_download_base, "没有底模？点这里选下载方式：推荐「应用内下载」（软件里直接下载，带进度/断点续传/下完自动识别），也可选浏览器极速下载（魔搭）或备用下载（hf-mirror）。"),
-            (self.base_model_lbl, "当前选中的底模文件路径。"),
+            (self.base_model_lbl, "当前选中的底模文件（显示文件名）。未选择时点【选择底模文件…】或【没有模型？点这里下载】。"),
             (self.raw_entry, "放原始图片的文件夹（支持 jpg/png/webp/bmp/tif/gif）。"),
             (self.btn_pick_raw, "选择原始图片文件夹。"),
             (self.btn_guide_base, "第③步：选择底模（会自动识别 SD1.5 / SDXL）。"),
@@ -1955,15 +1957,15 @@ class App:
             self._set_base_type(payload)
             model = self._find_model_of_type(payload)
             if model:
-                self.base_model_var.set(model[0])
+                self._set_base_model(model[0])
                 self._log(f"[底模] 目录里找到 {BASE_TYPE_LABELS[payload]} 模型：{model[1]}")
             else:
-                self.base_model_var.set("")
+                self._set_base_model("")
                 # 延迟弹出，避免在下拉事件里直接弹窗卡界面
                 self.root.after(60, lambda: self._ask_download_or_open(payload, allow_manual=False))
         elif kind == "file":
             path = payload
-            self.base_model_var.set(path)
+            self._set_base_model(path)
             bt = detect_base_type(path)
             if bt in ("sd15", "sdxl"):
                 self._set_base_type(bt)
@@ -2074,7 +2076,7 @@ class App:
             return base
         if getattr(self, "_base_models", None):
             p, n, t = self._base_models[0]
-            self.base_model_var.set(p)
+            self._set_base_model(p)
             if t:
                 self._set_base_type(t)
             self._log(f"[底模] 自动选用目录模型：{n}")
@@ -2083,10 +2085,11 @@ class App:
         if action == "manual":
             f = filedialog.askopenfilename(
                 title="选择底模（.safetensors / .ckpt）",
+                initialdir=base_models_dir(),
                 filetypes=[("模型文件", "*.safetensors *.ckpt"), ("所有文件", "*.*")],
             )
             if f:
-                self.base_model_var.set(f)
+                self._set_base_model(f)
                 self._detect_and_apply(f)
                 return f
         return None
@@ -2264,14 +2267,38 @@ class App:
         self._apply_presets()
         self._log("已恢复当前模式+底模的全部预设参数（手动修改记录已清空）。")
 
+    def _set_base_model(self, path):
+        """设置当前底模路径，并在界面显示清晰的模型名/占位提示。"""
+        self.base_model_var.set(path or "")
+        p = (path or "").strip()
+        if p and os.path.isfile(p) and p.lower().endswith((".safetensors", ".ckpt")):
+            self.base_disp_var.set(f"📄 {os.path.basename(p)}")
+        elif p:
+            self.base_disp_var.set(f"⚠ {os.path.basename(p)}（不是有效的底模文件）")
+        else:
+            self.base_disp_var.set("（未选择模型，点【选择底模文件…】或下载）")
+
     def cmd_pick_base(self):
+        d = base_models_dir()
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
         f = filedialog.askopenfilename(
             title="选择底模（.safetensors / .ckpt，SD1.5 或 SDXL）",
+            initialdir=d,
             filetypes=[("模型文件", "*.safetensors *.ckpt"), ("所有文件", "*.*")],
         )
-        if f:
-            self.base_model_var.set(f)
-            self._detect_base_async(f)
+        if not f:
+            return
+        if not os.path.isfile(f):
+            messagebox.showwarning(APP_NAME, "请选择一个模型文件（.safetensors 或 .ckpt），不要选择文件夹。")
+            return
+        if not f.lower().endswith((".safetensors", ".ckpt")):
+            messagebox.showwarning(APP_NAME, "请选择 .safetensors 或 .ckpt 格式的底模文件。")
+            return
+        self._set_base_model(f)
+        self._detect_base_async(f)
 
     def _detect_base_async(self, path):
         self.status_var.set("正在识别底模类型…")
