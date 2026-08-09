@@ -271,7 +271,7 @@ def _fill_missing_captions(output_dir, fallback, logf=print):
         logf(f"[INFO] 为 {n} 张没有标签的图片补写了兜底 caption（未找到 WD14 打标结果）")
 
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif", ".jfif", ".jpe", ".avif"}
 
 
 
@@ -562,7 +562,7 @@ def main():
         if os.path.splitext(f)[1].lower() in IMAGE_EXTS
     )
     if not files:
-        print(f"[WARN] 输入文件夹里没有找到图片（支持 jpg/png/webp/bmp/tif/gif）。")
+        print(f"[WARN] 输入文件夹里没有找到图片（支持 jpg/png/webp/bmp/tif/gif/jfif/jpe/avif）。")
         print(f"       {input_dir}")
         return
 
@@ -688,13 +688,19 @@ def main():
                 traceback.print_exc()
 
     # ---- 人物模式：WD14 打标 / 兜底 / 还原自带标签 / 插入 trigger ----
-    if mode == "character" and not args.no_caption and ok:
+    if mode == "character" and not args.no_caption and (ok + skipped):
         tagger = find_wd14_tagger()
         use_wd14 = (not args.no_wd14) and bool(tagger)
+        imgs_no_txt = [f for f in os.listdir(output_dir)
+                       if os.path.splitext(f)[1].lower() in IMAGE_EXTS
+                       and not os.path.isfile(os.path.join(output_dir, os.path.splitext(f)[0] + ".txt"))]
         if use_wd14:
-            wd14_ok = run_wd14_tagger(output_dir)
-            if not wd14_ok:
-                _fill_missing_captions(output_dir, DEFAULT_CHARACTER_CAPTION)
+            if imgs_no_txt:
+                wd14_ok = run_wd14_tagger(output_dir)
+                if not wd14_ok:
+                    _fill_missing_captions(output_dir, DEFAULT_CHARACTER_CAPTION)
+            else:
+                print("[INFO] 图片标签已齐全，跳过 WD14 打标。")
         else:
             _fill_missing_captions(output_dir, DEFAULT_CHARACTER_CAPTION)
             if not tagger:
@@ -720,7 +726,7 @@ def main():
             print(f"[INFO] 已把 trigger「{trigger}」插入 {n_trig} 张图片的标签第一行")
 
     # ---- 画风模式：同样支持画风专属触发词（插入每张 txt 第一行，不动 WD14 打标逻辑） ----
-    if mode == "style" and not args.no_caption and ok and trigger:
+    if mode == "style" and not args.no_caption and (ok + skipped) and trigger:
         n_trig = 0
         for f in sorted(os.listdir(output_dir)):
             if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
@@ -740,7 +746,7 @@ def main():
     print(f"  损坏: {corrupt}  |  过小: {too_small}  |  模糊: {blurry}  |  失败: {failed}")
     print(f"  去除黑边: {cropped}  |  去除水印: {watermarked}")
     print(f"  输出目录: {output_dir}")
-    if ok and not args.no_caption:
+    if (ok + skipped) and not args.no_caption:
         if mode == "style":
             print("  每张图已生成同名 .txt caption（画风描述，已过滤人物五官/角色标签" +
                   ("，trigger 已插入" if trigger else "") + "）")

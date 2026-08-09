@@ -2714,14 +2714,17 @@ class App:
 
     def _handle_auto_confirm(self, params, stats):
         ok_n = stats.get("ok", 0)
+        skipped_n = stats.get("skipped_existing", 0)
+        usable = ok_n + skipped_n
         min_n = MIN_IMAGES.get(params["mode"], 20)
         filtered = (stats.get("duplicates", 0) + stats.get("blurry", 0)
                     + stats.get("too_small", 0) + stats.get("corrupt", 0))
-        if ok_n < min_n:
+        if usable < min_n:
             self._set_busy(False)
             messagebox.showwarning(
                 APP_NAME,
-                f"可用图片太少啦：处理后只有 {ok_n} 张（{MODE_LABELS[params['mode']]} 至少需要 {min_n} 张）。\n"
+                f"可用图片太少啦：处理后只有 {usable} 张（{MODE_LABELS[params['mode']]} 至少需要 {min_n} 张）。\n"
+                f"本次新处理 {ok_n} 张，另有 {skipped_n} 张是之前已处理过的。\n"
                 f"已过滤：重复 {stats.get('duplicates', 0)} 张、模糊 {stats.get('blurry', 0)} 张、"
                 f"过小 {stats.get('too_small', 0)} 张、损坏 {stats.get('corrupt', 0)} 张。\n\n"
                 "请补充更多清晰、有效的图片后再试。")
@@ -2729,7 +2732,7 @@ class App:
         if filtered:
             messagebox.showinfo(
                 APP_NAME,
-                f"图片预处理完成：共处理 {stats.get('total', 0)} 张，可用 {ok_n} 张。\n"
+                f"图片预处理完成：共处理 {stats.get('total', 0)} 张，可用 {usable} 张。\n"
                 f"自动过滤：重复 {stats.get('duplicates', 0)}、模糊 {stats.get('blurry', 0)}、"
                 f"过小 {stats.get('too_small', 0)}、损坏 {stats.get('corrupt', 0)}。")
         vram = detect_vram_gb()
@@ -2749,7 +2752,7 @@ class App:
                     "工具已经自动开了省显存模式，要不要再试一次？"):
                 self._set_busy(False)
                 return
-        extra = [f"可用图片：{ok_n} 张（已过滤 {filtered} 张）",
+        extra = [f"可用图片：{usable} 张（已过滤 {filtered} 张）",
                  f"batch_size：{batch}（按显存自动）"]
         if not self._confirm_training(params, params.get("base_model") or "", extra=extra):
             self._set_busy(False)
