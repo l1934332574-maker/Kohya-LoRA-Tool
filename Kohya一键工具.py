@@ -988,7 +988,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         "--bucket_reso_steps=64", "--caption_extension=.txt",
         f"--save_every_n_steps={save_every}", "--save_state",
     ]
-    if base_type == "sdxl":
+    if base_type == "sdxl" and not train_te:
         cmd.append("--cache_text_encoder_outputs")
     if use_xformers:
         cmd.append("--xformers")
