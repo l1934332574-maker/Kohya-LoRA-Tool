@@ -702,10 +702,14 @@ def find_latest_state(output_dir, output_name):
     if not os.path.isdir(output_dir):
         return None
     cands = []
-    for f in os.listdir(output_dir):
-        p = os.path.join(output_dir, f)
-        if os.path.isdir(p) and f.startswith(output_name) and ("-state" in f):
-            cands.append(p)
+    search_dirs = [output_dir, os.path.join(output_dir, "snapshots")]
+    for d in search_dirs:
+        if not os.path.isdir(d):
+            continue
+        for f in os.listdir(d):
+            p = os.path.join(d, f)
+            if os.path.isdir(p) and f.startswith(output_name) and ("-state" in f):
+                cands.append(p)
     if not cands:
         return None
     return max(cands, key=lambda p: os.path.getmtime(p))
@@ -1022,6 +1026,23 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         raise RuntimeError(f"训练结束，退出码 {rc}，请查看上方日志（可用断点续训继续）")
     model_path = os.path.join(data_sub("output"), output_name + ".safetensors")
     logf(f"[训练] 完成！模型: {model_path}")
+    # 把中间快照（step-* 模型 + 续训状态目录）归拢到 output\snapshots\，根目录只留成品
+    try:
+        out_dir = data_sub("output")
+        snap_dir = os.path.join(out_dir, "snapshots")
+        os.makedirs(snap_dir, exist_ok=True)
+        moved = 0
+        for name in list(os.listdir(out_dir)):
+            if name.startswith(output_name + "-step") or name == output_name + "-state":
+                s0 = os.path.join(out_dir, name)
+                d0 = os.path.join(snap_dir, name)
+                if not os.path.exists(d0):
+                    shutil.move(s0, d0)
+                    moved += 1
+        if moved:
+            logf(f"[导出] 已把 {moved} 个中间快照/续训状态整理到: {snap_dir}")
+    except Exception as e:
+        logf(f"[导出] 整理中间快照失败（忽略）: {e}")
     try:
         tpl = write_usage_template(mode, params, output_name)
         logf(f"[导出] 已生成使用模板: {tpl}")
