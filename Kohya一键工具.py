@@ -997,6 +997,8 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     if _px:
         env.setdefault("HTTP_PROXY", _px)
         env.setdefault("HTTPS_PROXY", _px)
+    # 国内镜像：transformers/huggingface_hub 走 hf-mirror，避免直连 huggingface.co 超时
+    env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
     rc = run_stream(cmd, cwd=sds, env=env, logf=logf)
     if rc != 0:
         raise RuntimeError(f"训练结束，退出码 {rc}，请查看上方日志（可用断点续训继续）")
