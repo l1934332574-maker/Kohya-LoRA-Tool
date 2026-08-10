@@ -101,9 +101,9 @@ PRESETS = {
     },
     "character": {
         "sd15": {"rank": "24", "alpha": "12", "unet_lr": "1.5e-4", "te_lr": "8e-5",
-                 "repeats": "3", "max_epochs": "4"},
+                 "repeats": "3", "max_epochs": "6"},
         "sdxl": {"rank": "32", "alpha": "16", "unet_lr": "7e-5", "te_lr": "4e-5",
-                 "repeats": "3", "max_epochs": "4"},
+                 "repeats": "3", "max_epochs": "6"},
     },
 }
 
