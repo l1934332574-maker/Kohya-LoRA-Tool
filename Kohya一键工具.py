@@ -865,6 +865,23 @@ def write_usage_template(mode, params, output_name):
     return path
 
 
+def _ensure_sd15_tokenizer(cache_dir, logf=print):
+    """预缓存 SD1.5 CLIP 分词器（kohya 期望的平铺目录格式），避免训练时联网下载失败。"""
+    target = os.path.join(cache_dir, "openai_clip-vit-large-patch14")
+    if os.path.isfile(os.path.join(target, "vocab.json")):
+        return True
+    try:
+        from transformers import CLIPTokenizer
+        tok = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+        os.makedirs(target, exist_ok=True)
+        tok.save_pretrained(target)
+        logf(f"[训练] 已预缓存 SD1.5 CLIP 分词器 -> {target}")
+        return True
+    except Exception as e:
+        logf(f"[训练] 分词器预缓存失败（{e}），将尝试联网加载")
+        return False
+
+
 def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, resume_from=None):
     params = params or {}
     kdir = get_kohya_dir()
@@ -890,6 +907,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     cfg_path = os.path.join(KIT_DIR, "configs", "dataset_config.toml")
     data_sub("output")
     data_sub("logs")
+    _ensure_sd15_tokenizer(data_sub("tokenizers"), logf)
 
     # ---- 全局正向提示词：训练期注入（不写进原 txt） ----
     global_dataset = None
