@@ -297,13 +297,7 @@ class App:
         self.btn_one_click_hint.pack(anchor="w", padx=16, pady=(0, 4))
 
         sp = ctk.CTkFrame(self.sidebar, fg_color="transparent"); sp.pack(expand=True)
-        ctk.CTkLabel(self.sidebar, text="外观主题", font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w", padx=18)
-        self.theme_menu = ctk.CTkOptionMenu(
-            self.sidebar, values=["跟随系统", "深色", "浅色"], width=170, height=28,
-            fg_color=CARD2, button_color=CARD2, button_hover_color="#3a4150",
-            text_color=SUB, font=ui_font(FONT_HINT), dropdown_font=ui_font(FONT_HINT),
-            dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150", command=self._switch_theme)
-        self.theme_menu.pack(padx=16, pady=(2, 20))
+        # 注：深浅主题切换有兼容问题，暂移除，固定深色
 
         # ---------- 右侧 ----------
         right = ctk.CTkFrame(self.root, fg_color=BG, corner_radius=0)
@@ -510,30 +504,6 @@ class App:
             self.q.put(("STATUS",))
 
     # ============ 模式 / 底模 ============
-    def _switch_theme(self, val):
-        key = "dark" if val != "浅色" else "light"
-        ctk.set_appearance_mode("dark" if key == "dark" else "light")
-        _apply_theme_globals(key)
-        try:
-            self.sidebar.destroy()
-        except Exception:
-            pass
-        try:
-            self.main.destroy()
-        except Exception:
-            pass
-        self._main_widgets = []
-        self._badge_widgets = []
-        self._build_ui()
-        self._scan_base_models()
-        self._apply_presets()
-        self._update_mode_ui()
-        self._refresh_status()
-        try:
-            self.theme_menu.set(val)
-        except Exception:
-            pass
-
     def _current_mode(self):
         try:
             val = self.mode_combo.get()
