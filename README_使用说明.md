@@ -83,8 +83,8 @@
 | alpha（缩放） | **6** | **12** |
 | 学习率（UNet） | **3e-4** | **1.5e-4** |
 | 文本编码器学习率 | **1.5e-4** | **8e-5** |
-| repeats（图片重复次数） | **5** | **15** |
-| 最大训练 epoch | **8** | **12** |
+| repeats（图片重复次数） | **5** | **3**（20~40 张图；见下方「总步数与防过拟合」） |
+| 最大训练 epoch | **8** | **4**（20~40 张图；见下方「总步数与防过拟合」） |
 | 标签处理 | 过滤强人物五官/角色标签 | 完整保留全部标签 |
 | Trigger 触发词 | 无（不显示输入框） | 有（插入每张标签第一行） |
 | 正则数据集 | 不需要（不传递正则参数） | 可选（写入 is_reg 数据集） |
@@ -176,7 +176,7 @@
 
 :: 人物模式
 "%PYTHON%" preprocess.py --input "D:\char_raw" --output "D:\train_char" --size 1024 ^
-    --mode character --trigger "ohwx" --reg-dir "D:\reg" --repeats 15 --dedup
+    --mode character --trigger "ohwx" --reg-dir "D:\reg" --repeats 3 --dedup
 
 :: 不自动 WD14 打标
 "%PYTHON%" preprocess.py --input "D:\char_raw" --output "D:\train_char" --mode character --no-wd14
@@ -204,6 +204,27 @@
 双击 **`04_一键训练_TrainCLI.bat`**（可把底模路径作为第 1 个参数传入）。
 
 ---
+
+## 6.5 总步数与防过拟合（重要）
+
+**总步数计算公式：**
+
+> 总步数 ≈ 图片张数 × repeats × max_train_epochs
+
+**目标安全区间：1200 ~ 1800 步**（SDXL 人物 LoRA 训练）。步数过高模型会"死记硬背"训练图片，只能复刻原图，无法生成新姿势/新构图；步数太低则学不够。
+
+**当前人物模式内置预设：repeats=3、max_train_epochs=4**，适配 **20~40 张图片**（约 1200~1800 步）。
+
+更换数据集图片数量时，请**按上面的公式手动调整**「高级参数」里的 repeats / 最大 epoch（程序不会自动适配图片数量）：
+
+| 图片数量 | 建议 repeats | 建议 max_train_epochs | 估算总步数 |
+|---|---|---|---|
+| 10~15 张 | 4 | 4 | 160~240 步 |
+| 20~40 张 | 3 | 4 | 240~480 步 |
+| 50~80 张 | 2 | 3 | 300~480 步 |
+
+> 说明：上表按公式 总步数 ≈ 张数 × repeats × epochs 估算；实际步数还受 batch_size、bucketing（不同分辨率分批）影响，以训练开始时的日志为准。
+> 训练会每 200 步保存一次 checkpoint，训练结束后全部快照整理到 `output\snapshots\`，方便挑选效果最好的中间权重（规避过拟合）。
 
 ## 7. 训练产物与使用模板
 

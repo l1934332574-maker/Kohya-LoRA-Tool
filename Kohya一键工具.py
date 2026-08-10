@@ -101,9 +101,9 @@ PRESETS = {
     },
     "character": {
         "sd15": {"rank": "24", "alpha": "12", "unet_lr": "1.5e-4", "te_lr": "8e-5",
-                 "repeats": "15", "max_epochs": "12"},
+                 "repeats": "3", "max_epochs": "4"},
         "sdxl": {"rank": "32", "alpha": "16", "unet_lr": "7e-5", "te_lr": "4e-5",
-                 "repeats": "15", "max_epochs": "12"},
+                 "repeats": "3", "max_epochs": "4"},
     },
 }
 
@@ -961,7 +961,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         epochs = epochs_eff
 
     # 保存节奏：约每 1/10 步保存一次（至少 100 步），用于中间快照与断点续训
-    save_every = min(300, max(100, total_steps // 10)) if total_steps > 0 else 300
+    save_every = 200
 
     cmd = [
         accel, "launch", "--num_cpu_threads_per_process", "2", script,

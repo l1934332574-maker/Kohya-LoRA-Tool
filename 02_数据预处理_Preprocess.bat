@@ -20,7 +20,7 @@ if /i "%MODE%"=="character" (
     set "MODE_NAME=人物角色"
     set "TRAIN=%~dp0dataset\train_character"
     set "PP_MODE=character"
-    set "PP_REPEATS=15"
+    set "PP_REPEATS=3"
 ) else (
     set "MODE_NAME=画风"
     set "TRAIN=%~dp0dataset\train"
