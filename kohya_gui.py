@@ -88,6 +88,63 @@ STYLE_PRESETS = {
     "写实": {"rank": "24", "alpha": "12", "unet_lr": "1e-4", "te_lr": "6e-5", "repeats": "4", "max_epochs": "6"},
 }
 
+_MAIN_BTN_TIPS = {
+    "数据预处理": "缩放/去黑边/去水印/打标签。一键开始训练会自动做，老手可单独用。",
+    "一键训练": "用已经预处理好的数据直接训练（需要先选好底模）。",
+    "打开输出文件夹": "打开训练产物目录：模型、使用模板、参数报告、中间快照。",
+    "使用说明": "打开新手教学 & 常见问题窗口。",
+}
+
+
+class Tooltip:
+    """鼠标悬停显示通俗中文说明的气泡（适配 customtkinter 控件）。"""
+
+    def __init__(self, widget, text, wrap=360):
+        self.widget = widget
+        self.text = text
+        self.wrap = wrap
+        self.tip = None
+        self._bind_recursive(widget, "<Enter>", self._enter)
+        self._bind_recursive(widget, "<Leave>", self._leave)
+
+    def _bind_recursive(self, w, ev, cb):
+        try:
+            w.bind(ev, cb, add="+")
+        except Exception:
+            pass
+        try:
+            for child in w.winfo_children():
+                self._bind_recursive(child, ev, cb)
+        except Exception:
+            pass
+
+    def _enter(self, _e=None):
+        if self.tip is not None or not self.text:
+            return
+        try:
+            root = self.widget.winfo_toplevel()
+            x = self.widget.winfo_rootx() + 12
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+            self.tip = tk.Toplevel(root)
+            self.tip.wm_overrideredirect(True)
+            self.tip.wm_geometry(f"+{x}+{y}")
+            self.tip.attributes("-topmost", True)
+            lbl = tk.Label(self.tip, text=self.text, justify="left", bg="#2f343d",
+                           fg="#e2e5ec", relief="solid", borderwidth=1, wraplength=self.wrap,
+                           font=("Microsoft YaHei UI", 9), padx=8, pady=6)
+            lbl.pack()
+        except Exception:
+            self.tip = None
+
+    def _leave(self, _e=None):
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except Exception:
+                pass
+            self.tip = None
+
+
 def _hex2rgb(h):
     h = h.lstrip("#")
     return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
@@ -177,6 +234,8 @@ class App:
         self.guide_status = {"env": "未做", "kohya": "未做", "base": "未选", "raw": "未选"}
         self._badge_widgets = []
         self._main_widgets = []
+        self._adv_entries = {}
+        self._main_btns = {}
 
         self._build_ui()
         self._scan_base_models()
@@ -244,6 +303,14 @@ class App:
             self.btn_one_click.configure(state=("disabled" if v else "normal"))
         except Exception:
             pass
+        try:
+            if v:
+                self.btn_stop.configure(state="normal")
+                self.btn_stop.pack(fill="x", padx=14, pady=(4, 2), before=self._sidebar_spacer)
+            else:
+                self.btn_stop.pack_forget()
+        except Exception:
+            pass
 
     def _on_close(self):
         try:
@@ -296,7 +363,14 @@ class App:
         self.btn_one_click_hint = ctk.CTkLabel(self.sidebar, text="完成 ①②③④ 后自动点亮", font=ui_font(FONT_HINT), text_color=HINT)
         self.btn_one_click_hint.pack(anchor="w", padx=16, pady=(0, 4))
 
+        self.btn_stop = ctk.CTkButton(self.sidebar, text="⏹ 停止当前任务", height=34,
+                                      fg_color="#4a3535", hover_color="#5a4141", corner_radius=8,
+                                      font=ui_font(FONT_BODY), state="disabled",
+                                      command=self.cmd_stop)
+        # 平时不显示，任务进行中（_set_busy(True)）才显示在「一键开始训练」下方
+
         sp = ctk.CTkFrame(self.sidebar, fg_color="transparent"); sp.pack(expand=True)
+        self._sidebar_spacer = sp
         # 注：深浅主题切换有兼容问题，暂移除，固定深色
 
         # ---------- 右侧 ----------
@@ -363,6 +437,7 @@ class App:
             self.log.tag_config(tag, foreground=col)
         self._log("欢迎使用 Kohya-LoRA 一键训练工具")
         self._log("按左侧新手引导 ①②③④ 顺序操作，最后点下方「一键开始训练」")
+        self._attach_tooltips()
     # ============ 主区卡片（可滚动） ============
     def _build_main_cards(self):
         for w in self._main_widgets:
@@ -430,9 +505,11 @@ class App:
         self._main_widgets.append(btns)
         for t, w, cmd in [("数据预处理", 110, self.cmd_preprocess), ("一键训练", 96, self.cmd_train),
                           ("打开输出文件夹", 112, self.cmd_open_output), ("使用说明", 90, self.cmd_readme)]:
-            ctk.CTkButton(btns, text=t, width=w, height=38, fg_color=CARD2, hover_color="#343a46",
-                          border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
-                          font=ui_font(FONT_BODY), command=cmd).pack(side="left", padx=5)
+            b = ctk.CTkButton(btns, text=t, width=w, height=38, fg_color=CARD2, hover_color="#343a46",
+                              border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                              font=ui_font(FONT_BODY), command=cmd)
+            b.pack(side="left", padx=5)
+            self._main_btns[t] = b
 
     def _build_badges(self):
         for w in self._badge_widgets:
@@ -454,7 +531,8 @@ class App:
                OK_TX if sts.get("python") else "#c9a8a8")
         _badge("● Kohya-SS 就绪" if sts.get("kohya_ok") else "● Kohya 未装", OK_BG if sts.get("kohya_ok") else "#3a3333",
                OK_TX if sts.get("kohya_ok") else "#c9a8a8")
-        _badge("● RTX 4070 · 8GB" if sts.get("gpu") else "● 未检测到 N 卡", HW_BG, HW_TX)
+        _gpu = sts.get("gpu")
+        _badge(f"● {_gpu}" if _gpu else "● 未检测到 N 卡", HW_BG, HW_TX)
         self.guide_env_var.set("已装" if sts.get("git") and sts.get("python") else "未装")
         self.guide_kohya_var.set("已装" if sts.get("kohya_ok") else "未装")
         def _dot(key, ok_):
@@ -479,9 +557,12 @@ class App:
         self._start_worker(self._env_worker, "环境准备（Git / Python）")
 
     def _env_worker(self):
+        core.reset_stop()
         try:
             core.ensure_prereqs(self._log)
             self._log("[OK] Git / Python 环境就绪")
+        except core.StopRequested:
+            self._log("[停止] 环境准备已手动停止")
         except Exception as e:
             self._log(f"[ERROR] 环境准备失败：{e}")
             traceback.print_exc()
@@ -493,9 +574,12 @@ class App:
         self._start_worker(self._install_worker, "安装 Kohya-SS 训练内核")
 
     def _install_worker(self):
+        core.reset_stop()
         try:
             core.install_kohya(self._log)
             self._log("[OK] Kohya-SS 安装完成")
+        except core.StopRequested:
+            self._log("[停止] 安装已手动停止（已解压/已装的部分会保留，可重跑继续）")
         except Exception as e:
             self._log(f"[ERROR] 安装失败：{e}")
             traceback.print_exc()
@@ -607,10 +691,21 @@ class App:
                 self._log(f"[底模] 已选择 {os.path.basename(payload)}（类型待确认）")
 
     def _set_base_type(self, bt):
-        if bt not in ("sd15", "sdxl"):
+        if bt not in core.BASE_TYPE_KEYS:
             return
         self.base_type = bt
         self._apply_presets()
+        try:
+            # FLUX / Anima 默认只训练 UNet/DiT 部分（省显存）
+            self.unet_only_var.set(bt in ("flux", "anima"))
+        except Exception:
+            pass
+        hint = core.BASE_TYPE_HINTS.get(bt)
+        if hint:
+            try:
+                self._log(hint)
+            except Exception:
+                pass
 
     def _find_model_of_type(self, bt):
         for p, n, t in self._base_models:
@@ -712,26 +807,34 @@ class App:
             f = ctk.CTkFrame(g, fg_color="transparent"); f.grid(row=0, column=i, padx=10, pady=8, sticky="w")
             ctk.CTkLabel(f, text=label, font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w")
             v = self.param_vars.setdefault(key, tk.StringVar())
-            ctk.CTkEntry(f, width=80, height=28, justify="center", textvariable=v,
-                         fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY)).pack(pady=(3, 0))
+            entry = ctk.CTkEntry(f, width=80, height=28, justify="center", textvariable=v,
+                                 fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
+            entry.pack(pady=(3, 0))
+            self._adv_entries[key] = entry
         cb = ctk.CTkFrame(self.adv_body, fg_color="transparent"); cb.pack(anchor="w", pady=(4, 0))
-        ctk.CTkCheckBox(cb, text="只训练 UNet（不训练文本编码器）", variable=self.unet_only_var,
-                        fg_color=ACC, hover_color=ACC_H, text_color=TXT, font=ui_font(FONT_BODY),
-                        command=self._refresh_preset_summary).pack(side="left")
-        ctk.CTkButton(cb, text="↺ 恢复预设", width=92, height=26, fg_color="transparent", hover_color="#343a46",
-                      border_width=1, border_color=BORDER, text_color=HINT, corner_radius=6,
-                      font=ui_font(FONT_HINT), command=self.cmd_reset_presets).pack(side="left", padx=(20, 0))
+        self.chk_unet_only = ctk.CTkCheckBox(cb, text="只训练 UNet（不训练文本编码器）", variable=self.unet_only_var,
+                                             fg_color=ACC, hover_color=ACC_H, text_color=TXT, font=ui_font(FONT_BODY),
+                                             command=self._refresh_preset_summary)
+        self.chk_unet_only.pack(side="left")
+        self.btn_reset_preset = ctk.CTkButton(cb, text="↺ 恢复预设", width=92, height=26, fg_color="transparent",
+                                              hover_color="#343a46", border_width=1, border_color=BORDER,
+                                              text_color=HINT, corner_radius=6, font=ui_font(FONT_HINT),
+                                              command=self.cmd_reset_presets)
+        self.btn_reset_preset.pack(side="left", padx=(20, 0))
         self.global_frame = ctk.CTkFrame(self.adv_body, fg_color="transparent")
         self.global_frame.pack(fill="x", pady=(10, 0))
         ctk.CTkLabel(self.global_frame, text="附加全局提示词（可选，训练时自动加到标签最前面，不写入图片 txt）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w")
         gr = ctk.CTkFrame(self.global_frame, fg_color="transparent"); gr.pack(fill="x", pady=(4, 0))
         ctk.CTkLabel(gr, text="正向", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
-        ctk.CTkEntry(gr, width=320, height=28, textvariable=self.global_pos_var, fg_color=CARD2,
-                     border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY)).pack(side="left", padx=(8, 14))
+        self.global_pos_entry = ctk.CTkEntry(gr, width=320, height=28, textvariable=self.global_pos_var, fg_color=CARD2,
+                                             border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
+        self.global_pos_entry.pack(side="left", padx=(8, 14))
         ctk.CTkLabel(gr, text="负向", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
-        ctk.CTkEntry(gr, width=320, height=28, textvariable=self.global_neg_var, fg_color=CARD2,
-                     border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY)).pack(side="left", padx=(8, 0))
+        self.global_neg_entry = ctk.CTkEntry(gr, width=320, height=28, textvariable=self.global_neg_var, fg_color=CARD2,
+                                             border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
+        self.global_neg_entry.pack(side="left", padx=(8, 0))
+        self._attach_adv_tooltips()
 
     def _apply_style_preset(self, val):
         if val in STYLE_PRESETS:
@@ -747,6 +850,62 @@ class App:
         self._manual_override.clear()
         self._apply_presets()
         self._log("已恢复当前模式+底模的全部预设参数")
+
+    # ============ 停止当前任务 ============
+    def cmd_stop(self):
+        """一键停止当前任务：终止正在运行的训练/预处理/安装进程。"""
+        if not self.busy:
+            return
+        if not messagebox.askyesno(
+                core.APP_NAME,
+                "确定要停止当前任务吗？\n\n"
+                "· 训练中途停止：进度快照已保留，下次运行会自动询问是否断点续训\n"
+                "· 预处理/安装中途停止：已完成的文件会保留\n\n是否停止？"):
+            return
+        self._log("[停止] 正在请求停止当前任务…")
+        try:
+            core.stop_active_process()
+        except Exception as e:
+            self._log(f"[停止] 请求失败：{e}")
+
+    # ============ 悬停提示 ============
+    def _tip(self, widget, text):
+        if widget is not None and text:
+            try:
+                Tooltip(widget, text)
+            except Exception:
+                pass
+
+    def _attach_tooltips(self):
+        tips = [
+            (self.mode_combo, "训练模式：🎨画风=只学绘画风格（不学脸/角色）；👤人物=学某个角色的脸、服饰、特征。切换会自动填好推荐参数。"),
+            (self.base_combo, "底模架构：SD1.5/SDXL 是经典架构；FLUX.1 画质新但非常吃显存（8G 不推荐）；Anima 是 2026 最新架构、显存友好。点「选择底模文件」选完会自动识别。"),
+            (self.btn_pick_base, "手动浏览选择本机的 .safetensors / .ckpt 底模；选完自动识别类型。"),
+            (self.btn_refresh_base, "重新扫描默认模型文件夹，把新放入的底模列进下拉。"),
+            (self.btn_download_base, "没有底模？点这里选下载方式：推荐「应用内下载」（软件里直接下载，带进度/断点续传/下完自动识别）。"),
+            (self.raw_entry, "放原始图片的文件夹（支持 jpg/png/webp/bmp/tif/gif）。"),
+            (self.btn_pick_raw, "选择原始图片文件夹。"),
+            (self.trigger_entry, "触发词=模型的“召唤词”：人物模式=角色名；画风模式=画风专属词。训练后画图写上它就能唤出角色/画风。支持多个，用英文逗号分隔。"),
+            (self.reg_entry, "正则图：同一角色的参考图文件夹，训练时防止模型学过头（可选）。"),
+            (self.btn_pick_reg, "选择正则数据集文件夹（人物模式可选）。"),
+            (self.btn_one_click, "小白专用：自动过滤模糊/过小/损坏图 → 正方形裁剪 → 去重 → 打标签 → 开始训练，全程不用管。"),
+            (self.btn_stop, "任务进行中（训练/预处理/安装）可用：立即终止当前进程。训练中断后进度快照会保留，下次可断点续训。"),
+        ]
+        for w, t in tips:
+            self._tip(w, t)
+        for name, btn in getattr(self, "_main_btns", {}).items():
+            self._tip(btn, _MAIN_BTN_TIPS.get(name))
+
+    def _attach_adv_tooltips(self):
+        for key, entry in getattr(self, "_adv_entries", {}).items():
+            tip = core.PARAM_TIPS.get(key)
+            if tip:
+                self._tip(entry, tip)
+        self._tip(self.style_preset_menu, "一键填入常用数值：动漫偏精细、写实偏自然；选完仍可手动微调。")
+        self._tip(self.chk_unet_only, "只训练 UNet（不训练文本编码器）：更省显存、更稳，画风类可以勾选。")
+        self._tip(self.btn_reset_preset, "把当前模式+底模的所有参数恢复成推荐预设（手动改过的会被重置）。")
+        self._tip(self.global_pos_entry, "附加全局正向提示词：训练时自动加到每张图片标签最前面（例如 masterpiece），不写进图片的 txt 文件，可留空。")
+        self._tip(self.global_neg_entry, "附加全局负向提示词：会写进使用模板和参数报告；kohya 训练本身不使用负向提示词，可留空。")
 
     # ============ 参数收集 ============
     def _collect_params(self):
@@ -782,6 +941,7 @@ class App:
         self._start_worker(lambda: self._preprocess_worker(params), "数据预处理")
 
     def _preprocess_worker(self, params):
+        core.reset_stop()
         try:
             report = os.path.join(os.environ.get("TEMP", "."), "kohya_auto_report.json")
             core.preprocess(
@@ -793,6 +953,8 @@ class App:
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None)
             self._log("[OK] 预处理完成")
+        except core.StopRequested:
+            self._log("[停止] 预处理已手动停止")
         except Exception as e:
             self._log(f"[ERROR] 预处理失败：{e}")
             traceback.print_exc()
@@ -806,17 +968,22 @@ class App:
             return
         if not self._warn_no_nvidia():
             return
+        if not self._warn_low_vram(params):
+            return
         resume = self._ask_resume(params)
         if not self._confirm_training(params, resume):
             return
         self._start_worker(lambda: self._train_worker(params, resume), "一键训练")
 
     def _train_worker(self, params, resume=None):
+        core.reset_stop()
         try:
             vram = core.detect_vram_gb()
             core.train(self._log, base_model=params["base_model"], mode=params["mode"],
                        params=params, vram_gb=vram, resume_from=resume)
             self._log("[OK] 训练完成，模型在 output 文件夹")
+        except core.StopRequested:
+            self._log("[停止] 训练已手动停止，进度快照已保留，下次可断点续训")
         except Exception as e:
             self._log(f"[ERROR] 训练失败：{e}")
             traceback.print_exc()
@@ -837,6 +1004,7 @@ class App:
         self._start_worker(lambda: self._one_click_worker(params), "一键开始训练")
 
     def _one_click_worker(self, params):
+        core.reset_stop()
         try:
             report = os.path.join(os.environ.get("TEMP", "."), "kohya_auto_report.json")
             try:
@@ -862,6 +1030,9 @@ class App:
                     stats = {}
             ok_n = stats.get("ok", 0) + stats.get("skipped_existing", 0)
             self.q.put(("AUTO_CONFIRM", params, stats, ok_n))
+        except core.StopRequested:
+            self._log("[停止] 一键训练已手动停止（已预处理的部分保留，可重跑继续）")
+            self.q.put("__DONE__")
         except Exception as e:
             self._log(f"[ERROR] 一键训练失败：{e}")
             traceback.print_exc()
@@ -900,6 +1071,19 @@ class App:
             core.APP_NAME,
             "本工具针对 NVIDIA 显卡优化。\n"
             "AMD/Intel 显卡在 Windows 下没有开箱即用支持，需要自行配置 ZLUDA/ROCm，存在兼容性风险。\n\n是否继续？")
+
+    def _warn_low_vram(self, params):
+        """按架构显存建议弹窗警告（须在主线程调用）。返回 True=继续。"""
+        info = core.ARCH_INFO.get(params.get("base_type", "sd15"), {})
+        need = info.get("recommend_vram", 12)
+        vram = core.detect_vram_gb()
+        if vram is None or vram >= need:
+            return True
+        return messagebox.askyesno(
+            core.APP_NAME,
+            f"当前架构：{info.get('label', params.get('base_type'))}\n"
+            f"建议显存：{need}G 及以上；你的显卡约 {vram:.1f}G。\n\n"
+            "训练可能卡顿或显存不足（OOM），工具会自动开启省显存设置。\n是否继续？")
 
     def _ask_resume(self, params):
         output_name = core.OUTPUT_NAMES.get(params["mode"], "anime_style_lora")
@@ -945,6 +1129,9 @@ class App:
         if not self._warn_no_nvidia():
             self._set_busy(False)
             return
+        if not self._warn_low_vram(params):
+            self._set_busy(False)
+            return
         resume = self._ask_resume(params)
         if not self._confirm_training(params, resume):
             self._set_busy(False)
@@ -954,36 +1141,89 @@ class App:
 
 
     # ============ 底模下载（应用内 / 浏览器） ============
+    def _show_arch_download_help(self, bt):
+        """新架构（FLUX/Anima）没有应用内一键下载，给出准备指引。"""
+        if bt == "flux":
+            msg = (
+                "FLUX.1 没有应用内一键下载（文件多且大）。\n\n"
+                "需要 4 个文件放在同一个文件夹：\n"
+                "· flux1-dev.safetensors（DiT，约 23GB）\n"
+                "· clip_l.safetensors\n"
+                "· t5xxl_fp16.safetensors（约 9GB）\n"
+                "· ae.safetensors\n\n"
+                "下载：HuggingFace black-forest-labs/FLUX.1-dev（DiT+AE）、"
+                "comfyanonymous/flux_text_encoders（clip_l/t5xxl），"
+                "国内可用 hf-mirror.com 镜像。\n"
+                "放好后点「选择底模文件」选 flux1-dev.safetensors 即可。")
+        else:
+            msg = (
+                "Anima 没有应用内一键下载。\n\n"
+                "需要：\n"
+                "· Anima DiT .safetensors（约 5GB，作为底模选择）\n"
+                "· Qwen3-0.6B 文本编码器（训练时自动从 hf-mirror 下载）\n"
+                "· Qwen-Image VAE（训练时自动下载）\n\n"
+                "DiT 下载：HuggingFace circlestone-labs/Anima，或国内镜像 hf-mirror.com。\n"
+                "下载后放进 models/base，点「选择底模文件」选择即可。")
+        messagebox.showinfo(core.APP_NAME, msg)
+        self.cmd_open_base_dir()
+
     def _download_choice_dialog(self, bt=None):
         bt = bt or self.base_type
         label = core.BASE_TYPE_LABELS.get(bt, "底模")
-        fname, fsize = core.HF_MODEL_INFO.get(bt, ("模型文件", ""))
+        models = core.get_download_models(bt)
+        if not models:
+            self._show_arch_download_help(bt)
+            return
+        sel = {"m": core.get_default_download_model(bt) or models[0]}
         dlg = ctk.CTkToplevel(self.root)
         dlg.title("下载基础底模")
-        dlg.geometry("460x240")
+        dlg.geometry("540x340")
         dlg.resizable(False, False)
         dlg.transient(self.root)
-        ctk.CTkLabel(dlg, text=f"当前底模类型：{label}\n将下载：{fname}（{fsize}）\n保存到：{core.base_models_dir()}\n\n推荐「应用内下载」：带进度、断点续传、下完自动识别",
-                     font=ui_font(FONT_BODY), text_color=TXT, justify="left", wraplength=420).pack(padx=20, pady=(18, 14))
+        ctk.CTkLabel(dlg, text=f"当前底模类型：{label}\n选择要下载的底模（建议选「动漫」系列，并和你出图用的底模同一系列）：",
+                     font=ui_font(FONT_BODY), text_color=TXT, justify="left", wraplength=480).pack(padx=20, pady=(16, 8), anchor="w")
+        names = [f"{m['name']}（{m['size']}）" for m in models]
+        menu = ctk.CTkOptionMenu(dlg, values=names, width=460, height=30,
+                                 fg_color=CARD2, button_color=CARD2, button_hover_color="#3a4150",
+                                 text_color=TXT, font=ui_font(FONT_BODY), dropdown_font=ui_font(FONT_BODY),
+                                 dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150")
+        menu.pack(padx=20, pady=(0, 6))
+        default = core.get_default_download_model(bt) or models[0]
+        menu.set(names[models.index(default)])
+        info_lbl = ctk.CTkLabel(dlg, text=default["note"], font=ui_font(FONT_HINT), text_color=HINT,
+                                justify="left", wraplength=480)
+        info_lbl.pack(padx=20, pady=(0, 4), anchor="w")
+        def _pick(_v=None):
+            try:
+                idx = names.index(menu.get())
+                sel["m"] = models[idx]
+                info_lbl.configure(text=models[idx]["note"])
+            except Exception:
+                pass
+        menu.configure(command=_pick)
+        ctk.CTkLabel(dlg, text=f"保存到：{core.base_models_dir()}\n应用内下载带进度、断点续传，下完自动识别并加入底模列表。",
+                     font=ui_font(FONT_HINT), text_color=SUB, justify="left", wraplength=480).pack(padx=20, pady=(2, 10), anchor="w")
         def _act(k):
+            m = sel["m"]
             dlg.destroy()
             if k == "inapp":
-                self.cmd_dl_in_app(bt)
+                self.cmd_dl_in_app(bt, m)
             elif k == "web_fast":
-                import webbrowser; webbrowser.open(core.MODELSCOPE_URLS.get(bt, core.HF_MIRROR_URL))
+                import webbrowser; webbrowser.open(m.get("url") or core.HF_MIRROR_URL)
             elif k == "web_fallback":
-                import webbrowser; webbrowser.open(core.HF_MIRROR_URLS.get(bt, core.HF_MIRROR_URL))
+                import webbrowser; webbrowser.open(m.get("fallback") or m.get("url") or core.HF_MIRROR_URL)
             elif k == "open":
                 self.cmd_open_base_dir()
-        bf = ctk.CTkFrame(dlg, fg_color="transparent"); bf.pack(pady=(0, 18))
+        bf = ctk.CTkFrame(dlg, fg_color="transparent"); bf.pack(pady=(0, 16))
         for t, k in [("⬇ 应用内下载（推荐）", "inapp"), ("🌐 浏览器极速", "web_fast"),
                      ("🔁 备用下载", "web_fallback"), ("📂 打开文件夹", "open")]:
             ctk.CTkButton(bf, text=t, width=104, height=30, fg_color=CARD2, hover_color="#343a46",
                           border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
                           font=ui_font(FONT_HINT), command=lambda kk=k: _act(kk)).pack(side="left", padx=4)
+        self._tip(menu, "选择训练用的底模：动漫 LoRA 建议选「动漫」系列；最好和你出图用的底模同一系列（例如 Forge 用 AniShadow 就选 AniShadow/Illustrious）。")
         dlg.grab_set()
 
-    def cmd_dl_in_app(self, bt=None):
+    def cmd_dl_in_app(self, bt=None, model=None):
         if _ModelDownloader is None:
             messagebox.showerror(core.APP_NAME, "下载模块加载失败，请使用「浏览器极速下载」。")
             return
@@ -991,8 +1231,13 @@ class App:
             messagebox.showinfo(core.APP_NAME, "已有下载任务在进行中，请先完成或取消。")
             return
         bt = bt or self.base_type
-        url = core.MODELSCOPE_URLS.get(bt) or core.HF_MIRROR_URLS.get(bt) or core.HF_MIRROR_URL
-        fname, fsize = core.HF_MODEL_INFO.get(bt, (os.path.basename(url), ""))
+        if model is None:
+            model = core.get_default_download_model(bt)
+        if model is None:
+            messagebox.showerror(core.APP_NAME, "暂无可下载的底模选项。")
+            return
+        url = model.get("url") or core.MODELSCOPE_URLS.get(bt) or core.HF_MIRROR_URL
+        fname, fsize = model["file"], model["size"]
         dest = os.path.join(core.base_models_dir(), fname)
         try:
             os.makedirs(core.base_models_dir(), exist_ok=True)

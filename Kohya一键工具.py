@@ -84,12 +84,46 @@ MODE_LABELS = {
 }
 MODE_KEYS = ["style", "character"]
 
-BASE_TYPE_LABELS = {"sd15": "SD1.5（512px）", "sdxl": "SDXL 1.0（1024px）"}
-BASE_TYPE_KEYS = ["sd15", "sdxl"]
-BASE_TYPE_HINTS = {
-    "sd15": "",
-    "sdxl": "⚠ SDXL 底模推荐 16G 及以上显存，否则容易显存不足。",
+# 架构注册表（对标秋叶：SD1.5 / SDXL / FLUX.1 / Anima）
+# family: sd=U-Net 架构；flux=DiT；anima=DiT+Qwen3
+# tokenizers: [(model_id, kind)] kind='clip'=CLIPTokenizer, 'auto'=AutoTokenizer
+ARCH_INFO = {
+    "sd15": {
+        "label": "SD1.5（512px）", "resolution": 512, "script": "train_network.py",
+        "network_module": "networks.lora", "mixed": "fp16", "save_precision": "fp16",
+        "min_bucket": 256, "max_bucket": 1024, "family": "sd",
+        "min_vram": 8, "recommend_vram": 12, "hint": "",
+        "tokenizers": [("openai/clip-vit-large-patch14", "clip")],
+    },
+    "sdxl": {
+        "label": "SDXL 1.0（1024px）", "resolution": 1024, "script": "sdxl_train_network.py",
+        "network_module": "networks.lora", "mixed": "bf16", "save_precision": "bf16",
+        "min_bucket": 512, "max_bucket": 2048, "family": "sd",
+        "min_vram": 12, "recommend_vram": 16,
+        "hint": "⚠ SDXL 底模推荐 16G 及以上显存，否则容易显存不足。",
+        "tokenizers": [("laion/CLIP-ViT-bigG-14-laion2B-39B-b160k", "clip")],
+    },
+    "flux": {
+        "label": "FLUX.1（1024px）", "resolution": 1024, "script": "flux_train_network.py",
+        "network_module": "networks.lora_flux", "mixed": "fp16", "save_precision": "bf16",
+        "min_bucket": 256, "max_bucket": 1024, "family": "flux",
+        "min_vram": 12, "recommend_vram": 16,
+        "hint": "⚠ FLUX.1 是 12B 大模型，官方建议 16G 显存；8G 显存基本跑不动，请谨慎选择。",
+        "tokenizers": [("openai/clip-vit-large-patch14", "clip"), ("google/t5-v1_1-xxl", "auto")],
+    },
+    "anima": {
+        "label": "Anima（1024px）", "resolution": 1024, "script": "anima_train_network.py",
+        "network_module": "networks.lora_anima", "mixed": "bf16", "save_precision": "bf16",
+        "min_bucket": 512, "max_bucket": 2048, "family": "anima",
+        "min_vram": 8, "recommend_vram": 12,
+        "hint": "⚠ Anima 是 2026 最新架构（2B DiT + Qwen3 文本编码器），8G 显存可跑（需开省显存），推荐 12G+。",
+        "tokenizers": [("Qwen/Qwen3-0.6B", "auto"), ("google/t5-v1_1-xxl", "auto")],
+    },
 }
+
+BASE_TYPE_KEYS = list(ARCH_INFO.keys())
+BASE_TYPE_LABELS = {k: v["label"] for k, v in ARCH_INFO.items()}
+BASE_TYPE_HINTS = {k: v["hint"] for k, v in ARCH_INFO.items()}
 
 # 内置预设参数（按 模式 × 底模类型；切换自动填充；手动改过的不再被覆盖，只有「恢复预设」重写）
 PRESETS = {
@@ -98,16 +132,24 @@ PRESETS = {
                  "repeats": "5", "max_epochs": "8"},
         "sdxl": {"rank": "16", "alpha": "8", "unet_lr": "1.5e-4", "te_lr": "7.5e-5",
                  "repeats": "5", "max_epochs": "8"},
+        "flux": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
+                 "repeats": "5", "max_epochs": "8"},
+        "anima": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
+                  "repeats": "5", "max_epochs": "8"},
     },
     "character": {
         "sd15": {"rank": "24", "alpha": "12", "unet_lr": "1.5e-4", "te_lr": "8e-5",
                  "repeats": "3", "max_epochs": "6"},
         "sdxl": {"rank": "32", "alpha": "16", "unet_lr": "7e-5", "te_lr": "4e-5",
                  "repeats": "3", "max_epochs": "6"},
+        "flux": {"rank": "16", "alpha": "16", "unet_lr": "8e-5", "te_lr": "8e-5",
+                 "repeats": "3", "max_epochs": "6"},
+        "anima": {"rank": "16", "alpha": "16", "unet_lr": "8e-5", "te_lr": "8e-5",
+                  "repeats": "3", "max_epochs": "6"},
     },
 }
 
-RESOLUTIONS = {"sd15": 512, "sdxl": 1024}
+RESOLUTIONS = {k: v["resolution"] for k, v in ARCH_INFO.items()}
 MIN_IMAGES = {"style": 20, "character": 15}   # 一键训练最少可用图片数
 MAX_AUTO_STEPS = 12000                          # 一键训练自动约束的最大总步数（防过拟合）
 
@@ -154,6 +196,46 @@ PY_MAX = (3, 13, 0)
 
 # ---------- 通用工具 ----------
 
+class StopRequested(Exception):
+    """用户手动停止当前任务（训练/预处理/安装等）。"""
+
+_STOP_EVENT = threading.Event()
+_ACTIVE_LOCK = threading.Lock()
+_ACTIVE_PROC = None
+
+
+def _terminate_tree(proc):
+    """Windows 上终止整个进程树（accelerate 会拉起训练子进程）。"""
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            capture_output=True, timeout=30,
+        )
+        return
+    except Exception:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
+def stop_active_process():
+    """请求停止当前正在运行的子进程（训练/预处理/安装等）。"""
+    global _ACTIVE_PROC
+    _STOP_EVENT.set()
+    with _ACTIVE_LOCK:
+        proc = _ACTIVE_PROC
+    if proc is not None and proc.poll() is None:
+        _terminate_tree(proc)
+    return True
+
+
+def reset_stop():
+    """开始新任务前调用，清除上一次的停止信号。"""
+    _STOP_EVENT.clear()
+
+
 def build_env(extra_dirs=()):
     env = dict(os.environ)
     paths = list(extra_dirs) + [env.get("PATH", "")]
@@ -162,7 +244,12 @@ def build_env(extra_dirs=()):
 
 
 def run_stream(cmd, cwd=None, env=None, logf=print):
-    """运行命令并把 stdout/stderr 实时交给 logf。返回退出码。"""
+    """运行命令并把 stdout/stderr 实时交给 logf。返回退出码。
+
+    支持手动停止：stop_active_process() 会终止当前进程树，
+    并在读取循环中抛出 StopRequested（调用方按“用户主动停止”处理）。
+    """
+    global _ACTIVE_PROC
     if logf:
         logf("$ " + " ".join(str(x) for x in cmd))
     proc = subprocess.Popen(
@@ -170,10 +257,26 @@ def run_stream(cmd, cwd=None, env=None, logf=print):
         cwd=cwd, env=env, text=True, encoding="utf-8", errors="replace",
         bufsize=1, creationflags=subprocess.CREATE_NO_WINDOW,
     )
-    for line in proc.stdout:
-        if logf:
-            logf(line.rstrip("\n").rstrip("\r"))
+    with _ACTIVE_LOCK:
+        _ACTIVE_PROC = proc
+    if _STOP_EVENT.is_set():
+        _terminate_tree(proc)
+    try:
+        for line in proc.stdout:
+            if logf:
+                logf(line.rstrip("\n").rstrip("\r"))
+            if _STOP_EVENT.is_set():
+                _terminate_tree(proc)
+                if logf:
+                    logf("[停止] 已收到停止请求，正在终止进程…")
+                break
+    finally:
+        with _ACTIVE_LOCK:
+            if _ACTIVE_PROC is proc:
+                _ACTIVE_PROC = None
     proc.wait()
+    if _STOP_EVENT.is_set():
+        raise StopRequested("任务已手动停止")
     return proc.returncode
 
 
@@ -717,6 +820,9 @@ def find_latest_state(output_dir, output_name):
 
 def auto_training_setup(vram_gb, base_type):
     """根据显存智能适配 (batch_size, use_xformers, gc_suggest)。"""
+    if base_type in ("flux", "anima"):
+        # 新架构统一：batch=1、sdpa、开梯度检查点省显存
+        return 1, False, True
     if base_type == "sdxl":
         if vram_gb is None or vram_gb < 16:
             return 1, True, True
@@ -869,14 +975,21 @@ def write_usage_template(mode, params, output_name):
     return path
 
 
-def _ensure_tokenizer_cached(cache_dir, model_id, logf=print):
-    """预缓存 CLIP 分词器（kohya 期望的平铺目录格式），避免训练时联网下载失败。"""
+def _ensure_tokenizer_cached(cache_dir, model_id, logf=print, kind="clip"):
+    """预缓存分词器（kohya 期望的平铺目录格式），避免训练时联网下载失败。
+
+    kind: 'clip'=CLIPTokenizer；其他（t5/qwen3 等）=AutoTokenizer。
+    """
     target = os.path.join(cache_dir, model_id.replace("/", "_"))
-    if os.path.isfile(os.path.join(target, "vocab.json")):
+    if os.path.isfile(os.path.join(target, "vocab.json")) or os.path.isfile(os.path.join(target, "tokenizer.json")):
         return True
     try:
-        from transformers import CLIPTokenizer
-        tok = CLIPTokenizer.from_pretrained(model_id)
+        if kind == "clip":
+            from transformers import CLIPTokenizer
+            tok = CLIPTokenizer.from_pretrained(model_id)
+        else:
+            from transformers import AutoTokenizer
+            tok = AutoTokenizer.from_pretrained(model_id, use_fast=True)
         os.makedirs(target, exist_ok=True)
         tok.save_pretrained(target)
         logf(f"[训练] 已预缓存分词器 {model_id} -> {target}")
@@ -894,16 +1007,18 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         raise RuntimeError("Kohya 尚未安装，请先点击【一键安装】")
     sds = os.path.join(kdir, "sd-scripts")
     base_type = params.get("base_type", "sd15")
-    script = "train_network.py" if base_type == "sd15" else "sdxl_train_network.py"
+    arch_info = ARCH_INFO.get(base_type, ARCH_INFO["sd15"])
+    script = arch_info["script"]
+    family = arch_info["family"]
     if not os.path.isfile(os.path.join(sds, script)):
-        raise RuntimeError(f"sd-scripts 缺失 {script}，请重跑【一键安装】")
+        raise RuntimeError(f"sd-scripts 缺失 {script}（当前架构 {BASE_TYPE_LABELS.get(base_type, base_type)}），请重跑【一键安装】")
     if not base_model or not os.path.isfile(base_model):
         raise RuntimeError("请选择底模（.safetensors）")
     accel = os.path.join(kdir, "venv", "Scripts", "accelerate.exe")
     if not os.path.isfile(accel):
         raise RuntimeError("accelerate 缺失，请重跑【一键安装】")
 
-    resolution = RESOLUTIONS.get(base_type, 512)
+    resolution = arch_info["resolution"]
     train_dir = os.path.join(data_dir(), "dataset", "train" if mode == "style" else "train_character")
     if not os.path.isdir(train_dir) or not any(
             f.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp")) for f in os.listdir(train_dir)):
@@ -911,8 +1026,8 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     cfg_path = os.path.join(KIT_DIR, "configs", "dataset_config.toml")
     data_sub("output")
     data_sub("logs")
-    _ensure_tokenizer_cached(data_sub("tokenizers"), "openai/clip-vit-large-patch14", logf)
-    _ensure_tokenizer_cached(data_sub("tokenizers"), "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k", logf)
+    for _tid, _kind in arch_info["tokenizers"]:
+        _ensure_tokenizer_cached(data_sub("tokenizers"), _tid, logf, _kind)
 
     # ---- 全局正向提示词：训练期注入（不写进原 txt） ----
     global_dataset = None
@@ -949,9 +1064,10 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     batch_size = int(params.get("batch_size", 1))
     use_xformers = bool(params.get("use_xformers", False))
     output_name = OUTPUT_NAMES.get(mode, "anime_style_lora")
-    mixed = "bf16" if base_type == "sdxl" else "fp16"
-    save_precision = "bf16" if base_type == "sdxl" else "fp16"
-    min_bucket, max_bucket = (256, 1024) if base_type == "sd15" else (512, 2048)
+    mixed = arch_info["mixed"]
+    save_precision = arch_info["save_precision"]
+    min_bucket, max_bucket = arch_info["min_bucket"], arch_info["max_bucket"]
+    network_module = arch_info["network_module"]
 
     # 自动约束 epoch（防过拟合）
     img_count = count_images(train_dir)
@@ -972,12 +1088,35 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         f"--output_name={output_name}",
         f"--logging_dir={data_sub('logs')}",
         "--save_model_as=safetensors", f"--save_precision={save_precision}",
-        "--network_module=networks.lora",
+        f"--network_module={network_module}",
         f"--network_dim={rank}", f"--network_alpha={alpha}",
-        f"--learning_rate={unet_lr}", f"--unet_lr={unet_lr}", f"--text_encoder_lr={te_lr}",
+        f"--learning_rate={unet_lr}",
     ]
-    if not train_te:
+    if family == "sd":
+        cmd += [f"--unet_lr={unet_lr}", f"--text_encoder_lr={te_lr}"]
+    if not train_te or family == "anima":
+        # FLUX/Anima 默认只训练 DiT 部分（Anima 的 Qwen3 文本编码器始终冻结）
         cmd.append("--network_train_unet_only")
+    if family == "flux":
+        clip_l, t5xxl, ae = find_flux_components(base_model)
+        missing = [n for n, p in (("CLIP-L", clip_l), ("T5-XXL", t5xxl), ("AE", ae)) if not p]
+        if missing:
+            raise RuntimeError(
+                "FLUX 训练需要 4 个文件放在同一个文件夹：\n"
+                "  · flux1-dev.safetensors（已选的底模）\n"
+                "  · clip_l.safetensors\n  · t5xxl_fp16.safetensors\n  · ae.safetensors\n\n"
+                f"缺少：{'、'.join(missing)}\n"
+                "下载地址：HuggingFace black-forest-labs/FLUX.1-dev（DiT+AE）、"
+                "comfyanonymous/flux_text_encoders（clip_l/t5xxl），国内可用 hf-mirror.com。")
+        cmd += [f"--clip_l={clip_l}", f"--t5xxl={t5xxl}", f"--ae={ae}", "--guidance_scale=1.0"]
+        if vram_gb is None or vram_gb < 12:
+            cmd += ["--fp8_base", "--blocks_to_swap=20"]
+        elif vram_gb < 16:
+            cmd += ["--fp8_base"]
+    elif family == "anima":
+        qwen3, vae = _ensure_anima_components(logf)
+        cmd += [f"--qwen3={qwen3}", f"--vae={vae}",
+                "--qwen_image_vae_2d", "--vae_chunk_size=64"]
     cmd += [
         "--optimizer_type=AdamW8bit", "--lr_scheduler=cosine", "--lr_warmup_steps=120",
         f"--max_train_epochs={epochs}",
@@ -990,12 +1129,18 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     ]
     if base_type == "sdxl" and not train_te:
         cmd.append("--cache_text_encoder_outputs")
-    if use_xformers:
-        cmd.append("--xformers")
+    if family == "sd":
+        if use_xformers:
+            cmd.append("--xformers")
+        else:
+            cmd.append("--sdpa")
+        if gc_on:
+            cmd.append("--gradient_checkpointing")
     else:
+        # FLUX / Anima 固定用 sdpa + 梯度检查点（省显存）
         cmd.append("--sdpa")
-    if gc_on:
-        cmd.append("--gradient_checkpointing")
+        if gc_on or vram_gb is None or vram_gb < 16:
+            cmd.append("--gradient_checkpointing")
     if resume_from:
         cmd.append(f"--resume={resume_from}")
         logf(f"[训练] 断点续训：从 {resume_from} 继续")
@@ -1022,7 +1167,16 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         env.setdefault("HTTPS_PROXY", _px)
     # 国内镜像：transformers/huggingface_hub 走 hf-mirror，避免直连 huggingface.co 超时
     env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-    rc = run_stream(cmd, cwd=sds, env=env, logf=logf)
+    try:
+        rc = run_stream(cmd, cwd=sds, env=env, logf=logf)
+    except StopRequested:
+        # 手动停止：清理全局提示词临时数据集后原样抛出，由界面层友好提示
+        if global_dataset:
+            try:
+                shutil.rmtree(global_dataset, ignore_errors=True)
+            except Exception:
+                pass
+        raise
     if rc != 0:
         raise RuntimeError(f"训练结束，退出码 {rc}，请查看上方日志（可用断点续训继续）")
     model_path = os.path.join(data_sub("output"), output_name + ".safetensors")
@@ -1125,6 +1279,113 @@ HF_MODEL_INFO = {
     "sd15": ("v1-5-pruned-emaonly.safetensors", "约 4.3 GB"),
     "sdxl": ("sd_xl_base_1.0.safetensors", "约 6.9 GB"),
 }
+
+# 应用内/浏览器可选的底模下载目录（key 稳定；name 面向小白用户；rec=True 为默认推荐项）
+# 说明：训练底模建议和你出图时用的底模同一系列/同类型，效果最稳；
+#       动漫 LoRA 一般建议直接用「动漫」系列底模训练，而不是原版通用底模。
+DOWNLOAD_MODELS = {
+    "sd15": [
+        {
+            "key": "anime_anything5", "rec": True,
+            "name": "动漫 anything-v5",
+            "file": "AnythingV5Ink_ink.safetensors",
+            "size": "约 2.0 GB",
+            "url": "https://modelscope.cn/models/licyks/sd-model/resolve/master/sd_1.5/AnythingV5Ink_ink.safetensors",
+            "fallback": "https://modelscope.cn/models/licyks/sd-model/resolve/master/sd_1.5/AnythingV5Ink_ink.safetensors",
+            "note": "经典动漫底模（SD1.5 动漫首选），画风/人物 LoRA 都通用；训练后出图也建议用动漫底模。",
+        },
+        {
+            "key": "anime_meinamix",
+            "name": "动漫 MeinaMix V11",
+            "file": "meinamix_meinaV11.safetensors",
+            "size": "约 2.0 GB",
+            "url": "https://modelscope.cn/models/licyks/sd-model/resolve/master/sd_1.5/meinamix_meinaV11.safetensors",
+            "fallback": "https://modelscope.cn/models/licyks/sd-model/resolve/master/sd_1.5/meinamix_meinaV11.safetensors",
+            "note": "综合动漫底模，风格泛化好，画风多样时更稳。",
+        },
+        {
+            "key": "vanilla",
+            "name": "通用 SD1.5 原版",
+            "file": "v1-5-pruned-emaonly.safetensors",
+            "size": "约 4.0 GB",
+            "url": "https://modelscope.cn/models/AI-ModelScope/stable-diffusion-v1-5/resolve/master/v1-5-pruned-emaonly.safetensors",
+            "fallback": "https://hf-mirror.com/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors?download=true",
+            "note": "2022 年的原版通用底模，适合写实/通用；动漫效果一般，不推荐动漫 LoRA 首选。",
+        },
+    ],
+    "sdxl": [
+        {
+            "key": "anime_illustrious20", "rec": True,
+            "name": "动漫 Illustrious-XL v2.0-stable",
+            "file": "Illustrious-XL-v2.0-stable.safetensors",
+            "size": "约 6.5 GB",
+            "url": "https://modelscope.cn/models/licyks/sd-model/resolve/master/sdxl_1.0/Illustrious-XL-v2.0-stable.safetensors",
+            "fallback": "https://modelscope.cn/models/licyks/sd-model/resolve/master/sdxl_1.0/Illustrious-XL-v2.0-stable.safetensors",
+            "note": "2025 年发布的 Illustrious 最新稳定版，当前动漫 LoRA 主流底模，画质/细节好（eps 预测，直接训练即可）。",
+        },
+        {
+            "key": "anime_noobai_eps11",
+            "name": "动漫 NoobAI-XL eps 1.1",
+            "file": "noobaiXLNAIXL_epsilonPred11Version.safetensors",
+            "size": "约 6.6 GB",
+            "url": "https://modelscope.cn/models/licyks/sd-model/resolve/master/sdxl_1.0/noobaiXLNAIXL_epsilonPred11Version.safetensors",
+            "fallback": "https://modelscope.cn/models/licyks/sd-model/resolve/master/sdxl_1.0/noobaiXLNAIXL_epsilonPred11Version.safetensors",
+            "note": "2025 年 NoobAI 的 eps 版本，动漫人物/画风都强；eps 预测，直接训练即可（v-pred 版需要额外参数，未收录）。",
+        },
+        {
+            "key": "anime_nova",
+            "name": "动漫 Nova Anime XL（2026）",
+            "file": "novaAnimeXL_ilV30HappyNewYear.safetensors",
+            "size": "约 6.5 GB",
+            "url": "https://modelscope.cn/models/ModelE/Nova-Anime-XL/resolve/master/novaAnimeXL_ilV30HappyNewYear.safetensors",
+            "fallback": "https://modelscope.cn/models/ModelE/Nova-Anime-XL/resolve/master/novaAnimeXL_ilV30HappyNewYear.safetensors",
+            "note": "2026 年更新的合体底模（NoobAI eps 1.1 + Illustrious v2.0-stable + ChenkinNoob），细节/对比度更好，最新选择。",
+        },
+        {
+            "key": "anime_anishadow52",
+            "name": "动漫 AniShadow V5.2",
+            "file": "sd_xl_anime_V52.safetensors",
+            "size": "约 6.5 GB",
+            "url": "https://modelscope.cn/models/licyks/sd-model/resolve/master/sdxl_1.0/sd_xl_anime_V52.safetensors",
+            "fallback": "https://modelscope.cn/models/licyks/sd-model/resolve/master/sdxl_1.0/sd_xl_anime_V52.safetensors",
+            "note": "和你 Forge 里的 AniShadow V5 同系列，训练后直接配它出图效果最一致。",
+        },
+        {
+            "key": "anime_animagine40",
+            "name": "动漫 Animagine XL 4.0",
+            "file": "animagine-xl-4.0.safetensors",
+            "size": "约 6.5 GB",
+            "url": "https://modelscope.cn/models/licyks/sd-model/resolve/master/sdxl_1.0/animagine-xl-4.0.safetensors",
+            "fallback": "https://modelscope.cn/models/licyks/sd-model/resolve/master/sdxl_1.0/animagine-xl-4.0.safetensors",
+            "note": "老牌动漫底模 Animagine 的新版本，动漫风格成熟。",
+        },
+        {
+            "key": "vanilla",
+            "name": "通用 SDXL 1.0 原版",
+            "file": "sd_xl_base_1.0.safetensors",
+            "size": "约 6.5 GB",
+            "url": "https://modelscope.cn/models/AI-ModelScope/stable-diffusion-xl-base-1.0/resolve/master/sd_xl_base_1.0.safetensors",
+            "fallback": "https://hf-mirror.com/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors?download=true",
+            "note": "2023 年的原版通用底模，动漫效果一般，不推荐动漫 LoRA 首选。",
+        },
+    ],
+}
+
+
+def get_download_models(base_type):
+    """返回该底模类型的可选下载模型列表。"""
+    return DOWNLOAD_MODELS.get(base_type, [])
+
+
+def get_default_download_model(base_type):
+    """返回默认推荐下载模型（带 rec 标记的第一个，否则第一个）。"""
+    models = get_download_models(base_type)
+    if not models:
+        return None
+    for m in models:
+        if m.get("rec"):
+            return m
+    return models[0]
 
 
 def base_models_dir():
@@ -1242,6 +1503,13 @@ def _ckpt_keys(path):
 
 def _classify_base_keys(keys):
     joined = "\n".join(keys or [])
+    # FLUX：DiT（single/double transformer blocks + guidance embed）
+    if ("single_transformer_blocks." in joined or "double_blocks." in joined
+            or "guidance_embed." in joined or "model.diffusion_model.single_blocks." in joined):
+        return "flux"
+    # Anima：MiniTrainDIT + LLM adapter（Qwen3→T5 桥）
+    if "llm_adapter." in joined and ("adaln_modulation." in joined or "x_embedder." in joined):
+        return "anima"
     # SDXL：conditioner 双文本编码器（open_clip + clip）
     if "conditioner.embedders.0.transformer" in joined or "conditioner.embedders.1.transformer" in joined:
         return "sdxl"
@@ -1254,7 +1522,7 @@ def _classify_base_keys(keys):
 
 
 def detect_base_type(model_path):
-    """自动识别底模类型：返回 'sd15' / 'sdxl' / None（无法识别）。"""
+    """自动识别底模类型：返回 'sd15' / 'sdxl' / 'flux' / 'anima' / None（无法识别）。"""
     try:
         ext = os.path.splitext(model_path or "")[1].lower()
         if ext == ".safetensors":
@@ -1266,6 +1534,106 @@ def detect_base_type(model_path):
         return _classify_base_keys(keys)
     except Exception:
         return None
+
+
+# ---------- FLUX / Anima 组件 ----------
+
+def _pick_sibling(base_model, predicate):
+    """在底模同目录找一个符合条件的配套文件。"""
+    d = os.path.dirname(os.path.abspath(base_model))
+    try:
+        names = os.listdir(d)
+    except Exception:
+        names = []
+    for name in sorted(names):
+        low = name.lower()
+        if not low.endswith((".safetensors", ".sft", ".pth")):
+            continue
+        if predicate(low):
+            return os.path.join(d, name)
+    return None
+
+
+def find_flux_components(base_model):
+    """FLUX 训练需要 DiT + CLIP-L + T5-XXL + AE 四个文件，自动在底模同目录找另外三个。
+
+    返回 (clip_l, t5xxl, ae)，找不到的为 None。
+    """
+    def _clip(name):
+        stem = os.path.splitext(name)[0]
+        return stem in ("clip_l", "clip-l", "clip_l_fp16", "clip-l-fp16", "clip_l_fp8", "clip_l.safetensors") or stem.startswith("clip_l") or stem.startswith("clip-l")
+    def _t5(name):
+        stem = os.path.splitext(name)[0]
+        return stem.startswith("t5xxl") or stem.startswith("t5_xxl") or stem.startswith("t5-xxl")
+    def _ae(name):
+        stem = os.path.splitext(name)[0]
+        return stem in ("ae", "ae_fp16", "ae_fp8", "ae_bf16", "vae", "vae_fp16") or stem.startswith("ae.") or stem.startswith("vae.")
+    clip_l = _pick_sibling(base_model, _clip)
+    t5xxl = _pick_sibling(base_model, _t5)
+    ae = _pick_sibling(base_model, _ae)
+    return clip_l, t5xxl, ae
+
+
+def _hf_download(repo, local_dir, logf, allow_patterns=None):
+    """用 huggingface_hub 走 hf-mirror 下载仓库到 local_dir。"""
+    import os as _os
+    from huggingface_hub import snapshot_download
+    old = _os.environ.get("HF_ENDPOINT")
+    _os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+    try:
+        snapshot_download(repo, local_dir=local_dir, allow_patterns=allow_patterns)
+    finally:
+        if old is None:
+            _os.environ.pop("HF_ENDPOINT", None)
+        else:
+            _os.environ["HF_ENDPOINT"] = old
+
+
+def _ensure_anima_components(logf=print):
+    """确保 Anima 的 Qwen3-0.6B 文本编码器和 Qwen-Image VAE 就位。
+
+    返回 (qwen3 路径, vae 路径)；缺失时自动从 hf-mirror 下载。
+    """
+    base = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "KohyaLoraTool", "anima")
+    os.makedirs(base, exist_ok=True)
+    qwen3_dir = os.path.join(base, "Qwen3-0.6B")
+    if not (os.path.isdir(qwen3_dir) and os.path.isfile(os.path.join(qwen3_dir, "config.json"))):
+        logf("[Anima] 首次使用需要下载 Qwen3-0.6B 文本编码器（约 1.2GB，走 hf-mirror）…")
+        try:
+            _hf_download("Qwen/Qwen3-0.6B", qwen3_dir, logf)
+        except Exception as e:
+            raise RuntimeError(f"Qwen3-0.6B 自动下载失败：{e}\n可手动下载后放到：{qwen3_dir}")
+        if not (os.path.isdir(qwen3_dir) and os.path.isfile(os.path.join(qwen3_dir, "config.json"))):
+            raise RuntimeError(f"Qwen3-0.6B 下载不完整，请检查：{qwen3_dir}")
+    vae_dir = os.path.join(base, "Anima_vae")
+    vae_file = None
+    if os.path.isdir(vae_dir):
+        for root, _dirs, files in os.walk(vae_dir):
+            for f in files:
+                if f.lower().endswith((".safetensors", ".pth")):
+                    vae_file = os.path.join(root, f)
+                    break
+            if vae_file:
+                break
+    if not vae_file:
+        logf("[Anima] 首次使用需要下载 Qwen-Image VAE（走 hf-mirror）…")
+        try:
+            _hf_download("circlestone-labs/Anima", vae_dir, logf, allow_patterns=["split_files/vae/*"])
+        except Exception as e:
+            raise RuntimeError(f"Qwen-Image VAE 自动下载失败：{e}")
+        if os.path.isdir(vae_dir):
+            for root, _dirs, files in os.walk(vae_dir):
+                for f in files:
+                    if f.lower().endswith((".safetensors", ".pth")):
+                        vae_file = os.path.join(root, f)
+                        break
+                if vae_file:
+                    break
+    if not vae_file:
+        raise RuntimeError(f"未找到 Qwen-Image VAE 文件，请手动下载后放到：{vae_dir}")
+    logf(f"[Anima] Qwen3: {qwen3_dir}")
+    logf(f"[Anima] VAE: {vae_file}")
+    return qwen3_dir, vae_file
 
 
 class App:
@@ -2684,7 +3052,7 @@ class App:
         batch, xformers, _gc = auto_training_setup(vram, params["base_type"])
         params["batch_size"] = batch
         params["use_xformers"] = xformers
-        need = 16 if params["base_type"] == "sdxl" else 12
+        need = ARCH_INFO.get(params["base_type"], {}).get("recommend_vram", 12)
         if vram is not None and vram < need:
             if not messagebox.askyesno(
                     APP_NAME,
@@ -2784,7 +3152,7 @@ class App:
         if not self._warn_no_nvidia():
             self._set_busy(False)
             return
-        need = 16 if params["base_type"] == "sdxl" else 8
+        need = ARCH_INFO.get(params["base_type"], {}).get("recommend_vram", 12)
         if vram is not None and vram < need:
             if not messagebox.askyesno(
                     APP_NAME,
