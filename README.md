@@ -1,4 +1,4 @@
-# Kohya-LoRA 一键训练工具
+﻿# Kohya-LoRA 一键训练工具
 
 > Windows 平台、小白向的本地 LoRA 训练桌面工具。基于 [kohya-ss](https://github.com/bmaltais/kohya_ss) / [sd-scripts](https://github.com/kohya-ss/sd-scripts)（Apache-2.0）二次封装，项目本体 **MIT 开源**。
 
@@ -20,12 +20,6 @@
 - **kohya 环境重定向** 到 `%APPDATA%\KohyaLoraTool`：升级覆盖安装不重装环境
 - **显存智能适配**：自动调整 batch / 精度 / 梯度检查点，低显存弹出通俗中文警告
 - **第二训练引擎（实验性）**：独立安装 musubi-tuner（不碰 Kohya 环境），新增 **「🖼 Krea 2 图像LoRA」** 模式（Krea2 12.9B，预设 rank32/1024px，国内镜像下载模型引导）；视频 LoRA 训练开发中
-- **Krea2 细化引导**：软件内「📖 Krea 2 使用引导」逐步教学（装引擎→下模型→选图→训练→出图）；Krea2 模式自动隐藏无关的 SD 底模下拉、隐藏无效的文本编码器学习率；参数按官方/社区校准（repeats2、RAW 训练→Turbo 出图）
-- **网络自愈**：Pillow/numpy 离线 wheel 内置（预处理不依赖网络）；AMD ROCm/PyTorch 大文件断点续传下载；pip 全局重试/超时/备用镜像/系统代理
-- **显存检测升级（DXGI）**：AMD 卡不再误报显存（16GB 卡正确识别），训练按真实显存自动适配
-- **AMD 训练自愈**：训练前自动检查 AMD 环境依赖，缺失自动补装（修复 ModuleNotFoundError: toml）
-- **训练环境自愈（统一）**：训练前检查 kohya venv / AMD venv 的完整运行时依赖（含 transformers/huggingface_hub），缺失自动补装
-- **AMD 训练依赖自愈扩展**：补装 sd-scripts 完整训练依赖（imagesize/rich/ftfy/优化器包等），AMD 训练不再因缺小包中断
 
 ## 📦 下载安装
 
