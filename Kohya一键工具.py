@@ -1814,7 +1814,7 @@ AMD_ROC_WHEELS = [
     f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/rocm_sdk_libraries_custom-{AMD_ROC_VERSION}-py3-none-win_amd64.whl",
     f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/rocm-{AMD_ROC_VERSION}.tar.gz",
 ]
-AMD_TRAIN_DEPS = "transformers diffusers accelerate safetensors omegaconf numpy pillow av opencv-python einops sentencepiece toml voluptuous"
+AMD_TRAIN_DEPS = "transformers==4.54.1 diffusers==0.32.1 accelerate safetensors omegaconf numpy pillow av opencv-python einops sentencepiece toml voluptuous imagesize rich ftfy"
 
 
 def venv_python_version(venv_dir):
@@ -1883,13 +1883,28 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
             "'voluptuous','safetensors','diffusers','accelerate','omegaconf','imagesize','rich',"
             "'ftfy','einops','cv2','sentencepiece'];"
             "import sys;sys.exit(0 if all(importlib.util.find_spec(x) is not None for x in m) else 1)")
+    need_install = True
     try:
         r = subprocess.run([vpy, "-c", code], capture_output=True, text=True, timeout=60)
-        if r.returncode == 0:
-            return True
+        need_install = r.returncode != 0
     except Exception:
-        pass
-    logf("[环境] 训练环境缺少运行时依赖（PIL/numpy/transformers/huggingface_hub/toml 等），正在自动补装…")
+        need_install = True
+    if not need_install:
+        # 版本兼容：kohya sd-scripts 需要 transformers 4.x / diffusers 0.32.x；
+        # 5.x / 0.39 改了 CLIP 文本编码器结构，加载 SD1.5 底模会报 state_dict key 不匹配
+        vcode = ("from importlib.metadata import version;import sys;"
+                 "t=version('transformers').split('.');d=version('diffusers').split('.');"
+                 "sys.exit(0 if t[0]=='4' and d[0]=='0' and d[1]=='32' else 1)")
+        try:
+            rv = subprocess.run([vpy, "-c", vcode], capture_output=True, text=True, timeout=60)
+            need_install = rv.returncode != 0
+            if need_install:
+                logf("[环境] transformers/diffusers 版本不兼容 kohya（需要 transformers 4.54 / diffusers 0.32），正在校正版本…")
+        except Exception:
+            need_install = True
+    if not need_install:
+        return True
+    logf("[环境] 训练环境需要补装/校正依赖（PIL/numpy/transformers/huggingface_hub/toml 等），正在处理…")
     subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
                     "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
     env = build_env()
@@ -1904,8 +1919,9 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
                 logf("[环境] pillow/numpy 离线安装异常，改走镜像…")
                 wheels = []
     # sd-scripts 训练完整依赖（AMD 环境用，不含 bitsandbytes 等 NVIDIA 专属包）
-    pkgs = ["transformers", "huggingface-hub", "toml", "voluptuous", "safetensors",
-            "diffusers", "accelerate", "omegaconf", "imagesize", "rich", "ftfy",
+    # transformers/diffusers 钉 kohya 兼容版本，防止装到 5.x/0.39 导致 CLIP 加载失败
+    pkgs = ["transformers==4.54.1", "huggingface-hub", "toml", "voluptuous", "safetensors",
+            "diffusers==0.32.1", "accelerate", "omegaconf", "imagesize", "rich", "ftfy",
             "lion-pytorch", "schedulefree", "pytorch-optimizer",
             "prodigy-plus-schedule-free", "prodigyopt", "einops", "opencv-python", "sentencepiece"]
     ok = False
