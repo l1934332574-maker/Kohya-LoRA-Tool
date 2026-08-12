@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.5.5"
+APP_VERSION = "0.5.6"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1876,8 +1876,12 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
     返回 True=就绪；False=补装失败（网络问题）。
     """
     # 用 find_spec 只查包是否存在（不 import，秒级；import transformers 太重会拖慢每次训练启动）
+    # sd-scripts 训练需要的依赖（不含 NVIDIA 专属的 bitsandbytes/tensorflow/onnxruntime-gpu）
+    # 只检查「模块加载时必需」的核心依赖；lion-pytorch/schedulefree/prodigy 等可选优化器
+    # 不查（工具只用 AdamW/AdamW8bit，装全量时顺带补上即可）
     code = ("import importlib.util;m=['PIL','numpy','transformers','huggingface_hub','toml',"
-            "'voluptuous','safetensors','diffusers','accelerate','omegaconf'];"
+            "'voluptuous','safetensors','diffusers','accelerate','omegaconf','imagesize','rich',"
+            "'ftfy','einops','cv2','sentencepiece'];"
             "import sys;sys.exit(0 if all(importlib.util.find_spec(x) is not None for x in m) else 1)")
     try:
         r = subprocess.run([vpy, "-c", code], capture_output=True, text=True, timeout=60)
@@ -1899,8 +1903,11 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
             if _r.returncode != 0:
                 logf("[环境] pillow/numpy 离线安装异常，改走镜像…")
                 wheels = []
+    # sd-scripts 训练完整依赖（AMD 环境用，不含 bitsandbytes 等 NVIDIA 专属包）
     pkgs = ["transformers", "huggingface-hub", "toml", "voluptuous", "safetensors",
-            "diffusers", "accelerate", "omegaconf"]
+            "diffusers", "accelerate", "omegaconf", "imagesize", "rich", "ftfy",
+            "lion-pytorch", "schedulefree", "pytorch-optimizer",
+            "prodigy-plus-schedule-free", "prodigyopt", "einops", "opencv-python", "sentencepiece"]
     ok = False
     for _idx in ("https://pypi.tuna.tsinghua.edu.cn/simple", "https://mirrors.aliyun.com/pypi/simple/"):
         if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
