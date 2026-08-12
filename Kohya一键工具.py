@@ -1714,21 +1714,69 @@ def _amd_torch_wheels(venv_dir):
     ]
 
 
+def _download_with_resume(url, dest, logf=print):
+    """用 curl 断点续传下载大文件（repo.radeon.com 网络不稳时关键，断了可续传）。
+
+    返回 True=成功。优先 curl（Windows 自带，支持 -C - 续传 + 重试）；否则 urllib 分段下载。
+    """
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    curl = shutil.which("curl")
+    if curl and os.path.isfile(curl):
+        cmd = [curl, "-sS", "-L", "-C", "-", "--retry", "10", "--retry-delay", "5", "--retry-all-errors",
+               "--connect-timeout", "60", "--max-time", "10800", "-o", dest, url]
+        _px = system_proxy()
+        if _px:
+            cmd = [curl, "-sS", "-L", "-C", "-", "--retry", "10", "--retry-delay", "5", "--retry-all-errors",
+                   "--connect-timeout", "60", "--max-time", "10800", "--proxy", _px, "-o", dest, url]
+        return run_stream(cmd, env=build_env(), logf=logf) == 0
+    # urllib 兜底：Range 断点续传
+    import urllib.request
+    tmp = dest + ".part"
+    exist = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
+    try:
+        req = urllib.request.Request(url, headers={"Range": "bytes=%d-" % exist} if exist else {})
+        with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "ab") as f:
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+        os.replace(tmp, dest)
+        return True
+    except Exception as e:
+        logf(f"[下载] 中断（{e}），已保留 {tmp}，重试时自动续传")
+        return False
+
+
 def run_pip_in_venv(venv_dir, args, logf=print):
     """在训练环境（venv）里运行 pip install。返回退出码；可被停止按钮中断。"""
     py = os.path.join(venv_dir, "Scripts", "python.exe")
     if not os.path.isfile(py):
         raise RuntimeError(f"训练环境无效，找不到 {py}，请先创建训练环境。")
-    cmd = [py, "-m", "pip", "install", "--no-cache-dir"] + args
+    cmd = [py, "-m", "pip", "install", "--no-cache-dir", "--retries", "10", "--timeout", "120"] + args
     env = build_env()
     env.setdefault("PIP_NO_INPUT", "1")
     return run_stream(cmd, env=env, logf=logf)
 
 
 def install_amd_rocm(venv_dir, logf=print):
-    """自动安装 AMD ROCm 运行库（阶段 1/3，约 1~2GB，视网速 10~60 分钟）。"""
-    logf("[AMD] 阶段 1/3：安装 AMD ROCm 运行库（文件较大，请耐心等待，可随时点停止）…")
-    rc = run_pip_in_venv(venv_dir, AMD_ROC_WHEELS, logf)
+    """自动安装 AMD ROCm 运行库（阶段 1/3，约 1~2GB，视网速 10~60 分钟）。
+
+    先断点续传下载 wheel 到本地缓存（repo.radeon.com 网络不稳，避免半途失败），再本地安装。
+    """
+    logf("[AMD] 阶段 1/3：安装 AMD ROCm 运行库（文件较大，支持断点续传，可随时点停止）…")
+    cache = os.path.join(data_dir(), "installer_cache", "amd_rocm")
+    local = []
+    for _u in AMD_ROC_WHEELS:
+        _fn = os.path.basename(_u)
+        _dst = os.path.join(cache, _fn)
+        if not (os.path.isfile(_dst) and os.path.getsize(_dst) > 1024 * 1024):
+            logf(f"[AMD] 下载 {_fn}（可断点续传）…")
+            if not _download_with_resume(_u, _dst, logf):
+                raise RuntimeError(f"ROCm 组件下载失败：{_fn}（网络不稳，请重试，已支持断点续传）")
+        local.append(_dst)
+    logf("[AMD] ROCm 组件下载完成，开始安装 …")
+    rc = run_pip_in_venv(venv_dir, local, logf)
     if rc != 0:
         raise RuntimeError(f"ROCm 运行库安装失败（退出码 {rc}），请向上查看日志。")
     logf("[OK] AMD ROCm 运行库安装完成")
@@ -1736,9 +1784,20 @@ def install_amd_rocm(venv_dir, logf=print):
 
 
 def install_amd_torch(venv_dir, logf=print):
-    """自动安装 AMD 版 PyTorch（阶段 2/3，约 2~3GB）。"""
-    logf("[AMD] 阶段 2/3：安装 AMD 版 PyTorch（文件较大，请耐心等待）…")
-    rc = run_pip_in_venv(venv_dir, _amd_torch_wheels(venv_dir), logf)
+    """自动安装 AMD 版 PyTorch（阶段 2/3，约 2~3GB，支持断点续传）。"""
+    logf("[AMD] 阶段 2/3：安装 AMD 版 PyTorch（文件较大，支持断点续传，请耐心等待）…")
+    cache = os.path.join(data_dir(), "installer_cache", "amd_torch")
+    local = []
+    for _u in _amd_torch_wheels(venv_dir):
+        _fn = os.path.basename(_u)
+        _dst = os.path.join(cache, _fn)
+        if not (os.path.isfile(_dst) and os.path.getsize(_dst) > 1024 * 1024):
+            logf(f"[AMD] 下载 {_fn}（可断点续传）…")
+            if not _download_with_resume(_u, _dst, logf):
+                raise RuntimeError(f"PyTorch 组件下载失败：{_fn}（网络不稳，请重试，已支持断点续传）")
+        local.append(_dst)
+    logf("[AMD] PyTorch 组件下载完成，开始安装 …")
+    rc = run_pip_in_venv(venv_dir, local, logf)
     if rc != 0:
         raise RuntimeError(f"AMD 版 PyTorch 安装失败（退出码 {rc}），请向上查看日志。")
     logf("[OK] AMD 版 PyTorch 安装完成")
