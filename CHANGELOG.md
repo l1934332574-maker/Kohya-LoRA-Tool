@@ -8,7 +8,21 @@
 
 # 更新日志（Changelog）
 
+# 更新日志（Changelog）
+
+## v0.5.5（2026-08-12）
+
+### 修复
+- **训练环境运行时依赖自愈**：训练前检查 kohya venv / AMD venv 是否具备完整依赖
+  （PIL/numpy/transformers/huggingface_hub/toml/voluptuous/safetensors/diffusers/accelerate/omegaconf），
+  缺失自动补装（内置 wheel + 国内镜像 + 重试），修复 Anima 分词器缓存 / VAE 下载报
+  `No module named 'transformers'` / `'huggingface_hub'`
+- 检查用 importlib.find_spec（秒级），不拖慢训练启动
+
+---
+
 ## v0.5.4（2026-08-12）
+
 
 ### 修复
 - **AMD 训练环境缺 toml/voluptuous**：训练走 venv_amd 跑 sd-scripts 时报
