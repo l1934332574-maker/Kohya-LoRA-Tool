@@ -96,8 +96,9 @@ KOHYA_DIR_FILE = os.path.join(KIT_DIR, "kohya_dir.txt")
 MODE_LABELS = {
     "style": "🎨 画风LoRA模式",
     "character": "👤 人物角色LoRA模式",
+    "krea2": "🖼 Krea 2 图像LoRA",
 }
-MODE_KEYS = ["style", "character"]
+MODE_KEYS = ["style", "character", "krea2"]
 
 # 架构注册表（对标秋叶：SD1.5 / SDXL / FLUX.1 / Anima）
 # family: sd=U-Net 架构；flux=DiT；anima=DiT+Qwen3
@@ -162,10 +163,20 @@ PRESETS = {
         "anima": {"rank": "16", "alpha": "16", "unet_lr": "8e-5", "te_lr": "8e-5",
                   "repeats": "3", "max_epochs": "6"},
     },
+    "krea2": {
+        "sd15": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
+                 "repeats": "5", "max_epochs": "16"},
+        "sdxl": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
+                 "repeats": "5", "max_epochs": "16"},
+        "flux": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
+                 "repeats": "5", "max_epochs": "16"},
+        "anima": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
+                  "repeats": "5", "max_epochs": "16"},
+    },
 }
 
 RESOLUTIONS = {k: v["resolution"] for k, v in ARCH_INFO.items()}
-MIN_IMAGES = {"style": 20, "character": 15}   # 一键训练最少可用图片数
+MIN_IMAGES = {"style": 20, "character": 15, "krea2": 15}   # 一键训练最少可用图片数
 MAX_AUTO_STEPS = 12000                          # 一键训练自动约束的最大总步数（防过拟合）
 
 PARAM_LABELS = {
@@ -191,6 +202,9 @@ TRIGGER_HINT_CHARACTER = ("💡提示：填一个网上很少见到的英文单�
                           "不要用 girl 这种普通单词！\n"
                           "训练之后输入这个单词，就能画出这个人物。\n"
                           "不填也可以正常训练。")
+TRIGGER_HINT_KREA2 = ("💡提示：填一个网上很少见到的英文单词（如 my_k2_01）\n"
+                      "训练后输入这个单词，就能召唤这个角色/风格。\n"
+                      "⚠ Krea 2 模式需先把模型放进 models/krea2/ 并安装第二引擎。")
 TRIGGER_HINT_STYLE = ("💡提示：填一个网上很少见到的英文单词，比如 my_style01\n"
                       "不要用 sketch 这种普通单词！\n"
                       "⚠重要：你的训练图片不能全是同一个人，不然画风套不到别的东西上。\n"
@@ -199,9 +213,10 @@ TRIGGER_HINT_STYLE = ("💡提示：填一个网上很少见到的英文单词�
 DATASET_TIPS = {
     "style": "📌 数据集提示：建议 20~60 张图片，尽量多不同人物、不同姿态，避免五官固化。画风模式自动过滤强人物五官标签；可填画风专属触发词，不需要正则图。",
     "character": "📌 数据集提示：建议 15~30 张同一人物，多角度、不同服装，推荐设置唯一 trigger 触发词；可配合正则数据集防过拟合。",
+    "krea2": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Krea 2 模型放进 models/krea2/（RAW+VAE+文本编码器）。推荐 12G+ 显存。",
 }
 
-OUTPUT_NAMES = {"style": "anime_style_lora", "character": "character_lora"}
+OUTPUT_NAMES = {"style": "anime_style_lora", "character": "character_lora", "krea2": "krea2_lora"}
 
 
 
@@ -750,6 +765,17 @@ def _bundled_sd_zip():
     return None
 
 
+def _bundled_musubi_zip():
+    """第二训练引擎（musubi-tuner）内置离线源码包。"""
+    folder = os.path.join(KIT_DIR, "installers", "musubi-tuner")
+    if not os.path.isdir(folder):
+        return None
+    for f in os.listdir(folder):
+        if f.startswith("musubi-tuner-") and f.endswith(".zip"):
+            return os.path.join(folder, f)
+    return None
+
+
 def _extract_zip(zip_path, dest):
     """解压 zip 到 dest，并自动上移顶层文件夹（如 xxx-master/）。"""
     import zipfile
@@ -917,6 +943,355 @@ def install_kohya(logf=print):
         return kdir
     finally:
         _release_kohya_install_lock(lock_f)
+
+
+# ---------- 第二训练引擎（musubi-tuner：Krea2 图像 + 视频 LoRA） ----------
+
+def _musubi_marker_ok():
+    """第二引擎快速标记检查（秒级、不跑 import，供 system_status 缓存使用）。
+
+    判定：musubi-venv 存在 + site-packages 里有 musubi-tuner（editable 装会留下
+    *.dist-info / *_editable_impl_musubi_tuner.pth）+ 源码里有 krea2_train_network.py。
+    """
+    kdir = get_kohya_dir()
+    vpy = os.path.join(kdir, "musubi-venv", "Scripts", "python.exe")
+    if not os.path.isfile(vpy):
+        return False
+    if not os.path.isfile(os.path.join(kdir, "musubi-tuner", "krea2_train_network.py")):
+        return False
+    sp = os.path.join(kdir, "musubi-venv", "Lib", "site-packages")
+    if not os.path.isdir(sp):
+        return False
+    try:
+        return any("musubi" in n.lower() for n in os.listdir(sp))
+    except Exception:
+        return False
+
+
+def musubi_engine_status():
+    """第二训练引擎（musubi-tuner）状态：返回 (ok, detail, venv_python)。
+
+    独立 musubi-venv（不碰 kohya venv，避免 transformers 版本冲突）。
+    这是权威检查（会 import 验证）；徽章/缓存请用 _musubi_marker_ok（秒级）。
+    """
+    kdir = get_kohya_dir()
+    vpy = os.path.join(kdir, "musubi-venv", "Scripts", "python.exe")
+    src_ok = os.path.isfile(os.path.join(kdir, "musubi-tuner", "krea2_train_network.py"))
+    if not os.path.isfile(vpy):
+        return False, "未安装（musubi-venv 不存在）", vpy
+    if not src_ok:
+        return False, "musubi-tuner 源码缺失", vpy
+    try:
+        r = subprocess.run(
+            [vpy, "-c", "import torch; import musubi_tuner; from musubi_tuner.krea2_train_network import main; print('ok')"],
+            capture_output=True, text=True, timeout=120)
+        if r.returncode == 0:
+            return True, "已就绪（Krea2 + 视频）", vpy
+        return False, "环境异常（import 失败）", vpy
+    except Exception:
+        return False, "环境异常", vpy
+
+
+def install_musubi_engine(logf=print):
+    """安装第二训练引擎 musubi-tuner（Krea2 图像 LoRA + 视频 LoRA）。
+
+    - 独立 musubi-venv（不碰 kohya venv，避免 transformers 版本冲突）；
+    - 源码用内置离线包，依赖走国内镜像；torch cu128 与 kohya 同源（官方 index，国内暂无稳定 cu128 镜像）；
+    - 已安装则跳过（幂等）。返回 musubi-venv 的 python 路径。
+    """
+    git = find_git()
+    py, pyver = find_python()
+    if not git or not py:
+        raise RuntimeError("请先点击【环境准备】安装 Git / Python")
+    kdir = get_kohya_dir()
+    logf(f"[第二引擎] 安装目录: {kdir}")
+    lock_f = _acquire_kohya_install_lock(kdir, logf)
+    if lock_f is None:
+        raise RuntimeError("检测到另一个安装任务正在运行，请先等待完成后再试。")
+    try:
+        # 1) 源码
+        mt_dir = os.path.join(kdir, "musubi-tuner")
+        if not os.path.isfile(os.path.join(mt_dir, "krea2_train_network.py")):
+            zip_src = _bundled_musubi_zip()
+            if zip_src:
+                logf(f"[第二引擎] 解压内置 musubi-tuner 源码: {os.path.basename(zip_src)}")
+                _extract_zip(zip_src, mt_dir)
+            else:
+                logf("[第二引擎] 未找到内置源码包，改用 git 克隆（需联网）…")
+                os.makedirs(mt_dir, exist_ok=True)
+                if _git_clone(git, "https://github.com/kohya-ss/musubi-tuner.git", mt_dir, logf) != 0:
+                    raise RuntimeError("git clone musubi-tuner 失败，请检查网络/代理后重试")
+        else:
+            logf("[第二引擎] musubi-tuner 源码已存在，跳过解压")
+        # 2) 独立 venv
+        mv = os.path.join(kdir, "musubi-venv")
+        vpy = os.path.join(mv, "Scripts", "python.exe")
+        if not os.path.isfile(vpy):
+            logf("[第二引擎] 创建独立虚拟环境 musubi-venv（不影响 kohya venv）…")
+            if run_stream([py, "-m", "venv", mv], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
+                raise RuntimeError("创建 musubi-venv 失败")
+        # 3) 已装验证：torch + musubi_tuner 可用 => 跳过
+        try:
+            r = subprocess.run(
+                [vpy, "-c", "import torch; import musubi_tuner; from musubi_tuner.krea2_train_network import main"],
+                capture_output=True, text=True, timeout=180)
+            torch_ok = r.returncode == 0
+        except Exception:
+            torch_ok = False
+        if torch_ok:
+            logf("[第二引擎] 检测到已安装（torch + musubi_tuner 可用），跳过重复安装。")
+            return vpy
+        # 4) pip 镜像（清华 pypi + 阿里 pytorch 额外源，与 kohya 一致）
+        subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
+                        "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
+        subprocess.run([vpy, "-m", "pip", "config", "set", "global.extra-index-url",
+                        "https://mirrors.aliyun.com/pytorch-wheels/cu128"], capture_output=True, timeout=60)
+        logf("[第二引擎] 升级 pip / setuptools / wheel …")
+        if run_stream([vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q"],
+                      cwd=kdir, logf=logf) != 0:
+            raise RuntimeError("pip 升级失败，请重试")
+        # 5) torch cu128（与 kohya 同源；首次可能较慢/需网络）
+        logf("[第二引擎] 安装 PyTorch cu128（约 2.5GB，与 kohya 同源，首次可能较慢）…")
+        env = build_env([os.path.dirname(git)])
+        if run_stream(
+            [vpy, "-m", "pip", "install", "torch==2.7.1+cu128", "torchvision==0.22.0+cu128",
+             "--extra-index-url", "https://download.pytorch.org/whl/cu128"],
+            cwd=kdir, env=env, logf=logf) != 0:
+            raise RuntimeError("torch cu128 安装失败，请检查网络/代理后重试")
+        # 6) musubi-tuner（editable，带全套钉死依赖）
+        logf("[第二引擎] 安装 musubi-tuner（Krea2/视频训练内核）…")
+        if run_stream([vpy, "-m", "pip", "install", "-e", mt_dir], cwd=kdir, env=env, logf=logf) != 0:
+            raise RuntimeError("musubi-tuner 安装失败")
+        # 7) 验证
+        try:
+            r = subprocess.run(
+                [vpy, "-c", "import torch;from musubi_tuner.krea2_train_network import main;print(torch.__version__);print(torch.cuda.is_available())"],
+                capture_output=True, text=True, timeout=300)
+            out = (r.stdout or "").strip().splitlines()
+            logf(f"[第二引擎] 验证：torch {out[0] if out else '?'} | CUDA 可用: {out[1] if len(out) > 1 else '?'}")
+            if r.returncode != 0:
+                raise RuntimeError("第二引擎验证失败：" + (r.stderr or "")[-200:])
+        except Exception as e:
+            logf(f"[第二引擎] 验证失败: {e}")
+            raise
+        logf("[第二引擎] 安装完成：Krea2 图像 LoRA + 视频 LoRA 可用。")
+        return vpy
+    finally:
+        _release_kohya_install_lock(lock_f)
+
+
+# ---------- Krea2 图像 LoRA 训练（第二引擎 musubi-tuner） ----------
+
+KREA2_RESOLUTION = 1024
+KREA2_MAX_STEPS = 6000          # Krea2 自动约束最大总步数（防过拟合）
+
+# Krea2 模型文件（放 models/krea2/，不内置；国内镜像直链）
+KREA2_MODEL_LINKS = {
+    "raw": ("raw.safetensors", "Krea 2 RAW 底模（约 13~26GB，训练必需）",
+            "https://hf-mirror.com/krea/Krea-2-Raw/resolve/main/raw.safetensors"),
+    "turbo": ("turbo.safetensors", "Krea 2 Turbo（可选，推理/训练采样用）",
+              "https://hf-mirror.com/krea/Krea-2-Turbo/resolve/main/turbo.safetensors"),
+    "vae": ("qwen_image_vae.safetensors", "Qwen-Image VAE（约 0.3GB）",
+            "https://hf-mirror.com/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors"),
+    "te": ("qwen3vl_4b_bf16.safetensors", "Qwen3-VL-4B 文本编码器（约 8GB）",
+           "https://hf-mirror.com/Comfy-Org/Qwen3-VL/resolve/main/text_encoders/qwen3vl_4b_bf16.safetensors"),
+}
+
+
+def krea2_models_dir():
+    return os.path.join(KIT_DIR, "models", "krea2")
+
+
+def krea2_model_files():
+    """扫描 models/krea2，返回 {raw,vae,te,turbo} 路径或 None。"""
+    d = krea2_models_dir()
+    out = {"raw": None, "vae": None, "te": None, "turbo": None}
+    if os.path.isdir(d):
+        for f in os.listdir(d):
+            low = f.lower()
+            p = os.path.join(d, f)
+            if not os.path.isfile(p):
+                continue
+            if low == "raw.safetensors":
+                out["raw"] = p
+            elif low == "turbo.safetensors":
+                out["turbo"] = p
+            elif low == "qwen_image_vae.safetensors":
+                out["vae"] = p
+            elif low == "qwen3vl_4b_bf16.safetensors":
+                out["te"] = p
+    return out
+
+
+def krea2_missing_models():
+    """返回缺失的 Krea2 模型说明列表（含国内镜像直链）；turbo 可选不算缺失。"""
+    files = krea2_model_files()
+    missing = []
+    for key, (fname, desc, url) in KREA2_MODEL_LINKS.items():
+        if key == "turbo":
+            continue
+        if not files.get(key):
+            missing.append(f"· {desc}\n  文件: {fname}\n  下载: {url}")
+    return missing
+
+
+def write_musubi_dataset_config(image_dir, cache_dir, config_path, resolution=1024,
+                                num_repeats=1, keep_tokens=1, caption_extension=".txt"):
+    """musubi-tuner 数据集配置（与 kohya 不同：image_directory / cache_directory）。
+
+    注意：musubi 的 schema 只接受 resolution/caption_extension/batch_size/num_repeats/
+    enable_bucket/bucket_no_upscale（general 或 datasets 级），keep_tokens/shuffle_caption
+    会被 voluptuous 校验拒绝，因此这里不输出。trigger 保护靠标签第一行（不 shuffle 即可）。
+    """
+    image_dir = os.path.abspath(image_dir).replace("\\", "/")
+    cache_dir = os.path.abspath(cache_dir).replace("\\", "/")
+    text = (
+        "# Auto-generated by Kohya-LoRA tool (musubi-tuner dataset config).\n"
+        "[general]\n"
+        f"resolution = [{int(resolution)}, {int(resolution)}]\n"
+        f'caption_extension = "{caption_extension}"\n'
+        "batch_size = 1\n"
+        "enable_bucket = true\n"
+        "bucket_no_upscale = false\n"
+        "\n"
+        "[[datasets]]\n"
+        f'image_directory = "{image_dir}"\n'
+        f'cache_directory = "{cache_dir}"\n'
+        f"num_repeats = {int(num_repeats)}\n"
+    )
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return image_dir
+
+
+def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from=None, progress=None):
+    """Krea2 图像 LoRA 训练（第二引擎 musubi-tuner）。
+
+    流程：校验 musubi 环境 → 校验模型文件 → 写 musubi 数据集配置 → 缓存 latents/文本编码器 → 训练。
+    模型需放入 models/krea2/（国内镜像下载，见 krea2_missing_models）。
+    """
+    params = params or {}
+    ok, detail, mvpy = musubi_engine_status()
+    if not ok:
+        raise RuntimeError("第二训练引擎未安装，请先在左侧点「②' 第二引擎(可选)」安装。\n" + detail)
+    kdir = get_kohya_dir()
+    mt_dir = os.path.join(kdir, "musubi-tuner")
+    accel = os.path.join(os.path.dirname(mvpy), "accelerate.exe")
+    if not os.path.isfile(accel):
+        raise RuntimeError("musubi-venv 缺少 accelerate，请重装第二引擎")
+    files = krea2_model_files()
+    missing = krea2_missing_models()
+    if missing:
+        raise RuntimeError(
+            "Krea2 训练缺少模型文件，请下载放入 models/krea2/ 文件夹：\n\n" + "\n".join(missing) +
+            "\n\n（在软件里点「打开 Krea2 模型文件夹」，用浏览器打开上面的国内镜像直链下载后放进去）")
+    train_dir = dataset_train_dir(mode, params.get("project"))
+    if count_images(train_dir) == 0:
+        raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
+    # 数据集配置 + 独立缓存目录
+    proj = _sanitize_dirname(params.get("project")) or "krea2"
+    cfg_path = os.path.join(KIT_DIR, "configs", "krea2_dataset_config.toml")
+    cache_dir = os.path.join(data_dir(), "dataset", proj, "krea2_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    resolution = int(params.get("resolution") or KREA2_RESOLUTION)
+    write_musubi_dataset_config(train_dir, cache_dir, cfg_path, resolution=resolution,
+                                num_repeats=int(params.get("repeats", 5)), keep_tokens=1)
+    logf(f"[Krea2] 数据集: {train_dir}（{resolution}px, repeats={params.get('repeats', 5)}）")
+    # 预缓存 latents
+    logf("[Krea2] 缓存 latents …")
+    if run_stream([mvpy, os.path.join(mt_dir, "krea2_cache_latents.py"),
+                   "--dataset_config", cfg_path, "--vae", files["vae"], "--num_workers", "1"],
+                  cwd=mt_dir, logf=logf) != 0:
+        raise RuntimeError("latents 缓存失败，请查看上方日志")
+    # 预缓存文本编码器输出
+    logf("[Krea2] 缓存文本编码器输出 …")
+    if run_stream([mvpy, os.path.join(mt_dir, "krea2_cache_text_encoder_outputs.py"),
+                   "--dataset_config", cfg_path, "--text_encoder", files["te"], "--batch_size", "1", "--num_workers", "1"],
+                  cwd=mt_dir, logf=logf) != 0:
+        raise RuntimeError("文本编码器缓存失败，请查看上方日志")
+    # 训练参数
+    rank = int(params.get("rank", 32))
+    alpha = int(params.get("alpha", 32))
+    lr = params.get("unet_lr", 1e-4)
+    epochs = int(params.get("max_epochs", 16))
+    gc_on = decide_gradient_checkpointing(params.get("gc", "自动"), vram_gb)
+    # 显存适配：fp8 + blocks_to_swap（需实测校准）
+    fp8 = vram_gb is None or vram_gb < 24
+    swap = 2
+    if vram_gb is None or vram_gb < 12:
+        swap = 20
+    elif vram_gb < 16:
+        swap = 12
+    elif vram_gb < 24:
+        swap = 6
+    # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
+    per_epoch = int(params.get("repeats", 5)) * count_images(train_dir)
+    if per_epoch * epochs > KREA2_MAX_STEPS:
+        new_epochs = max(1, int(KREA2_MAX_STEPS / max(1, per_epoch)))
+        logf(f"[Krea2] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
+        epochs = new_epochs
+    if progress is not None:
+        try:
+            progress.set_total(per_epoch * epochs)
+        except Exception:
+            pass
+    out_dir = data_sub("output", proj)
+    output_name = "krea2_lora"
+    cmd = [
+        accel, "launch", "--num_cpu_threads_per_process", "1", "--mixed_precision", "bf16",
+        os.path.join(mt_dir, "krea2_train_network.py"),
+        "--dit", files["raw"], "--vae", files["vae"],
+        "--dataset_config", cfg_path,
+        "--sdpa", "--mixed_precision", "bf16",
+        "--timestep_sampling", "shift", "--weighting_scheme", "none", "--discrete_flow_shift", "2.5",
+        "--optimizer_type", "adamw8bit", "--learning_rate", str(lr), "--gradient_checkpointing",
+        "--max_data_loader_n_workers", "1",
+        "--network_module", "networks.lora_krea2", "--network_dim", str(rank), "--network_alpha", str(alpha),
+        "--max_train_epochs", str(epochs), "--save_every_n_epochs", "1", "--seed", "42",
+        "--output_dir", out_dir, "--output_name", output_name,
+    ]
+    if fp8:
+        cmd += ["--fp8_base", "--fp8_scaled"]
+    if swap > 0:
+        cmd += ["--blocks_to_swap", str(swap)]
+    if gc_on:
+        cmd += ["--gradient_checkpointing"]
+    logf(f"[Krea2] 底模(RAW): {files['raw']}")
+    logf(f"[Krea2] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 5)}")
+    logf(f"[Krea2] fp8={'开' if fp8 else '关'} | blocks_to_swap={swap} | 梯度检查点={'开' if gc_on else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
+    rc = run_stream(cmd, cwd=mt_dir, logf=logf)
+    if rc != 0:
+        raise RuntimeError(f"Krea2 训练结束，退出码 {rc}，请查看上方日志")
+    model_path = os.path.join(out_dir, output_name + ".safetensors")
+    logf(f"[Krea2] 完成！模型: {model_path}")
+    try:
+        _write_krea2_template(mode, params, output_name, out_dir=out_dir)
+        write_params_report(mode, params, output_name, out_dir=out_dir)
+    except Exception as e:
+        logf(f"[Krea2] 生成模板/报告失败（忽略）: {e}")
+    return model_path
+
+
+def _write_krea2_template(mode, params, output_name, out_dir=None):
+    """Krea2 LoRA 使用模板。"""
+    out_dir = out_dir or data_sub("output")
+    path = os.path.join(out_dir, output_name + "_使用模板.txt")
+    trig = ", ".join(split_triggers(params.get("trigger"))) if params.get("trigger") else "<你的触发词>"
+    text = (
+        "【Krea 2 图像 LoRA 使用模板】\n"
+        f"模型文件：{output_name}.safetensors\n"
+        f"Trigger 触发词：{trig}\n"
+        "适用底模：Krea 2（RAW 训练 / Turbo 推理）\n"
+        "训练分辨率：1024px\n\n"
+        "使用建议：\n"
+        f"1. 正向提示词以触发词开头：{trig}, <描述>\n"
+        "2. 推荐 LoRA 权重 0.6 ~ 0.9\n"
+        "3. 该 LoRA 只能用于 Krea 2 系列底模（不支持 SD/SDXL）。\n"
+    )
+    with open(path, "w", encoding="utf-8-sig") as f:
+        f.write(text)
+    return path
 
 
 # ---------- 预处理 / UI / 训练 ----------
@@ -2216,12 +2591,17 @@ def system_status(force=False):
     vpy = venv_python(kdir)
     kohya_ok = os.path.isfile(vpy) and os.path.isdir(os.path.join(kdir, "sd-scripts"))
     gpu = detect_gpu_name() or "?"
+    try:
+        _musubi_ok = _musubi_marker_ok()
+    except Exception:
+        _musubi_ok = False
     data = {
         "git": git or None,
         "python": f"{ver}" if ver else None,
         "kohya_ok": kohya_ok,
         "kohya_dir": kdir if kohya_ok else None,
         "gpu": gpu,
+        "musubi_ok": _musubi_ok,
     }
     _SYSTEM_STATUS_CACHE["t"] = _now
     _SYSTEM_STATUS_CACHE["data"] = data

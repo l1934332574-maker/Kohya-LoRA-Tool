@@ -565,10 +565,12 @@ class App:
             self._guide_btns[key] = b
         self.guide_env_var = tk.StringVar(value="未装")
         self.guide_kohya_var = tk.StringVar(value="未装")
+        self.guide_musubi_var = tk.StringVar(value="未装")
         self.guide_base_var = tk.StringVar(value="未选")
         self.guide_raw_var = tk.StringVar(value="未选")
         _guide("env", "① 环境准备", self.guide_env_var, "去准备", self.cmd_env)
         _guide("kohya", "② 安装训练内核", self.guide_kohya_var, "去安装", self.cmd_install)
+        _guide("musubi", "②' 第二引擎(可选)", self.guide_musubi_var, "去安装", self.cmd_install_musubi)
         _guide("base", "③ 选择底模+模式", self.guide_base_var, "去选底模", self.cmd_pick_base)
         _guide("raw", "④ 选择图片文件夹", self.guide_raw_var, "去选文件夹", self.cmd_pick_raw)
 
@@ -1270,7 +1272,9 @@ class App:
                 pass
         _dot("env", bool(sts.get("git") and sts.get("python")))
         _dot("kohya", bool(sts.get("kohya_ok")))
-        _dot("base", bool(self.base_model_var.get()))
+        self.guide_musubi_var.set("已装" if sts.get("musubi_ok") else "未装")
+        _dot("musubi", bool(sts.get("musubi_ok")))
+        _dot("base", bool(self.base_model_var.get()) or (self.mode == "krea2" and not core.krea2_missing_models()))
         _dot("raw", bool(self.raw_dir_var.get()))
         self._refresh_one_click_state()
 
@@ -1287,6 +1291,29 @@ class App:
             pass
 
     # ============ 环境 / 安装 ============
+    def cmd_install_musubi(self):
+        """安装第二训练引擎（Krea2 图像 LoRA + 视频 LoRA）。"""
+        if self.busy:
+            messagebox.showinfo(core.APP_NAME, "有任务正在运行，请先等待当前任务完成。")
+            return
+        if not messagebox.askyesno(core.APP_NAME,
+                "安装第二训练引擎（Krea2 图像 LoRA + 视频 LoRA）？\n\n"
+                "· 使用独立环境，完全不影响现有画风/人物训练\n"
+                "· 需下载 PyTorch cu128（约 2.5GB，首次可能较慢）\n"
+                "· Krea2 / 视频模型按需另行下载（国内镜像）\n\n是否开始安装？"):
+            return
+        self._start_worker(self._install_musubi_worker, "安装第二引擎")
+
+    def _install_musubi_worker(self):
+        try:
+            core.install_musubi_engine(self._log)
+            self.q.put(("STATUS",))
+        except Exception as e:
+            self._log(f"[ERROR] 第二引擎安装失败：{e}")
+            traceback.print_exc()
+        finally:
+            self.q.put("__DONE__")
+
     def cmd_env(self):
         self._start_worker(self._env_worker, "环境准备（Git / Python）")
 
@@ -1366,7 +1393,9 @@ class App:
         except Exception:
             pass
         try:
-            self.trigger_hint_var.set(core.TRIGGER_HINT_CHARACTER if self.mode == "character" else core.TRIGGER_HINT_STYLE)
+            _hint = core.TRIGGER_HINT_KREA2 if self.mode == "krea2" else (
+                core.TRIGGER_HINT_CHARACTER if self.mode == "character" else core.TRIGGER_HINT_STYLE)
+            self.trigger_hint_var.set(_hint)
         except Exception:
             pass
         # 画风模式：隐藏触发词/正则卡片内容（用 pack_forget 显示/隐藏行）
@@ -1646,6 +1675,7 @@ class App:
             (getattr(self, "btn_download_base", None), "没有底模？点这里选下载方式：推荐「应用内下载」（软件里直接下载，带进度/断点续传/下完自动识别）。"),
             (getattr(self, "btn_one_click", None), "小白专用：自动过滤模糊/过小/损坏图 → 正方形裁剪 → 去重 → 打标签 → 开始训练，全程不用管。"),
             (getattr(self, "btn_stop", None), "任务进行中（训练/预处理/安装）可用：立即终止当前进程。训练中断后进度快照会保留，下次可断点续训。"),
+            (getattr(self, "_guide_btns", {}).get("musubi"), "第二训练引擎（Krea2 图像 LoRA + 视频 LoRA）：独立环境安装，不影响现有画风/人物训练。装好后才能用 Krea2/视频模式（即将上线）。"),
         ]
         for w, t in tips:
             self._tip(w, t)
@@ -1761,10 +1791,11 @@ class App:
         core.reset_stop()
         try:
             report = os.path.join(os.environ.get("TEMP", "."), "kohya_auto_report.json")
+            pp_mode = "character" if params.get("mode") == "krea2" else params["mode"]
             core.preprocess(
                 self._log, input_dir=params["raw_dir"],
-                size=core.RESOLUTIONS.get(params["base_type"], 512),
-                mode=params["mode"], trigger=params["trigger"],
+                size=(core.KREA2_RESOLUTION if params.get("mode") == "krea2" else core.RESOLUTIONS.get(params["base_type"], 512)),
+                mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=True,
                 min_size=256, blur_threshold=30.0, report=report,
@@ -1780,9 +1811,13 @@ class App:
 
     def cmd_train(self):
         params = self._collect_params()
-        if not params["base_model"]:
-            messagebox.showwarning(core.APP_NAME, "请先选择底模（步骤③）。")
-            return
+        if params.get("mode") == "krea2":
+            if not self._ensure_krea2_ready():
+                return
+        else:
+            if not params["base_model"]:
+                messagebox.showwarning(core.APP_NAME, "请先选择底模（步骤③）。")
+                return
         if not self._warn_no_nvidia():
             return
         if not self._warn_low_vram(params):
@@ -1799,8 +1834,12 @@ class App:
         try:
             vram = core.detect_vram_gb()
             params["project"] = self.current_project or ""
-            core.train(self._log, base_model=params["base_model"], mode=params["mode"],
-                       params=params, vram_gb=vram, resume_from=resume, progress=self._train_mon)
+            if params.get("mode") == "krea2":
+                core.train_krea2(self._log, mode="krea2", params=params,
+                                 vram_gb=vram, resume_from=resume, progress=self._train_mon)
+            else:
+                core.train(self._log, base_model=params["base_model"], mode=params["mode"],
+                           params=params, vram_gb=vram, resume_from=resume, progress=self._train_mon)
             self._log("[OK] 训练完成，模型在 output 文件夹")
         except core.StopRequested:
             self._log("[停止] 训练已手动停止，进度快照已保留，下次可断点续训")
@@ -1837,10 +1876,11 @@ class App:
                     os.remove(report)
             except Exception:
                 pass
+            pp_mode = "character" if params.get("mode") == "krea2" else params["mode"]
             core.preprocess(
                 self._log, input_dir=params["raw_dir"],
-                size=core.RESOLUTIONS.get(params["base_type"], 512),
-                mode=params["mode"], trigger=params["trigger"],
+                size=(core.KREA2_RESOLUTION if params.get("mode") == "krea2" else core.RESOLUTIONS.get(params["base_type"], 512)),
+                mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=True,
                 min_size=256, blur_threshold=30.0, report=report,
@@ -2182,6 +2222,30 @@ class App:
                 "· 权限不足 → 训练环境在 %APPDATA% 下一般无需管理员；若仍报权限错误，\n"
                 "   请确认 %APPDATA%\\KohyaLoraTool\\venv_amd 目录可写")
 
+    def _ensure_krea2_ready(self):
+        """Krea2 模式训练前检查：第二引擎已装 + Krea2 模型齐全。返回是否可继续。"""
+        try:
+            ok, detail, _ = core.musubi_engine_status()
+        except Exception as e:
+            ok, detail = False, str(e)
+        if not ok:
+            messagebox.showwarning(core.APP_NAME,
+                                   "第二训练引擎未安装。\n请先点左侧「②' 第二引擎(可选)」安装。\n\n" + detail)
+            return False
+        missing = core.krea2_missing_models()
+        if missing:
+            d = core.krea2_models_dir()
+            if messagebox.askyesno(core.APP_NAME,
+                    "Krea 2 模式还缺少模型文件，需要先下载放入 models/krea2/：\n\n" + "\n".join(missing) +
+                    f"\n\n模型文件夹：{d}\n\n是否现在打开该文件夹？（下载完成后把文件放进去）"):
+                try:
+                    os.makedirs(d, exist_ok=True)
+                    os.startfile(d)
+                except Exception:
+                    pass
+            return False
+        return True
+
     def _warn_no_nvidia(self):
         """显卡兼容检查：N 卡直接放行；AMD 卡走兼容模式；其他保持原警告。返回 True=继续。"""
         try:
@@ -2223,14 +2287,19 @@ class App:
 
     def _warn_low_vram(self, params):
         """按架构显存建议弹窗警告（须在主线程调用）。返回 True=继续。"""
-        info = core.ARCH_INFO.get(params.get("base_type", "sd15"), {})
-        need = info.get("recommend_vram", 12)
+        if params.get("mode") == "krea2":
+            need = 16
+            label = "Krea 2（12.9B）"
+        else:
+            info = core.ARCH_INFO.get(params.get("base_type", "sd15"), {})
+            need = info.get("recommend_vram", 12)
+            label = info.get("label", params.get("base_type"))
         vram = core.detect_vram_gb()
         if vram is None or vram >= need:
             return True
         return messagebox.askyesno(
             core.APP_NAME,
-            f"当前架构：{info.get('label', params.get('base_type'))}\n"
+            f"当前架构：{label}\n"
             f"建议显存：{need}G 及以上；你的显卡约 {vram:.1f}G。\n\n"
             "训练可能卡顿或显存不足（OOM），工具会自动开启省显存设置。\n是否继续？")
 
@@ -2249,21 +2318,34 @@ class App:
         return None
 
     def _confirm_training(self, params, resume=None):
-        base = core.BASE_TYPE_LABELS.get(params["base_type"], params["base_type"])
-        msg = (
-            "即将开始训练，请确认以下参数：\n\n"
-            f"模式        : {core.MODE_LABELS.get(params['mode'], params['mode'])}\n"
-            f"底模类型    : {base}\n"
-            f"rank / alpha: {params['rank']} / {params['alpha']}\n"
-            f"学习率      : {params['unet_lr']}\n"
-            f"文本编码器学习率: {params['te_lr']}\n"
-            f"repeats     : {params['repeats']}\n"
-            f"最大 epoch  : {params['max_epochs']}\n"
-            f"训练目标    : {'UNet + 文本编码器' if params['train_text_encoder'] else '仅 UNet'}\n"
-            f"Trigger     : {params['trigger'] or '（未填写）'}\n"
-            f"正则数据集  : {params['reg_dir'] or '（未使用）'}"
-            + ("\nAMD 兼容模式: 开启（实验性）" if params.get("amd_mode") else "")
-        )
+        if params.get("mode") == "krea2":
+            files = core.krea2_model_files()
+            msg = (
+                "即将开始 Krea 2 训练，请确认以下参数：\n\n"
+                f"模式        : {core.MODE_LABELS.get('krea2')}\n"
+                f"底模(RAW)   : {os.path.basename(files.get('raw') or '？')}\n"
+                f"rank / alpha: {params['rank']} / {params['alpha']}\n"
+                f"学习率      : {params['unet_lr']}\n"
+                f"repeats     : {params['repeats']}\n"
+                f"最大 epoch  : {params['max_epochs']}\n"
+                f"Trigger     : {params['trigger'] or '（未填写）'}"
+            )
+        else:
+            base = core.BASE_TYPE_LABELS.get(params["base_type"], params["base_type"])
+            msg = (
+                "即将开始训练，请确认以下参数：\n\n"
+                f"模式        : {core.MODE_LABELS.get(params['mode'], params['mode'])}\n"
+                f"底模类型    : {base}\n"
+                f"rank / alpha: {params['rank']} / {params['alpha']}\n"
+                f"学习率      : {params['unet_lr']}\n"
+                f"文本编码器学习率: {params['te_lr']}\n"
+                f"repeats     : {params['repeats']}\n"
+                f"最大 epoch  : {params['max_epochs']}\n"
+                f"训练目标    : {'UNet + 文本编码器' if params['train_text_encoder'] else '仅 UNet'}\n"
+                f"Trigger     : {params['trigger'] or '（未填写）'}\n"
+                f"正则数据集  : {params['reg_dir'] or '（未使用）'}"
+                + ("\nAMD 兼容模式: 开启（实验性）" if params.get("amd_mode") else "")
+            )
         if resume:
             msg += f"\n\n（将从断点续训：{os.path.basename(resume)}）"
         return messagebox.askokcancel(core.APP_NAME, msg)
@@ -2474,8 +2556,10 @@ class App:
 
 
     def _refresh_one_click_state(self):
+        need_base = self.mode != "krea2"
+        _base_ok = bool(self.base_model_var.get()) or (not need_base and not core.krea2_missing_models())
         ready = (self.guide_env_var.get() == "已装" and self.guide_kohya_var.get() == "已装"
-                 and bool(self.base_model_var.get()) and bool(self.raw_dir_var.get()))
+                 and _base_ok and bool(self.raw_dir_var.get()))
         try:
             self.btn_one_click.configure(state=("normal" if ready else "disabled"),
                                          fg_color=(ACC if ready else CARD2),
