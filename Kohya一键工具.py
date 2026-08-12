@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.5.3"
+APP_VERSION = "0.5.4"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1814,7 +1814,7 @@ AMD_ROC_WHEELS = [
     f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/rocm_sdk_libraries_custom-{AMD_ROC_VERSION}-py3-none-win_amd64.whl",
     f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/rocm-{AMD_ROC_VERSION}.tar.gz",
 ]
-AMD_TRAIN_DEPS = "transformers diffusers accelerate safetensors omegaconf numpy pillow av opencv-python einops sentencepiece"
+AMD_TRAIN_DEPS = "transformers diffusers accelerate safetensors omegaconf numpy pillow av opencv-python einops sentencepiece toml voluptuous"
 
 
 def venv_python_version(venv_dir):
@@ -2543,6 +2543,25 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
                 "AMD 显卡需要先配置 ROCm 版 PyTorch 或 ZLUDA 才能训练。\n"
                 "请按「使用说明」的 AMD 章节配置环境，或在界面关闭 AMD 兼容模式。" % (_bk or "未知"))
         logf("[训练] AMD 兼容模式（实验性）：torch 后端 = %s，参数已自动适配" % _bk)
+        # 自愈：确认 AMD 训练环境有 sd-scripts 需要的依赖（toml/voluptuous 等小包，
+        # 之前 AMD 依赖安装列表漏了它们会导致训练报 ModuleNotFoundError: toml）
+        try:
+            _r = subprocess.run(
+                [vpy, "-c", "import toml, voluptuous, safetensors, transformers, diffusers, accelerate, omegaconf"],
+                capture_output=True, text=True, timeout=120)
+            if _r.returncode != 0:
+                logf("[AMD] 训练环境缺少 sd-scripts 依赖（如 toml/voluptuous），正在自动补装…")
+                subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
+                                "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
+                if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                               "toml", "voluptuous", "safetensors", "transformers", "diffusers", "accelerate", "omegaconf"],
+                              cwd=kdir, env=build_env(), logf=logf) != 0:
+                    raise RuntimeError("AMD 训练环境依赖补装失败（网络不稳），请检查网络后重试，或重跑【AMD 环境检查 / 安装引导】")
+                logf("[AMD] 训练环境依赖补装完成")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logf(f"[AMD] 训练环境依赖检查失败（忽略，继续尝试）: {e}")
     sds = os.path.join(kdir, "sd-scripts")
     base_type = params.get("base_type", "sd15")
     arch_info = ARCH_INFO.get(base_type, ARCH_INFO["sd15"])
