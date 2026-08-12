@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Kohya-LoRA 一键训练工具 · 新版 CustomTkinter UI（kohya_gui.py）
 业务逻辑全部复用 Kohya一键工具.py，本文件只负责界面。
 入口：python kohya_gui.py
@@ -8,11 +8,14 @@ import sys
 import queue
 import threading
 import platform
+import subprocess
 import functools
 import traceback
+import re
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox
+import webbrowser
 
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
@@ -88,11 +91,19 @@ STYLE_PRESETS = {
     "写实": {"rank": "24", "alpha": "12", "unet_lr": "1e-4", "te_lr": "6e-5", "repeats": "4", "max_epochs": "6"},
 }
 
+# AMD ROCm 官方 Windows 发布版本（升级 ROCm 时只改这里）
+# wheel 地址模板：https://repo.radeon.com/rocm/windows/rocm-rel-<ver>/...
+AMD_ROC_VERSION = "7.2.1"
+AMD_TORCH_VERSION = "2.9.1"
+AMD_TORCHVISION_VERSION = "0.24.1"
+AMD_DRIVER_MIN = "26.2.2"
+
 _MAIN_BTN_TIPS = {
     "数据预处理": "缩放/去黑边/去水印/打标签。一键开始训练会自动做，老手可单独用。",
     "一键训练": "用已经预处理好的数据直接训练（需要先选好底模）。",
     "打开输出文件夹": "打开训练产物目录：模型、使用模板、参数报告、中间快照。",
     "使用说明": "打开新手教学 & 常见问题窗口。",
+    "标签编辑器": "打开标签编辑器：逐张看图改标签、批量删除/替换标签、置顶 trigger、标签频率统计、整理成 repeats_名称 子目录结构。训练前改好标签，模型学得更准。",
 }
 
 
@@ -178,13 +189,10 @@ def create_soft_shadow_card(parent, corner_radius=8, pad=10, offset=(1, 2),
     canvas = tk.Canvas(parent, bg=bg, highlightthickness=0, bd=0, height=10)
     inner = ctk.CTkFrame(canvas, corner_radius=corner_radius, fg_color=fg_color)
     wid = canvas.create_window(pad, pad, window=inner, anchor="nw")
-    def _layout(_e=None):
-        cw = inner.winfo_reqwidth()
-        ch = inner.winfo_reqheight()
-        cw_avail = canvas.winfo_width() - 2 * pad
-        if cw_avail > 20:
-            cw = max(cw, cw_avail)
-        if cw <= 10 or ch <= 10:
+    _st = {"key": None, "after": None}
+    def _render(key, cw, ch):
+        _st["after"] = None
+        if _st["key"] == key:
             return
         img = _make_shadow(cw, ch, corner_radius, shadow, alpha, offset[0], offset[1], blur, pad)
         canvas.delete("shd")
@@ -193,6 +201,25 @@ def create_soft_shadow_card(parent, corner_radius=8, pad=10, offset=(1, 2),
         canvas.itemconfigure(wid, width=cw)
         canvas.configure(height=ch + 2 * pad)
         canvas._shadow_img = img
+        _st["key"] = key
+    def _layout(_e=None):
+        cw = inner.winfo_reqwidth()
+        ch = inner.winfo_reqheight()
+        cw_avail = canvas.winfo_width() - 2 * pad
+        if cw_avail > 20:
+            cw = max(cw, cw_avail)
+        if cw <= 10 or ch <= 10:
+            return
+        key = (cw, ch, corner_radius)
+        if key == _st["key"]:
+            return
+        # 防抖：快速缩放/滚动时等 40ms 后再算一次，避免每帧都做高斯模糊
+        if _st["after"] is not None:
+            try:
+                canvas.after_cancel(_st["after"])
+            except Exception:
+                pass
+        _st["after"] = canvas.after(40, lambda: _render(key, cw, ch))
     inner.bind("<Configure>", _layout)
     canvas.bind("<Configure>", _layout)
     return canvas, inner
@@ -208,9 +235,15 @@ class App:
         self._base_items = []
         self._dl = None
         self.ui_proc = None
+        self._label_editor = None
+        # ---- 项目化管理状态 ----
+        self.current_project = None          # 当前打开的项目名（None=主页）
+        self._saving = False                 # 自动保存防递归标志
+        self._autosave_after = None          # 防抖定时器
 
         self.root = ctk.CTk()
-        self.root.title(core.APP_NAME + " · 新界面")
+        self.project_name_var = tk.StringVar()
+        self.root.title(core.APP_NAME + " · v" + getattr(core, "APP_VERSION", "0.0.0"))
         self.root.geometry("1180x900")
         self.root.minsize(1040, 780)
         self.root.configure(fg_color=BG)
@@ -236,12 +269,23 @@ class App:
         self._main_widgets = []
         self._adv_entries = {}
         self._main_btns = {}
+        self.amd_var = tk.BooleanVar(value=False)
+        self.amd_env_var = tk.StringVar()
+        self.train_env_var = tk.StringVar()
+        try:
+            self._gpu_info = core.detect_gpu_info()
+        except Exception:
+            self._gpu_info = {"vendor": "unknown", "name": None, "vram_gb": None}
 
         self._build_ui()
         self._scan_base_models()
         self._apply_presets()
         self._update_mode_ui()
-        self._refresh_status()
+        self._build_home()
+        self._show_home()
+        self._bind_autosave_traces()
+        # 环境/显卡检测放后台线程预热，界面先秒开，避免启动卡顿
+        self._refresh_status_async()
         self.root.after(100, self._poll)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -272,6 +316,9 @@ class App:
                 self._handle(item)
         except queue.Empty:
             pass
+        self._poll_n = getattr(self, "_poll_n", 0) + 1
+        if self._poll_n % 8 == 0:
+            self._refresh_monitor()
         self.root.after(120, self._poll)
 
     def _handle(self, item):
@@ -285,6 +332,8 @@ class App:
                 self._refresh_status()
             elif kind == "BASE_DETECTED":
                 self._refresh_status()
+            elif kind == "BASE_SCAN_DONE":
+                self._apply_base_models(item[1] if len(item) > 1 else [])
             elif kind == "AUTO_CONFIRM":
                 self._handle_auto_confirm(item[1], item[2], item[3] if len(item) > 3 else None)
             elif kind == "DL_PROGRESS":
@@ -293,16 +342,50 @@ class App:
                 self._handle_dl_done(item[1], item[2])
 
     def _start_worker(self, fn, title):
+        # 防重入：同一时间只允许一个后台任务（安装/预处理/训练），
+        # 避免连点「② 安装训练内核」导致两个 pip 同时写同一个 venv（文件锁冲突 WinError 32）。
+        if self.busy:
+            messagebox.showinfo(core.APP_NAME, "有任务正在运行，请先等待当前任务完成。")
+            return
         self._set_busy(True)
         self._log("开始：" + title)
         threading.Thread(target=fn, daemon=True).start()
 
     def _set_busy(self, v):
         self.busy = v
+        state = ("disabled" if v else "normal")
+        # 左侧引导按钮（①环境 ②安装 ③底模 ④图片）
+        for b in getattr(self, "_guide_btns", {}).values():
+            try:
+                b.configure(state=state)
+            except Exception:
+                pass
+        # 右侧主操作按钮（预处理/训练/打开输出/使用说明）
+        for b in getattr(self, "_main_btns", {}).values():
+            try:
+                b.configure(state=state)
+            except Exception:
+                pass
+        # 其它操作按钮
+        for name in ("btn_pick_base", "btn_refresh_base", "btn_download_base",
+                     "btn_pick_raw", "btn_pick_reg", "btn_toggle_adv", "btn_reset_preset",
+                     "btn_amd_env", "btn_pick_train_env",
+                     "btn_back_home", "btn_new_project"):
+            b = getattr(self, name, None)
+            if b is not None:
+                try:
+                    b.configure(state=state)
+                except Exception:
+                    pass
+        # 一键开始训练：忙碌时禁用；空闲时按引导完成状态恢复
         try:
-            self.btn_one_click.configure(state=("disabled" if v else "normal"))
+            if v:
+                self.btn_one_click.configure(state="disabled")
+            else:
+                self._refresh_one_click_state()
         except Exception:
             pass
+        # 停止按钮：任务进行中显示并可点，空闲时隐藏
         try:
             if v:
                 self.btn_stop.configure(state="normal")
@@ -312,7 +395,139 @@ class App:
         except Exception:
             pass
 
+    def _refresh_status_async(self):
+        """后台线程预热环境检测，完成后回到主线程刷新徽章/引导状态（启动秒开）。"""
+        def _w():
+            try:
+                core.system_status(force=True)   # 后台跑 git/python/gpu 检测
+            except Exception:
+                pass
+            try:
+                self.q.put(("STATUS",))
+            except Exception:
+                pass
+        try:
+            threading.Thread(target=_w, daemon=True).start()
+        except Exception:
+            pass
+
+    def _build_monitor_bar(self, parent):
+        """训练实时监控面板（步数/loss/显存/预计时间/loss曲线）。"""
+        self.mon = ctk.CTkFrame(parent, fg_color="#16181e", corner_radius=0)
+        self.mon_row1 = ctk.CTkFrame(self.mon, fg_color="transparent"); self.mon_row1.pack(fill="x", padx=26, pady=(10, 0))
+        ctk.CTkLabel(self.mon_row1, text="📊 训练监控", font=ui_font(FONT_TITLE), text_color=TITLE_C).pack(side="left")
+        self.mon_step_var = tk.StringVar(value="步数 0 / 0（0%）")
+        ctk.CTkLabel(self.mon_row1, textvariable=self.mon_step_var, font=ui_font(FONT_BODY),
+                     text_color=SUB).pack(side="left", padx=(18, 0))
+        self.mon_progress = ctk.CTkProgressBar(self.mon, height=10, corner_radius=5,
+                                               fg_color="#2b303a", progress_color="#7AA2F7")
+        self.mon_progress.set(0)
+        self.mon_progress.pack(fill="x", padx=26, pady=(6, 0))
+        self.mon_row2 = ctk.CTkFrame(self.mon, fg_color="transparent"); self.mon_row2.pack(fill="x", padx=26, pady=(6, 0))
+        self.mon_loss_var = tk.StringVar(value="loss: --")
+        self.mon_lr_var = tk.StringVar(value="lr: --")
+        self.mon_speed_var = tk.StringVar(value="速度: --")
+        self.mon_eta_var = tk.StringVar(value="预计剩余: --")
+        self.mon_vram_var = tk.StringVar(value="显存: --")
+        for v in (self.mon_loss_var, self.mon_lr_var, self.mon_speed_var, self.mon_eta_var, self.mon_vram_var):
+            ctk.CTkLabel(self.mon_row2, textvariable=v, font=ui_font(FONT_HINT), text_color=SUB).pack(side="left", padx=(0, 16))
+        self.mon_canvas = tk.Canvas(self.mon, height=70, bg="#14161c", highlightthickness=0)
+        self.mon_canvas.pack(fill="x", padx=26, pady=(0, 10))
+        self.mon_canvas.create_text(10, 10, text="等待训练数据…", anchor="nw", fill="#7c8290", font=("Microsoft YaHei", 9))
+        self._mon_visible = False
+
+    def _show_monitor(self, v):
+        try:
+            if v and not self._mon_visible:
+                self.mon.pack(fill="x", side="bottom", pady=(0, 0), before=self.logbar_ref)
+                self._mon_visible = True
+            elif not v and self._mon_visible:
+                self.mon.pack_forget()
+                self._mon_visible = False
+        except Exception:
+            pass
+
+    def _refresh_monitor(self):
+        mon = getattr(self, "_train_mon", None)
+        if mon is None or not getattr(self, "_mon_visible", False):
+            return
+        try:
+            snap = mon.snapshot()
+            total = snap.get("total") or 0
+            step = snap.get("step") or 0
+            pct = (step / total) if total else 0.0
+            self.mon_progress.set(min(max(pct, 0.0), 1.0))
+            self.mon_step_var.set(f"步数 {step} / {total}（{pct*100:.0f}%）")
+            loss = snap.get("loss")
+            if loss is not None:
+                diff = ""
+                if snap.get("loss_prev") is not None:
+                    d = loss - snap["loss_prev"]
+                    diff = " ↓" if d < 0 else (" ↑" if d > 0 else " →")
+                self.mon_loss_var.set(f"loss: {loss:.4f}{diff}")
+            else:
+                self.mon_loss_var.set("loss: --")
+            lr = snap.get("lr")
+            self.mon_lr_var.set(f"lr: {lr:.2e}" if lr else "lr: --")
+            sp = snap.get("speed") or 0.0
+            # 速度单位与训练日志（tqdm）统一：>=1 it/s 用 it/s，否则用 s/it（两者互为倒数）
+            if sp <= 0:
+                self.mon_speed_var.set("速度: --")
+            elif sp >= 1.0:
+                self.mon_speed_var.set(f"速度: {sp:.2f} it/s")
+            else:
+                self.mon_speed_var.set(f"速度: {1.0 / sp:.2f} s/it")
+            self.mon_eta_var.set("预计剩余: " + core.format_eta(snap.get("eta")))
+            # 显存（N 卡）
+            if self._gpu_info.get("vendor") == "nvidia":
+                try:
+                    r = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total",
+                                        "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=3)
+                    if r.returncode == 0:
+                        parts = [p.strip() for p in r.stdout.strip().split(",")]
+                        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                            self.mon_vram_var.set(f"显存: {int(parts[0])/1024:.1f}/{int(parts[1])/1024:.1f} GB")
+                except Exception:
+                    pass
+            self._draw_loss_curve(snap.get("loss_history") or [])
+        except Exception:
+            pass
+
+    def _draw_loss_curve(self, hist):
+        try:
+            c = self.mon_canvas
+            c.delete("all")
+            w = max(c.winfo_width(), 10)
+            h = max(c.winfo_height(), 10)
+            if len(hist) < 2:
+                c.create_text(10, 10, text="等待训练数据…（loss 曲线）", anchor="nw",
+                              fill="#7c8290", font=("Microsoft YaHei", 9))
+                return
+            data = hist[-50:]
+            mn, mx = min(data), max(data)
+            span = (mx - mn) or 1.0
+            pad = 6
+            for gy in (0.25, 0.5, 0.75):
+                yy = pad + gy * (h - 2 * pad)
+                c.create_line(pad, yy, w - pad, yy, fill="#22262e", width=1)
+            pts = []
+            for i, v in enumerate(data):
+                x = pad + i * (w - 2 * pad) / (len(data) - 1)
+                y = h - pad - (v - mn) / span * (h - 2 * pad)
+                pts.append((x, y))
+            flat = [p for pt in pts for p in pt]
+            c.create_line(flat, fill="#7AA2F7", width=2, smooth=True)
+            c.create_text(w - pad, 4, text=f"loss 最近{len(data)}步 ↓", anchor="ne",
+                          fill="#9aa0ad", font=("Microsoft YaHei", 8))
+        except Exception:
+            pass
+
     def _on_close(self):
+        try:
+            if getattr(self, "current_project", None):
+                self._autosave()
+        except Exception:
+            pass
         try:
             if self.ui_proc is not None and self.ui_proc.poll() is None:
                 self.ui_proc.terminate()
@@ -334,6 +549,7 @@ class App:
                      text_color=SUB).pack(anchor="w", padx=16, pady=(0, 4))
 
         self._guide_dots = {}
+        self._guide_btns = {}
         def _guide(key, label, var, btn_text, cmd):
             row = ctk.CTkFrame(self.sidebar, fg_color="transparent")
             row.pack(fill="x", padx=14, pady=3)
@@ -342,10 +558,11 @@ class App:
             self._guide_dots[key] = dot
             ctk.CTkLabel(row, text=label, font=ui_font(FONT_BODY), text_color=TXT, width=92, anchor="w").pack(side="left")
             ctk.CTkLabel(row, textvariable=var, font=ui_font(FONT_HINT), text_color=HINT, width=26, anchor="w").pack(side="left")
-            ctk.CTkButton(row, text=btn_text, width=56, height=28, fg_color=CARD2, hover_color="#343a46",
-                          border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
-                          font=ui_font(FONT_HINT), command=cmd).pack(side="right")
-
+            b = ctk.CTkButton(row, text=btn_text, width=56, height=28, fg_color=CARD2, hover_color="#343a46",
+                              border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                              font=ui_font(FONT_HINT), command=cmd)
+            b.pack(side="right")
+            self._guide_btns[key] = b
         self.guide_env_var = tk.StringVar(value="未装")
         self.guide_kohya_var = tk.StringVar(value="未装")
         self.guide_base_var = tk.StringVar(value="未选")
@@ -377,12 +594,24 @@ class App:
         right = ctk.CTkFrame(self.root, fg_color=BG, corner_radius=0)
         right.pack(side="left", fill="both", expand=True)
 
+        # 主页容器（项目列表，默认显示）；工作容器（打开项目后的配置页，默认隐藏）
+        self.home_frame = ctk.CTkFrame(right, fg_color=BG, corner_radius=0)
+        self.home_frame.pack(fill="both", expand=True)
+        self.work_frame = ctk.CTkFrame(right, fg_color=BG, corner_radius=0)
+
         # 顶部条：标题 + 模式切换 + 底模 + 状态徽章
-        top = ctk.CTkFrame(right, fg_color="transparent")
+        top = ctk.CTkFrame(self.work_frame, fg_color="transparent")
         top.pack(fill="x", padx=26, pady=(18, 0))
         row1 = ctk.CTkFrame(top, fg_color="transparent"); row1.pack(fill="x")
+        self.btn_back_home = ctk.CTkButton(row1, text="← 返回项目", width=90, height=28, fg_color=CARD2,
+                                           hover_color="#343a46", border_width=1, border_color=BORDER,
+                                           text_color=TXT, corner_radius=6, font=ui_font(FONT_HINT),
+                                           command=self.cmd_back_home)
+        self.btn_back_home.pack(side="left", padx=(0, 12))
         self.home_title = ctk.CTkLabel(row1, text="人物角色 LoRA 训练", font=ui_font(FONT_TITLE), text_color=TITLE_C)
         self.home_title.pack(side="left")
+        self.proj_title = ctk.CTkLabel(row1, text="", font=ui_font(FONT_BODY), text_color=ACC)
+        self.proj_title.pack(side="left", padx=(14, 0))
         st = ctk.CTkFrame(top, fg_color="transparent"); st.pack(fill="x", pady=(8, 0))
         self.badge_frame = st
 
@@ -414,20 +643,51 @@ class App:
                                                border_width=1, border_color=ACC, text_color=ACC, corner_radius=6,
                                                font=ui_font(FONT_BODY), command=self.cmd_download_base)
         self.btn_download_base.pack(side="left", padx=4)
+        # AMD 兼容模式（实验性）：仅 AMD 显卡显示
+        self.amd_bar = ctk.CTkFrame(top, fg_color="transparent")
+        if self._gpu_info.get("vendor") == "amd":
+            self.amd_bar.pack(fill="x", pady=(8, 0))
+            amd_row1 = ctk.CTkFrame(self.amd_bar, fg_color="transparent"); amd_row1.pack(fill="x")
+            self.amd_sw = ctk.CTkSwitch(amd_row1, text="AMD 兼容模式（实验性）", variable=self.amd_var,
+                                        command=self._on_amd_toggle, font=ui_font(FONT_HINT), text_color=SUB,
+                                        progress_color=ACC, fg_color="#3a4150")
+            self.amd_sw.pack(side="left")
+            self.btn_amd_env = ctk.CTkButton(amd_row1, text="环境检查 / 安装引导", width=140, height=26,
+                                             fg_color=CARD2, hover_color="#343a46", border_width=1,
+                                             border_color=BORDER, text_color=TXT, corner_radius=6,
+                                             font=ui_font(FONT_HINT), command=self.cmd_amd_env)
+            self.btn_amd_env.pack(side="left", padx=(10, 0))
+            ctk.CTkLabel(amd_row1, textvariable=self.amd_env_var, font=ui_font(FONT_HINT),
+                         text_color=HINT, anchor="w").pack(side="left", padx=(10, 0))
+            amd_row2 = ctk.CTkFrame(self.amd_bar, fg_color="transparent"); amd_row2.pack(fill="x", pady=(6, 0))
+            ctk.CTkLabel(amd_row2, text="训练环境(venv，留空=默认 kohya 环境)", font=ui_font(FONT_HINT),
+                         text_color=HINT).pack(side="left")
+            self.train_env_entry = ctk.CTkEntry(amd_row2, width=280, height=26, textvariable=self.train_env_var,
+                                                fg_color=CARD2, border_color=BORDER, text_color=TXT,
+                                                placeholder_text="例如 C:\\kohya_amd_env",
+                                                font=ui_font(FONT_HINT))
+            self.train_env_entry.pack(side="left", padx=(8, 6))
+            self.btn_pick_train_env = ctk.CTkButton(amd_row2, text="选择训练环境…", width=108, height=26,
+                                                    fg_color=CARD2, hover_color="#343a46", border_width=1,
+                                                    border_color=BORDER, text_color=TXT, corner_radius=6,
+                                                    font=ui_font(FONT_HINT), command=self.cmd_pick_train_env)
+            self.btn_pick_train_env.pack(side="left")
         self.preset_summary = ctk.CTkLabel(top, text="", font=ui_font(FONT_HINT), text_color=SUB, anchor="w")
         self.preset_summary.pack(fill="x", pady=(8, 0))
 
         # 可滚动主区
-        self.scroll = ctk.CTkScrollableFrame(right, fg_color=BG, corner_radius=0)
+        self.scroll = ctk.CTkScrollableFrame(self.work_frame, fg_color=BG, corner_radius=0)
         self.scroll.pack(fill="both", expand=True, padx=26, pady=(14, 0))
         try:
             self.scroll._parent_canvas.configure(yscrollincrement=2)  # 降低滚轮单格滚动距离，更平滑
         except Exception:
             pass
-        self._build_main_cards()
+        # 主卡片延迟构建：启动只显示主页，打开项目时才构建训练配置页（加快首屏，减少启动卡顿）
+        self._main_cards_built = False
 
         # 底部独立日志面板
         logbar = ctk.CTkFrame(right, fg_color="#16181e", corner_radius=0)
+        self.logbar_ref = logbar
         logbar.pack(fill="x", side="bottom", pady=(8, 0))
         ctk.CTkLabel(logbar, text="运行日志", font=ui_font(FONT_TITLE), text_color=TITLE_C).pack(anchor="w", padx=26, pady=(8, 2))
         self.log = ctk.CTkTextbox(logbar, height=150, fg_color="#14161c", text_color="#b6bcc9", corner_radius=6,
@@ -435,9 +695,474 @@ class App:
         self.log.pack(fill="x", padx=26, pady=(0, 14))
         for tag, col in [("ok", LOG_OK), ("warn", LOG_WARN), ("err", LOG_ERR), ("info", LOG_INFO), ("train", LOG_TRAIN)]:
             self.log.tag_config(tag, foreground=col)
+        # 训练监控面板（平时隐藏，训练时 pack 在日志上方）
+        self._build_monitor_bar(right)
         self._log("欢迎使用 Kohya-LoRA 一键训练工具")
         self._log("按左侧新手引导 ①②③④ 顺序操作，最后点下方「一键开始训练」")
         self._attach_tooltips()
+    # ==================== 项目化管理：主页 / 新建 / 打开 / 自动保存 ====================
+
+    def _build_home(self):
+        """主页：项目卡片列表 + 新建按钮。"""
+        for w in getattr(self, "_home_widgets", []):
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self._home_widgets = []
+        f = self.home_frame
+        head = ctk.CTkFrame(f, fg_color="transparent")
+        head.pack(fill="x", padx=26, pady=(24, 6))
+        self._home_widgets.append(head)
+        ctk.CTkLabel(head, text="🏠 我的项目", font=ui_font(FONT_TITLE), text_color=TITLE_C).pack(side="left")
+        self.btn_new_project = ctk.CTkButton(head, text="➕ 新建项目", width=110, height=32,
+                                             fg_color=ACC, hover_color=ACC_H, corner_radius=6,
+                                             font=ui_font(FONT_BODY), command=self.cmd_new_project)
+        self.btn_new_project.pack(side="right")
+        self._home_widgets.append(self.btn_new_project)
+        _hint = ctk.CTkLabel(f, text="每个项目保存一套完整的训练配置（模式 / 底模 / 数据集 / 触发词 / 全部参数），下次直接打开继续用。",
+                             font=ui_font(FONT_HINT), text_color=HINT)
+        _hint.pack(anchor="w", padx=26, pady=(0, 10))
+        self._home_widgets.append(_hint)
+        # 项目卡片滚动区
+        card_area = ctk.CTkScrollableFrame(f, fg_color=BG, corner_radius=0)
+        card_area.pack(fill="both", expand=True, padx=26, pady=(0, 10))
+        self._home_widgets.append(card_area)
+        projects = core.list_projects()
+        if not projects:
+            empty = ctk.CTkFrame(card_area, fg_color=CARD2, corner_radius=8)
+            empty.pack(fill="x", pady=8)
+            self._home_widgets.append(empty)
+            ctk.CTkLabel(empty, text="还没有项目。\n点右上角「➕ 新建项目」开始，软件会自动保存你的每一次配置。",
+                         font=ui_font(FONT_BODY), text_color=SUB, justify="center").pack(pady=28)
+        for info in projects:
+            self._build_project_card(card_area, info)
+
+    def _build_project_card(self, parent, info):
+        name = info.get("name", "")
+        mode_l = core.MODE_LABELS.get(info.get("mode", "style"), "画风")
+        bt_l = core.BASE_TYPE_LABELS.get(info.get("base_type", "sd15"), info.get("base_type", "sd15"))
+        card = ctk.CTkFrame(parent, fg_color=CARD2, corner_radius=8)
+        card.pack(fill="x", pady=5)
+        self._home_widgets.append(card)
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=14, pady=10)
+        # 左侧信息
+        info_col = ctk.CTkFrame(row, fg_color="transparent")
+        info_col.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(info_col, text=name, font=ui_font(FONT_BODY), text_color=TXT, anchor="w").pack(anchor="w")
+        sub = f"{mode_l} · {bt_l}"
+        raw = info.get("raw_dir") or ""
+        if raw:
+            sub += f"  |  图集: {raw}"
+        upd = info.get("updated") or ""
+        if upd:
+            sub += f"  |  更新: {upd}"
+        ctk.CTkLabel(info_col, text=sub, font=ui_font(FONT_HINT), text_color=HINT, anchor="w").pack(anchor="w", pady=(2, 0))
+        # 右侧按钮
+        btn_col = ctk.CTkFrame(row, fg_color="transparent")
+        btn_col.pack(side="right")
+        ctk.CTkButton(btn_col, text="打开", width=62, height=28, fg_color=ACC, hover_color=ACC_H,
+                      corner_radius=6, font=ui_font(FONT_HINT),
+                      command=lambda n=name: self.cmd_open_project(n)).pack(side="left", padx=3)
+        ctk.CTkButton(btn_col, text="重命名", width=68, height=28, fg_color=CARD2, hover_color="#343a46",
+                      border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                      font=ui_font(FONT_HINT),
+                      command=lambda n=name: self.cmd_rename_project(n)).pack(side="left", padx=3)
+        ctk.CTkButton(btn_col, text="删除", width=62, height=28, fg_color="#4a3535", hover_color="#5a4141",
+                      text_color="#e0b0b0", corner_radius=6, font=ui_font(FONT_HINT),
+                      command=lambda n=name: self.cmd_delete_project(n)).pack(side="left", padx=3)
+
+    def _show_home(self):
+        """显示主页（项目列表），隐藏工作区。"""
+        self.current_project = None
+        self.work_frame.pack_forget()
+        self.home_frame.pack(fill="both", expand=True)
+        self._build_home()
+        # 徽章在 work_frame（主页不可见），只更新左侧引导状态，避免重复跑环境检测
+        try:
+            self._refresh_guide_only()
+        except Exception:
+            pass
+
+    def _ensure_main_cards(self):
+        """首次打开工作区时才构建主卡片（延迟加载，避免启动卡顿）。"""
+        if getattr(self, "_main_cards_built", False):
+            return
+        try:
+            self._build_main_cards()
+            self._attach_main_tooltips()
+        finally:
+            self._main_cards_built = True
+
+    def _show_work(self):
+        """显示工作区（训练配置页），隐藏主页。"""
+        self.home_frame.pack_forget()
+        self._ensure_main_cards()
+        self.work_frame.pack(fill="both", expand=True)
+
+    def _refresh_guide_only(self):
+        """只刷新左侧引导状态（用缓存的环境结果），不重复跑子进程检测。"""
+        try:
+            sts = core.system_status()
+            self.guide_env_var.set("已装" if sts.get("git") and sts.get("python") else "未装")
+            self.guide_kohya_var.set("已装" if sts.get("kohya_ok") else "未装")
+            def _dot(key, ok_):
+                try:
+                    self._guide_dots[key].configure(fg_color=("#5c7c66" if ok_ else "#6e4545"))
+                except Exception:
+                    pass
+            _dot("env", bool(sts.get("git") and sts.get("python")))
+            _dot("kohya", bool(sts.get("kohya_ok")))
+            _dot("base", bool(self.base_model_var.get()))
+            _dot("raw", bool(self.raw_dir_var.get()))
+            self._refresh_one_click_state()
+        except Exception:
+            pass
+
+    def _bind_autosave_traces(self):
+        """给所有输入控件绑定变更回调，自动保存项目。"""
+        try:
+            def _on_any(*_a):
+                self._schedule_autosave()
+            for v in (self.trigger_var, self.reg_var, self.raw_dir_var,
+                      self.global_pos_var, self.global_neg_var,
+                      self.base_model_var, self.train_env_var):
+                try:
+                    v.trace_add("write", _on_any)
+                except Exception:
+                    pass
+            for k, v in self.param_vars.items():
+                try:
+                    v.trace_add("write", _on_any)
+                except Exception:
+                    pass
+            try:
+                self.unet_only_var.trace_add("write", _on_any)
+            except Exception:
+                pass
+            try:
+                self.amd_var.trace_add("write", _on_any)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def cmd_back_home(self):
+        if self.busy:
+            messagebox.showinfo(core.APP_NAME, "任务正在运行，请先等待完成或停止。")
+            return
+        if self.current_project and messagebox.askyesno(core.APP_NAME,
+                f"返回项目列表？\n当前项目「{self.current_project}」的配置已自动保存。"):
+            self._autosave()
+            self._show_home()
+        elif not self.current_project:
+            self._show_home()
+
+    # ---------- 新建 / 打开 / 重命名 / 删除 ----------
+    def _reset_project_ui(self):
+        """新建项目前清空上一次项目遗留的界面状态，避免新项目继承旧配置/旧图集路径。
+
+        只清空"项目专属"字段（图集/底模/触发词/正则/全局提示词/参数覆盖标记）；
+        模式/架构/预设随后由所选模板重新填充。
+        """
+        self._manual_override.clear()
+        self.raw_dir_var.set("")
+        self.base_model_var.set("")
+        self.trigger_var.set("")
+        self.reg_var.set("")
+        self.global_pos_var.set("")
+        self.global_neg_var.set("")
+        self.unet_only_var.set(False)
+        try:
+            self.train_env_var.set("")
+        except Exception:
+            pass
+        self.guide_base_var.set("未选")
+        self.guide_raw_var.set("未选")
+        try:
+            self.base_combo.set(core.BASE_TYPE_LABELS.get(self.base_type, list(core.BASE_TYPE_LABELS.values())[0]))
+        except Exception:
+            pass
+        try:
+            self._apply_presets()
+            self._update_mode_ui()
+            self._refresh_preset_summary()
+            self._refresh_one_click_state()
+        except Exception:
+            pass
+
+    def cmd_new_project(self):
+        """新建项目：选择模板 + 填项目名。"""
+        if self.busy:
+            messagebox.showinfo(core.APP_NAME, "任务正在运行，请先等待完成或停止。")
+            return
+        dlg = ctk.CTkToplevel(self.root)
+        dlg.title("新建项目")
+        dlg.geometry("460x330")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        body = ctk.CTkFrame(dlg, fg_color=BG)
+        body.pack(fill="both", expand=True, padx=18, pady=16)
+        ctk.CTkLabel(body, text="选择预设模板", font=ui_font(FONT_BODY), text_color=TXT).pack(anchor="w")
+        tpl_var = tk.StringVar(value="动漫画风")
+        tpl_menu = ctk.CTkOptionMenu(body, values=list(core.PROJECT_TEMPLATES.keys()),
+                                     variable=tpl_var, width=220, height=30,
+                                     fg_color=CARD2, button_color=CARD2, button_hover_color="#3a4150",
+                                     text_color=TXT, font=ui_font(FONT_BODY),
+                                     dropdown_font=ui_font(FONT_BODY), dropdown_fg_color=CARD2,
+                                     dropdown_hover_color="#3a4150")
+        tpl_menu.pack(anchor="w", pady=(4, 2))
+        tpl_note = ctk.CTkLabel(body, text="", font=ui_font(FONT_HINT), text_color=HINT, wraplength=420, justify="left")
+        tpl_note.pack(anchor="w", pady=(0, 8))
+        def _tpl_note(_e=None):
+            tpl_note.configure(text=core.PROJECT_TEMPLATES.get(tpl_var.get(), {}).get("note", ""))
+        tpl_menu.configure(command=lambda v: _tpl_note())
+        _tpl_note()
+        ctk.CTkLabel(body, text="项目名称", font=ui_font(FONT_BODY), text_color=TXT).pack(anchor="w")
+        name_var = tk.StringVar(value=core.default_project_name())
+        name_entry = ctk.CTkEntry(body, textvariable=name_var, width=300, height=30,
+                                  fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
+        name_entry.pack(anchor="w", pady=(4, 2))
+        ctk.CTkLabel(body, text="项目名建议用英文或简短中文，避免特殊字符。", font=ui_font(FONT_HINT),
+                     text_color=HINT).pack(anchor="w", pady=(0, 12))
+        def _do_create():
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showwarning(core.APP_NAME, "请填写项目名称。")
+                return
+            if core.load_project(name):
+                if not messagebox.askyesno(core.APP_NAME, f"已存在同名项目「{name}」，覆盖它吗？"):
+                    return
+            tpl = core.PROJECT_TEMPLATES.get(tpl_var.get(), {})
+            # 关键：先清空界面残留的旧项目状态，再套用模板，
+            # 否则新项目会继承上一个项目（甚至已删除项目）的图集/底模/触发词/参数
+            self._reset_project_ui()
+            # 应用模板：模式 / 底模类型 / 参数
+            if tpl.get("mode"):
+                self.mode = tpl["mode"]
+                try:
+                    self.mode_combo.set(core.MODE_LABELS[self.mode])
+                except Exception:
+                    pass
+            if tpl.get("base_type"):
+                self.base_type = tpl["base_type"]
+                try:
+                    self.base_combo.set(core.BASE_TYPE_LABELS[self.base_type])
+                except Exception:
+                    pass
+            self._apply_presets()
+            self._update_mode_ui()
+            for k, v in (tpl.get("params") or {}).items():
+                self.param_vars.setdefault(k, tk.StringVar()).set(v)
+            self._refresh_preset_summary()
+            data = self._collect_project_data(template=tpl_var.get())
+            data["created"] = None  # save 时会自动补
+            ok = core.save_project(name, data)
+            if not ok:
+                messagebox.showerror(core.APP_NAME, "保存项目失败，请检查磁盘/权限。")
+                return
+            self._log(f"[项目] 已新建项目「{name}」（模板：{tpl_var.get()}）")
+            self.current_project = name
+            self.proj_title.configure(text="项目：" + name)
+            dlg.destroy()
+            self._show_work()
+            self._refresh_status()
+        ctk.CTkButton(body, text="创建并打开", width=120, height=34, fg_color=ACC, hover_color=ACC_H,
+                      corner_radius=6, font=ui_font(FONT_BODY), command=_do_create).pack(side="right", pady=(8, 0))
+        ctk.CTkButton(body, text="取消", width=80, height=34, fg_color=CARD2, hover_color="#343a46",
+                      border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                      font=ui_font(FONT_BODY), command=dlg.destroy).pack(side="right", padx=(0, 10), pady=(8, 0))
+        name_entry.focus_set()
+
+    def cmd_open_project(self, name):
+        """打开项目：恢复模式/底模/数据集/参数。"""
+        if self.busy:
+            messagebox.showinfo(core.APP_NAME, "任务正在运行，请先等待完成或停止。")
+            return
+        data = core.load_project(name)
+        if not data:
+            messagebox.showwarning(core.APP_NAME, f"项目「{name}」不存在或已损坏。")
+            self._build_home()
+            return
+        self._apply_project_data(data)
+        self.current_project = name
+        self.proj_title.configure(text="项目：" + name)
+        self._show_work()
+        self._refresh_status()
+        self._log(f"[项目] 已打开项目「{name}」，全部配置已恢复。")
+        # 旧版共享数据集一次性导入（每个项目从此独立，不混用）
+        try:
+            self._maybe_migrate_legacy_dataset(name)
+        except Exception as _e:
+            self._log(f"[数据集] 旧数据集导入失败（忽略）: {_e}")
+
+    def cmd_rename_project(self, old):
+        dlg = ctk.CTkToplevel(self.root)
+        dlg.title("重命名项目")
+        dlg.geometry("380x160")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        body = ctk.CTkFrame(dlg, fg_color=BG)
+        body.pack(fill="both", expand=True, padx=18, pady=16)
+        ctk.CTkLabel(body, text="新项目名：", font=ui_font(FONT_BODY), text_color=TXT).pack(anchor="w")
+        v = tk.StringVar(value=old)
+        e = ctk.CTkEntry(body, textvariable=v, width=300, height=30, fg_color=CARD2,
+                         border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
+        e.pack(anchor="w", pady=(4, 12))
+        def _do():
+            new = v.get().strip()
+            if not new:
+                return
+            if new == old:
+                dlg.destroy()
+                return
+            if core.load_project(new):
+                messagebox.showwarning(core.APP_NAME, f"已存在同名项目「{new}」。")
+                return
+            data = core.load_project(old)
+            if not data:
+                dlg.destroy()
+                return
+            core.save_project(new, data)
+            core.delete_project(old)
+            # 项目数据集目录跟着改名，避免数据"丢失"
+            try:
+                _old_ds = os.path.join(core.data_dir(), "dataset", core._sanitize_dirname(old))
+                _new_ds = os.path.join(core.data_dir(), "dataset", core._sanitize_dirname(new))
+                if os.path.isdir(_old_ds) and not os.path.isdir(_new_ds):
+                    os.rename(_old_ds, _new_ds)
+                    self._log(f"[数据集] 项目数据集目录已同步改名：{_new_ds}")
+            except Exception as _e:
+                self._log(f"[数据集] 数据集目录改名失败（忽略，可在新项目里重新预处理）: {_e}")
+            if self.current_project == old:
+                self.current_project = new
+                self.proj_title.configure(text="项目：" + new)
+                self._autosave()
+            self._log(f"[项目] 已重命名「{old}」→「{new}」")
+            dlg.destroy()
+            if not self.current_project:
+                self._build_home()
+        ctk.CTkButton(body, text="确定", width=90, height=32, fg_color=ACC, hover_color=ACC_H,
+                      corner_radius=6, font=ui_font(FONT_BODY), command=_do).pack(side="right")
+        ctk.CTkButton(body, text="取消", width=80, height=32, fg_color=CARD2, hover_color="#343a46",
+                      border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                      font=ui_font(FONT_BODY), command=dlg.destroy).pack(side="right", padx=(0, 10))
+        e.focus_set()
+
+    def cmd_delete_project(self, name):
+        if not messagebox.askyesno(core.APP_NAME,
+                f"确定删除项目「{name}」吗？\n删除后不可恢复（训练产物仍在 output 文件夹）。"):
+            return
+        core.delete_project(name)
+        self._log(f"[项目] 已删除项目「{name}」")
+        if self.current_project == name:
+            self._show_home()
+        else:
+            self._build_home()
+
+    # ---------- 数据收集 / 应用 / 自动保存 ----------
+    def _collect_project_data(self, template="自定义"):
+        """收集当前界面全部状态，供保存到项目 json。"""
+        params = self._collect_params()
+        return {
+            "name": self.current_project or "",
+            "template": template,
+            "mode": params.get("mode", self.mode),
+            "base_type": params.get("base_type", self.base_type),
+            "base_model": params.get("base_model") or "",
+            "raw_dir": params.get("raw_dir") or "",
+            "trigger": params.get("trigger") or "",
+            "reg_dir": params.get("reg_dir") or "",
+            "global_pos": params.get("global_pos") or "",
+            "global_neg": params.get("global_neg") or "",
+            "unet_only": params.get("train_text_encoder") is False,
+            "train_env": params.get("train_env") or "",
+            "params": {
+                "rank": params.get("rank"),
+                "alpha": params.get("alpha"),
+                "unet_lr": params.get("unet_lr"),
+                "te_lr": params.get("te_lr"),
+                "repeats": params.get("repeats"),
+                "max_epochs": params.get("max_epochs"),
+            },
+        }
+
+    def _apply_project_data(self, data):
+        """把项目 json 恢复回界面。"""
+        self._loading_project = True
+        self._manual_override.clear()
+        try:
+            m = data.get("mode", "character")
+            if m in core.MODE_LABELS:
+                self.mode = m
+                try:
+                    self.mode_combo.set(core.MODE_LABELS[m])
+                except Exception:
+                    pass
+            bt = data.get("base_type", "sdxl")
+            if bt in core.BASE_TYPE_LABELS:
+                self.base_type = bt
+                try:
+                    self.base_combo.set(core.BASE_TYPE_LABELS[bt])
+                except Exception:
+                    pass
+            self.trigger_var.set(data.get("trigger") or "")
+            self.reg_var.set(data.get("reg_dir") or "")
+            self.raw_dir_var.set(data.get("raw_dir") or "")
+            self.global_pos_var.set(data.get("global_pos") or "")
+            self.global_neg_var.set(data.get("global_neg") or "")
+            bm = data.get("base_model") or ""
+            if bm:
+                self.base_model_var.set(bm)
+                bt2 = core.detect_base_type(bm)
+                if bt2 in ("sd15", "sdxl"):
+                    self._set_base_type(bt2)
+                    try:
+                        self.base_combo.set(core.BASE_TYPE_LABELS[bt2])
+                    except Exception:
+                        pass
+            self.unet_only_var.set(bool(data.get("unet_only", False)))
+            te = data.get("train_env") or ""
+            if te:
+                self.train_env_var.set(te)
+            p = data.get("params") or {}
+            for k, v in p.items():
+                if v is not None:
+                    self.param_vars.setdefault(k, tk.StringVar()).set(str(v))
+                    self._manual_override.add(k)   # 项目参数优先，不被预设覆盖
+            self._apply_presets()   # 填充缺失参数（不覆盖项目已有值）
+            self._update_mode_ui()
+            self._refresh_preset_summary()
+            self._refresh_one_click_state()
+        finally:
+            self._loading_project = False
+
+    def _schedule_autosave(self):
+        """防抖自动保存：输入停止 800ms 后写盘。"""
+        if self.current_project is None or getattr(self, "_loading_project", False):
+            return
+        if self._autosave_after is not None:
+            try:
+                self.root.after_cancel(self._autosave_after)
+            except Exception:
+                pass
+        self._autosave_after = self.root.after(800, self._autosave)
+
+    def _autosave(self):
+        self._autosave_after = None
+        if self.current_project is None or self._saving:
+            return
+        self._saving = True
+        try:
+            data = self._collect_project_data()
+            data["created"] = None
+            core.save_project(self.current_project, data)
+        except Exception as e:
+            self._log(f"[项目] 自动保存失败：{e}")
+        finally:
+            self._saving = False
+
     # ============ 主区卡片（可滚动） ============
     def _build_main_cards(self):
         for w in self._main_widgets:
@@ -503,13 +1228,16 @@ class App:
         # 操作按钮
         btns = ctk.CTkFrame(s, fg_color="transparent"); btns.pack(fill="x", pady=(4, 14))
         self._main_widgets.append(btns)
-        for t, w, cmd in [("数据预处理", 110, self.cmd_preprocess), ("一键训练", 96, self.cmd_train),
-                          ("打开输出文件夹", 112, self.cmd_open_output), ("使用说明", 90, self.cmd_readme)]:
+        for t, w, cmd in [("数据预处理", 110, self.cmd_preprocess), ("标签编辑器", 112, self.cmd_label_editor),
+                          ("一键训练", 96, self.cmd_train), ("打开输出文件夹", 112, self.cmd_open_output),
+                          ("使用说明", 90, self.cmd_readme)]:
             b = ctk.CTkButton(btns, text=t, width=w, height=38, fg_color=CARD2, hover_color="#343a46",
                               border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
                               font=ui_font(FONT_BODY), command=cmd)
             b.pack(side="left", padx=5)
             self._main_btns[t] = b
+        ctk.CTkLabel(s, text="💡 训练前可用「标签编辑器」检查/修正每张图的标签：WD14 自动打的标签偶尔不准，手动改好后 LoRA 学得更准。",
+                     font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w", padx=22, pady=(2, 12))
 
     def _build_badges(self):
         for w in self._badge_widgets:
@@ -549,6 +1277,12 @@ class App:
     def _refresh_status(self):
         try:
             self._build_badges()
+        except Exception:
+            pass
+        try:
+            if self._gpu_info.get("vendor") == "amd":
+                ok, bk, detail = core.amd_env_status(self._amd_vpy())
+                self.amd_env_var.set(("✓ 环境就绪（%s）" % bk) if ok else "环境未就绪 · 点「环境检查」查看")
         except Exception:
             pass
 
@@ -624,13 +1358,17 @@ class App:
         self.mode = self._current_mode()
         self._apply_presets()
         self._update_mode_ui()
+        self._schedule_autosave()
 
     def _update_mode_ui(self):
         try:
             self.home_title.configure(text=core.MODE_LABELS.get(self.mode, self.mode) + " 训练")
         except Exception:
             pass
-        self.trigger_hint_var.set(core.TRIGGER_HINT_CHARACTER if self.mode == "character" else core.TRIGGER_HINT_STYLE)
+        try:
+            self.trigger_hint_var.set(core.TRIGGER_HINT_CHARACTER if self.mode == "character" else core.TRIGGER_HINT_STYLE)
+        except Exception:
+            pass
         # 画风模式：隐藏触发词/正则卡片内容（用 pack_forget 显示/隐藏行）
         try:
             self.trigger_entry.master.master.master.configure(
@@ -639,10 +1377,24 @@ class App:
             pass
 
     def _scan_base_models(self):
+        """后台扫描底模目录（safetensors 只读头部秒级；.ckpt 用 torch 读取可能较慢，放后台不阻塞启动）。"""
+        def _w():
+            try:
+                models = core.scan_base_models()
+            except Exception:
+                models = []
+            try:
+                self.q.put(("BASE_SCAN_DONE", models))
+            except Exception:
+                pass
         try:
-            self._base_models = core.scan_base_models()
+            threading.Thread(target=_w, daemon=True).start()
         except Exception:
-            self._base_models = []
+            pass
+
+    def _apply_base_models(self, models):
+        """主线程：把扫描结果填进底模下拉。"""
+        self._base_models = models or []
         items, self._base_items, self._base_labels = [], [], []
         for bt in core.BASE_TYPE_KEYS:
             items.append(core.BASE_TYPE_LABELS[bt])
@@ -653,8 +1405,8 @@ class App:
             items.append(label)
             self._base_items.append(("file", p))
             self._base_labels.append(label)
-        self.base_combo.configure(values=items)
         try:
+            self.base_combo.configure(values=items)
             self.base_combo.set(core.BASE_TYPE_LABELS.get(self.base_type, items[0]))
         except Exception:
             pass
@@ -706,6 +1458,7 @@ class App:
                 self._log(hint)
             except Exception:
                 pass
+        self._schedule_autosave()
 
     def _find_model_of_type(self, bt):
         for p, n, t in self._base_models:
@@ -773,7 +1526,10 @@ class App:
             self._log(f"[预处理] 已选正则数据集：{d}")
 
     def cmd_open_output(self):
-        os.startfile(core.data_sub("output"))
+        if self.current_project:
+            os.startfile(core.data_sub("output", self.current_project))
+        else:
+            os.startfile(core.data_sub("output"))
 
     def cmd_readme(self):
         self._show_help_window()
@@ -807,6 +1563,10 @@ class App:
             f = ctk.CTkFrame(g, fg_color="transparent"); f.grid(row=0, column=i, padx=10, pady=8, sticky="w")
             ctk.CTkLabel(f, text=label, font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w")
             v = self.param_vars.setdefault(key, tk.StringVar())
+            try:
+                v.trace_add("write", lambda *a: self._schedule_autosave())
+            except Exception:
+                pass
             entry = ctk.CTkEntry(f, width=80, height=28, justify="center", textvariable=v,
                                  fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
             entry.pack(pady=(3, 0))
@@ -877,19 +1637,33 @@ class App:
                 pass
 
     def _attach_tooltips(self):
+        """悬停提示：只绑顶部/侧边栏（主卡片提示在 _ensure_main_cards 后补绑，避免启动时引用未构建的控件）。"""
         tips = [
-            (self.mode_combo, "训练模式：🎨画风=只学绘画风格（不学脸/角色）；👤人物=学某个角色的脸、服饰、特征。切换会自动填好推荐参数。"),
-            (self.base_combo, "底模架构：SD1.5/SDXL 是经典架构；FLUX.1 画质新但非常吃显存（8G 不推荐）；Anima 是 2026 最新架构、显存友好。点「选择底模文件」选完会自动识别。"),
-            (self.btn_pick_base, "手动浏览选择本机的 .safetensors / .ckpt 底模；选完自动识别类型。"),
-            (self.btn_refresh_base, "重新扫描默认模型文件夹，把新放入的底模列进下拉。"),
-            (self.btn_download_base, "没有底模？点这里选下载方式：推荐「应用内下载」（软件里直接下载，带进度/断点续传/下完自动识别）。"),
-            (self.raw_entry, "放原始图片的文件夹（支持 jpg/png/webp/bmp/tif/gif）。"),
-            (self.btn_pick_raw, "选择原始图片文件夹。"),
-            (self.trigger_entry, "触发词=模型的“召唤词”：人物模式=角色名；画风模式=画风专属词。训练后画图写上它就能唤出角色/画风。支持多个，用英文逗号分隔。"),
-            (self.reg_entry, "正则图：同一角色的参考图文件夹，训练时防止模型学过头（可选）。"),
-            (self.btn_pick_reg, "选择正则数据集文件夹（人物模式可选）。"),
-            (self.btn_one_click, "小白专用：自动过滤模糊/过小/损坏图 → 正方形裁剪 → 去重 → 打标签 → 开始训练，全程不用管。"),
-            (self.btn_stop, "任务进行中（训练/预处理/安装）可用：立即终止当前进程。训练中断后进度快照会保留，下次可断点续训。"),
+            (getattr(self, "mode_combo", None), "训练模式：🎨画风=只学绘画风格（不学脸/角色）；👤人物=学某个角色的脸、服饰、特征。切换会自动填好推荐参数。"),
+            (getattr(self, "base_combo", None), "底模架构：SD1.5/SDXL 是经典架构；FLUX.1 画质新但非常吃显存（8G 不推荐）；Anima 是 2026 最新架构、显存友好。点「选择底模文件」选完会自动识别。"),
+            (getattr(self, "btn_pick_base", None), "手动浏览选择本机的 .safetensors / .ckpt 底模；选完自动识别类型。"),
+            (getattr(self, "btn_refresh_base", None), "重新扫描默认模型文件夹，把新放入的底模列进下拉。"),
+            (getattr(self, "btn_download_base", None), "没有底模？点这里选下载方式：推荐「应用内下载」（软件里直接下载，带进度/断点续传/下完自动识别）。"),
+            (getattr(self, "btn_one_click", None), "小白专用：自动过滤模糊/过小/损坏图 → 正方形裁剪 → 去重 → 打标签 → 开始训练，全程不用管。"),
+            (getattr(self, "btn_stop", None), "任务进行中（训练/预处理/安装）可用：立即终止当前进程。训练中断后进度快照会保留，下次可断点续训。"),
+        ]
+        for w, t in tips:
+            self._tip(w, t)
+        if hasattr(self, "amd_sw"):
+            self._tip(self.amd_sw, "AMD 兼容模式（实验性）：开启后训练自动改用 sdpa + bf16 + AdamW，并做环境检查。第一次用请先点「环境检查 / 安装引导」。")
+        if hasattr(self, "btn_amd_env"):
+            self._tip(self.btn_amd_env, "检查 AMD 训练环境是否就绪，并打开详细安装引导（驱动 / Python / ROCm / PyTorch 一步步教你装）。")
+        if hasattr(self, "train_env_entry"):
+            self._tip(self.train_env_entry, "AMD 官方 ROCm 版 PyTorch 需要 Python 3.12，所以要新建一个训练环境，把它的文件夹路径填在这里（留空=用默认 kohya 环境）。")
+
+    def _attach_main_tooltips(self):
+        """主卡片构建完成后补绑悬停提示。"""
+        tips = [
+            (getattr(self, "raw_entry", None), "放原始图片的文件夹（支持 jpg/png/webp/bmp/tif/gif）。"),
+            (getattr(self, "btn_pick_raw", None), "选择原始图片文件夹。"),
+            (getattr(self, "trigger_entry", None), "触发词=模型的“召唤词”：人物模式=角色名；画风模式=画风专属词。训练后画图写上它就能唤出角色/画风。支持多个，用英文逗号分隔。"),
+            (getattr(self, "reg_entry", None), "正则图：同一角色的参考图文件夹，训练时防止模型学过头（可选）。"),
+            (getattr(self, "btn_pick_reg", None), "选择正则数据集文件夹（人物模式可选）。"),
         ]
         for w, t in tips:
             self._tip(w, t)
@@ -930,7 +1704,50 @@ class App:
             "train_text_encoder": not self.unet_only_var.get(),
             "global_pos": self.global_pos_var.get().strip(),
             "global_neg": self.global_neg_var.get().strip(),
+            "amd_mode": bool(self.amd_var.get()),
+            "train_env": self.train_env_var.get().strip() or None,
         }
+
+    def _maybe_migrate_legacy_dataset(self, name):
+        """打开项目时：若本项目还没有数据集，而旧版共享数据集里有图，询问是否导入。"""
+        try:
+            legacy = core.dataset_train_dir(self.mode)          # 旧版共享目录
+            target = core.dataset_train_dir(self.mode, name)
+            n_legacy = core.count_images(legacy)
+            n_target = core.count_images(target)
+        except Exception:
+            return
+        if n_target > 0 or n_legacy == 0:
+            return
+        if messagebox.askyesno(core.APP_NAME,
+                f"检测到旧版共享数据集里还有 {n_legacy} 张图片。\n\n"
+                f"是否把它们导入到当前项目「{name}」？（以后每个项目的数据都是独立的，不会互相混用）"):
+            try:
+                t2, migrated = core.migrate_legacy_dataset(name, self.mode)
+                n2 = core.count_images(t2)
+                if migrated:
+                    self._log(f"[数据集] 已把旧版共享数据集导入当前项目（{n2} 张图）：{t2}")
+                    messagebox.showinfo(core.APP_NAME, f"已导入 {n2} 张图片到当前项目「{name}」。")
+            except Exception as e:
+                self._log(f"[数据集] 导入失败（忽略）: {e}")
+
+    # ============ 标签编辑器 ============
+    def cmd_label_editor(self):
+        """打开标签编辑器（浏览/修改/批量操作/统计/整理数据集）。"""
+        try:
+            if self._label_editor is not None:
+                try:
+                    self._label_editor.win.lift()
+                    self._label_editor.win.focus_force()
+                    return
+                except Exception:
+                    self._label_editor = None
+            params = self._collect_params()
+            params["project"] = self.current_project or ""
+            self._label_editor = LabelEditorWindow(self.root, self, params)
+        except Exception as e:
+            self._log(f"[ERROR] 打开标签编辑器失败：{e}")
+            traceback.print_exc()
 
     # ============ 预处理 / 训练 ============
     def cmd_preprocess(self):
@@ -951,7 +1768,7 @@ class App:
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=True,
                 min_size=256, blur_threshold=30.0, report=report,
-                keep_tokens=None)
+                keep_tokens=None, project=self.current_project)
             self._log("[OK] 预处理完成")
         except core.StopRequested:
             self._log("[停止] 预处理已手动停止")
@@ -977,10 +1794,13 @@ class App:
 
     def _train_worker(self, params, resume=None):
         core.reset_stop()
+        self._train_mon = core.TrainMonitor()
+        self._show_monitor(True)
         try:
             vram = core.detect_vram_gb()
+            params["project"] = self.current_project or ""
             core.train(self._log, base_model=params["base_model"], mode=params["mode"],
-                       params=params, vram_gb=vram, resume_from=resume)
+                       params=params, vram_gb=vram, resume_from=resume, progress=self._train_mon)
             self._log("[OK] 训练完成，模型在 output 文件夹")
         except core.StopRequested:
             self._log("[停止] 训练已手动停止，进度快照已保留，下次可断点续训")
@@ -988,6 +1808,11 @@ class App:
             self._log(f"[ERROR] 训练失败：{e}")
             traceback.print_exc()
         finally:
+            try:
+                self._train_mon.finish()
+            except Exception:
+                pass
+            self._show_monitor(False)
             self.q.put("__DONE__")
 
     def cmd_one_click_train(self):
@@ -1019,7 +1844,7 @@ class App:
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=True,
                 min_size=256, blur_threshold=30.0, report=report,
-                keep_tokens=None)
+                keep_tokens=None, project=self.current_project)
             stats = {}
             if os.path.isfile(report):
                 try:
@@ -1061,15 +1886,339 @@ class App:
         elif ans is False:
             self.cmd_open_base_dir()
 
+    def _amd_vpy(self):
+        """AMD 模式当前使用的训练环境 python（优先用户指定，否则默认 kohya venv）。"""
+        env_dir = self.train_env_var.get().strip()
+        if env_dir and os.path.isfile(os.path.join(env_dir, "Scripts", "python.exe")):
+            return os.path.join(env_dir, "Scripts", "python.exe")
+        kdir = core.get_kohya_dir()
+        return core.venv_python(kdir) if kdir else None
+
+    def _on_amd_toggle(self):
+        if self.amd_var.get():
+            self._log("[AMD] 已开启 AMD 兼容模式（实验性）：训练将自动使用 sdpa + bf16 + AdamW")
+            try:
+                ok, bk, detail = core.amd_env_status(self._amd_vpy())
+                if not ok:
+                    self._log(f"[AMD] 训练环境未就绪：{detail}")
+                    if messagebox.askyesno(
+                            core.APP_NAME,
+                            "AMD 兼容模式已开启，但训练环境还没配置好。\n\n"
+                            f"当前状态：{detail}\n\n"
+                            "要不要现在打开「安装引导」？\n"
+                            "引导会一步步告诉你装什么驱动、下载什么、点哪里。\n"
+                            "（装好之前先不要训练，否则会失败）"):
+                        self._open_amd_guide()
+            except Exception:
+                pass
+        else:
+            self._log("[AMD] 已关闭 AMD 兼容模式")
+        self._refresh_status()
+
+    def cmd_pick_train_env(self):
+        """选择 AMD 训练环境（含 Scripts\\python.exe 的 venv 文件夹）。"""
+        d = filedialog.askdirectory(title="选择训练环境（venv 文件夹，需包含 Scripts\\python.exe）")
+        if not d:
+            return
+        if not os.path.isfile(os.path.join(d, "Scripts", "python.exe")):
+            messagebox.showwarning(
+                core.APP_NAME,
+                "该文件夹不是有效的 Python 虚拟环境（缺少 Scripts\\python.exe）。\n\n"
+                "请选择 venv 文件夹本身，例如：C:\\kohya_amd_env")
+            return
+        self.train_env_var.set(d)
+        self._log(f"[AMD] 训练环境已指定：{d}")
+        self._refresh_status()
+
+    def cmd_amd_env(self):
+        """AMD 兼容模式环境检查 + 打开详细安装引导窗口。"""
+        self._open_amd_guide()
+
+    def _recheck_amd(self, win=None):
+        try:
+            if win is not None:
+                win.destroy()
+        except Exception:
+            pass
+        self._open_amd_guide()
+
+    def _open_amd_guide(self):
+        """AMD 训练环境安装引导窗口（面向小白：自动检测 + 动态命令 + 半自动创建环境）。"""
+        try:
+            if getattr(self, "_amd_guide_win", None) and self._amd_guide_win.winfo_exists():
+                self._amd_guide_win.lift()
+                return
+        except Exception:
+            pass
+        vpy = self._amd_vpy()
+        ok, bk, detail = core.amd_env_status(vpy)
+        ginfo = core.detect_gpu_info()
+        name = ginfo.get("name") or "未知"
+        vram = ginfo.get("vram_gb")
+        env_dir = self.train_env_var.get().strip() or "（默认 kohya 环境）"
+
+        # 检测系统 Python，动态生成 wheel URL（cp311 / cp312）
+        sys_vers = core.detect_system_pythons()
+        py_ver = "3.12" if "3.12" in sys_vers else ("3.11" if "3.11" in sys_vers else None)
+        cp = "cp311" if py_ver == "3.11" else "cp312"
+        if sys_vers:
+            py_line = "检测到系统 Python：" + "、".join(sys_vers)
+            if py_ver is None:
+                py_line += "（⚠ AMD 官方仅支持 3.11/3.12，请安装 Python 3.12）"
+            elif py_ver == "3.11":
+                py_line += "（官方验证版为 3.12，3.11 的 wheel 见发布目录确认）"
+        else:
+            py_line = "未检测到 Python（请先安装 3.12，见第 2 步）"
+
+        rocm_cmd = ("pip install --no-cache-dir "
+                    f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/rocm_sdk_core-{AMD_ROC_VERSION}-py3-none-win_amd64.whl "
+                    f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/rocm_sdk_devel-{AMD_ROC_VERSION}-py3-none-win_amd64.whl "
+                    f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/rocm_sdk_libraries_custom-{AMD_ROC_VERSION}-py3-none-win_amd64.whl "
+                    f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/rocm-{AMD_ROC_VERSION}.tar.gz")
+        torch_cmd = ("pip install --no-cache-dir "
+                     f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/torch-{AMD_TORCH_VERSION}%2Brocm{AMD_ROC_VERSION}-{cp}-{cp}-win_amd64.whl "
+                     f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/torchaudio-{AMD_TORCH_VERSION}%2Brocm{AMD_ROC_VERSION}-{cp}-{cp}-win_amd64.whl "
+                     f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/torchvision-{AMD_TORCHVISION_VERSION}%2Brocm{AMD_ROC_VERSION}-{cp}-{cp}-win_amd64.whl")
+        deps_cmd = ("pip install transformers diffusers accelerate safetensors omegaconf "
+                    "numpy pillow av opencv-python einops sentencepiece")
+
+        default_env = os.path.join(core.data_dir(), "venv_amd")
+        status_txt = ("✅ 环境就绪（%s）" % bk) if ok else ("❌ 环境未就绪：" + (detail or "未知"))
+
+        w = ctk.CTkToplevel(self.root)
+        self._amd_guide_win = w
+        w.title("AMD 显卡 · 训练环境安装引导（实验性）")
+        w.geometry("860x740")
+        w.minsize(780, 580)
+        w.transient(self.root)
+
+        txt = ctk.CTkTextbox(w, fg_color="#16181e", text_color="#c6ccd8", corner_radius=8,
+                             border_width=1, border_color=BORDER, font=ui_font(FONT_BODY), wrap="word")
+        txt.pack(fill="both", expand=True, padx=16, pady=(16, 6))
+
+        help_text = (
+            "AMD 显卡 · 训练环境安装引导（实验性）\n"
+            "==================================================\n"
+            "⚠ 提示：AMD 显卡训练属于实验性支持，可能遇到兼容问题；按步骤来，报错发给我们排查。\n\n"
+            "▍当前状态\n"
+            f"· 显卡：{name}" + (f"（约 {vram:.1f}GB）" if vram else "") + "\n"
+            f"· {py_line}\n"
+            f"· 当前训练环境：{env_dir}\n"
+            f"· {status_txt}\n\n"
+            "工具默认安装的是 NVIDIA 版 PyTorch，AMD 卡无法直接使用。\n"
+            "AMD 官方为 Windows 提供 ROCm 版 PyTorch（推荐 Python 3.12）。\n"
+            "下面按步骤来（约 30~60 分钟，主要是下载）。\n\n"
+            "▍路线一：ROCm 原生（推荐，RX 7000/9000 系官方支持）\n"
+            "--------------------------------------------------\n"
+            "第 1 步：更新显卡驱动（≥ " + AMD_DRIVER_MIN + "）\n"
+            "   打开 AMD 官方驱动下载页，下载安装 Adrenalin " + AMD_DRIVER_MIN + " 或更新版本。\n\n"
+            "第 2 步：安装 Python 3.12\n"
+            "   直接点下方「自动安装 Python 3.12」按钮（已内置安装包，静默安装约 1 分钟，\n"
+            "   不用自己下载）。装完点「重新检查」刷新。\n\n"
+            "第 3 步：创建训练环境\n"
+            "   推荐直接点下方「自动创建训练环境」（自动建到默认位置，也可手动改）：\n"
+            "   " + default_env + "\n"
+            "   手动方式：py -3.12 -m venv " + default_env + "\n\n"
+            "第 4~6 步：安装 AMD 运行库 + PyTorch + 训练依赖（全自动）\n"
+            "   直接点下方「🚀 自动安装全部依赖」按钮，软件会自动装好这三样\n"
+            "   （文件较大共约 3~5GB，视网速 20~60 分钟，可随时点「停止当前任务」）。\n"
+            "   老手也可点「复制 ROCm/复制 PyTorch/复制依赖」命令手动装。\n"
+            "   ⚠ 不要手动安装 xformers 和 bitsandbytes（AMD 不支持，本工具会自动避开）\n\n"
+            "第 7 步：把环境告诉本工具\n"
+            "   回到工具界面，在「AMD 兼容模式」旁边：\n"
+            "   ① 点「选择训练环境…」，选中上面那个 venv 文件夹\n"
+            "   ② 点「环境检查 / 安装引导」，看到“✅ 环境就绪（rocm）”\n"
+            "   ③ 开启「AMD 兼容模式（实验性）」开关，就可以开始训练了\n\n"
+            "▍路线二：ZLUDA（进阶，成功率看显卡，不推荐小白）\n"
+            "--------------------------------------------------\n"
+            "原理：让 CUDA 版 PyTorch 通过 ZLUDA 翻译层跑在 AMD 卡上，不用换 Python/torch。\n"
+            "步骤概要：\n"
+            " ① 安装 AMD HIP SDK（版本须与 ZLUDA 匹配，见其发布说明）\n"
+            " ② 从 GitHub 下载 ZLUDA Windows 预编译 zip\n"
+            " ③ 备份并把 ZLUDA 的 nvcuda.dll 等放入训练环境 torch/lib 目录\n"
+            " ④ 设置系统环境变量 HIP_PATH（指向已安装的 ROCm/HIP 目录）\n"
+            " ⑤ 运行 import torch; print(torch.cuda.is_available())，为 True 即成功\n"
+            "⚠ 性能一般、稳定性差（官方声明 PyTorch 支持有限），仅建议折腾型用户。\n"
+            "GitHub：https://github.com/lshqqytiger/ZLUDA\n"
+            "参考教程：https://github.com/vladmandic/sdnext/wiki/ZLUDA\n\n"
+            "官方文档：https://rocm.docs.amd.com/projects/radeon-ryzen/zh-cn/latest/index.html\n\n"
+            "遇到问题把报错发给我们，按步骤排查即可。本工具只负责检测与参数适配，不对 AMD 环境稳定性作任何承诺。"
+        )
+        txt.insert("1.0", help_text)
+        txt.configure(state="disabled")
+
+        btns = ctk.CTkFrame(w, fg_color="transparent"); btns.pack(fill="x", padx=16, pady=(0, 14))
+
+        def _btn(t, cb):
+            b = ctk.CTkButton(btns, text=t, height=30, fg_color=CARD2, hover_color="#343a46",
+                              border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                              font=ui_font(FONT_HINT), command=cb)
+            b.pack(side="left", padx=4)
+            return b
+
+        def _copy(s):
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(s)
+            except Exception:
+                pass
+            self._log("[AMD] 命令已复制到剪贴板，去 cmd 里粘贴运行")
+            messagebox.showinfo(core.APP_NAME, "命令已复制到剪贴板。\n请打开「命令提示符」粘贴运行。")
+
+        def _auto_venv():
+            pv = py_ver
+            if not pv:
+                messagebox.showwarning(
+                    core.APP_NAME,
+                    "未检测到 Python 3.11/3.12。\n\n请先点「自动安装 Python 3.12」，\n装完再点「重新检查」，然后点「自动创建训练环境」。")
+                return
+            target = os.path.join(core.data_dir(), "venv_amd")
+            self._log(f"[AMD] 正在用 Python {pv} 创建训练环境：{target} …")
+
+            def work():
+                ok2, msg2 = core.create_python_venv(pv, target)
+                self.root.after(0, lambda: self._venv_done(ok2, msg2, target, pv))
+            threading.Thread(target=work, daemon=True).start()
+
+        def _auto_py312():
+            self._log("[AMD] 开始自动安装 Python 3.12（内置安装包，静默安装，约 1 分钟）…")
+
+            def work():
+                ok3, msg3 = core.install_python_312(self._log)
+                self.root.after(0, lambda: self._py312_done(ok3, msg3))
+            threading.Thread(target=work, daemon=True).start()
+
+        def _auto_install_all():
+            venv = self.train_env_var.get().strip()
+            if not venv or not os.path.isfile(os.path.join(venv, "Scripts", "python.exe")):
+                messagebox.showwarning(core.APP_NAME, "请先点「自动创建训练环境」，再点「自动安装全部依赖」。")
+                return
+            if not messagebox.askyesno(
+                    core.APP_NAME,
+                    "即将自动安装 AMD 训练依赖（ROCm 运行库 + AMD 版 PyTorch + 训练依赖）。\n\n"
+                    "文件较大（共约 3~5GB），视网速需要 20~60 分钟，期间可随时点「停止当前任务」。\n\n"
+                    "确定开始吗？"):
+                return
+            self._set_busy(True)
+            self._log("[AMD] 开始自动安装全部依赖（可在底部点「停止当前任务」中断）…")
+
+            def work():
+                try:
+                    core.install_amd_rocm(venv, self._log)
+                    core.install_amd_torch(venv, self._log)
+                    core.install_amd_deps(venv, self._log)
+                    okv, ver, avail = core.verify_amd_torch(venv)
+                    self.root.after(0, lambda: self._amd_install_done(okv and avail, ver, avail))
+                except core.StopRequested:
+                    self.root.after(0, lambda: self._amd_install_done(False, "已手动停止", False))
+                except Exception as e:
+                    self.root.after(0, lambda: self._amd_install_done(False, str(e), False))
+                finally:
+                    self.root.after(0, lambda: self._set_busy(False))
+            threading.Thread(target=work, daemon=True).start()
+
+        _btn("🚀 自动安装全部依赖", _auto_install_all)
+        _btn("自动安装 Python 3.12", _auto_py312)
+        _btn("自动创建训练环境", _auto_venv)
+        _btn("复制 ROCm 命令", lambda: _copy(rocm_cmd))
+        _btn("复制 PyTorch 命令", lambda: _copy(torch_cmd))
+        _btn("复制依赖命令", lambda: _copy(deps_cmd))
+        _btn("打开 ROCm 发布目录", lambda: webbrowser.open("https://repo.radeon.com/rocm/windows/"))
+        _btn("重新检查", lambda: self._recheck_amd(w))
+        _btn("关闭", w.destroy)
+
+    def _venv_done(self, ok, msg, target, py_ver):
+        """自动创建训练环境完成后的回调（主线程）。"""
+        if ok:
+            self.train_env_var.set(target)
+            self._log(f"[AMD] 训练环境创建成功：{target}")
+            self._refresh_status()
+            messagebox.showinfo(
+                core.APP_NAME,
+                "训练环境创建成功！\n\n已自动填入「训练环境」输入框。\n\n接下来在同一个 cmd 窗口（环境已激活状态下）：\n"
+                "① 点「复制 ROCm 命令」粘贴运行\n"
+                "② 点「复制 PyTorch 命令」粘贴运行\n"
+                "③ 点「复制依赖命令」粘贴运行\n\n"
+                "完成后回到本工具点「重新检查」，看到“✅ 环境就绪（rocm）”即可训练。")
+        else:
+            self._log(f"[AMD] 创建训练环境失败：{msg}")
+            messagebox.showerror(
+                core.APP_NAME,
+                f"创建训练环境失败：\n{msg}\n\n"
+                f"可手动在 cmd 里运行：\npy -{py_ver} -m venv {target}")
+
+    def _py312_done(self, ok, msg):
+        """自动安装 Python 3.12 完成后的回调（主线程）。"""
+        if ok:
+            self._log("[OK] Python 3.12 安装完成")
+            messagebox.showinfo(core.APP_NAME, "Python 3.12 安装成功！\n\n点「重新检查」刷新，然后点「自动创建训练环境」继续。")
+            try:
+                self._recheck_amd()
+            except Exception:
+                pass
+        else:
+            self._log(f"[ERROR] Python 3.12 安装失败：{msg}")
+            messagebox.showerror(core.APP_NAME, f"Python 3.12 安装失败：\n{msg}")
+
+    def _amd_install_done(self, ok, info, avail):
+        """自动安装全部依赖完成后的回调（主线程）。"""
+        if ok and avail:
+            self._log("[OK] AMD 训练依赖安装完成，torch 可用")
+            messagebox.showinfo(
+                core.APP_NAME,
+                "✅ AMD 训练依赖安装完成！\n\n"
+                f"torch 版本：{info}\nGPU 可用：{avail}\n\n"
+                "点「重新检查」，看到「✅ 环境就绪（rocm）」即可开始训练。")
+        elif ok:
+            self._log(f"[WARN] 依赖安装完成但 torch 验证未通过：{info}")
+            messagebox.showwarning(core.APP_NAME, f"依赖安装完成，但 torch 验证未通过：\n{info}")
+        else:
+            self._log(f"[ERROR] AMD 依赖安装失败：{info}")
+            messagebox.showerror(
+                core.APP_NAME,
+                f"AMD 依赖安装失败：\n{info}\n\n"
+                "可能原因：\n"
+                "· 网络中断/镜像慢 → 可挂代理后点「重新检查」再试，或点「复制命令」手动装\n"
+                "· 权限不足 → 训练环境在 %APPDATA% 下一般无需管理员；若仍报权限错误，\n"
+                "   请确认 %APPDATA%\\KohyaLoraTool\\venv_amd 目录可写")
+
     def _warn_no_nvidia(self):
+        """显卡兼容检查：N 卡直接放行；AMD 卡走兼容模式；其他保持原警告。返回 True=继续。"""
         try:
             if core.detect_nvidia_gpu():
                 return True
         except Exception:
             return True
+        try:
+            vendor = self._gpu_info.get("vendor") or core.detect_gpu_vendor()
+        except Exception:
+            vendor = "unknown"
+        if vendor == "amd":
+            if not self.amd_var.get():
+                ans = messagebox.askyesno(
+                    core.APP_NAME,
+                    "检测到 AMD 显卡（Radeon）。\n\n"
+                    "本工具默认面向 NVIDIA 优化；AMD 卡需要先开启「AMD 兼容模式（实验性）」\n"
+                    "并配置 ROCm 版 PyTorch 或 ZLUDA 训练环境，否则无法正常训练。\n\n"
+                    "是否现在开启 AMD 兼容模式？")
+                if ans:
+                    self.amd_var.set(True)
+                    self._log("[AMD] 已开启 AMD 兼容模式（实验性，不承诺稳定）")
+                return False
+            ok, bk, detail = core.amd_env_status(self._amd_vpy())
+            if not ok:
+                self._log(f"[AMD] 环境未就绪：{detail}")
+                messagebox.showwarning(
+                    core.APP_NAME,
+                    "AMD 兼容模式：训练环境未就绪。\n\n"
+                    f"检测结果：{detail}\n\n"
+                    "请点击顶部「环境检查 / 安装引导」查看两条配置路线（ROCm / ZLUDA）和下载链接。")
+                return False
+            self._log(f"[AMD] 兼容模式环境就绪（{bk}），可尝试训练（实验性）")
+            return True
         return messagebox.askyesno(
             core.APP_NAME,
-            "本工具针对 NVIDIA 显卡优化。\n"
+            "未检测到 NVIDIA 显卡。\n"
             "AMD/Intel 显卡在 Windows 下没有开箱即用支持，需要自行配置 ZLUDA/ROCm，存在兼容性风险。\n\n是否继续？")
 
     def _warn_low_vram(self, params):
@@ -1087,7 +2236,11 @@ class App:
 
     def _ask_resume(self, params):
         output_name = core.OUTPUT_NAMES.get(params["mode"], "anime_style_lora")
-        state = core.find_latest_state(core.data_sub("output"), output_name)
+        # 断点续训要在当前项目的输出目录里找快照：
+        # params 里通常没有 project 字段（_collect_params 不生成），直接用 self.current_project。
+        _proj = (self.current_project or "").strip() or (params.get("project") or "").strip()
+        _odir = core.data_sub("output", _proj) if _proj else core.data_sub("output")
+        state = core.find_latest_state(_odir, output_name)
         if state:
             return state if messagebox.askyesno(
                 core.APP_NAME,
@@ -1109,6 +2262,7 @@ class App:
             f"训练目标    : {'UNet + 文本编码器' if params['train_text_encoder'] else '仅 UNet'}\n"
             f"Trigger     : {params['trigger'] or '（未填写）'}\n"
             f"正则数据集  : {params['reg_dir'] or '（未使用）'}"
+            + ("\nAMD 兼容模式: 开启（实验性）" if params.get("amd_mode") else "")
         )
         if resume:
             msg += f"\n\n（将从断点续训：{os.path.basename(resume)}）"
@@ -1136,6 +2290,9 @@ class App:
         if not self._confirm_training(params, resume):
             self._set_busy(False)
             return
+        # 阶段1（一键训练=预处理）线程已结束但未释放 busy，
+        # 这里先释放，否则 _start_worker 的防重入检查会拦截训练启动。
+        self._set_busy(False)
         self._start_worker(lambda: self._train_worker(params, resume), "训练")
 
 
@@ -1372,10 +2529,432 @@ class App:
             "A：点顶部「没有模型？点这里下载」，选「应用内下载」或浏览器下载。\n\n"
             "Q：LoRA 怎么用？\n"
             "A：把 output 里的 .safetensors 放进生图工具（如 WebUI）的 models/Lora 文件夹，\n"
-            "   出图时选上它，人物模式用「触发词」开头，画风模式直接写画风描述。"
+            "   出图时选上它，人物模式用「触发词」开头，画风模式直接写画风描述。\n\n"
+            "Q：怎么检查/修改每张图的标签？\n"
+            "A：主界面点「标签编辑器」：可逐张看图改标签、批量删除/替换标签、置顶 trigger、\n"
+            "   标签频率统计。WD14 自动打的标签偶尔不准，改好后 LoRA 学得更准。\n\n"
+            "Q：数据集里的 repeats_名称 是什么？\n"
+            "A：秋叶式目录结构：在数据集里建「数字_名称」子目录（如 3_yanami_01），\n"
+            "   表示这组图片在训练时重复 3 次。标签编辑器里点「整理为 repeats_名称」\n"
+            "   可一键把平铺图片整理成这种结构（不同概念可以放不同子目录、用不同 repeats）。\n\n"
+            "Q：我是 AMD 显卡，能用吗？\n"
+            "A：能，但属于实验性支持：界面顶部会出现「AMD 兼容模式（实验性）」开关，\n"
+            "   开启后训练会自动改成 sdpa + bf16 + AdamW 并做环境检查；第一次用请先点「环境检查 / 安装引导」\n"
+            "   按两条路线（ROCm 原生 / ZLUDA）配置训练环境，配置好再训练。"
         )
         txt.insert("1.0", help_text)
         txt.configure(state="disabled")
+
+class LabelEditorWindow:
+    """标签编辑器：浏览/修改每张图标签、批量删除/替换、置顶 trigger、标签频率统计、整理 repeats_名称 结构。"""
+
+    def __init__(self, master, app, params):
+        self.app = app
+        self.mode = params.get("mode", "character")
+        self.project = (params.get("project") or "").strip()
+        self.win = ctk.CTkToplevel(master)
+        _title = "标签编辑器 · " + core.MODE_LABELS.get(self.mode, self.mode)
+        if self.project:
+            _title += " · 项目：" + self.project
+        self.win.title(_title)
+        self.win.geometry("1140x780")
+        self.win.minsize(920, 640)
+        self.win.transient(master)
+        self.win.configure(fg_color=BG)
+        # 每个项目独立数据集：dataset/<项目名>/train_character（不混用其他项目的数据）
+        self.train_dir = core.dataset_train_dir(self.mode, self.project)
+        self.records = []
+        self._thumbs = {}
+        self._current = None      # 当前选中的 record 下标
+        self._dirty = set()       # 有未保存修改的 record 下标
+        self._build_ui()
+        self.refresh()
+
+    # ---------- 布局 ----------
+    def _build_ui(self):
+        w = self.win
+        top = ctk.CTkFrame(w, fg_color="transparent"); top.pack(fill="x", padx=18, pady=(14, 6))
+        self.info_var = tk.StringVar()
+        ctk.CTkLabel(top, textvariable=self.info_var, font=ui_font(FONT_HINT), text_color=HINT, anchor="w").pack(side="left")
+        ctk.CTkButton(top, text="打开文件夹", width=96, height=28, fg_color=CARD2, hover_color="#343a46",
+                      border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                      font=ui_font(FONT_HINT), command=self._open_dir).pack(side="right")
+        ctk.CTkButton(top, text="↻ 刷新", width=76, height=28, fg_color=CARD2, hover_color="#343a46",
+                      border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                      font=ui_font(FONT_HINT), command=self.refresh).pack(side="right", padx=(0, 8))
+
+        body = ctk.CTkFrame(w, fg_color="transparent"); body.pack(fill="both", expand=True, padx=18, pady=(4, 8))
+        body.grid_columnconfigure(0, minsize=280, weight=0)
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+
+        # 左：图片列表
+        left = ctk.CTkFrame(body, fg_color=CARD, corner_radius=8)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        self.list_title = ctk.CTkLabel(left, text="图片列表（0 张）", font=ui_font(FONT_BODY), text_color=TITLE_C)
+        self.list_title.pack(anchor="w", padx=12, pady=(10, 6))
+        lf = ctk.CTkFrame(left, fg_color="transparent")
+        lf.pack(fill="both", expand=True, padx=8, pady=(0, 10))
+        self.listbox = tk.Listbox(lf, bg=CARD2, fg=TXT, selectbackground=SELBAR, selectforeground="#ffffff",
+                                  font=ui_font(FONT_BODY), highlightthickness=0, borderwidth=0,
+                                  activestyle="none", exportselection=False)
+        self.listbox.pack(side="left", fill="both", expand=True)
+        sb = ctk.CTkScrollbar(lf, command=self.listbox.yview)
+        sb.pack(side="right", fill="y")
+        self.listbox.configure(yscrollcommand=sb.set)
+        self.listbox.bind("<<ListboxSelect>>", self._on_select)
+        self.listbox.bind("<Double-Button-1>", lambda e: self._open_image())
+
+        # 右：预览 + 标签编辑
+        right = ctk.CTkFrame(body, fg_color=CARD, corner_radius=8)
+        right.grid(row=0, column=1, sticky="nsew")
+        ctk.CTkLabel(right, text="预览", font=ui_font(FONT_BODY), text_color=TITLE_C).pack(anchor="w", padx=12, pady=(10, 4))
+        self.preview = ctk.CTkLabel(right, text="（选中左侧图片后显示缩略图）", font=ui_font(FONT_HINT), text_color=HINT,
+                                    width=220, height=140)
+        self.preview.pack(anchor="w", padx=12)
+        self.fname_var = tk.StringVar()
+        ctk.CTkLabel(right, textvariable=self.fname_var, font=ui_font(FONT_HINT), text_color=SUB, anchor="w").pack(anchor="w", padx=12, pady=(4, 0))
+        ctk.CTkLabel(right, text="标签内容（可直接修改，保存后写入同名 .txt，支持多行）", font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w", padx=12, pady=(10, 4))
+        self.caption = ctk.CTkTextbox(right, fg_color=CARD2, text_color=TXT, corner_radius=6,
+                                      border_width=1, border_color=BORDER, font=ui_font(FONT_BODY), wrap="word")
+        self.caption.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+        self.caption.bind("<KeyRelease>", self._mark_dirty)
+        save_row = ctk.CTkFrame(right, fg_color="transparent"); save_row.pack(fill="x", padx=12, pady=(0, 10))
+        self.btn_save_one = ctk.CTkButton(save_row, text="💾 保存当前标签", width=136, height=30, fg_color=CARD2,
+                                          hover_color="#343a46", border_width=1, border_color=BORDER,
+                                          text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
+                                          command=self._save_current)
+        self.btn_save_one.pack(side="left")
+        ctk.CTkLabel(save_row, text="提示：切换图片前先保存，未保存的修改会丢失", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
+
+        # 底部批量工具栏
+        tools = ctk.CTkFrame(w, fg_color=CARD, corner_radius=8)
+        tools.pack(fill="x", padx=18, pady=(0, 6))
+        r1 = ctk.CTkFrame(tools, fg_color="transparent"); r1.pack(fill="x", padx=12, pady=(10, 4))
+        ctk.CTkLabel(r1, text="批量删除标签", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        self.del_entry = ctk.CTkEntry(r1, width=200, height=28, fg_color=CARD2, border_color=BORDER, text_color=TXT,
+                                      placeholder_text="如: 1girl, solo（逗号分隔）", font=ui_font(FONT_HINT))
+        self.del_entry.pack(side="left", padx=(8, 6))
+        self.btn_del = ctk.CTkButton(r1, text="执行删除", width=84, height=28, fg_color=CARD2, hover_color="#343a46",
+                                     border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                                     font=ui_font(FONT_HINT), command=self._do_remove)
+        self.btn_del.pack(side="left")
+        ctk.CTkLabel(r1, text="　", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        ctk.CTkLabel(r1, text="批量替换", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        self.rep_find = ctk.CTkEntry(r1, width=120, height=28, fg_color=CARD2, border_color=BORDER, text_color=TXT,
+                                     placeholder_text="原标签", font=ui_font(FONT_HINT))
+        self.rep_find.pack(side="left", padx=(8, 4))
+        ctk.CTkLabel(r1, text="→", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        self.rep_to = ctk.CTkEntry(r1, width=120, height=28, fg_color=CARD2, border_color=BORDER, text_color=TXT,
+                                   placeholder_text="新标签", font=ui_font(FONT_HINT))
+        self.rep_to.pack(side="left", padx=(4, 6))
+        self.btn_rep = ctk.CTkButton(r1, text="执行替换", width=84, height=28, fg_color=CARD2, hover_color="#343a46",
+                                     border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                                     font=ui_font(FONT_HINT), command=self._do_replace)
+        self.btn_rep.pack(side="left")
+
+        r2 = ctk.CTkFrame(tools, fg_color="transparent"); r2.pack(fill="x", padx=12, pady=(0, 10))
+        self.btn_pin = ctk.CTkButton(r2, text="📌 置顶 Trigger", width=120, height=30, fg_color=CARD2, hover_color="#343a46",
+                                     border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                                     font=ui_font(FONT_HINT), command=self._do_pin)
+        self.btn_pin.pack(side="left")
+        self.btn_stats = ctk.CTkButton(r2, text="📊 标签统计", width=100, height=30, fg_color=CARD2, hover_color="#343a46",
+                                       border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                                       font=ui_font(FONT_HINT), command=self._show_stats)
+        self.btn_stats.pack(side="left", padx=(8, 0))
+        self.btn_organize = ctk.CTkButton(r2, text="📁 整理为 repeats_名称", width=156, height=30, fg_color=CARD2,
+                                          hover_color="#343a46", border_width=1, border_color=BORDER, text_color=TXT,
+                                          corner_radius=6, font=ui_font(FONT_HINT), command=self._do_organize)
+        self.btn_organize.pack(side="left", padx=(8, 0))
+        self.btn_del_img = ctk.CTkButton(r2, text="🗑 删除选中图片", width=116, height=30, fg_color="#4a3535", hover_color="#5a4141",
+                                         border_width=1, border_color="#5a4141", text_color="#e0b0b0", corner_radius=6,
+                                         font=ui_font(FONT_HINT), command=self._do_delete_image)
+        self.btn_del_img.pack(side="left", padx=(8, 0))
+        self.status_var = tk.StringVar(value="就绪")
+        ctk.CTkLabel(tools, textvariable=self.status_var, font=ui_font(FONT_HINT), text_color=HINT, anchor="w").pack(fill="x", padx=12, pady=(0, 8))
+
+        self.win.protocol("WM_DELETE_WINDOW", self._close)
+
+    # ---------- 数据 ----------
+    def refresh(self):
+        if self._current is not None and self._current in self._dirty:
+            if messagebox.askyesno("标签编辑器", "当前标签有未保存的修改，是否先保存？"):
+                self._save_current(quiet=True)
+            else:
+                self._dirty.discard(self._current)
+        self.records = core.list_dataset_images(self.train_dir)
+        self._thumbs = {}
+        self._dirty = set()
+        self._current = None
+        self.listbox.delete(0, "end")
+        for it in self.records:
+            rel = it["rel"]
+            label = (rel + " / " if rel and rel != "." else "") + os.path.basename(it["img"])
+            self.listbox.insert("end", label)
+        self.list_title.configure(text=f"图片列表（{len(self.records)} 张）")
+        if os.path.isdir(self.train_dir):
+            try:
+                n_sub = sum(1 for f in os.listdir(self.train_dir)
+                            if os.path.isdir(os.path.join(self.train_dir, f)) and re.match(r"^\d+_", f))
+            except Exception:
+                n_sub = 0
+            sub_txt = f"，{n_sub} 个 repeats 子目录" if n_sub else ""
+            self.info_var.set(f"数据集: {self.train_dir}  |  {len(self.records)} 张图{sub_txt}")
+        else:
+            self.info_var.set(f"数据集: {self.train_dir}（目录不存在）")
+            self._set_status("还没有预处理数据：请先在主界面执行【数据预处理】或【一键开始训练】")
+        self.preview.configure(text="（选中左侧图片后显示缩略图）", image="")
+        self.fname_var.set("")
+        self.caption.delete("1.0", "end")
+
+    def _on_select(self, _e=None):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if idx >= len(self.records):
+            return
+        if self._current is not None and self._current in self._dirty:
+            if messagebox.askyesno("标签编辑器", "当前标签有未保存的修改，是否先保存？"):
+                self._save_current(quiet=True)
+            else:
+                self._dirty.discard(self._current)
+        self._current = idx
+        it = self.records[idx]
+        disp = os.path.join(it["rel"], os.path.basename(it["img"])) if it["rel"] else os.path.basename(it["img"])
+        self.fname_var.set(disp)
+        self.caption.delete("1.0", "end")
+        self.caption.insert("1.0", it["caption"])
+        self._load_preview(it["img"])
+        self._dirty.discard(idx)
+
+    def _load_preview(self, img_path):
+        try:
+            im = Image.open(img_path).convert("RGB")
+            im.thumbnail((220, 140))
+            photo = ImageTk.PhotoImage(im)
+            self._thumbs[img_path] = photo
+            self.preview.configure(image=photo, text="")
+        except Exception:
+            self.preview.configure(image="", text="（无法预览）")
+
+    def _mark_dirty(self, _e=None):
+        if self._current is not None:
+            self._dirty.add(self._current)
+            self._set_status("当前标签已修改，记得点「保存当前标签」")
+
+    def _save_current(self, quiet=False):
+        if self._current is None:
+            return
+        it = self.records[self._current]
+        text = self.caption.get("1.0", "end").strip()
+        try:
+            core.save_caption(it["txt"], text)
+            it["caption"] = text
+            self._dirty.discard(self._current)
+            if not quiet:
+                self._set_status(f"已保存: {os.path.basename(it['txt'])}")
+            self._log_app(f"[标签] 已保存 {it['txt']}")
+        except Exception as e:
+            messagebox.showerror("保存失败", f"写入失败：{e}")
+
+    def _do_delete_image(self):
+        """删除当前选中的图片及其同名 txt/npz（把质量差的训练图移出数据集）。"""
+        if self._current is None:
+            messagebox.showinfo("删除图片", "请先在左侧选中要删除的图片。")
+            return
+        it = self.records[self._current]
+        disp = os.path.join(it["rel"], os.path.basename(it["img"])) if it["rel"] else os.path.basename(it["img"])
+        if not messagebox.askyesno("删除图片", f"确定从数据集删除这张图吗？\n\n{disp}\n\n同时会删除它的标签文件（.txt）。此操作不可恢复。"):
+            return
+        removed = []
+        for cand in (it["img"], it["txt"]):
+            try:
+                if os.path.isfile(cand):
+                    os.remove(cand)
+                    removed.append(os.path.basename(cand))
+            except Exception as e:
+                messagebox.showerror("删除失败", f"{cand}\n{e}")
+                return
+        # 同名 npz 缓存一并删除
+        stem = os.path.splitext(it["img"])[0]
+        for fn in list(os.listdir(os.path.dirname(it["img"]))):
+            if fn.startswith(os.path.basename(stem)) and fn.lower().endswith(".npz"):
+                try:
+                    os.remove(os.path.join(os.path.dirname(it["img"]), fn))
+                except Exception:
+                    pass
+        self._set_status(f"已删除：{'、'.join(removed)}")
+        self._log_app(f"[标签] 已删除 {disp}" + ("（含 npz 缓存）" if removed else ""))
+        self._dirty.discard(self._current)
+        self._current = None
+        self.refresh()
+
+    # ---------- 批量操作 ----------
+    def _do_remove(self):
+        tags = self.del_entry.get().strip()
+        if not tags:
+            messagebox.showinfo("批量删除标签", "请先输入要删除的标签（逗号分隔）。")
+            return
+        self._begin_batch("正在批量删除标签…（批量操作会覆盖未保存的手动修改）")
+        try:
+            files, removed = core.batch_remove_tags(self.train_dir, tags, logf=self._log_app)
+            msg = f"批量删除完成：修改 {files} 个文件，删除 {removed} 个标签。"
+            self._set_status(msg)
+            self._log_app("[标签] " + msg)
+        except Exception as e:
+            messagebox.showerror("批量删除失败", str(e))
+        finally:
+            self._end_batch()
+
+    def _do_replace(self):
+        find = self.rep_find.get().strip()
+        if not find:
+            messagebox.showinfo("批量替换", "请先输入要替换的原标签。")
+            return
+        to = self.rep_to.get().strip()
+        self._begin_batch("正在批量替换标签…（批量操作会覆盖未保存的手动修改）")
+        try:
+            files = core.batch_replace_tags(self.train_dir, find, to, logf=self._log_app)
+            msg = f"批量替换完成：修改 {files} 个文件（{find} → {to or '（删除）'}）。"
+            self._set_status(msg)
+            self._log_app("[标签] " + msg)
+        except Exception as e:
+            messagebox.showerror("批量替换失败", str(e))
+        finally:
+            self._end_batch()
+
+    def _do_pin(self):
+        params = self.app._collect_params()
+        trigger = (params.get("trigger") or "").strip()
+        if not trigger:
+            messagebox.showinfo("置顶 Trigger", "当前模式的 Trigger 触发词为空，无法置顶。\n请先回主界面填写触发词。")
+            return
+        self._begin_batch("正在把 Trigger 置顶…")
+        try:
+            n = core.pin_trigger_to_labels(self.train_dir, trigger, logf=self._log_app)
+            msg = f"Trigger「{trigger}」已置顶到 {n} 个标签文件第一行。"
+            self._set_status(msg)
+            self._log_app("[标签] " + msg)
+        except Exception as e:
+            messagebox.showerror("置顶失败", str(e))
+        finally:
+            self._end_batch()
+
+    def _do_organize(self):
+        params = self.app._collect_params()
+        repeats = params.get("repeats", 5)
+        default_name = (params.get("trigger") or "").strip() or "dataset"
+        dlg = ctk.CTkInputDialog(
+            text=f"输入概念名（会生成子目录 {repeats}_{default_name}，把根目录平铺的图片/标签移进去）：\n\n"
+                 "提示：repeats_名称 是秋叶式目录结构，repeats 表示这组图片的训练重复次数，名称随意（英文/中文都行）。",
+            title="整理为 repeats_名称 结构")
+        name = dlg.get_input()
+        if name is None or not name.strip():
+            return
+        self._begin_batch("正在整理数据集…")
+        try:
+            moved, target = core.organize_dataset_repeats(self.train_dir, repeats, name.strip())
+            msg = f"已整理：把 {moved} 个文件移入 {os.path.basename(target)}（repeats={repeats}）。"
+            self._set_status(msg)
+            self._log_app("[标签] " + msg)
+            self.refresh()
+        except Exception as e:
+            messagebox.showerror("整理失败", str(e))
+        finally:
+            self._end_batch()
+
+    def _show_stats(self):
+        stats = core.tag_frequency(self.train_dir, top_n=300)
+        if not stats:
+            messagebox.showinfo("标签统计", "数据集里还没有标签。")
+            return
+        w = ctk.CTkToplevel(self.win)
+        w.title("标签统计")
+        w.geometry("580x660")
+        w.transient(self.win)
+        w.configure(fg_color=BG)
+        ctk.CTkLabel(w, text="标签出现频率（点击「删除」可从全部标签中移除该词）", font=ui_font(FONT_BODY), text_color=TITLE_C).pack(anchor="w", padx=16, pady=(14, 6))
+        scroll = ctk.CTkScrollableFrame(w, fg_color=CARD, corner_radius=8)
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+        for tag, cnt in stats:
+            row = ctk.CTkFrame(scroll, fg_color="transparent"); row.pack(fill="x", padx=6, pady=2)
+            ctk.CTkLabel(row, text=f"{cnt:4d} 次", font=ui_font(FONT_HINT), text_color=ACC, width=64, anchor="w").pack(side="left")
+            ctk.CTkLabel(row, text=tag, font=ui_font(FONT_BODY), text_color=TXT, anchor="w").pack(side="left", padx=(6, 0))
+            ctk.CTkButton(row, text="删除", width=56, height=24, fg_color="#4a3535", hover_color="#5a4141",
+                          corner_radius=6, font=ui_font(FONT_HINT),
+                          command=lambda t=tag, win=w: self._stats_delete(t, win)).pack(side="right")
+
+    def _stats_delete(self, tag, win):
+        try:
+            files, removed = core.batch_remove_tags(self.train_dir, tag, logf=self._log_app)
+            self._log_app(f"[标签] 从统计窗口删除「{tag}」：{files} 个文件，{removed} 个标签")
+        except Exception as e:
+            messagebox.showerror("删除失败", str(e))
+            return
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        self._set_status(f"已删除标签「{tag}」")
+        self._show_stats()
+
+    # ---------- 辅助 ----------
+    def _begin_batch(self, status):
+        self._dirty.clear()
+        self._set_status(status)
+        for b in (self.btn_del, self.btn_rep, self.btn_pin, self.btn_stats, self.btn_organize, self.btn_del_img, self.btn_save_one):
+            try:
+                b.configure(state="disabled")
+            except Exception:
+                pass
+        self.win.update_idletasks()
+
+    def _end_batch(self):
+        for b in (self.btn_del, self.btn_rep, self.btn_pin, self.btn_stats, self.btn_organize, self.btn_del_img, self.btn_save_one):
+            try:
+                b.configure(state="normal")
+            except Exception:
+                pass
+        self.refresh()
+
+    def _set_status(self, text):
+        self.status_var.set(str(text))
+
+    def _log_app(self, text):
+        try:
+            self.app._log(str(text))
+        except Exception:
+            pass
+
+    def _open_dir(self):
+        try:
+            os.makedirs(self.train_dir, exist_ok=True)
+            os.startfile(self.train_dir)
+        except Exception as e:
+            messagebox.showerror("打开文件夹", str(e))
+
+    def _open_image(self):
+        if self._current is None:
+            return
+        try:
+            os.startfile(self.records[self._current]["img"])
+        except Exception as e:
+            messagebox.showerror("打开图片", str(e))
+
+    def _close(self):
+        if self._current is not None and self._current in self._dirty:
+            if messagebox.askyesno("标签编辑器", "有未保存的标签修改，是否保存后再关闭？"):
+                self._save_current(quiet=True)
+        try:
+            if getattr(self.app, "_label_editor", None) is self:
+                self.app._label_editor = None
+        except Exception:
+            pass
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
 
 
 def main():

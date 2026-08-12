@@ -28,6 +28,8 @@ a = Analysis(
         ('..\\README_使用说明.md', '.'),
         ('..\\LICENSE', '.'),
         ('..\\THIRD_PARTY_NOTICES.md', '.'),
+        # WD14 打标模型内置：开箱即用，无需联网下载（约 311MB）
+        ('..\\wd14_tagger_model', 'wd14_tagger_model'),
     ] + ctk_datas + dd_datas,
     hiddenimports=ctk_hidden,
     hookspath=[],

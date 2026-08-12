@@ -34,6 +34,18 @@ import os
 import re
 import sys
 import traceback
+import subprocess
+
+# 全局隐藏子进程窗口：GUI 宿主无控制台，直接 subprocess 会弹黑色 cmd 窗口，
+# 这里统一加 CREATE_NO_WINDOW（0x08000000），WD14 打标等子进程全部后台静默运行。
+if os.name == "nt":
+    _orig_popen = subprocess.Popen
+
+    def _popen_no_window(*args, **kwargs):
+        kwargs.setdefault("creationflags", 0x08000000)
+        return _orig_popen(*args, **kwargs)
+
+    subprocess.Popen = _popen_no_window
 
 # 统一 caption：只描述画风，绝不描述画面中的人物 / 角色。
 # 注意：这里没有 trigger word，这是纯风格 LoRA。
@@ -222,22 +234,46 @@ def _system_proxy():
     return None
 
 
+def _wd14_model_dir():
+    """WD14 模型目录：优先用程序内置（wd14_tagger_model，随安装包分发），否则用 %APPDATA% 缓存。
+
+    返回 (目录, 是否已就绪)。就绪 = 该目录里已有对应 repo 的 model.onnx。
+    """
+    repo = WD14_REPO_ID.replace("/", "_")
+    candidates = []
+    kit = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(kit, "wd14_tagger_model"))            # 内置（随安装包）
+    candidates.append(os.path.join(
+        os.environ.get("APPDATA", os.path.expanduser("~")),
+        "KohyaLoraTool", "wd14_tagger_model"))                           # 下载缓存
+    for d in candidates:
+        if os.path.isfile(os.path.join(d, repo, "model.onnx")):
+            return d, True
+    return candidates[-1], False
+
+
 def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.35):
     """调用 kohya 官方 WD14 打标脚本，为 output_dir 里每张图生成 .txt 标签。
 
     返回是否成功。失败时由调用方做兜底处理，不会中断整体预处理。
+    模型优先用内置 wd14_tagger_model（开箱即用，不联网）；缺失时才自动下载一次。
     """
     script = script or find_wd14_tagger()
     if not script:
         logf("[WD14] 未找到 kohya 官方打标脚本，跳过自动打标")
         return False
+    model_dir, ready = _wd14_model_dir()
     logf(f"[WD14] 使用官方打标脚本: {script}")
+    logf(f"[WD14] 打标模型目录: {model_dir}" + ("（内置，已就绪）" if ready else "（未就绪，将自动下载）"))
     cmd = [
         sys.executable, script, output_dir,
         "--onnx", "--repo_id", WD14_REPO_ID,
+        "--model_dir", model_dir,
         "--batch_size", str(batch_size), "--thresh", str(thresh),
         "--remove_underscore", "--caption_extension", ".txt",
     ]
+    if not ready:
+        cmd.append("--force_download")
     env = dict(os.environ)
     env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
     _px = _system_proxy()
@@ -247,11 +283,30 @@ def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.
     try:
         rc = _run_cmd(cmd, env=env, logf=logf)
         if rc == 0:
-            logf("[WD14] 自动打标完成")
+            logf("[WD14] 自动打标完成（GPU）")
             return True
         logf(f"[WD14] 打标脚本退出码 {rc}")
+        # GPU 会话初始化失败（驱动/CUDA 版本不匹配）时，自动回退 CPU 重试一次
+        if env.get("CUDA_VISIBLE_DEVICES") != "":
+            logf("[WD14] GPU 打标失败，正在回退 CPU 重试一次（会慢一些）…")
+            env["CUDA_VISIBLE_DEVICES"] = ""
+            rc2 = _run_cmd(cmd, env=env, logf=logf)
+            if rc2 == 0:
+                logf("[WD14] 自动打标完成（CPU 回退）")
+                return True
+            logf(f"[WD14] CPU 回退也失败（退出码 {rc2}）")
     except Exception as e:
         logf(f"[WD14] 打标失败: {e}")
+        try:
+            if env.get("CUDA_VISIBLE_DEVICES") != "":
+                logf("[WD14] 正在回退 CPU 重试一次…")
+                env["CUDA_VISIBLE_DEVICES"] = ""
+                rc3 = _run_cmd(cmd, env=env, logf=logf)
+                if rc3 == 0:
+                    logf("[WD14] 自动打标完成（CPU 回退）")
+                    return True
+        except Exception:
+            pass
     return False
 
 
@@ -419,11 +474,15 @@ def is_blurry(img, threshold):
 
 
 def write_dataset_config(output_dir, config_path, resolution=768, batch_size=1,
-                         num_repeats=1, reg_dir=None, keep_tokens=0):
+                         num_repeats=1, reg_dir=None, keep_tokens=0,
+                         subsets=None, reg_subsets=None):
     """为 kohya sd-scripts 生成数据集配置 TOML（绝对路径）。
 
-    - num_repeats：训练图片重复次数；
+    - num_repeats：训练图片重复次数（平铺数据集时生效）；
+    - subsets：[(image_dir, num_repeats), ...]，支持秋叶式 repeats_名称 子目录结构，
+      每个子目录独立重复次数；传入时按多个 [[datasets.subsets]] 输出，忽略单一 num_repeats；
     - reg_dir：正则数据集文件夹（非空时额外写一个 is_reg = true 的 [[datasets]]）；
+    - reg_subsets：正则数据集子集列表（同 subsets 语义，默认为 [(reg_dir, 1)]）；
     - keep_tokens：保留在 caption 开头的 token 数（人物模式保护 trigger，通常=1）。
     """
     image_dir = os.path.abspath(output_dir).replace("\\", "/")
@@ -444,13 +503,27 @@ def write_dataset_config(output_dir, config_path, resolution=768, batch_size=1,
         "bucket_reso_steps = 64",
         f"min_bucket_reso = {min_bucket}",
         f"max_bucket_reso = {max_bucket}",
-        "",
-        "  [[datasets.subsets]]",
-        f'  image_dir = "{image_dir}"',
-        f"  num_repeats = {int(num_repeats)}",
     ]
+    if subsets:
+        for _item in subsets:
+            _d = _item[0]
+            _nr = _item[1]
+            _abs = os.path.abspath(_d).replace("\\", "/")
+            lines += [
+                "",
+                "  [[datasets.subsets]]",
+                f'  image_dir = "{_abs}"',
+                f"  num_repeats = {int(_nr)}",
+            ]
+    else:
+        lines += [
+            "",
+            "  [[datasets.subsets]]",
+            f'  image_dir = "{image_dir}"',
+            f"  num_repeats = {int(num_repeats)}",
+        ]
     if reg_dir and os.path.isdir(reg_dir):
-        reg = os.path.abspath(reg_dir).replace("\\", "/")
+        reg_subsets = reg_subsets or [(reg_dir, 1)]
         lines += [
             "",
             "[[datasets]]",
@@ -462,11 +535,17 @@ def write_dataset_config(output_dir, config_path, resolution=768, batch_size=1,
             "bucket_reso_steps = 64",
             f"min_bucket_reso = {min_bucket}",
             f"max_bucket_reso = {max_bucket}",
-            "",
-            "  [[datasets.subsets]]",
-            f'  image_dir = "{reg}"',
-            "  num_repeats = 1",
         ]
+        for _item in reg_subsets:
+            _d = _item[0]
+            _nr = _item[1]
+            _abs = os.path.abspath(_d).replace("\\", "/")
+            lines += [
+                "",
+                "  [[datasets.subsets]]",
+                f'  image_dir = "{_abs}"',
+                f"  num_repeats = {int(_nr)}",
+            ]
     toml_text = "\n".join(lines) + "\n"
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
     with open(config_path, "w", encoding="utf-8") as f:
@@ -557,10 +636,22 @@ def main():
     trigger = (args.trigger or "").strip()
     style_caption = normalize_caption(args.caption)
 
+    # 收集输入文件：优先直接扫描根目录；根目录没有图时自动递归子文件夹
+    # （用户常把图按角色/风格分在子目录里，选中"上层图集文件夹"也能直接处理）
     files = sorted(
         f for f in os.listdir(input_dir)
         if os.path.splitext(f)[1].lower() in IMAGE_EXTS
     )
+    if not files:
+        files = []
+        for _root, _dirs, _fs in os.walk(input_dir):
+            _dirs[:] = [d for d in _dirs if not d.startswith(".")]
+            for _f in _fs:
+                if os.path.splitext(_f)[1].lower() in IMAGE_EXTS:
+                    files.append(os.path.relpath(os.path.join(_root, _f), input_dir).replace(os.sep, "/"))
+        files.sort()
+        if files:
+            print(f"[INFO] 根目录没有图片，自动扫描子文件夹，共找到 {len(files)} 张图片。")
     if not files:
         print(f"[WARN] 输入文件夹里没有找到图片（支持 jpg/png/webp/bmp/tif/gif/jfif/jpe/avif）。")
         print(f"       {input_dir}")
@@ -600,8 +691,11 @@ def main():
     seen_hashes = {}
     user_captions = {}  # stem -> 原图自带 .txt 内容（人物模式优先保留）
     for name in files:
-        stem = os.path.splitext(name)[0]
-        raw_img = os.path.join(input_dir, name)
+        # name 可能是相对路径（子文件夹递归时用 / 分隔）；输出名用 __ 扁平化，避免重名
+        _rel = name.replace("/", os.sep)
+        _flat = name.replace("/", "__").replace("\\", "__")
+        stem = os.path.splitext(_flat)[0]
+        raw_img = os.path.join(input_dir, _rel)
         out_img = os.path.join(output_dir, stem + ".png")
         out_txt = os.path.join(output_dir, stem + ".txt")
         if os.path.exists(out_img) and not args.overwrite:
@@ -657,7 +751,7 @@ def main():
             img.save(out_img, format="PNG", optimize=True)
 
             if not args.no_caption:
-                raw_txt = os.path.join(input_dir, stem + ".txt")
+                raw_txt = os.path.join(input_dir, os.path.splitext(_rel)[0] + ".txt")
                 if mode == "style":
                     # 画风模式：优先用原图自带 .txt（过滤人物标签），否则统一画风 caption
                     cap = ""
@@ -791,4 +885,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

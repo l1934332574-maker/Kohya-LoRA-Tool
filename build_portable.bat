@@ -41,6 +41,7 @@ copy /y "_common.bat" "%PKG%\" >nul
 if not exist "%PKG%\installers"    xcopy /e /i /q "installers"    "%PKG%\installers"    >nul
 if not exist "%PKG%\configs"       xcopy /e /i /q "configs"       "%PKG%\configs"       >nul
 if not exist "%PKG%\models\base"   mkdir "%PKG%\models\base" >nul 2>nul
+if not exist "%PKG%\wd14_tagger_model" xcopy /e /i /q "wd14_tagger_model" "%PKG%\wd14_tagger_model" >nul
 
 rem 清空 kohya_dir.txt：首次运行自动检测 kohya 源码（不写死本机路径）
 > "%PKG%\kohya_dir.txt" echo.

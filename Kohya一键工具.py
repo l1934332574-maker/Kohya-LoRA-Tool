@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Kohya-SS LoRA 一键工具（Windows 桌面应用，画风 / 人物角色 双模式）
@@ -30,6 +30,19 @@ import tempfile
 import webbrowser
 import urllib.request
 
+# ---------- 全局隐藏子进程窗口 ----------
+# GUI 程序没有控制台窗口，直接 subprocess 启动的子进程（git/python/nvidia-smi/powershell 等）
+# 默认会各自弹出一个新的黑色 cmd 窗口；这里统一给所有 Popen 加 CREATE_NO_WINDOW，
+# 让任何子进程都后台静默运行，不再弹窗。（subprocess.run/call 内部都走 Popen，自动生效）
+if os.name == "nt":
+    _orig_popen = subprocess.Popen
+
+    def _popen_no_window(*args, **kwargs):
+        kwargs.setdefault("creationflags", 0x08000000)  # CREATE_NO_WINDOW
+        return _orig_popen(*args, **kwargs)
+
+    subprocess.Popen = _popen_no_window
+
 try:
     from model_downloader import ModelDownloader as _ModelDownloader
 except Exception:
@@ -43,6 +56,8 @@ except Exception:  # pragma: no cover
     _HAS_TK = False
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
+# 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
+APP_VERSION = "0.4.0"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -198,6 +213,152 @@ PY_MAX = (3, 13, 0)
 
 class StopRequested(Exception):
     """用户手动停止当前任务（训练/预处理/安装等）。"""
+
+
+class TrainMonitor:
+    """训练实时监控：从 kohya 训练日志里解析 步数/loss/lr/速度/预计剩余时间。
+    线程安全（内部用锁）；GUI 主线程通过 snapshot() 轮询刷新面板。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.reset()
+
+    def reset(self):
+        with self._lock:
+            self._reset_locked()
+
+    def _reset_locked(self):
+        """锁内复位（避免 start() 里嵌套获取同一把非重入锁导致死锁）。"""
+        self.step = 0
+        self.total = 0
+        self.loss = None
+        self.loss_prev = None
+        self.loss_history = []
+        self.lr = None
+        self.speed = 0.0            # 步/秒
+        self.eta = None             # 预计剩余秒数
+        self.running = False
+        self._last_step = 0
+        self._last_time = None
+
+    def start(self, total=0):
+        with self._lock:
+            self._reset_locked()
+            self.running = True
+            self.total = int(total or 0)
+            self._last_time = time.time()
+
+    def set_total(self, total):
+        with self._lock:
+            self.total = int(total or 0)
+
+    def set_lr(self, lr):
+        """预填学习率（kohya 的 tqdm 日志里通常不输出 lr 字段，
+        所以训练启动时把配置的学习率填进去，面板就能显示真实生效值）。"""
+        try:
+            lr = float(lr)
+        except Exception:
+            return
+        with self._lock:
+            self.lr = lr
+
+    def on_line(self, line):
+        """解析一行训练日志（兼容 kohya 两种格式：'steps: N ... loss: x lr: y' 与 tqdm 'N/M [..] loss=..'）。
+
+        注意：tqdm 格式（N/M [）优先，因为它带真实总步数。
+        格式1（steps: N）要排除 kohya 启动时打印的
+        'total optimization steps: 2916' / 'gradient accumulation steps: N' 等，
+        否则会把"总步数"误当成"当前步数"，导致监控进度条瞬间拉满/跳变。
+        """
+        try:
+            s = str(line)
+            step = None
+            total = None
+            # 格式2（优先）：tqdm 进度条 N/M [  或 N/M [..] it/s
+            m = re.search(r"(\d+)\s*/\s*(\d+)\s*\[", s)
+            if m:
+                step = int(m.group(1))
+                total = int(m.group(2))
+            else:
+                # 格式1：独立的 'steps: N'（排除百分比 'steps: 1%'，排除 total/gradient/num 等前缀）
+                if not re.search(r"(?:total|gradient|num|infer|sampling|val)[^:]*steps:", s, re.I):
+                    m = re.search(r"steps:\s*(\d+)(?!%)", s)
+                    if m:
+                        step = int(m.group(1))
+            if step is None:
+                return False
+            # loss：兼容 'loss:' 与 'loss='；同样 lr
+            ml = re.search(r"loss[=:]\s*([0-9.eE+-]+)", s)
+            loss = float(ml.group(1)) if ml else None
+            mr = re.search(r"lr[=:]\s*([0-9.eE+-]+)", s)
+            lr = float(mr.group(1)) if mr else None
+            # 速度：tqdm 的 'x.xx it/s' 或 'x.xx s/it'
+            speed = None
+            ms = re.search(r"([0-9.]+)\s*it/s", s)
+            if ms:
+                speed = float(ms.group(1))
+            else:
+                ms = re.search(r"([0-9.]+)\s*s/it", s)
+                if ms and float(ms.group(1)) > 0:
+                    speed = 1.0 / float(ms.group(1))
+            now = time.time()
+            with self._lock:
+                self.step = step
+                if total and total > 0:
+                    self.total = total
+                if loss is not None:
+                    self.loss_prev = self.loss
+                    self.loss = loss
+                    self.loss_history.append(loss)
+                    if len(self.loss_history) > 200:
+                        self.loss_history = self.loss_history[-200:]
+                if lr is not None:
+                    self.lr = lr
+                if speed is not None and speed > 0:
+                    self.speed = speed
+                    if self.total > 0:
+                        remain = self.total - step
+                        self.eta = remain / speed
+                elif self._last_time and now > self._last_time:
+                    dt = now - self._last_time
+                    if dt > 0:
+                        dstep = step - self._last_step
+                        if dstep > 0:
+                            self.speed = dstep / dt
+                            if self.speed > 0 and self.total > 0:
+                                remain = self.total - step
+                                self.eta = remain / self.speed
+                self._last_step = step
+                self._last_time = now
+            return True
+        except Exception:
+            return False
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "step": self.step, "total": self.total,
+                "loss": self.loss, "loss_prev": self.loss_prev,
+                "loss_history": list(self.loss_history),
+                "lr": self.lr, "speed": self.speed, "eta": self.eta,
+                "running": self.running,
+            }
+
+    def finish(self):
+        with self._lock:
+            self.running = False
+
+
+def format_eta(sec):
+    """把秒数格式化成 时:分:秒。"""
+    if sec is None or sec < 0:
+        return "--:--"
+    sec = int(sec)
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
 
 _STOP_EVENT = threading.Event()
 _ACTIVE_LOCK = threading.Lock()
@@ -488,15 +649,33 @@ def ensure_prereqs(logf=print):
 # ---------- Kohya 安装 ----------
 
 def get_kohya_dir():
+    """定位 kohya_ss 训练内核目录。
+
+    优先级：
+    1) kohya_dir.txt 记录（最优先，尊重用户/历史选择）
+    2) APPDATA 数据目录下的 KohyaLoraTool 文件夹里的 kohya_ss（新默认：
+       和 dataset/output 放一起，升级/重装软件不删 APPDATA，训练环境直接保留，不用每次重装）
+    3) 安装目录内 kohya_ss（旧版位置，向后兼容：老用户覆盖升级不重装）
+    4) 用户主目录下的 kohya_ss（更早版本的兜底位置）
+    5) 都不存在 -> 返回 APPDATA 数据目录下的 kohya_ss（新装到这里）
+    """
     if os.path.isfile(KOHYA_DIR_FILE):
         with open(KOHYA_DIR_FILE, "r", encoding="utf-8") as f:
             p = f.read().strip().lstrip("\ufeff").strip()
         if p and os.path.isdir(p):
             return p
-    d = os.path.join(KIT_DIR, "kohya_ss")
-    # kohya_ss 官方不支持空格/非 ASCII 路径：含空格或中文时装到用户目录
-    if " " in KIT_DIR or any(ord(c) > 127 for c in KIT_DIR):
-        d = os.path.join(os.path.expanduser("~"), "kohya_ss")
+    # 新默认：数据目录（升级/重装软件保留，不用重装环境）
+    d = os.path.join(data_dir(), "kohya_ss")
+    if os.path.isdir(d):
+        return d
+    # 向后兼容：安装目录内（旧版位置，覆盖升级不重装）
+    d_old = os.path.join(KIT_DIR, "kohya_ss")
+    if os.path.isdir(d_old):
+        return d_old
+    # 更早版本的兜底位置
+    d_legacy = os.path.join(os.path.expanduser("~"), "kohya_ss")
+    if os.path.isdir(d_legacy):
+        return d_legacy
     return d
 
 
@@ -591,6 +770,52 @@ def _extract_zip(zip_path, dest):
             shutil.rmtree(top_dir)
 
 
+def _acquire_kohya_install_lock(kdir, logf=print):
+    """跨进程安装锁：同一 kohya 目录同一时间只允许一个安装进程。返回锁句柄或 None。"""
+    try:
+        import msvcrt
+    except Exception:
+        return None
+    lock_path = os.path.join(os.path.dirname(kdir), os.path.basename(kdir) + ".install.lock")
+    try:
+        f = open(lock_path, "w+")
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            f.close()
+            return None
+        f.seek(0)
+        f.write(str(os.getpid()))
+        f.flush()
+        return f
+    except Exception:
+        try:
+            f.close()
+        except Exception:
+            pass
+        return None
+
+
+def _release_kohya_install_lock(lock_f):
+    """释放跨进程安装锁并删除锁文件。"""
+    if lock_f is None:
+        return
+    try:
+        import msvcrt
+        lock_f.seek(0)
+        msvcrt.locking(lock_f.fileno(), msvcrt.LK_UNLCK, 1)
+    except Exception:
+        pass
+    try:
+        lock_f.close()
+    except Exception:
+        pass
+    try:
+        os.remove(lock_f.name)
+    except Exception:
+        pass
+
+
 def install_kohya(logf=print):
     git = find_git()
     py, pyver = find_python()
@@ -598,83 +823,100 @@ def install_kohya(logf=print):
         raise RuntimeError("请先点击【环境准备】安装 Git / Python")
     kdir = get_kohya_dir()
     logf(f"[Kohya] 安装目录: {kdir}")
-    os.makedirs(os.path.dirname(kdir), exist_ok=True)
-    kohya_ok = (os.path.isdir(os.path.join(kdir, ".git"))
-                or os.path.isfile(os.path.join(kdir, "kohya_gui.py")))
-    if kohya_ok:
-        logf("[Kohya] 已存在 kohya_ss，跳过解压/克隆")
-    else:
-        if os.path.exists(kdir) and os.listdir(kdir):
-            raise RuntimeError(f"目标目录非空且不是 kohya_ss: {kdir}")
-        zip_src = _bundled_kohya_zip()
-        if zip_src:
-            logf(f"[Kohya] 使用内置源码包解压: {os.path.basename(zip_src)}")
-            _extract_zip(zip_src, kdir)
-        else:
-            logf("[Kohya] 未找到内置源码包，改用 git 克隆（需联网）…")
-            logf("[Kohya] 配置 Git（openssl 后端，解决 GitHub 连接报错）…")
-            for c in (["git", "config", "--global", "http.sslBackend", "openssl"],
-                      ["git", "config", "--global", "http.version", "HTTP/1.1"],
-                      ["git", "config", "--global", "http.postBuffer", "524288000"]):
-                try:
-                    subprocess.run(c, capture_output=True, timeout=30)
-                except Exception:
-                    pass
-            if _git_clone(git, "https://github.com/bmaltais/kohya_ss.git", kdir, logf) != 0:
-                raise RuntimeError("git clone 失败，请检查网络/代理后重试")
-    # sd-scripts 子模块：内置包优先（避免联网拉子模块）
-    sd_dir = os.path.join(kdir, "sd-scripts")
-    if not os.path.isfile(os.path.join(sd_dir, "sdxl_train_network.py")):
-        sd_zip = _bundled_sd_zip()
-        if sd_zip:
-            logf(f"[Kohya] 解压内置 sd-scripts 子模块: {os.path.basename(sd_zip)}")
-            os.makedirs(sd_dir, exist_ok=True)
-            _extract_zip(sd_zip, sd_dir)
-        else:
-            logf("[Kohya] 未找到内置 sd-scripts，稍后由 kohya 安装脚本联网拉取子模块（需网络）")
-    vpy = venv_python(kdir)
-    if not os.path.isfile(vpy):
-        logf("[Kohya] 创建 Python 虚拟环境…")
-        if run_stream([py, "-m", "venv", "venv"], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
-            raise RuntimeError("创建 venv 失败")
-    # 已安装验证：venv 里 torch 可用 + sd-scripts 存在 => 跳过重复安装
+    # 跨进程锁：防止重复点击/双开导致两个安装同时写同一个 venv（WinError 32 文件占用）
+    lock_f = _acquire_kohya_install_lock(kdir, logf)
+    if lock_f is None:
+        raise RuntimeError(
+            "检测到另一个「安装训练内核」正在运行（同一安装目录被占用）。\n"
+            "请先等待完成，或关闭重复打开的软件窗口后重试；避免两个安装同时写文件导致失败。"
+        )
     try:
-        r = subprocess.run([vpy, "-c", "import torch; print(torch.__version__)"],
-                           capture_output=True, text=True, timeout=120)
-        torch_ok = r.returncode == 0
-    except Exception:
-        torch_ok = False
-    if torch_ok and os.path.isdir(os.path.join(kdir, "sd-scripts")):
-        logf("[Kohya] 检测到已安装环境（torch 可用），跳过重复安装。")
+        try:
+            if detect_gpu_vendor() == "amd":
+                logf("[Kohya] 检测到 AMD 显卡：默认安装的是 NVIDIA CUDA 版 PyTorch，AMD 卡无法直接使用。")
+                logf("[Kohya] 安装完成后，请开启「AMD 兼容模式（实验性）」并按「环境检查 / 安装引导」配置 ROCm / ZLUDA 环境。")
+        except Exception:
+            pass
+        os.makedirs(os.path.dirname(kdir), exist_ok=True)
+        kohya_ok = (os.path.isdir(os.path.join(kdir, ".git"))
+                    or os.path.isfile(os.path.join(kdir, "kohya_gui.py")))
+        if kohya_ok:
+            logf("[Kohya] 已存在 kohya_ss，跳过解压/克隆")
+        else:
+            if os.path.exists(kdir) and os.listdir(kdir):
+                raise RuntimeError(f"目标目录非空且不是 kohya_ss: {kdir}")
+            zip_src = _bundled_kohya_zip()
+            if zip_src:
+                logf(f"[Kohya] 使用内置源码包解压: {os.path.basename(zip_src)}")
+                _extract_zip(zip_src, kdir)
+            else:
+                logf("[Kohya] 未找到内置源码包，改用 git 克隆（需联网）…")
+                logf("[Kohya] 配置 Git（openssl 后端，解决 GitHub 连接报错）…")
+                for c in (["git", "config", "--global", "http.sslBackend", "openssl"],
+                          ["git", "config", "--global", "http.version", "HTTP/1.1"],
+                          ["git", "config", "--global", "http.postBuffer", "524288000"]):
+                    try:
+                        subprocess.run(c, capture_output=True, timeout=30)
+                    except Exception:
+                        pass
+                if _git_clone(git, "https://github.com/bmaltais/kohya_ss.git", kdir, logf) != 0:
+                    raise RuntimeError("git clone 失败，请检查网络/代理后重试")
+        # sd-scripts 子模块：内置包优先（避免联网拉子模块）
+        sd_dir = os.path.join(kdir, "sd-scripts")
+        if not os.path.isfile(os.path.join(sd_dir, "sdxl_train_network.py")):
+            sd_zip = _bundled_sd_zip()
+            if sd_zip:
+                logf(f"[Kohya] 解压内置 sd-scripts 子模块: {os.path.basename(sd_zip)}")
+                os.makedirs(sd_dir, exist_ok=True)
+                _extract_zip(sd_zip, sd_dir)
+            else:
+                logf("[Kohya] 未找到内置 sd-scripts，稍后由 kohya 安装脚本联网拉取子模块（需网络）")
+        vpy = venv_python(kdir)
+        if not os.path.isfile(vpy):
+            logf("[Kohya] 创建 Python 虚拟环境…")
+            if run_stream([py, "-m", "venv", "venv"], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
+                raise RuntimeError("创建 venv 失败")
+        # 已安装验证：venv 里 torch 可用 + sd-scripts 存在 => 跳过重复安装
+        try:
+            r = subprocess.run([vpy, "-c", "import torch; print(torch.__version__)"],
+                               capture_output=True, text=True, timeout=120)
+            torch_ok = r.returncode == 0
+        except Exception:
+            torch_ok = False
+        if torch_ok and os.path.isdir(os.path.join(kdir, "sd-scripts")):
+            logf("[Kohya] 检测到已安装环境（torch 可用），跳过重复安装。")
+            with open(KOHYA_DIR_FILE, "w", encoding="utf-8") as f:
+                f.write(kdir)
+            return kdir
+        logf("[Kohya] 设置 pip 镜像源（清华 pypi + 阿里 pytorch cu128，无需代理）…")
+        subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
+                        "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
+        subprocess.run([vpy, "-m", "pip", "config", "set", "global.extra-index-url",
+                        "https://mirrors.aliyun.com/pytorch-wheels/cu128"], capture_output=True, timeout=60)
+        logf("[Kohya] 升级 pip / setuptools / wheel …")
+        if run_stream([vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q"], cwd=kdir, logf=logf) != 0:
+            raise RuntimeError("pip 升级失败（可能是网络或安装目录被占用），请重试")
+        logf("[Kohya] 安装全部依赖（官方无人值守模式，约 10-30 分钟）…")
+        env = build_env([os.path.dirname(git)])
+        env.setdefault("PIP_EXTRA_INDEX_URL", "https://mirrors.aliyun.com/pytorch-wheels/cu128")
+        if run_stream([vpy, "setup\\setup_windows.py", "--headless"], cwd=kdir, env=env, logf=logf) != 0:
+            raise RuntimeError("依赖安装失败，请向上滚动查看 pip 报错")
         with open(KOHYA_DIR_FILE, "w", encoding="utf-8") as f:
             f.write(kdir)
+        try:
+            r = subprocess.run(
+                [vpy, "-c", "import torch;print(torch.__version__);print(torch.cuda.is_available())"],
+                capture_output=True, text=True, timeout=180,
+            )
+            lines = (r.stdout or "").strip().splitlines()
+            torchv = lines[0] if lines else "?"
+            cuda = lines[1] if len(lines) > 1 else "?"
+            logf(f"[Kohya] 验证：torch {torchv} | CUDA 可用: {cuda}")
+        except Exception as e:
+            logf(f"[Kohya] 验证 torch 失败: {e}")
         return kdir
-    logf("[Kohya] 设置 pip 镜像源（清华 pypi + 阿里 pytorch cu128，无需代理）…")
-    subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
-                    "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
-    subprocess.run([vpy, "-m", "pip", "config", "set", "global.extra-index-url",
-                    "https://mirrors.aliyun.com/pytorch-wheels/cu128"], capture_output=True, timeout=60)
-    logf("[Kohya] 升级 pip / setuptools / wheel …")
-    run_stream([vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q"], cwd=kdir, logf=logf)
-    logf("[Kohya] 安装全部依赖（官方无人值守模式，约 10-30 分钟）…")
-    env = build_env([os.path.dirname(git)])
-    env.setdefault("PIP_EXTRA_INDEX_URL", "https://mirrors.aliyun.com/pytorch-wheels/cu128")
-    if run_stream([vpy, "setup\\setup_windows.py", "--headless"], cwd=kdir, env=env, logf=logf) != 0:
-        raise RuntimeError("依赖安装失败，请向上滚动查看 pip 报错")
-    with open(KOHYA_DIR_FILE, "w", encoding="utf-8") as f:
-        f.write(kdir)
-    try:
-        r = subprocess.run(
-            [vpy, "-c", "import torch;print(torch.__version__);print(torch.cuda.is_available())"],
-            capture_output=True, text=True, timeout=180,
-        )
-        lines = (r.stdout or "").strip().splitlines()
-        torchv = lines[0] if lines else "?"
-        cuda = lines[1] if len(lines) > 1 else "?"
-        logf(f"[Kohya] 验证：torch {torchv} | CUDA 可用: {cuda}")
-    except Exception as e:
-        logf(f"[Kohya] 验证 torch 失败: {e}")
-    return kdir
+    finally:
+        _release_kohya_install_lock(lock_f)
 
 
 # ---------- 预处理 / UI / 训练 ----------
@@ -682,13 +924,13 @@ def install_kohya(logf=print):
 def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
                reg_dir=None, repeats=5, dedup=False, wd14=True,
                square_crop=False, min_size=0, blur_threshold=0.0, report=None,
-               keep_tokens=None):
+               keep_tokens=None, project=None):
     vpy = venv_python()
     if not os.path.isfile(vpy):
         raise RuntimeError("Kohya 尚未安装，请先点击【一键安装】")
     if not input_dir or not os.path.isdir(input_dir):
         raise RuntimeError("请选择图片文件夹")
-    out = os.path.join(data_dir(), "dataset", "train" if mode == "style" else "train_character")
+    out = dataset_train_dir(mode, project)
     os.environ["TRIGGER_WORD"] = trigger or ""
     os.environ["MODE"] = mode
     os.makedirs(out, exist_ok=True)
@@ -738,7 +980,10 @@ def start_ui(logf=print):
     cmd = [vpy, "kohya_gui.py", "--server_port", "7860", "--inbrowser"]
     if " " in kdir:
         cmd.append("--noverify")
-    env = build_env([os.path.join(kdir, "venv", "Lib", "site-packages", "torch", "lib")])
+    _torchlib = os.path.join(kdir, "venv", "Lib", "site-packages", "torch", "lib")
+    if amd_mode and (params.get("train_env") or "").strip():
+        _torchlib = os.path.join((params.get("train_env") or "").strip(), "Lib", "site-packages", "torch", "lib")
+    env = build_env([_torchlib])
     logf("[UI] 正在启动 Kohya-SS Web UI …")
     logf("[UI] 若浏览器未自动打开，请访问 http://127.0.0.1:7860")
     proc = subprocess.Popen(
@@ -760,7 +1005,7 @@ def detect_nvidia_gpu():
 
 
 def detect_vram_gb():
-    """检测显卡显存（GB）。用 nvidia-smi 读取 memory.total；失败返回 None。"""
+    """检测显卡显存（GB）。优先 nvidia-smi（N 卡）；失败回退注册表 qwMemorySize（AMD/其他）。失败返回 None。"""
     try:
         r = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
@@ -776,7 +1021,368 @@ def detect_vram_gb():
                 return vals[0] / 1024.0
     except Exception:
         pass
+    return _registry_vram_gb()
+
+
+def _registry_vram_gb():
+    """从显卡注册表读取真实显存（HardwareInformation.qwMemorySize，QWORD，单位字节）。
+    兼容 AMD / Intel 显卡（WMI 的 AdapterRAM 会溢出到 4GB，不可靠）。"""
+    try:
+        import winreg
+        base = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as k:
+            i = 0
+            while True:
+                try:
+                    sub = winreg.EnumKey(k, i)
+                except OSError:
+                    break
+                i += 1
+                try:
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base + "\\" + sub) as sk:
+                        val, _ = winreg.QueryValueEx(sk, "HardwareInformation.qwMemorySize")
+                        if val:
+                            gb = float(val) / (1024.0 ** 3)
+                            if gb > 0:
+                                return gb
+                except Exception:
+                    continue
+    except Exception:
+        pass
     return None
+
+
+def detect_gpu_vendor():
+    """检测显卡厂商：'nvidia' | 'amd' | 'intel' | 'unknown'（任何异常都不抛出）。"""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode == 0 and (r.stdout or "").strip():
+            return "nvidia"
+    except Exception:
+        pass
+    try:
+        ps = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+              "Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name + '|' + $_.AdapterCompatibility }"]
+        r = subprocess.run(ps, capture_output=True, text=True, timeout=30)
+        low = (r.stdout or "").lower()
+        if any(k in low for k in ("amd", "ati", "radeon")):
+            return "amd"
+        if "intel" in low:
+            return "intel"
+    except Exception:
+        pass
+    return "unknown"
+
+
+def detect_gpu_name():
+    """返回显卡名称（N 卡走 nvidia-smi；其他走 WMI）。失败返回 None。"""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode == 0:
+            lines = [ln.strip() for ln in (r.stdout or "").strip().splitlines() if ln.strip()]
+            if lines:
+                return lines[0]
+    except Exception:
+        pass
+    try:
+        ps = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+              "Get-CimInstance Win32_VideoController | Select-Object -First 1 -ExpandProperty Name"]
+        r = subprocess.run(ps, capture_output=True, text=True, timeout=30)
+        name = (r.stdout or "").strip()
+        if name:
+            return name
+    except Exception:
+        pass
+    return None
+
+
+def detect_gpu_info():
+    """统一显卡信息：{'vendor','name','vram_gb'}。任何一步失败都不抛异常。"""
+    return {"vendor": detect_gpu_vendor(), "name": detect_gpu_name(), "vram_gb": detect_vram_gb()}
+
+
+def detect_torch_backend(vpy=None):
+    """检测训练环境（kohya venv）里 torch 的后端：
+    'rocm'=AMD ROCm 版 | 'zluda'=AMD 卡 + CUDA torch 且可用（ZLUDA 生效）
+    | 'cuda'=N 卡 CUDA | 'cpu'=无 GPU 后端 | None=无法读取。"""
+    if not vpy or not os.path.isfile(vpy):
+        return None
+    code = ("import torch;"
+            "print('CUDA=%s' % (getattr(torch.version,'cuda',None) or ''));"
+            "print('HIP=%s' % (getattr(torch.version,'hip',None) or ''));"
+            "print('AVAIL=%s' % torch.cuda.is_available());"
+            "print('NAME=%s' % (torch.cuda.get_device_name(0) if torch.cuda.is_available() else ''))")
+    try:
+        r = subprocess.run([vpy, "-c", code], capture_output=True, text=True, timeout=120)
+        info = {}
+        for ln in (r.stdout or "").strip().splitlines():
+            if "=" in ln:
+                k, v = ln.split("=", 1)
+                info[k] = v
+        if info.get("HIP"):
+            return "rocm"
+        if info.get("AVAIL") == "True":
+            if detect_gpu_vendor() == "amd":
+                return "zluda"
+            return "cuda"
+        return "cpu"
+    except Exception:
+        return None
+
+
+def detect_system_pythons():
+    """列出系统已安装的 Python 版本（Windows py launcher + 注册表 + 已知路径）。
+    返回 ['3.12','3.11',...] 或 []。
+    仅靠 py -0p 在刚装完 Python 时可能检测不到（launcher 缓存/环境变量未刷新），
+    所以补充注册表与已知目录扫描。"""
+    vers = []
+    def _add(v):
+        if v and v not in vers:
+            vers.append(v)
+    # 1) py launcher（只匹配标准版本行：-V:3.12 / -V:3.12-64，排除 Astral/uv 等第三方）
+    try:
+        r = subprocess.run(["py", "-0p"], capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            for ln in (r.stdout or "").splitlines():
+                m = re.search(r"-V:(\d+\.\d+)", ln)
+                if m:
+                    _add(m.group(1))
+    except Exception:
+        pass
+    # 2) 注册表：HKCU / HKLM 的 Software\Python\PythonCore\<ver>
+    try:
+        import winreg
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(hive, r"Software\Python\PythonCore") as k:
+                    i = 0
+                    while True:
+                        try:
+                            sub = winreg.EnumKey(k, i)
+                            i += 1
+                        except OSError:
+                            break
+                        m = re.match(r"^(\d+\.\d+)", sub)
+                        if m:
+                            _add(m.group(1))
+            except OSError:
+                pass
+    except Exception:
+        pass
+    # 3) 已知安装目录（用户级 InstallAllUsers=0 默认装到 LOCALAPPDATA\Programs\Python）
+    try:
+        base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python")
+        if os.path.isdir(base):
+            for name in os.listdir(base):
+                m = re.match(r"^Python(\d)(\d+)$", name)
+                if m:
+                    py = os.path.join(base, name, "python.exe")
+                    if os.path.isfile(py):
+                        _add(f"{m.group(1)}.{m.group(2)}")
+        for c in (r"C:\Python312\python.exe",
+                  r"C:\Program Files\Python312\python.exe"):
+            if os.path.isfile(c):
+                _add("3.12")
+    except Exception:
+        pass
+    return vers
+
+
+# Python 3.12 安装包国内镜像（内置包缺失时兜底下载）
+PY312_DOWNLOAD_URLS = [
+    "https://mirrors.huaweicloud.com/python/3.12.10/python-3.12.10-amd64.exe",
+    "https://registry.npmmirror.com/-/binary/python/3.12.10/python-3.12.10-amd64.exe",
+]
+
+
+def install_python_312(logf=print):
+    """安装 Python 3.12：内置安装包优先（installers/python/python-3.12*.exe），
+    没有则从国内镜像下载后静默安装。返回 (ok, msg)。"""
+    try:
+        if "3.12" in detect_system_pythons():
+            logf("[AMD] Python 3.12 已安装，跳过。")
+            return True, "Python 3.12 已安装"
+        import glob
+        builtin = glob.glob(os.path.join(KIT_DIR, "installers", "python", "python-3.12*.exe"))
+        exe = builtin[0] if builtin else None
+        if not exe:
+            exe = os.path.join(KIT_DIR, "installers", "python", "python-3.12.10-amd64.exe")
+            try:
+                os.makedirs(os.path.dirname(exe), exist_ok=True)
+            except Exception:
+                pass
+            logf("[AMD] 未找到内置 Python 3.12 安装包，正在从国内镜像下载（约 26MB）…")
+            ok = False
+            for u in PY312_DOWNLOAD_URLS:
+                try:
+                    logf(f"[AMD] 下载：{u}")
+                    _download(u, exe, logf)
+                    if os.path.isfile(exe) and os.path.getsize(exe) > 10_000_000:
+                        ok = True
+                        break
+                except Exception as e:
+                    logf(f"[AMD] 镜像下载失败：{e}")
+            if not ok:
+                return False, "Python 3.12 安装包下载失败，请检查网络；也可手动安装（点「打开 Python 下载页」）。"
+        logf("[AMD] 正在静默安装 Python 3.12（约 1 分钟）…")
+        r = subprocess.run(
+            [exe, "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_launcher=1",
+             "Include_test=0", "Include_doc=0", "Include_tcltk=1", "Include_pip=1"],
+            capture_output=True, text=True, timeout=1800)
+        # 安装程序退出码 0 表示成功；此时 py launcher 可能缓存未刷新，
+        # 用「检测 + 已知路径 + 注册表」综合判断，避免误报失败。
+        ok312 = ("3.12" in detect_system_pythons())
+        if not ok312:
+            # 用户级安装默认路径
+            user_py = os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Python\Python312\python.exe")
+            for c in (user_py, r"C:\Python312\python.exe", r"C:\Program Files\Python312\python.exe"):
+                if os.path.isfile(c):
+                    s, parts = _py_version(c)
+                    if s and parts[:2] == (3, 12):
+                        ok312 = True
+                        break
+        if ok312:
+            logf("[OK] Python 3.12 安装成功！")
+            return True, "Python 3.12 安装成功"
+        if r.returncode == 0:
+            # 退出码 0 但没检测到：可能是路径非常规，引导用户确认（不再判失败）
+            logf("[AMD] 安装程序已成功退出（退出码 0），但暂未在常规路径检测到 Python 3.12。")
+            logf("[AMD] 请点击「重新检查」；若仍检测不到，可手动安装 Python 3.12（点「打开 Python 下载页」）。")
+            return False, "安装程序已执行（退出码 0），但未检测到 Python 3.12，请点「重新检查」确认；若仍无，请手动安装。"
+        return False, f"安装程序退出码 {r.returncode}，请手动安装 Python 3.12。"
+    except Exception as e:
+        return False, str(e)
+
+
+# AMD ROCm 官方 Windows 发布版本（升级 ROCm 时只改这里）
+AMD_ROC_VERSION = "7.2.1"
+AMD_TORCH_VERSION = "2.9.1"
+AMD_TORCHVISION_VERSION = "0.24.1"
+AMD_ROC_WHEELS = [
+    f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/rocm_sdk_core-{AMD_ROC_VERSION}-py3-none-win_amd64.whl",
+    f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/rocm_sdk_devel-{AMD_ROC_VERSION}-py3-none-win_amd64.whl",
+    f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/rocm_sdk_libraries_custom-{AMD_ROC_VERSION}-py3-none-win_amd64.whl",
+    f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/rocm-{AMD_ROC_VERSION}.tar.gz",
+]
+AMD_TRAIN_DEPS = "transformers diffusers accelerate safetensors omegaconf numpy pillow av opencv-python einops sentencepiece"
+
+
+def venv_python_version(venv_dir):
+    """读取 venv 的 Python 版本，返回 '3.12' 或 None。"""
+    try:
+        py = os.path.join(venv_dir, "Scripts", "python.exe")
+        if not os.path.isfile(py):
+            return None
+        r = subprocess.run([py, "-c", "import sys;print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                           capture_output=True, text=True, timeout=60)
+        return (r.stdout or "").strip() or None
+    except Exception:
+        return None
+
+
+def _amd_torch_wheels(venv_dir):
+    """按训练环境 Python 版本生成 AMD 版 PyTorch wheel URL（cp311/cp312）。"""
+    ver = venv_python_version(venv_dir) or "3.12"
+    cp = "cp311" if ver.startswith("3.11") else "cp312"
+    return [
+        f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/torch-{AMD_TORCH_VERSION}%2Brocm{AMD_ROC_VERSION}-{cp}-{cp}-win_amd64.whl",
+        f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/torchaudio-{AMD_TORCH_VERSION}%2Brocm{AMD_ROC_VERSION}-{cp}-{cp}-win_amd64.whl",
+        f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/torchvision-{AMD_TORCHVISION_VERSION}%2Brocm{AMD_ROC_VERSION}-{cp}-{cp}-win_amd64.whl",
+    ]
+
+
+def run_pip_in_venv(venv_dir, args, logf=print):
+    """在训练环境（venv）里运行 pip install。返回退出码；可被停止按钮中断。"""
+    py = os.path.join(venv_dir, "Scripts", "python.exe")
+    if not os.path.isfile(py):
+        raise RuntimeError(f"训练环境无效，找不到 {py}，请先创建训练环境。")
+    cmd = [py, "-m", "pip", "install", "--no-cache-dir"] + args
+    env = build_env()
+    env.setdefault("PIP_NO_INPUT", "1")
+    return run_stream(cmd, env=env, logf=logf)
+
+
+def install_amd_rocm(venv_dir, logf=print):
+    """自动安装 AMD ROCm 运行库（阶段 1/3，约 1~2GB，视网速 10~60 分钟）。"""
+    logf("[AMD] 阶段 1/3：安装 AMD ROCm 运行库（文件较大，请耐心等待，可随时点停止）…")
+    rc = run_pip_in_venv(venv_dir, AMD_ROC_WHEELS, logf)
+    if rc != 0:
+        raise RuntimeError(f"ROCm 运行库安装失败（退出码 {rc}），请向上查看日志。")
+    logf("[OK] AMD ROCm 运行库安装完成")
+    return True
+
+
+def install_amd_torch(venv_dir, logf=print):
+    """自动安装 AMD 版 PyTorch（阶段 2/3，约 2~3GB）。"""
+    logf("[AMD] 阶段 2/3：安装 AMD 版 PyTorch（文件较大，请耐心等待）…")
+    rc = run_pip_in_venv(venv_dir, _amd_torch_wheels(venv_dir), logf)
+    if rc != 0:
+        raise RuntimeError(f"AMD 版 PyTorch 安装失败（退出码 {rc}），请向上查看日志。")
+    logf("[OK] AMD 版 PyTorch 安装完成")
+    return True
+
+
+def install_amd_deps(venv_dir, logf=print):
+    """自动安装训练依赖（阶段 3/3）。"""
+    logf("[AMD] 阶段 3/3：安装训练依赖（transformers/diffusers 等）…")
+    rc = run_pip_in_venv(venv_dir, AMD_TRAIN_DEPS.split(), logf)
+    if rc != 0:
+        raise RuntimeError(f"训练依赖安装失败（退出码 {rc}），请向上查看日志。")
+    logf("[OK] 训练依赖安装完成")
+    return True
+
+
+def verify_amd_torch(venv_dir):
+    """验证训练环境里的 torch 是否可用。返回 (ok, torch_ver, cuda_avail)。"""
+    try:
+        py = os.path.join(venv_dir, "Scripts", "python.exe")
+        if not os.path.isfile(py):
+            return False, "?", False
+        r = subprocess.run(
+            [py, "-c", "import torch;print(torch.__version__);print(torch.cuda.is_available())"],
+            capture_output=True, text=True, timeout=300)
+        lines = (r.stdout or "").strip().splitlines()
+        ver = lines[0] if lines else "?"
+        avail = "True" in "\n".join(lines)
+        return r.returncode == 0 and avail, ver, avail
+    except Exception:
+        return False, "?", False
+
+
+def create_python_venv(py_ver, target, logf=print):
+    """用指定 Python 版本创建虚拟环境（py -<ver> -m venv <target>）。返回 (ok, msg)。"""
+    try:
+        if os.path.isfile(os.path.join(target, "Scripts", "python.exe")):
+            return True, "环境已存在，跳过创建"
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        r = subprocess.run(["py", "-" + py_ver, "-m", "venv", target],
+                           capture_output=True, text=True, timeout=600)
+        if r.returncode == 0 and os.path.isfile(os.path.join(target, "Scripts", "python.exe")):
+            logf(f"[AMD] 训练环境创建成功：{target}")
+            return True, "创建成功"
+        return False, (r.stderr or r.stdout or "未知错误").strip()[-400:]
+    except Exception as e:
+        return False, str(e)
+
+
+def amd_env_status(vpy=None):
+    """AMD 兼容模式环境状态。返回 (ok, backend, detail)。"""
+    if not vpy or not os.path.isfile(vpy):
+        return False, None, "未找到 kohya 训练环境（请先完成【一键安装】）。"
+    bk = detect_torch_backend(vpy)
+    if bk == "rocm":
+        return True, bk, "检测到 ROCm 版 PyTorch，可直接训练（实验性）。"
+    if bk == "zluda":
+        return True, bk, "检测到 ZLUDA 生效（CUDA 版 PyTorch 运行在 AMD 卡上），可直接训练（实验性，更不稳定）。"
+    if bk == "cuda":
+        return False, bk, "当前 torch 是 NVIDIA CUDA 版，AMD 卡上无法使用，需要安装 ROCm 版 PyTorch 或 ZLUDA。"
+    if bk == "cpu":
+        return False, bk, "torch 可用但只有 CPU 后端，请安装 ROCm 版 PyTorch 或 ZLUDA。"
+    return False, None, "无法读取训练环境 torch 状态。"
 
 
 def decide_gradient_checkpointing(gc_choice, vram_gb):
@@ -793,15 +1399,254 @@ def split_triggers(s):
     return [t.strip() for t in (s or "").split(",") if t.strip()]
 
 
-def count_images(folder):
+def _sync_trigger_to_labels(train_dir, trigger, logf=print):
+    """训练前把当前 trigger 同步到数据集所有 txt 第一行（人物模式）。
+
+    背景：用户可能在预处理后修改了 trigger，但标签 txt 不会自动跟着变，
+    导致 LoRA 没学到当前 trigger，生图时"召唤不出来"。
+
+    关键点：kohya 用 keep_tokens 保护的是「标签第一行开头的 token」，
+    所以必须保证 trigger 出现在第一行最前面。不能按"整行里出现过该词"判断
+    （例如角色本名 "Yanami Anna" 里含 YANAMI，但 YANAMI 不在开头=没被保护）。
+    这里只认「第一行以 trigger 开头」，否则把 trigger 插到最前。
+    返回本次实际插入（修改）的 txt 数量。
+    """
+    trigger = (trigger or "").strip()
+    if not trigger:
+        return 0
+    if not os.path.isdir(train_dir):
+        return 0
+    n = 0
+    for root, _dirs, files in os.walk(train_dir):
+        for fn in files:
+            if not fn.lower().endswith(".txt"):
+                continue
+            fp = os.path.join(root, fn)
+            try:
+                with open(fp, "r", encoding="utf-8-sig") as f:
+                    cur = f.read()
+            except Exception:
+                continue
+            text = cur.strip("\ufeff").strip("\r\n").strip()
+            if not text:
+                continue
+            first = text.splitlines()[0].strip()
+            # 已以 trigger 开头（如 "YANAMI, 1girl" 或 "YANAMI"）-> 跳过
+            if re.match(re.escape(trigger) + r"(\s*[,，]|\s*$)", first, re.IGNORECASE):
+                continue
+            # 否则插入到最前：trigger, 原内容
+            new = trigger + ", " + text
+            try:
+                with open(fp, "w", encoding="utf-8") as f:
+                    f.write(new)
+                n += 1
+            except Exception:
+                pass
+    return n
+
+
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff")
+
+
+def count_images_in(folder):
+    """统计 folder 根目录下的图片数量（不递归子目录）。"""
     if not os.path.isdir(folder):
         return 0
     return sum(1 for f in os.listdir(folder)
-               if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")))
+               if f.lower().endswith(IMAGE_EXTS))
+
+
+def count_images(folder):
+    """递归统计数据集目录下的图片总数（支持 repeats_名称 子目录结构）。"""
+    if not os.path.isdir(folder):
+        return 0
+    n = 0
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        n += sum(1 for f in files if f.lower().endswith(IMAGE_EXTS))
+    return n
+
+
+def scan_dataset_subsets(train_dir, fallback_repeats=1):
+    """扫描数据集目录，支持秋叶式「repeats_概念名」子目录结构。
+
+    返回 [(image_dir, num_repeats, img_count), ...]：
+    - 直接放在根目录的图片：一组，repeats=fallback_repeats（对应高级面板的 repeats）
+    - 名为 <N>_<名称> 的子目录：各自一组，repeats=N（每个子目录独立重复次数）
+    训练时按这些子集生成 kohya dataset_config，并据此计算总步数。
+    """
+    subs = []
+    flat = count_images_in(train_dir)
+    if flat > 0:
+        subs.append((train_dir, max(1, int(fallback_repeats)), flat))
+    if os.path.isdir(train_dir):
+        for name in sorted(os.listdir(train_dir)):
+            p = os.path.join(train_dir, name)
+            if not os.path.isdir(p) or name.startswith("."):
+                continue
+            m = re.match(r"^(\d+)[_\-](.+)", name)
+            n = int(m.group(1)) if m else None
+            cnt = count_images_in(p)
+            if cnt > 0:
+                subs.append((p, n if n and n > 0 else max(1, int(fallback_repeats)), cnt))
+    return subs
+
+
+def dataset_per_epoch_steps(train_dir, fallback_repeats=1, batch_size=1):
+    """计算每 epoch 的训练步数（含 repeats 与 batch），并返回子集列表。"""
+    subs = scan_dataset_subsets(train_dir, fallback_repeats)
+    weighted = sum(n * c for _, n, c in subs)
+    return weighted // max(1, batch_size), subs
+
+
+# ============================================================
+# 标签编辑器辅助函数（浏览 / 批量修改 / 置顶 / 统计 / 整理数据集）
+# 供 kohya_gui.py 的「标签编辑器」窗口调用，也便于命令行/脚本复用。
+# ============================================================
+
+def list_dataset_images(train_dir):
+    """递归列出数据集内全部图片及其同名 txt 标签。
+
+    返回 [{rel, img, txt, caption}]，按路径排序；rel 为空串表示根目录。
+    """
+    out = []
+    if not os.path.isdir(train_dir):
+        return out
+    for root, dirs, files in os.walk(train_dir):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for f in sorted(files):
+            if not f.lower().endswith(IMAGE_EXTS):
+                continue
+            img = os.path.join(root, f)
+            stem = os.path.splitext(f)[0]
+            txt = os.path.join(root, stem + ".txt")
+            cap = ""
+            if os.path.isfile(txt):
+                try:
+                    with open(txt, "r", encoding="utf-8-sig") as fh:
+                        cap = fh.read()
+                except Exception:
+                    cap = ""
+            out.append({
+                "rel": os.path.relpath(root, train_dir),
+                "img": img,
+                "txt": txt,
+                "caption": cap,
+            })
+    return out
+
+
+def save_caption(txt_path, text):
+    """保存单张图片的标签（UTF-8，自动去掉首尾空白，保留换行）。"""
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write((text or "").strip() + "\n")
+
+
+def _split_tags(caption):
+    """把逗号分隔的标签拆成去空白列表（兼容中英文逗号）。"""
+    return [p.strip() for p in re.split(r"[,，]", caption or "") if p.strip()]
+
+
+def batch_remove_tags(train_dir, tags, logf=print):
+    """从全部标签中删除指定标签（支持逗号分隔多个；精确匹配、忽略大小写）。
+
+    返回 (处理文件数, 删除标签个数)。
+    """
+    tag_list = [t.strip() for t in re.split(r"[,，]", tags or "") if t.strip()]
+    if not tag_list:
+        return 0, 0
+    low_tags = {t.lower() for t in tag_list}
+    files, removed = 0, 0
+    for item in list_dataset_images(train_dir):
+        txt = item["txt"]
+        if not os.path.isfile(txt):
+            continue
+        parts = _split_tags(item["caption"])
+        kept = [p for p in parts if p.lower() not in low_tags]
+        if len(kept) != len(parts):
+            try:
+                save_caption(txt, ", ".join(kept))
+                files += 1
+                removed += len(parts) - len(kept)
+            except Exception as e:
+                logf(f"[标签] 写入失败 {txt}: {e}")
+    return files, removed
+
+
+def batch_replace_tags(train_dir, find, replace, logf=print):
+    """把全部标签中「精确等于 find」的标签替换为 replace（不替换子串，避免误伤）。
+
+    返回处理文件数。
+    """
+    find = (find or "").strip()
+    if not find:
+        return 0
+    replace = (replace or "").strip()
+    files = 0
+    for item in list_dataset_images(train_dir):
+        txt = item["txt"]
+        if not os.path.isfile(txt):
+            continue
+        parts = _split_tags(item["caption"])
+        new_parts = [replace if p == find else p for p in parts]
+        if new_parts != parts:
+            try:
+                save_caption(txt, ", ".join(new_parts))
+                files += 1
+            except Exception as e:
+                logf(f"[标签] 写入失败 {txt}: {e}")
+    return files
+
+
+def pin_trigger_to_labels(train_dir, trigger, logf=print):
+    """把 trigger 插到数据集所有标签第一行（已以 trigger 开头则跳过）。
+
+    返回实际修改的 txt 数量。trigger 为空返回 0。
+    """
+    return _sync_trigger_to_labels(train_dir, trigger, logf)
+
+
+def tag_frequency(train_dir, top_n=200):
+    """统计全部标签出现频率，返回 [(标签, 次数)] 按次数倒序。"""
+    from collections import Counter
+    cnt = Counter()
+    for item in list_dataset_images(train_dir):
+        for p in _split_tags(item["caption"]):
+            cnt[p] += 1
+    return cnt.most_common(top_n)
+
+
+def organize_dataset_repeats(train_dir, repeats, name):
+    """把数据集根目录平铺的图片+标签整理成 <repeats>_<名称> 子目录（秋叶式结构）。
+
+    只移动根目录直接放置的文件（图片/同名 txt/npz 缓存）；已存在的子目录不动。
+    返回 (移动文件数, 目标目录)。
+    """
+    name = re.sub(r'[\\/:*?"<>|\r\n]', "_", (name or "dataset").strip()) or "dataset"
+    repeats = max(1, int(repeats or 1))
+    target = os.path.join(train_dir, f"{repeats}_{name}")
+    os.makedirs(target, exist_ok=True)
+    moved = 0
+    for f in list(os.listdir(train_dir)):
+        fp = os.path.join(train_dir, f)
+        if not os.path.isfile(fp):
+            continue
+        low = f.lower()
+        if low.endswith(IMAGE_EXTS) or low.endswith(".txt") or low.endswith(".npz"):
+            try:
+                shutil.move(fp, os.path.join(target, f))
+                moved += 1
+            except Exception:
+                pass
+    return moved, target
 
 
 def find_latest_state(output_dir, output_name):
-    """在输出目录找最新的 kohya 训练状态目录（断点续训用）。"""
+    """在输出目录找最新的 kohya 训练状态目录（断点续训用）。
+
+    只找带 step 的目录（如 character_lora-step00000200-state），这些才是中断点；
+    纯 '<name>-state' 是训练正常完成时 kohya 保存的最终状态，不代表中断，
+    不用于续训提示（否则每次跑完都会误问要不要续训）。"""
     if not os.path.isdir(output_dir):
         return None
     cands = []
@@ -811,11 +1656,17 @@ def find_latest_state(output_dir, output_name):
             continue
         for f in os.listdir(d):
             p = os.path.join(d, f)
-            if os.path.isdir(p) and f.startswith(output_name) and ("-state" in f):
+            if not os.path.isdir(p) or not f.startswith(output_name):
+                continue
+            if "-step" in f and f.endswith("-state"):
                 cands.append(p)
     if not cands:
         return None
-    return max(cands, key=lambda p: os.path.getmtime(p))
+    # 按 step 号取最大（比 mtime 可靠）
+    def _step_no(p):
+        m = re.search(r"-step(\d+)-state", os.path.basename(p))
+        return int(m.group(1)) if m else -1
+    return max(cands, key=_step_no)
 
 
 def auto_training_setup(vram_gb, base_type):
@@ -840,6 +1691,7 @@ def auto_training_setup(vram_gb, base_type):
 def make_global_caption_dataset(train_dir, mode, global_pos):
     """生成带全局正向提示词的临时数据集（硬链接图片 + 新 caption），不修改原 txt。
 
+    支持 repeats_名称 子目录结构：子目录会原样复制（硬链接），repeats 语义保持不变。
     返回临时目录；global_pos 为空返回 None（直接用原数据集）。
     """
     global_pos = (global_pos or "").strip()
@@ -849,49 +1701,58 @@ def make_global_caption_dataset(train_dir, mode, global_pos):
     if os.path.isdir(tmp):
         shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(tmp, exist_ok=True)
-    exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
     n = 0
-    for f in os.listdir(train_dir):
-        low = f.lower()
-        if not low.endswith(exts):
-            continue
-        stem = os.path.splitext(f)[0]
-        src_img = os.path.join(train_dir, f)
-        dst_img = os.path.join(tmp, f)
+    for root, dirs, files in os.walk(train_dir):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        rel = os.path.relpath(root, train_dir)
+        dst_dir = tmp if rel == "." else os.path.join(tmp, rel)
         try:
-            os.link(src_img, dst_img)  # 硬链接省空间
-        except OSError:
-            shutil.copy2(src_img, dst_img)
-        cap = ""
-        txt = os.path.join(train_dir, stem + ".txt")
-        if os.path.isfile(txt):
+            os.makedirs(dst_dir, exist_ok=True)
+        except Exception:
+            continue
+        for f in files:
+            if not f.lower().endswith(IMAGE_EXTS):
+                continue
+            stem = os.path.splitext(f)[0]
+            src_img = os.path.join(root, f)
+            dst_img = os.path.join(dst_dir, f)
             try:
-                with open(txt, "r", encoding="utf-8") as fh:
-                    cap = fh.read().strip()
-            except Exception:
-                cap = ""
-        with open(os.path.join(tmp, stem + ".txt"), "w", encoding="utf-8") as fh:
-            fh.write((global_pos + (", " + cap if cap else "")))
-        n += 1
+                os.link(src_img, dst_img)  # 硬链接省空间
+            except OSError:
+                shutil.copy2(src_img, dst_img)
+            cap = ""
+            txt = os.path.join(root, stem + ".txt")
+            if os.path.isfile(txt):
+                try:
+                    with open(txt, "r", encoding="utf-8") as fh:
+                        cap = fh.read().strip()
+                except Exception:
+                    cap = ""
+            with open(os.path.join(dst_dir, stem + ".txt"), "w", encoding="utf-8") as fh:
+                fh.write((global_pos + (", " + cap if cap else "")))
+            n += 1
     if n == 0:
         shutil.rmtree(tmp, ignore_errors=True)
         return None
     return tmp
 
 
-def cap_epochs_by_steps(images, repeats, batch, epochs, max_steps=MAX_AUTO_STEPS):
-    """按总步数自动约束 epoch，防止过拟合；返回 (epochs, total_steps)。"""
-    per_epoch = int(images * repeats / max(1, batch))
-    total = per_epoch * max(1, epochs)
+def cap_epochs_by_steps(per_epoch_steps, batch, epochs, max_steps=MAX_AUTO_STEPS):
+    """按总步数自动约束 epoch，防止过拟合；返回 (epochs, total_steps)。
+
+    per_epoch_steps：每个 epoch 的步数（已计入 repeats 与 batch_size）。
+    """
+    per_epoch_steps = max(1, int(per_epoch_steps))
+    total = per_epoch_steps * max(1, epochs)
     if total <= max_steps:
         return epochs, total
-    new_epochs = max(1, int(max_steps / max(1, per_epoch)))
-    return new_epochs, per_epoch * new_epochs
+    new_epochs = max(1, int(max_steps / per_epoch_steps))
+    return new_epochs, per_epoch_steps * new_epochs
 
 
-def write_params_report(mode, params, output_name, extra=None):
+def write_params_report(mode, params, output_name, extra=None, out_dir=None):
     """训练结束后生成完整参数报告 txt。"""
-    out_dir = data_sub("output")
+    out_dir = out_dir or data_sub("output")
     path = os.path.join(out_dir, output_name + "_参数报告.txt")
     base = params.get("base_type", "sd15")
     lines = [
@@ -926,9 +1787,9 @@ def write_params_report(mode, params, output_name, extra=None):
     return path
 
 
-def write_usage_template(mode, params, output_name):
+def write_usage_template(mode, params, output_name, out_dir=None):
     """训练完成后生成 txt 使用模板（画风=画风提示词；人物=带 trigger/全局提示词示例）。"""
-    out_dir = data_sub("output")
+    out_dir = out_dir or data_sub("output")
     path = os.path.join(out_dir, output_name + "_使用模板.txt")
     base = params.get("base_type", "sd15")
     reso = RESOLUTIONS.get(base, 512)
@@ -999,12 +1860,38 @@ def _ensure_tokenizer_cached(cache_dir, model_id, logf=print, kind="clip"):
         return False
 
 
-def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, resume_from=None):
+def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, resume_from=None, progress=None):
     params = params or {}
+    amd_mode = bool(params.get("amd_mode", False))
+    if progress is not None:
+        _orig_logf = logf
+        def logf(line):
+            try:
+                progress.on_line(str(line))
+            except Exception:
+                pass
+            _orig_logf(line)
+        try:
+            progress.start()
+        except Exception:
+            pass
     kdir = get_kohya_dir()
     vpy = venv_python(kdir)
     if not os.path.isfile(vpy):
         raise RuntimeError("Kohya 尚未安装，请先点击【一键安装】")
+    if amd_mode:
+        _env_dir = (params.get("train_env") or "").strip()
+        if _env_dir and os.path.isfile(os.path.join(_env_dir, "Scripts", "python.exe")):
+            vpy = os.path.join(_env_dir, "Scripts", "python.exe")
+            logf(f"[训练] AMD 兼容模式：使用自定义训练环境 {_env_dir}")
+        _bk = detect_torch_backend(vpy)
+        if _bk not in ("rocm", "zluda"):
+            raise RuntimeError(
+                "AMD 兼容模式（实验性）：未检测到可用的训练环境。\n\n"
+                "当前 torch 后端：%s\n\n"
+                "AMD 显卡需要先配置 ROCm 版 PyTorch 或 ZLUDA 才能训练。\n"
+                "请按「使用说明」的 AMD 章节配置环境，或在界面关闭 AMD 兼容模式。" % (_bk or "未知"))
+        logf("[训练] AMD 兼容模式（实验性）：torch 后端 = %s，参数已自动适配" % _bk)
     sds = os.path.join(kdir, "sd-scripts")
     base_type = params.get("base_type", "sd15")
     arch_info = ARCH_INFO.get(base_type, ARCH_INFO["sd15"])
@@ -1014,14 +1901,16 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         raise RuntimeError(f"sd-scripts 缺失 {script}（当前架构 {BASE_TYPE_LABELS.get(base_type, base_type)}），请重跑【一键安装】")
     if not base_model or not os.path.isfile(base_model):
         raise RuntimeError("请选择底模（.safetensors）")
-    accel = os.path.join(kdir, "venv", "Scripts", "accelerate.exe")
+    if amd_mode and (params.get("train_env") or "").strip():
+        accel = os.path.join((params.get("train_env") or "").strip(), "Scripts", "accelerate.exe")
+    else:
+        accel = os.path.join(kdir, "venv", "Scripts", "accelerate.exe")
     if not os.path.isfile(accel):
         raise RuntimeError("accelerate 缺失，请重跑【一键安装】")
 
     resolution = arch_info["resolution"]
-    train_dir = os.path.join(data_dir(), "dataset", "train" if mode == "style" else "train_character")
-    if not os.path.isdir(train_dir) or not any(
-            f.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp")) for f in os.listdir(train_dir)):
+    train_dir = dataset_train_dir(mode, params.get("project"))
+    if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】或【一键开始训练】")
     cfg_path = os.path.join(KIT_DIR, "configs", "dataset_config.toml")
     data_sub("output")
@@ -1043,14 +1932,38 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     keep_tokens = 0
     if mode == "character":
         keep_tokens = max(1, len(split_triggers(params.get("trigger"))))
+        # 训练前把当前 trigger 同步进标签：用户可能改过 trigger 但没重新预处理，
+        # 若标签第一行没有当前 trigger，LoRA 就学不到它，生图"召唤不出来"。
+        try:
+            _synced = _sync_trigger_to_labels(train_dir, params.get("trigger"), logf)
+            if _synced:
+                logf(f"[训练] 已把 trigger「{params.get('trigger')}」同步到 {_synced} 张标签第一行")
+        except Exception as _e:
+            logf(f"[训练] trigger 标签同步失败（忽略）: {_e}")
+    # 数据集子集：支持秋叶式 repeats_名称 子目录结构（每个子目录独立 repeats）
+    try:
+        subsets = scan_dataset_subsets(dataset_dir, int(params.get("repeats", 5)))
+    except Exception:
+        subsets = [(dataset_dir, max(1, int(params.get("repeats", 5))), count_images(dataset_dir))]
+    reg_subsets = None
+    if mode == "character" and params.get("reg_dir"):
+        try:
+            reg_subsets = scan_dataset_subsets(params["reg_dir"], 1)
+        except Exception:
+            reg_subsets = None
     import preprocess as _pp
     _pp.write_dataset_config(
         dataset_dir, cfg_path, resolution=resolution,
         num_repeats=params.get("repeats", 5),
+        subsets=subsets,
         reg_dir=(params.get("reg_dir") if mode == "character" else None),
+        reg_subsets=reg_subsets,
         keep_tokens=keep_tokens,
     )
-    logf(f"[训练] 数据集: {dataset_dir}（{resolution}px, repeats={params.get('repeats', 5)}）")
+    logf(f"[训练] 数据集: {dataset_dir}（{resolution}px）")
+    for _d, _n, _c in subsets:
+        _tag = os.path.basename(os.path.normpath(_d))
+        logf(f"[训练]   · {_tag}：{_c} 张 × {_n} repeats")
     if mode == "character" and params.get("reg_dir"):
         logf(f"[训练] 正则数据集: {params.get('reg_dir')}")
 
@@ -1063,18 +1976,40 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     gc_on = decide_gradient_checkpointing(params.get("gc", "自动"), vram_gb)
     batch_size = int(params.get("batch_size", 1))
     use_xformers = bool(params.get("use_xformers", False))
+    optimizer_type = "AdamW8bit"
+    if amd_mode:
+        use_xformers = False          # AMD 无 xformers，强制 sdpa
+        optimizer_type = "AdamW"      # AMD 下 bitsandbytes(AdamW8bit) 不可用，改用纯 PyTorch 优化器
     output_name = OUTPUT_NAMES.get(mode, "anime_style_lora")
+    # 项目分组输出：output/<项目名>/（没开项目则直接 output/）
+    _proj = (params.get("project") or "").strip()
+    if _proj:
+        out_dir = data_sub("output", _proj)
+    else:
+        out_dir = data_sub("output")
     mixed = arch_info["mixed"]
+    if amd_mode:
+        mixed = "bf16"                # AMD RDNA3 原生支持 bf16，统一用 bf16 更稳
     save_precision = arch_info["save_precision"]
     min_bucket, max_bucket = arch_info["min_bucket"], arch_info["max_bucket"]
     network_module = arch_info["network_module"]
 
-    # 自动约束 epoch（防过拟合）
-    img_count = count_images(train_dir)
-    epochs_eff, total_steps = cap_epochs_by_steps(img_count, params.get("repeats", 5), batch_size, epochs)
+    # 自动约束 epoch（防过拟合）：总步数按 repeats_名称 子目录加权计算
+    per_epoch_steps = sum(n * c for _, n, c in subsets) // max(1, batch_size)
+    epochs_eff, total_steps = cap_epochs_by_steps(per_epoch_steps, batch_size, epochs)
     if epochs_eff != epochs:
         logf(f"[训练] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {epochs_eff}（总步数约 {total_steps}）")
         epochs = epochs_eff
+    if progress is not None:
+        try:
+            progress.set_total(total_steps)
+        except Exception:
+            pass
+        # kohya 的 tqdm 日志不输出 lr，训练启动时把配置的学习率预填进监控面板
+        try:
+            progress.set_lr(unet_lr)
+        except Exception:
+            pass
 
     # 保存节奏：约每 1/10 步保存一次（至少 100 步），用于中间快照与断点续训
     save_every = 200
@@ -1084,7 +2019,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         f"--pretrained_model_name_or_path={base_model}",
         f"--dataset_config={cfg_path}",
         f"--tokenizer_cache_dir={data_sub('tokenizers')}",
-        f"--output_dir={data_sub('output')}",
+        f"--output_dir={out_dir}",
         f"--output_name={output_name}",
         f"--logging_dir={data_sub('logs')}",
         "--save_model_as=safetensors", f"--save_precision={save_precision}",
@@ -1118,9 +2053,12 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         cmd += [f"--qwen3={qwen3}", f"--vae={vae}",
                 "--qwen_image_vae_2d", "--vae_chunk_size=64"]
     cmd += [
-        "--optimizer_type=AdamW8bit", "--lr_scheduler=cosine", "--lr_warmup_steps=120",
+        f"--optimizer_type={optimizer_type}", "--lr_scheduler=cosine", "--lr_warmup_steps=120",
         f"--max_train_epochs={epochs}",
-        f"--train_batch_size={batch_size}", "--max_data_loader_n_workers=1",
+        f"--train_batch_size={batch_size}",
+        # 0 = 数据加载在主进程内完成：Windows 下 n_workers>0 会用 multiprocessing 额外开子进程，
+        # 每次加载数据都弹黑色 cmd 窗口并抢资源；设 0 彻底不弹窗，训练速度几乎不受影响。
+        "--max_data_loader_n_workers=0",
         "--seed=1234", f"--mixed_precision={mixed}", "--cache_latents", "--cache_latents_to_disk",
         "--enable_bucket", "--bucket_no_upscale",
         f"--min_bucket_reso={min_bucket}", f"--max_bucket_reso={max_bucket}",
@@ -1159,6 +2097,8 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         logf(f"[训练] 附加全局正向提示词: {params.get('global_pos')}")
     if params.get("global_neg"):
         logf("[训练] 附加全局负向提示词: 仅记录进报告/模板（kohya 训练不使用负向提示词）。")
+    if amd_mode:
+        logf("[训练] AMD 兼容模式：sdpa + bf16 + AdamW 优化器（实验性，不承诺稳定）")
 
     env = build_env([os.path.join(kdir, "venv", "Lib", "site-packages", "torch", "lib")])
     _px = system_proxy()
@@ -1167,10 +2107,22 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         env.setdefault("HTTPS_PROXY", _px)
     # 国内镜像：transformers/huggingface_hub 走 hf-mirror，避免直连 huggingface.co 超时
     env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    if amd_mode:
+        _gname = (detect_gpu_name() or "")
+        if re.search(r"RX\s*6\d{3}", _gname, re.I):   # RX 6000 系（RDNA2）需 GFX 版本覆盖
+            env.setdefault("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
+            logf("[训练] AMD 兼容模式：RX 6000 系已设置 HSA_OVERRIDE_GFX_VERSION=10.3.0")
+        env.setdefault("DISABLE_ADDMM_CUDA_LT", "1")  # ZLUDA/ROCm 兼容
+        env.setdefault("MIOPEN_FIND_MODE", "2")       # ROCm 卷积搜索加速
     try:
         rc = run_stream(cmd, cwd=sds, env=env, logf=logf)
     except StopRequested:
         # 手动停止：清理全局提示词临时数据集后原样抛出，由界面层友好提示
+        if progress is not None:
+            try:
+                progress.finish()
+            except Exception:
+                pass
         if global_dataset:
             try:
                 shutil.rmtree(global_dataset, ignore_errors=True)
@@ -1178,12 +2130,21 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
                 pass
         raise
     if rc != 0:
+        if progress is not None:
+            try:
+                progress.finish()
+            except Exception:
+                pass
         raise RuntimeError(f"训练结束，退出码 {rc}，请查看上方日志（可用断点续训继续）")
-    model_path = os.path.join(data_sub("output"), output_name + ".safetensors")
+    if progress is not None:
+        try:
+            progress.finish()
+        except Exception:
+            pass
+    model_path = os.path.join(out_dir, output_name + ".safetensors")
     logf(f"[训练] 完成！模型: {model_path}")
     # 把中间快照（step-* 模型 + 续训状态目录）归拢到 output\snapshots\，根目录只留成品
     try:
-        out_dir = data_sub("output")
         snap_dir = os.path.join(out_dir, "snapshots")
         os.makedirs(snap_dir, exist_ok=True)
         moved = 0
@@ -1199,13 +2160,14 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     except Exception as e:
         logf(f"[导出] 整理中间快照失败（忽略）: {e}")
     try:
-        tpl = write_usage_template(mode, params, output_name)
+        tpl = write_usage_template(mode, params, output_name, out_dir=out_dir)
         logf(f"[导出] 已生成使用模板: {tpl}")
     except Exception as e:
         logf(f"[导出] 生成使用模板失败: {e}")
     try:
         rep = write_params_report(mode, params, output_name,
-                                  extra=[f"总步数约 {total_steps}", f"保存间隔 {save_every} 步"])
+                                  extra=[f"总步数约 {total_steps}", f"保存间隔 {save_every} 步"],
+                                  out_dir=out_dir)
         logf(f"[导出] 已生成参数报告: {rep}")
     except Exception as e:
         logf(f"[导出] 生成参数报告失败: {e}")
@@ -1238,27 +2200,32 @@ def system_proxy():
     return None
 
 
-def system_status():
+# system_status 结果缓存：环境/显卡检测要跑多个子进程（git/python/nvidia-smi/WMI），
+# 页面切换（主页<->项目）高频调用时缓存 30 秒，避免每次卡 5~10 秒。
+_SYSTEM_STATUS_CACHE = {"t": 0.0, "data": None}
+SYSTEM_STATUS_TTL = 30.0
+
+
+def system_status(force=False):
+    _now = time.time()
+    if (not force) and _SYSTEM_STATUS_CACHE["data"] is not None             and (_now - _SYSTEM_STATUS_CACHE["t"]) < SYSTEM_STATUS_TTL:
+        return _SYSTEM_STATUS_CACHE["data"]
     git = find_git()
     py, ver = find_python()
     kdir = get_kohya_dir()
     vpy = venv_python(kdir)
     kohya_ok = os.path.isfile(vpy) and os.path.isdir(os.path.join(kdir, "sd-scripts"))
-    gpu = "?"
-    try:
-        r = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                           capture_output=True, text=True, timeout=20)
-        if r.returncode == 0:
-            gpu = r.stdout.strip().splitlines()[0].strip()
-    except Exception:
-        pass
-    return {
+    gpu = detect_gpu_name() or "?"
+    data = {
         "git": git or None,
         "python": f"{ver}" if ver else None,
         "kohya_ok": kohya_ok,
         "kohya_dir": kdir if kohya_ok else None,
         "gpu": gpu,
     }
+    _SYSTEM_STATUS_CACHE["t"] = _now
+    _SYSTEM_STATUS_CACHE["data"] = data
+    return data
 
 
 # ---------- 桌面 UI ----------
@@ -1409,6 +2376,181 @@ def data_sub(*parts):
     except Exception:
         pass
     return d
+
+
+def _sanitize_dirname(name):
+    """把项目名清洗成可用的文件夹名（兼容中文，去掉路径非法字符）。"""
+    return re.sub(r'[\\/:*?"<>|\r\n]', "_", (name or "").strip()).strip(" .")
+
+
+def dataset_train_dir(mode="style", project=None):
+    """当前模式对应的训练数据集目录（人物=train_character，画风=train）。
+
+    - project 为空：旧版共享目录 dataset/train_character（兼容历史数据）；
+    - project 非空：项目独立目录 dataset/<项目名>/train_character，
+      每个项目的数据互不混用（标签编辑器/预处理/训练都按项目隔离）。
+    """
+    proj = _sanitize_dirname(project)
+    sub = "train" if mode == "style" else "train_character"
+    if proj:
+        return os.path.join(data_dir(), "dataset", proj, sub)
+    return os.path.join(data_dir(), "dataset", sub)
+
+
+def migrate_legacy_dataset(project, mode):
+    """把旧版共享数据集迁移到当前项目独立目录（一次性，仅当项目目录为空且共享目录有图时）。
+
+    返回 (目标目录, 是否发生了迁移)。
+    """
+    proj = _sanitize_dirname(project)
+    if not proj:
+        return dataset_train_dir(mode), False
+    target = dataset_train_dir(mode, project)
+    legacy = dataset_train_dir(mode)          # 旧版共享目录
+    if os.path.abspath(target) == os.path.abspath(legacy):
+        return target, False
+    if count_images(target) > 0:              # 项目已有自己的数据，不动
+        return target, False
+    if count_images(legacy) == 0:             # 共享目录没有数据，无需迁移
+        return target, False
+    os.makedirs(target, exist_ok=True)
+    n = 0
+    for name in sorted(os.listdir(legacy)):
+        if name.startswith("."):
+            continue
+        fp = os.path.join(legacy, name)
+        try:
+            if os.path.isdir(fp):
+                shutil.move(fp, os.path.join(target, name)); n += 1
+            elif name.lower().endswith(IMAGE_EXTS) or name.lower().endswith(".txt") or name.lower().endswith(".npz"):
+                shutil.move(fp, os.path.join(target, name)); n += 1
+        except Exception:
+            pass
+    return target, n > 0
+
+
+# ============================================================
+# 项目化管理：每个项目保存 模式/底模/数据集/trigger/全部参数/全局提示词
+# 项目文件存 %APPDATA%\KohyaLoraTool\projects\<项目名>.json
+# ============================================================
+
+def projects_dir():
+    """项目保存目录（数据目录下，随软件重装保留）。"""
+    return data_sub("projects")
+
+
+def _project_path(name):
+    return os.path.join(projects_dir(), (name or "").strip() + ".json")
+
+
+def list_projects():
+    """列出所有项目，按修改时间倒序。返回 [{name, updated, mode, base_type, raw_dir, base_model}]。"""
+    d = projects_dir()
+    out = []
+    try:
+        for fn in os.listdir(d):
+            if not fn.lower().endswith(".json"):
+                continue
+            fp = os.path.join(d, fn)
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+            out.append({
+                "name": data.get("name") or os.path.splitext(fn)[0],
+                "updated": data.get("updated", ""),
+                "mode": data.get("mode", "style"),
+                "base_type": data.get("base_type", "sd15"),
+                "raw_dir": data.get("raw_dir", ""),
+                "base_model": data.get("base_model", ""),
+            })
+    except Exception:
+        pass
+    out.sort(key=lambda x: x.get("updated", ""), reverse=True)
+    return out
+
+
+def load_project(name):
+    """读取项目。返回 dict 或 None。"""
+    fp = _project_path(name)
+    if not os.path.isfile(fp):
+        return None
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def save_project(name, data):
+    """保存项目（自动写 updated 时间）。返回是否成功。"""
+    name = (name or "").strip()
+    if not name:
+        return False
+    import datetime
+    data = dict(data or {})
+    data["name"] = name
+    data["updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if not data.get("created"):
+        data["created"] = data["updated"]
+    try:
+        os.makedirs(projects_dir(), exist_ok=True)
+        with open(_project_path(name), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def delete_project(name):
+    """删除项目文件。"""
+    fp = _project_path(name)
+    try:
+        if os.path.isfile(fp):
+            os.remove(fp)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def default_project_name():
+    """生成默认项目名：项目_MMDD_HHMM。"""
+    import datetime
+    return "项目_" + datetime.datetime.now().strftime("%m%d_%H%M")
+
+
+# 新建项目时的预设模板（填入模式 + 参数；底模/数据集用户自己选）
+PROJECT_TEMPLATES = {
+    "动漫画风": {
+        "mode": "style",
+        "base_type": "sdxl",
+        "note": "适合动漫/插画风格 LoRA：默认 SDXL 分辨率 1024，rank 16，低学习率防过拟合。",
+        "params": {"rank": "16", "alpha": "8", "unet_lr": "1.5e-4", "te_lr": "7.5e-5",
+                   "repeats": "5", "max_epochs": "8"},
+    },
+    "写实人物": {
+        "mode": "character",
+        "base_type": "sdxl",
+        "note": "适合真人/角色 LoRA：默认 SDXL 分辨率 1024，rank 32，配 trigger 触发词效果更好。",
+        "params": {"rank": "32", "alpha": "16", "unet_lr": "7e-5", "te_lr": "4e-5",
+                   "repeats": "3", "max_epochs": "6"},
+    },
+    "SD1.5 动漫": {
+        "mode": "style",
+        "base_type": "sd15",
+        "note": "轻量底模（512 分辨率），显存要求低，适合老显卡快速出效果。",
+        "params": {"rank": "12", "alpha": "6", "unet_lr": "3e-4", "te_lr": "1.5e-4",
+                   "repeats": "5", "max_epochs": "8"},
+    },
+    "自定义": {
+        "mode": "character",
+        "base_type": "sdxl",
+        "note": "全部参数自己调，程序按当前模式+底模填默认值。",
+        "params": {},
+    },
+}
 
 
 def scan_base_models():
