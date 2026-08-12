@@ -10,7 +10,20 @@
 
 # 更新日志（Changelog）
 
+# 更新日志（Changelog）
+
+## v0.5.6（2026-08-12）
+
+### 修复
+- **AMD 训练依赖自愈扩展**：toml/voluptuous 补上后，venv_amd 还缺 `imagesize`（sd-scripts dataset.py
+  模块加载必需）→ 自愈检查扩到 sd-scripts 核心依赖（imagesize/rich/ftfy/einops/opencv/sentencepiece 等），
+  补装时安装全量训练依赖（含 lion-pytorch/schedulefree/prodigy 系可选优化器）
+- 检查用 find_spec 秒级，健康机器不触发安装
+
+---
+
 ## v0.5.5（2026-08-12）
+
 
 ### 修复
 - **训练环境运行时依赖自愈**：训练前检查 kohya venv / AMD venv 是否具备完整依赖
