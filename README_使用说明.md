@@ -26,6 +26,7 @@
 | `installers/` | 内置离线安装包（Git、Python、kohya_ss + sd-scripts 源码），无需代理 |
 | `configs/` | 训练配置模板（运行时自动生成实际配置） |
 | `models/base/` | **把你的底模放这里**（程序自动扫描识别） |
+| `wd14_tagger_model/` | **内置 WD14 打标模型**（人物模式自动打标，开箱即用、自动走 GPU） |
 | `LICENSE` / `THIRD_PARTY_NOTICES.md` | MIT 许可 + 第三方开源声明 |
 
 > 运行数据（dataset / output / logs / tokenizers）自动写入 `%APPDATA%\KohyaLoraTool\`，程序目录只保留只读资源（models/base、configs）。
