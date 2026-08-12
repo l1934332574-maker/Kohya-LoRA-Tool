@@ -4,7 +4,7 @@
 ; 默认安装到用户文档目录 {userdocs}\KohyaLoraTool，避开 Program Files 权限问题
 ; ============================================================
 #define MyAppName "KohyaLoraTool"
-#define MyAppVersion "0.5.6"
+#define MyAppVersion "0.5.7"
 #define MyAppExeName "Kohya一键工具.exe"
 #define MyAppDir "..\dist\Kohya一键工具"
 

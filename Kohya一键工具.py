@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.5.6"
+APP_VERSION = "0.5.7"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -145,33 +145,33 @@ BASE_TYPE_HINTS = {k: v["hint"] for k, v in ARCH_INFO.items()}
 PRESETS = {
     "style": {
         "sd15": {"rank": "12", "alpha": "6", "unet_lr": "3e-4", "te_lr": "1.5e-4",
-                 "repeats": "5", "max_epochs": "8"},
+                 "repeats": "5", "max_epochs": "8", "resolution": "512"},
         "sdxl": {"rank": "16", "alpha": "8", "unet_lr": "1.5e-4", "te_lr": "7.5e-5",
-                 "repeats": "5", "max_epochs": "8"},
+                 "repeats": "5", "max_epochs": "8", "resolution": "1024"},
         "flux": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "5", "max_epochs": "8"},
+                 "repeats": "5", "max_epochs": "8", "resolution": "1024"},
         "anima": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
-                  "repeats": "5", "max_epochs": "8"},
+                  "repeats": "5", "max_epochs": "8", "resolution": "1024"},
     },
     "character": {
         "sd15": {"rank": "24", "alpha": "12", "unet_lr": "1.5e-4", "te_lr": "8e-5",
-                 "repeats": "3", "max_epochs": "6"},
+                 "repeats": "3", "max_epochs": "6", "resolution": "512"},
         "sdxl": {"rank": "32", "alpha": "16", "unet_lr": "7e-5", "te_lr": "4e-5",
-                 "repeats": "3", "max_epochs": "6"},
+                 "repeats": "3", "max_epochs": "6", "resolution": "1024"},
         "flux": {"rank": "16", "alpha": "16", "unet_lr": "8e-5", "te_lr": "8e-5",
-                 "repeats": "3", "max_epochs": "6"},
+                 "repeats": "3", "max_epochs": "6", "resolution": "1024"},
         "anima": {"rank": "16", "alpha": "16", "unet_lr": "8e-5", "te_lr": "8e-5",
-                  "repeats": "3", "max_epochs": "6"},
+                  "repeats": "3", "max_epochs": "6", "resolution": "1024"},
     },
     "krea2": {
         "sd15": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "16"},
+                 "repeats": "2", "max_epochs": "16", "resolution": "1024"},
         "sdxl": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "16"},
+                 "repeats": "2", "max_epochs": "16", "resolution": "1024"},
         "flux": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "16"},
+                 "repeats": "2", "max_epochs": "16", "resolution": "1024"},
         "anima": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                  "repeats": "2", "max_epochs": "16"},
+                  "repeats": "2", "max_epochs": "16", "resolution": "1024"},
     },
 }
 
@@ -186,6 +186,7 @@ PARAM_LABELS = {
     "te_lr": "文本编码器学习率",
     "repeats": "repeats",
     "max_epochs": "最大epoch",
+    "resolution": "训练分辨率",
 }
 
 # 高级参数通俗中文提示（鼠标悬停显示）
@@ -196,6 +197,7 @@ PARAM_TIPS = {
     "te_lr": "文本编码器学习率：控制提示词理解的学习速度，建议比 UNet 学习率低。",
     "repeats": "每张图片重复次数：越多学得越用力，小心过拟合。",
     "max_epochs": "最大训练轮数：轮数越多学得越久，够用就好。",
+    "resolution": "训练分辨率：512 最省显存最快，768 平衡，1024 画质最好。16G 显存跑 Krea2/SDXL 建议降到 768 或 512，防止爆显存。",
 }
 
 TRIGGER_HINT_CHARACTER = ("💡提示：填一个网上很少见到的英文单词，比如 my_oc01\n"
@@ -2633,7 +2635,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     if not os.path.isfile(accel):
         raise RuntimeError("accelerate 缺失，请重跑【一键安装】")
 
-    resolution = arch_info["resolution"]
+    resolution = int(params.get("resolution") or arch_info["resolution"])
     train_dir = dataset_train_dir(mode, params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】或【一键开始训练】")

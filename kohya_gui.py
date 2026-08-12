@@ -1383,7 +1383,8 @@ class App:
             self.preset_summary.configure(
                 text=f"当前预设：rank {pre.get('rank')} · alpha {pre.get('alpha')} · "
                      f"学习率 {pre.get('unet_lr')} · 文本编码器学习率 {pre.get('te_lr')} · "
-                     f"repeats {pre.get('repeats')} · 最大epoch {pre.get('max_epochs')} · {te}")
+                     f"repeats {pre.get('repeats')} · 最大epoch {pre.get('max_epochs')} · "
+                     f"分辨率 {pre.get('resolution')}px · {te}")
         except Exception:
             pass
 
@@ -1642,7 +1643,8 @@ class App:
         self.style_preset_menu.pack(side="left", padx=(10, 0))
         ctk.CTkLabel(prow, text="（动漫偏精细、写实偏自然；选完仍可手动微调）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         items = [("rank", "rank"), ("alpha", "alpha"), ("学习率", "unet_lr"),
-                 ("文本编码器学习率", "te_lr"), ("repeats", "repeats"), ("最大 epoch", "max_epochs")]
+                 ("文本编码器学习率", "te_lr"), ("repeats", "repeats"), ("最大 epoch", "max_epochs"),
+                 ("训练分辨率", "resolution")]
         for i, (label, key) in enumerate(items):
             f = ctk.CTkFrame(g, fg_color="transparent"); f.grid(row=0, column=i, padx=10, pady=8, sticky="w")
             ctk.CTkLabel(f, text=label, font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w")
@@ -1789,6 +1791,7 @@ class App:
             "te_lr": float(_getv("te_lr", "1.5e-4")),
             "repeats": int(float(_getv("repeats", "5"))),
             "max_epochs": int(float(_getv("max_epochs", "8"))),
+            "resolution": int(float(_getv("resolution", "1024" if self.mode == "krea2" else str(core.RESOLUTIONS.get(self.base_type, 512))))),
             "train_text_encoder": not self.unet_only_var.get(),
             "global_pos": self.global_pos_var.get().strip(),
             "global_neg": self.global_neg_var.get().strip(),
@@ -1917,7 +1920,7 @@ class App:
             pp_mode = "character" if params.get("mode") == "krea2" else params["mode"]
             core.preprocess(
                 self._log, input_dir=params["raw_dir"],
-                size=(core.KREA2_RESOLUTION if params.get("mode") == "krea2" else core.RESOLUTIONS.get(params["base_type"], 512)),
+                size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") == "krea2" else core.RESOLUTIONS.get(params["base_type"], 512))),
                 mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=True,
@@ -2002,7 +2005,7 @@ class App:
             pp_mode = "character" if params.get("mode") == "krea2" else params["mode"]
             core.preprocess(
                 self._log, input_dir=params["raw_dir"],
-                size=(core.KREA2_RESOLUTION if params.get("mode") == "krea2" else core.RESOLUTIONS.get(params["base_type"], 512)),
+                size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") == "krea2" else core.RESOLUTIONS.get(params["base_type"], 512))),
                 mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=True,
@@ -2451,6 +2454,7 @@ class App:
                 f"学习率      : {params['unet_lr']}\n"
                 f"repeats     : {params['repeats']}\n"
                 f"最大 epoch  : {params['max_epochs']}\n"
+                f"分辨率      : {params.get('resolution', 1024)}px\n"
                 f"Trigger     : {params['trigger'] or '（未填写）'}"
             )
         else:
@@ -2464,6 +2468,7 @@ class App:
                 f"文本编码器学习率: {params['te_lr']}\n"
                 f"repeats     : {params['repeats']}\n"
                 f"最大 epoch  : {params['max_epochs']}\n"
+                f"分辨率      : {params.get('resolution', core.RESOLUTIONS.get(params['base_type'], 512))}px\n"
                 f"训练目标    : {'UNet + 文本编码器' if params['train_text_encoder'] else '仅 UNet'}\n"
                 f"Trigger     : {params['trigger'] or '（未填写）'}\n"
                 f"正则数据集  : {params['reg_dir'] or '（未使用）'}"
