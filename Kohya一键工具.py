@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.5.1"
+APP_VERSION = "0.5.2"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -165,13 +165,13 @@ PRESETS = {
     },
     "krea2": {
         "sd15": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "5", "max_epochs": "16"},
+                 "repeats": "2", "max_epochs": "16"},
         "sdxl": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "5", "max_epochs": "16"},
+                 "repeats": "2", "max_epochs": "16"},
         "flux": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "5", "max_epochs": "16"},
+                 "repeats": "2", "max_epochs": "16"},
         "anima": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                  "repeats": "5", "max_epochs": "16"},
+                  "repeats": "2", "max_epochs": "16"},
     },
 }
 

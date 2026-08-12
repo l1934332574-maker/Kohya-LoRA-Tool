@@ -268,6 +268,7 @@ class App:
         self._badge_widgets = []
         self._main_widgets = []
         self._adv_entries = {}
+        self._adv_frames = {}
         self._main_btns = {}
         self.amd_var = tk.BooleanVar(value=False)
         self.amd_env_var = tk.StringVar()
@@ -646,8 +647,8 @@ class App:
                                                border_width=1, border_color=ACC, text_color=ACC, corner_radius=6,
                                                font=ui_font(FONT_BODY), command=self.cmd_download_base)
         self.btn_download_base.pack(side="left", padx=4)
-        # Krea2 模型状态（仅 Krea2 模式显示，替代底模下拉）
-        self.krea2_row = ctk.CTkFrame(row2, fg_color="transparent")
+        # Krea2 模型状态（仅 Krea2 模式显示，独立一行占满宽度）
+        self.krea2_row = ctk.CTkFrame(top, fg_color="transparent")
         self.krea2_model_var = tk.StringVar(value="")
         ctk.CTkLabel(self.krea2_row, textvariable=self.krea2_model_var, font=ui_font(FONT_BODY), text_color=ACC).pack(side="left")
         self.btn_krea2_models = ctk.CTkButton(self.krea2_row, text="📂 打开 Krea2 模型文件夹", width=170, height=30,
@@ -655,6 +656,12 @@ class App:
                                               text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
                                               command=self.cmd_open_krea2_models)
         self.btn_krea2_models.pack(side="left", padx=(10, 4))
+        ctk.CTkLabel(self.krea2_row, text="RAW 训练 → LoRA 可用于 Turbo 出图", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(8, 0))
+        self.btn_krea2_guide = ctk.CTkButton(self.krea2_row, text="📖 使用引导", width=92, height=30,
+                                             fg_color="transparent", hover_color="#252a36", border_width=1, border_color=ACC,
+                                             text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
+                                             command=self._show_krea2_guide)
+        self.btn_krea2_guide.pack(side="left", padx=(6, 4))
         # AMD 兼容模式（实验性）：仅 AMD 显卡显示
         self.amd_bar = ctk.CTkFrame(top, fg_color="transparent")
         if self._gpu_info.get("vendor") == "amd":
@@ -1410,6 +1417,18 @@ class App:
             pass
         # Krea2 模式：隐藏底模下拉，显示 Krea2 模型状态（Krea2 不用 SD/SDXL/FLUX/Anima 底模）
         try:
+            _tef = getattr(self, "_adv_frames", {}).get("te_lr")
+            if _tef is not None:
+                if self.mode == "krea2":
+                    _tef.grid_remove()   # Krea2 文本编码器是预缓存/不训练，该参数无效
+                else:
+                    try:
+                        _tef.grid()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
             if self.mode == "krea2":
                 for w in (self.base_label, self.base_combo, self.btn_pick_base, self.btn_refresh_base, self.btn_download_base):
                     try:
@@ -1417,9 +1436,10 @@ class App:
                     except Exception:
                         pass
                 _files = core.krea2_model_files()
-                _miss = "、".join(core.KREA2_MODEL_LINKS[k][0] for k in ("raw", "vae", "te") if not _files.get(k))
-                self.krea2_model_var.set(("Krea2 模型：缺 " + _miss) if _miss else "Krea2 模型：齐全 ✓")
-                self.krea2_row.pack(side="left", padx=(0, 10))
+                _short = {"raw": "RAW", "vae": "VAE", "te": "文本编码器"}
+                _miss = "、".join(_short[k] for k in ("raw", "vae", "te") if not _files.get(k))
+                self.krea2_model_var.set(("Krea2 模型：缺 " + _miss + "（点📂查看文件名/镜像）") if _miss else "Krea2 模型：齐全 ✓")
+                self.krea2_row.pack(fill="x", pady=(8, 0))
             else:
                 try:
                     self.krea2_row.pack_forget()
@@ -1635,6 +1655,7 @@ class App:
                                  fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
             entry.pack(pady=(3, 0))
             self._adv_entries[key] = entry
+            self._adv_frames[key] = f
         cb = ctk.CTkFrame(self.adv_body, fg_color="transparent"); cb.pack(anchor="w", pady=(4, 0))
         self.chk_unet_only = ctk.CTkCheckBox(cb, text="只训练 UNet（不训练文本编码器）", variable=self.unet_only_var,
                                              fg_color=ACC, hover_color=ACC_H, text_color=TXT, font=ui_font(FONT_BODY),
@@ -1712,6 +1733,7 @@ class App:
             (getattr(self, "btn_stop", None), "任务进行中（训练/预处理/安装）可用：立即终止当前进程。训练中断后进度快照会保留，下次可断点续训。"),
             (getattr(self, "_guide_btns", {}).get("musubi"), "第二训练引擎（Krea2 图像 LoRA + 视频 LoRA）：独立环境安装，不影响现有画风/人物训练。装好后才能用 Krea2/视频模式（即将上线）。"),
             (getattr(self, "btn_krea2_models", None), "打开 Krea2 模型文件夹（models/krea2），把 RAW/VAE/文本编码器 3 个文件放进去；软件内提供国内镜像下载链接。"),
+            (getattr(self, "btn_krea2_guide", None), "打开 Krea2 训练详细逐步引导（装环境→下模型→选图→预处理→训练→出图，含常见问题）。"),
         ]
         for w, t in tips:
             self._tip(w, t)
@@ -1822,6 +1844,63 @@ class App:
             os.startfile(d)
         except Exception as e:
             messagebox.showerror(core.APP_NAME, f"打开失败：{e}")
+
+    def _show_krea2_guide(self):
+        """Krea2 图像 LoRA 训练 · 详细逐步引导（小白版）。"""
+        w = ctk.CTkToplevel(self.root)
+        w.title("Krea 2 图像 LoRA · 使用引导")
+        w.geometry("760x760")
+        w.transient(self.root)
+        txt = ctk.CTkTextbox(w, fg_color="#16181e", text_color="#c6ccd8", corner_radius=8,
+                             border_width=1, border_color=BORDER, font=ui_font(FONT_BODY), wrap="word")
+        txt.pack(fill="both", expand=True, padx=18, pady=18)
+        k2 = core.KREA2_MODEL_LINKS
+        guide = (
+            "📖 Krea 2 图像 LoRA 训练 · 详细引导（小白版）\n\n"
+            "▍原理一句话\n"
+            "Krea 2 是 12.9B 大模型，用 15~30 张图就能训出「你的角色/风格」LoRA。\n"
+            "训练用 RAW 底模，训完的 LoRA 可用于 Krea 2（含 Turbo）出图。\n\n"
+            "▍第 1 步：安装第二引擎\n"
+            "· 左侧点「②' 第二引擎(可选)」→「去安装」\n"
+            "· 自动创建独立环境（完全不影响现有画风/人物训练）\n"
+            "· 下载 PyTorch 约 2.5GB，10~30 分钟（国内镜像，断了自动续传）\n"
+            "· 装完绿点变「已装」\n\n"
+            "▍第 2 步：下载 Krea 2 模型（3 个文件，放进 models/krea2/）\n"
+            f"1) {k2['raw'][0]} —— {k2['raw'][1]}\n"
+            f"   国内镜像：{k2['raw'][2]}\n"
+            f"2) {k2['vae'][0]} —— {k2['vae'][1]}\n"
+            f"   国内镜像：{k2['vae'][2]}\n"
+            f"3) {k2['te'][0]} —— {k2['te'][1]}\n"
+            f"   国内镜像：{k2['te'][2]}\n"
+            "· 下完把文件放进 models/krea2/（点「📂 打开 Krea2 模型文件夹」）\n"
+            "· 顶部状态变成「Krea2 模型：齐全 ✓」即可\n\n"
+            "▍第 3 步：打开项目，切到 Krea2 模式\n"
+            "· 顶部训练模式选「🖼 Krea 2 图像LoRA」\n"
+            "· 自动填好推荐参数（rank32 / alpha32 / 学习率1e-4 / 1024px / repeats2）\n\n"
+            "▍第 4 步：准备图片\n"
+            "· 人物：15~30 张同一人物，多角度、不同服装\n"
+            "· 风格：20~60 张同一风格\n"
+            "· 建议 1024px 清晰大图；模糊/过小/重复图会自动过滤\n"
+            "· 填一个 Trigger 触发词（网上少见的英文词，如 my_k2_01）\n\n"
+            "▍第 5 步：预处理 + 一键训练\n"
+            "· 点「🚀 一键开始训练」：自动 过滤→裁切→去重→WD14 打标→训练\n"
+            "· 显存：推荐 16G（最低 12G）；自动开 fp8 + block swap 省显存\n"
+            "· 自动约束步数防过拟合；每轮保存 checkpoint，可挑最优权重\n\n"
+            "▍第 6 步：训练完成\n"
+            "· 模型在 output\\<项目名>\\krea2_lora.safetensors\n"
+            "· 该 LoRA 用于 Krea 2 底模（含 Turbo）出图，正向提示词以 Trigger 开头\n\n"
+            "❓ 常见问题\n"
+            "Q: 显存不够 OOM？\n"
+            "A: 工具会自动开 fp8 + block swap；12G 以下不建议训练（只能预处理/看界面）。\n\n"
+            "Q: 下载慢/老断？\n"
+            "A: 内置断点续传，断了自动接着下；模型走国内镜像，不要挂代理反而更快。\n\n"
+            "Q: 效果过拟合（只会复刻原图）？\n"
+            "A: 减少 repeats 或 epochs，或减少图片数量；用中间的 checkpoint 挑效果最好的。\n\n"
+            "Q: 为什么训练用 RAW 不是 Turbo？\n"
+            "A: 官方推荐「Train on RAW → Run on Turbo」：RAW 泛化好，训完的 LoRA 在 Turbo 上出图又快又稳。\n"
+        )
+        txt.insert("1.0", guide)
+        txt.configure(state="disabled")
 
     # ============ 预处理 / 训练 ============
     def cmd_preprocess(self):
