@@ -416,6 +416,9 @@ def build_env(extra_dirs=()):
     env = dict(os.environ)
     paths = list(extra_dirs) + [env.get("PATH", "")]
     env["PATH"] = ";".join(p for p in paths if p)
+    # 网络不稳时 pip 容易 IncompleteRead 中断：全局加大重试次数与超时
+    env.setdefault("PIP_RETRIES", "10")
+    env.setdefault("PIP_TIMEOUT", "120")
     return env
 
 
@@ -920,11 +923,17 @@ def install_kohya(logf=print):
         if torch_ok and not deps_ok and os.path.isdir(os.path.join(kdir, "sd-scripts")):
             # 部分安装/中断导致缺 Pillow/numpy：快速补装，不必重跑整个安装
             logf("[Kohya] 检测到已装 torch 但缺 Pillow/numpy（可能之前安装被中断），正在快速补装…")
-            subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
-                            "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
-            if run_stream([vpy, "-m", "pip", "install", "--no-input", "pillow", "numpy"],
-                          cwd=kdir, logf=logf) != 0 or not _dep_ok("import PIL, numpy"):
-                raise RuntimeError("自动补装 Pillow/numpy 失败，请重试或重跑【一键安装】")
+            _env2 = build_env()
+            _ok2 = False
+            for _idx2 in ("https://pypi.tuna.tsinghua.edu.cn/simple",
+                          "https://mirrors.aliyun.com/pypi/simple/"):
+                if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                               "--index-url", _idx2, "pillow", "numpy"], cwd=kdir, env=_env2, logf=logf) == 0:
+                    _ok2 = True
+                    break
+                logf("[Kohya] 当前镜像下载失败，切换备用镜像重试…")
+            if not _ok2 or not _dep_ok("import PIL, numpy"):
+                raise RuntimeError("自动补装 Pillow/numpy 失败（网络不稳或镜像不可达），请检查网络后重试")
             logf("[Kohya] Pillow/numpy 补装完成。")
             with open(KOHYA_DIR_FILE, "w", encoding="utf-8") as f:
                 f.write(kdir)
@@ -1330,11 +1339,17 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
     if not _deps_ok:
         logf("[预处理] kohya venv 缺少 Pillow/numpy（可能之前安装被中断），正在自动补装…")
         _kd = get_kohya_dir()
-        subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
-                        "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
-        if run_stream([vpy, "-m", "pip", "install", "--no-input", "pillow", "numpy"],
-                      cwd=_kd, logf=logf) != 0:
-            raise RuntimeError("自动补装 Pillow/numpy 失败，请重跑【② 安装训练内核】")
+        _env = build_env()
+        _ok = False
+        for _idx in ("https://pypi.tuna.tsinghua.edu.cn/simple",
+                     "https://mirrors.aliyun.com/pypi/simple/"):
+            if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                           "--index-url", _idx, "pillow", "numpy"], cwd=_kd, env=_env, logf=logf) == 0:
+                _ok = True
+                break
+            logf("[预处理] 当前镜像下载失败，切换备用镜像重试…")
+        if not _ok:
+            raise RuntimeError("自动补装 Pillow/numpy 失败（网络不稳或镜像不可达），请检查网络后重试，或重跑【② 安装训练内核】")
         logf("[预处理] Pillow/numpy 补装完成")
     out = dataset_train_dir(mode, project)
     os.environ["TRIGGER_WORD"] = trigger or ""
