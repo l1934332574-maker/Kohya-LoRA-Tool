@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.5.2"
+APP_VERSION = "0.5.3"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1440,8 +1440,84 @@ def detect_nvidia_gpu():
         return False
 
 
+def _dxgi_adapters():
+    """用 DXGI 枚举显卡，返回 [(名称, 独显显存字节数)]。
+
+    DXGI 的 DedicatedVideoMemory 是 Windows 给显卡的权威独显显存值，
+    NVIDIA / AMD / Intel 都准确（RX 5600=6GB、7800XT=16GB、4070=8GB），
+    比注册表 qwMemorySize（AMD 有时误报）和 WMI AdapterRAM（>4GB 溢出）可靠。
+    """
+    try:
+        import ctypes
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
+                        ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
+
+        class _ADAPTER_DESC(ctypes.Structure):
+            _fields_ = [
+                ("Description", ctypes.c_wchar * 128),
+                ("VendorId", ctypes.c_uint), ("DeviceId", ctypes.c_uint),
+                ("SubSysId", ctypes.c_uint), ("Revision", ctypes.c_uint),
+                ("DedicatedVideoMemory", ctypes.c_size_t),
+                ("DedicatedSystemMemory", ctypes.c_size_t),
+                ("SharedSystemMemory", ctypes.c_size_t),
+                ("AdapterLuid", ctypes.c_longlong),
+            ]
+
+        IID_IDXGIFactory = _GUID(0x7b7166ec, 0x21c7, 0x44ae, (0xb2, 0x1a, 0xc9, 0xae, 0x32, 0x1a, 0xe3, 0x69))
+        dxgi = ctypes.WinDLL("dxgi.dll")
+        dxgi.CreateDXGIFactory.argtypes = [ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p)]
+        dxgi.CreateDXGIFactory.restype = ctypes.c_long
+        factory = ctypes.c_void_p()
+        hr = dxgi.CreateDXGIFactory(ctypes.byref(IID_IDXGIFactory), ctypes.byref(factory))
+        if hr != 0 or not factory.value:
+            return []
+        obj = factory.value
+        vtbl = ctypes.cast(ctypes.cast(obj, ctypes.POINTER(ctypes.c_void_p))[0],
+                           ctypes.POINTER(ctypes.c_void_p))
+        # IDXGIFactory: IUnknown(0-2)+IDXGIObject(3-6)+EnumAdapters(7)
+        EnumAdapters = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint,
+                                          ctypes.POINTER(ctypes.c_void_p))(vtbl[7])
+        out = []
+        i = 0
+        while True:
+            adapter = ctypes.c_void_p()
+            hr2 = EnumAdapters(obj, i, ctypes.byref(adapter))
+            if hr2 == 0x887A0027 or hr2 != 0 or not adapter.value:   # DXGI_ERROR_NOT_FOUND
+                break
+            av = ctypes.cast(ctypes.cast(adapter.value, ctypes.POINTER(ctypes.c_void_p))[0],
+                             ctypes.POINTER(ctypes.c_void_p))
+            # IDXGIAdapter: IUnknown(0-2)+IDXGIObject(3-6)+EnumOutputs(7)+GetDesc(8)
+            GetDesc = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(_ADAPTER_DESC))(av[8])
+            desc = _ADAPTER_DESC()
+            if GetDesc(adapter.value, ctypes.byref(desc)) == 0:
+                out.append((desc.Description or "", desc.DedicatedVideoMemory))
+            i += 1
+        return out
+    except Exception:
+        return []
+
+
 def detect_vram_gb():
-    """检测显卡显存（GB）。优先 nvidia-smi（N 卡）；失败回退注册表 qwMemorySize（AMD/其他）。失败返回 None。"""
+    """检测显卡显存（GB）。优先 DXGI（各品牌权威）；失败回退 nvidia-smi（N 卡）/注册表。返回 None=未知。"""
+    try:
+        adapters = _dxgi_adapters()
+        if adapters:
+            best = None
+            for _d, _mem in adapters:
+                d = (_d or "").lower()
+                # 排除核显/基础显示适配器
+                if ("basic display" in d or ("intel" in d and "graphics" in d)
+                        or "radeon(tm) graphics" in d or ("radeon" in d and "graphics" in d and "rx" not in d)):
+                    continue
+                gb = float(_mem) / (1024.0 ** 3)
+                if gb > 0:
+                    best = gb if best is None else max(best, gb)
+            if best:
+                return best
+    except Exception:
+        pass
     try:
         r = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
@@ -1462,10 +1538,15 @@ def detect_vram_gb():
 
 def _registry_vram_gb():
     """从显卡注册表读取真实显存（HardwareInformation.qwMemorySize，QWORD，单位字节）。
-    兼容 AMD / Intel 显卡（WMI 的 AdapterRAM 会溢出到 4GB，不可靠）。"""
+
+    兼容 AMD / Intel / NVIDIA（WMI 的 AdapterRAM 会溢出到 4GB，不可靠）。
+    遍历所有显示适配器：排除核显/基础显示适配器后取最大显存，
+    避免双显卡机器（核显 + 独显）取到核显的小显存（如 7800XT 被误报成核显 8GB）。
+    """
     try:
         import winreg
         base = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+        adapters = []  # (desc_lower, gb)
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as k:
             i = 0
             while True:
@@ -1476,16 +1557,47 @@ def _registry_vram_gb():
                 i += 1
                 try:
                     with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base + "\\" + sub) as sk:
-                        val, _ = winreg.QueryValueEx(sk, "HardwareInformation.qwMemorySize")
-                        if val:
-                            gb = float(val) / (1024.0 ** 3)
-                            if gb > 0:
-                                return gb
+                        desc = ""
+                        try:
+                            desc, _ = winreg.QueryValueEx(sk, "DriverDesc")
+                        except Exception:
+                            pass
+                        try:
+                            val, _ = winreg.QueryValueEx(sk, "HardwareInformation.qwMemorySize")
+                        except Exception:
+                            continue
+                        if not val:
+                            continue
+                        gb = float(val) / (1024.0 ** 3)
+                        # 部分驱动把数值记为 MB/KB，做单位探测
+                        if 0 < gb < 0.02:
+                            gb = float(val) / (1024.0 ** 2)
+                        if 0 < gb < 0.02:
+                            gb = float(val) / 1024.0
+                        if gb > 0:
+                            adapters.append((desc.lower(), gb))
                 except Exception:
                     continue
+        if not adapters:
+            return None
+
+        def _is_igpu(d):
+            if not d:
+                return False
+            d = d.lower()
+            if "microsoft basic display" in d or "basic display" in d:
+                return True
+            if "intel(r)" in d and "graphics" in d:
+                return True
+            if "radeon(tm) graphics" in d or ("radeon" in d and "graphics" in d and "rx" not in d):
+                return True
+            return False
+
+        discrete = [g for d, g in adapters if not _is_igpu(d)]
+        pool = discrete if discrete else [g for _, g in adapters]
+        return max(pool)
     except Exception:
-        pass
-    return None
+        return None
 
 
 def detect_gpu_vendor():
