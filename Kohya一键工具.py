@@ -902,15 +902,30 @@ def install_kohya(logf=print):
             logf("[Kohya] 创建 Python 虚拟环境…")
             if run_stream([py, "-m", "venv", "venv"], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
                 raise RuntimeError("创建 venv 失败")
-        # 已安装验证：venv 里 torch 可用 + sd-scripts 存在 => 跳过重复安装
-        try:
-            r = subprocess.run([vpy, "-c", "import torch; print(torch.__version__)"],
-                               capture_output=True, text=True, timeout=120)
-            torch_ok = r.returncode == 0
-        except Exception:
-            torch_ok = False
-        if torch_ok and os.path.isdir(os.path.join(kdir, "sd-scripts")):
-            logf("[Kohya] 检测到已安装环境（torch 可用），跳过重复安装。")
+        # 已安装验证：torch + Pillow + numpy + sd-scripts 齐全才算装好，
+        # 否则可能被中断的安装坑到（例如有 torch 但缺 Pillow，预处理会失败）。
+        def _dep_ok(code):
+            try:
+                return subprocess.run([vpy, "-c", code], capture_output=True, text=True,
+                                      timeout=120).returncode == 0
+            except Exception:
+                return False
+        torch_ok = _dep_ok("import torch; print(torch.__version__)")
+        deps_ok = _dep_ok("import PIL, numpy")
+        if torch_ok and deps_ok and os.path.isdir(os.path.join(kdir, "sd-scripts")):
+            logf("[Kohya] 检测到已安装环境（torch + Pillow/numpy 可用），跳过重复安装。")
+            with open(KOHYA_DIR_FILE, "w", encoding="utf-8") as f:
+                f.write(kdir)
+            return kdir
+        if torch_ok and not deps_ok and os.path.isdir(os.path.join(kdir, "sd-scripts")):
+            # 部分安装/中断导致缺 Pillow/numpy：快速补装，不必重跑整个安装
+            logf("[Kohya] 检测到已装 torch 但缺 Pillow/numpy（可能之前安装被中断），正在快速补装…")
+            subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
+                            "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
+            if run_stream([vpy, "-m", "pip", "install", "--no-input", "pillow", "numpy"],
+                          cwd=kdir, logf=logf) != 0 or not _dep_ok("import PIL, numpy"):
+                raise RuntimeError("自动补装 Pillow/numpy 失败，请重试或重跑【一键安装】")
+            logf("[Kohya] Pillow/numpy 补装完成。")
             with open(KOHYA_DIR_FILE, "w", encoding="utf-8") as f:
                 f.write(kdir)
             return kdir
@@ -1305,6 +1320,22 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         raise RuntimeError("Kohya 尚未安装，请先点击【一键安装】")
     if not input_dir or not os.path.isdir(input_dir):
         raise RuntimeError("请选择图片文件夹")
+    # 预处理依赖自检：kohya venv 必须能 import Pillow/numpy（部分中断安装会缺，导致预处理永远失败）。
+    # 缺失时自动补装（国内镜像，几秒），实现自愈，不用重装整个 kohya。
+    try:
+        _r = subprocess.run([vpy, "-c", "import PIL, numpy"], capture_output=True, text=True, timeout=120)
+        _deps_ok = _r.returncode == 0
+    except Exception:
+        _deps_ok = False
+    if not _deps_ok:
+        logf("[预处理] kohya venv 缺少 Pillow/numpy（可能之前安装被中断），正在自动补装…")
+        _kd = get_kohya_dir()
+        subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
+                        "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
+        if run_stream([vpy, "-m", "pip", "install", "--no-input", "pillow", "numpy"],
+                      cwd=_kd, logf=logf) != 0:
+            raise RuntimeError("自动补装 Pillow/numpy 失败，请重跑【② 安装训练内核】")
+        logf("[预处理] Pillow/numpy 补装完成")
     out = dataset_train_dir(mode, project)
     os.environ["TRIGGER_WORD"] = trigger or ""
     os.environ["MODE"] = mode
