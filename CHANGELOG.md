@@ -6,7 +6,19 @@
 
 # 更新日志（Changelog）
 
+# 更新日志（Changelog）
+
+## v0.5.4（2026-08-12）
+
+### 修复
+- **AMD 训练环境缺 toml/voluptuous**：训练走 venv_amd 跑 sd-scripts 时报
+  `ModuleNotFoundError: No module named 'toml'`（AMD 依赖列表漏了这两个小包）
+- AMD 依赖列表补 toml/voluptuous；训练前自动检查 venv_amd 关键依赖，缺失自动补装（国内镜像+重试/超时）
+
+---
+
 ## v0.5.3（2026-08-12）
+
 
 ### 修复
 - **显卡显存检测改用 DXGI**（DedicatedVideoMemory）：修复 AMD 卡显存误报
