@@ -38,7 +38,8 @@ copy /y "安装本地依赖.bat" "%PKG%\" >nul
 copy /y "手动安装_ManualInstall.bat" "%PKG%\" >nul
 copy /y "_common.bat" "%PKG%\" >nul
 
-if not exist "%PKG%\installers"    xcopy /e /i /q "installers"    "%PKG%\installers"    >nul
+if not exist "%PKG%\installers"    mkdir "%PKG%\installers" >nul 2>nul
+xcopy /e /i /q /y "installers"    "%PKG%\installers"    >nul
 if not exist "%PKG%\configs"       xcopy /e /i /q "configs"       "%PKG%\configs"       >nul
 if not exist "%PKG%\models\base"   mkdir "%PKG%\models\base" >nul 2>nul
 if not exist "%PKG%\wd14_tagger_model" xcopy /e /i /q "wd14_tagger_model" "%PKG%\wd14_tagger_model" >nul

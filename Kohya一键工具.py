@@ -925,13 +925,20 @@ def install_kohya(logf=print):
             logf("[Kohya] 检测到已装 torch 但缺 Pillow/numpy（可能之前安装被中断），正在快速补装…")
             _env2 = build_env()
             _ok2 = False
-            for _idx2 in ("https://pypi.tuna.tsinghua.edu.cn/simple",
-                          "https://mirrors.aliyun.com/pypi/simple/"):
-                if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
-                               "--index-url", _idx2, "pillow", "numpy"], cwd=kdir, env=_env2, logf=logf) == 0:
+            _wheels2 = _bundled_pip_wheels()
+            if _wheels2:
+                logf("[Kohya] 使用内置离线 wheel 安装 Pillow/numpy…")
+                if run_stream([vpy, "-m", "pip", "install", "--no-input", "--no-index"] + _wheels2,
+                              cwd=kdir, env=_env2, logf=logf) == 0:
                     _ok2 = True
-                    break
-                logf("[Kohya] 当前镜像下载失败，切换备用镜像重试…")
+            if not _ok2:
+                for _idx2 in ("https://pypi.tuna.tsinghua.edu.cn/simple",
+                              "https://mirrors.aliyun.com/pypi/simple/"):
+                    if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                                   "--index-url", _idx2, "pillow", "numpy"], cwd=kdir, env=_env2, logf=logf) == 0:
+                        _ok2 = True
+                        break
+                    logf("[Kohya] 当前镜像下载失败，切换备用镜像重试…")
             if not _ok2 or not _dep_ok("import PIL, numpy"):
                 raise RuntimeError("自动补装 Pillow/numpy 失败（网络不稳或镜像不可达），请检查网络后重试")
             logf("[Kohya] Pillow/numpy 补装完成。")
@@ -1341,13 +1348,21 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         _kd = get_kohya_dir()
         _env = build_env()
         _ok = False
-        for _idx in ("https://pypi.tuna.tsinghua.edu.cn/simple",
-                     "https://mirrors.aliyun.com/pypi/simple/"):
-            if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
-                           "--index-url", _idx, "pillow", "numpy"], cwd=_kd, env=_env, logf=logf) == 0:
+        # 优先用内置离线 wheel（彻底绕开网络不稳）
+        _wheels = _bundled_pip_wheels()
+        if _wheels:
+            logf("[预处理] 使用内置离线 wheel 安装 Pillow/numpy…")
+            if run_stream([vpy, "-m", "pip", "install", "--no-input", "--no-index"] + _wheels,
+                          cwd=_kd, env=_env, logf=logf) == 0:
                 _ok = True
-                break
-            logf("[预处理] 当前镜像下载失败，切换备用镜像重试…")
+        if not _ok:
+            for _idx in ("https://pypi.tuna.tsinghua.edu.cn/simple",
+                         "https://mirrors.aliyun.com/pypi/simple/"):
+                if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                               "--index-url", _idx, "pillow", "numpy"], cwd=_kd, env=_env, logf=logf) == 0:
+                    _ok = True
+                    break
+                logf("[预处理] 当前镜像下载失败，切换备用镜像重试…")
         if not _ok:
             raise RuntimeError("自动补装 Pillow/numpy 失败（网络不稳或镜像不可达），请检查网络后重试，或重跑【② 安装训练内核】")
         logf("[预处理] Pillow/numpy 补装完成")
@@ -1714,6 +1729,33 @@ def _amd_torch_wheels(venv_dir):
     ]
 
 
+def _bundled_pip_wheels():
+    """内置离线 wheel（pillow/numpy，供预处理自愈离线安装，绕开网络不稳）。"""
+    d = os.path.join(KIT_DIR, "installers", "python_libs")
+    wheels = []
+    if os.path.isdir(d):
+        for f in sorted(os.listdir(d)):
+            if f.lower().endswith((".whl", ".tar.gz")):
+                wheels.append(os.path.join(d, f))
+    return wheels
+
+
+def _wheel_valid(path):
+    """粗校验下载的 wheel/压缩包完整性（防止断点残留的残片被当成可用）。"""
+    try:
+        low = path.lower()
+        if low.endswith((".whl", ".zip")):
+            import zipfile
+            return zipfile.is_zipfile(path)
+        if low.endswith((".tar.gz", ".tgz")):
+            import tarfile
+            with tarfile.open(path, "r:gz"):
+                return True
+        return os.path.getsize(path) > 0
+    except Exception:
+        return False
+
+
 def _download_with_resume(url, dest, logf=print):
     """用 curl 断点续传下载大文件（repo.radeon.com 网络不稳时关键，断了可续传）。
 
@@ -1756,6 +1798,11 @@ def run_pip_in_venv(venv_dir, args, logf=print):
     cmd = [py, "-m", "pip", "install", "--no-cache-dir", "--retries", "10", "--timeout", "120"] + args
     env = build_env()
     env.setdefault("PIP_NO_INPUT", "1")
+    # 网络被掐断时走系统代理（朋友机器实测直连 pip 镜像被稳定掐断）
+    _px = system_proxy()
+    if _px:
+        env.setdefault("HTTP_PROXY", _px)
+        env.setdefault("HTTPS_PROXY", _px)
     return run_stream(cmd, env=env, logf=logf)
 
 
@@ -1770,7 +1817,13 @@ def install_amd_rocm(venv_dir, logf=print):
     for _u in AMD_ROC_WHEELS:
         _fn = os.path.basename(_u)
         _dst = os.path.join(cache, _fn)
-        if not (os.path.isfile(_dst) and os.path.getsize(_dst) > 1024 * 1024):
+        if not (os.path.isfile(_dst) and os.path.getsize(_dst) > 1024 * 1024 and _wheel_valid(_dst)):
+            if os.path.isfile(_dst):
+                logf(f"[AMD] {_fn} 缓存文件不完整，重新下载…")
+                try:
+                    os.remove(_dst)
+                except Exception:
+                    pass
             logf(f"[AMD] 下载 {_fn}（可断点续传）…")
             if not _download_with_resume(_u, _dst, logf):
                 raise RuntimeError(f"ROCm 组件下载失败：{_fn}（网络不稳，请重试，已支持断点续传）")
@@ -1791,7 +1844,13 @@ def install_amd_torch(venv_dir, logf=print):
     for _u in _amd_torch_wheels(venv_dir):
         _fn = os.path.basename(_u)
         _dst = os.path.join(cache, _fn)
-        if not (os.path.isfile(_dst) and os.path.getsize(_dst) > 1024 * 1024):
+        if not (os.path.isfile(_dst) and os.path.getsize(_dst) > 1024 * 1024 and _wheel_valid(_dst)):
+            if os.path.isfile(_dst):
+                logf(f"[AMD] {_fn} 缓存文件不完整，重新下载…")
+                try:
+                    os.remove(_dst)
+                except Exception:
+                    pass
             logf(f"[AMD] 下载 {_fn}（可断点续传）…")
             if not _download_with_resume(_u, _dst, logf):
                 raise RuntimeError(f"PyTorch 组件下载失败：{_fn}（网络不稳，请重试，已支持断点续传）")
