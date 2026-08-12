@@ -1,0 +1,41 @@
+# 更新日志（Changelog）
+
+## v0.5.0（2026-08-12）
+
+### 新增
+- **第二训练引擎（musubi-tuner，实验性）**：左侧新增「②' 第二引擎(可选)」独立环境安装入口，与现有 Kohya 环境完全隔离，可随时安装/跳过
+- **「🖼 Krea 2 图像LoRA」模式**：基于 Krea 2（12.9B MMDiT）训练，预设 rank32/alpha32/1024px
+  - `models/krea2` 模型解析 + 国内镜像下载引导（RAW 13~26GB / Qwen-Image VAE / Qwen3-VL 8GB）
+  - 训练流程：缓存 latents/文本编码器 → accelerate 训练，显存自动 `fp8 + blocks_to_swap` 省显存
+  - 缺模型/缺引擎引导弹窗、显存与确认弹窗适配、一键按钮状态适配
+- `installers/` 内置 musubi-tuner 离线源码包
+
+### 修复
+- musubi 数据集配置 schema 兼容（移除 `keep_tokens`/`shuffle_caption` 等不被接受的 key）
+- Krea2 VAE 下载链接指向正确仓库（`Comfy-Org/Qwen-Image_ComfyUI`）
+- 缓存/训练脚本 `num_workers` 传参修正（musubi 线程池不接受 0）
+
+### 说明
+- Krea2 训练需 12G+ 显存（推荐 16G）；本机 8G 仅可做预处理与查看界面
+- 视频 LoRA（Wan 等）训练开发中
+
+---
+
+## v0.4.0（2026-08-12）
+
+### 新增
+- 项目管理：主页项目列表、新建/打开/重命名/删除、配置自动保存、预设模板
+- 数据集按项目隔离 `dataset/<项目名>/`，旧共享数据一次性迁移，重命名同步改目录
+- 标签编辑器：逐张改标签、批量删除/替换、置顶 Trigger、标签频率统计、整理 `repeats_名称`
+- 训练实时监控：步数/总步数、loss + 趋势曲线、显存、预计剩余时间、训练速度
+- `repeats_名称` 子目录结构；预处理自动递归子文件夹；新建项目清空旧配置
+- WD14 打标模型内置，自动 GPU(CUDA) 推理，失败回退 CPU
+- 启动性能优化（主卡片延迟构建、阴影防抖、底模扫描后台化）
+
+### 修复
+- 训练写 dataset_config 时三元组解包崩溃
+- 断点续训、训练前自动同步 Trigger、停止按钮
+
+### 说明
+- AMD 兼容模式（实验性）：sdpa + bf16 + AdamW 自动适配
+- kohya 环境重定向 `%APPDATA%`，升级覆盖不重装环境

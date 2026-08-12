@@ -6,7 +6,7 @@
 
 > ⚠️ **免责提示：禁止训练版权画师作品、受版权保护的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
-## ✨ 功能亮点（v0.4.0）
+## ✨ 功能亮点（v0.5.0）
 
 - **双模式**：🎨 画风 LoRA（自动过滤强人物五官标签）/ 👤 人物角色 LoRA（完整保留标签 + trigger 触发词 + 可选正则数据集）
 - **四架构**：SD1.5 / SDXL / FLUX.1 / Anima，自动识别底模类型并适配分辨率与参数
@@ -19,6 +19,7 @@
 - **AMD 兼容模式（实验性）**：一键开关 + 环境检查/安装引导（ROCm / ZLUDA）
 - **kohya 环境重定向** 到 `%APPDATA%\KohyaLoraTool`：升级覆盖安装不重装环境
 - **显存智能适配**：自动调整 batch / 精度 / 梯度检查点，低显存弹出通俗中文警告
+- **第二训练引擎（实验性）**：独立安装 musubi-tuner（不碰 Kohya 环境），新增 **「🖼 Krea 2 图像LoRA」** 模式（Krea2 12.9B，预设 rank32/1024px，国内镜像下载模型引导）；视频 LoRA 训练开发中
 
 ## 📦 下载安装
 
@@ -47,7 +48,7 @@
 | `Kohya一键工具.py` | 业务逻辑核心（训练/预处理/环境/识别） |
 | `preprocess.py` | 预处理 / WD14 打标 / trigger 插入 / 数据集配置 |
 | `model_downloader.py` | 底模应用内下载（断点续传） |
-| `installers/` | 内置离线安装包（Git / Python / kohya_ss / sd-scripts） |
+| `installers/` | 内置离线安装包（Git / Python / kohya_ss / sd-scripts / musubi-tuner） |
 | `wd14_tagger_model/` | 内置 WD14 打标模型 |
 | `README_使用说明.md` | 完整使用说明（数据集准备、参数说明、打包、FAQ） |
 

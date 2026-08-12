@@ -23,7 +23,7 @@
 | `model_downloader.py` | 底模应用内下载（断点续传） |
 | `01_一键安装_Setup.bat` | 命令行一键装环境（Git/Python/kohya_ss + 依赖） |
 | `02_数据预处理_Preprocess.bat` / `03_启动UI_StartUI.bat` / `04_一键训练_TrainCLI.bat` | 命令行备选流程 |
-| `installers/` | 内置离线安装包（Git、Python、kohya_ss + sd-scripts 源码），无需代理 |
+| `installers/` | 内置离线安装包（Git、Python、kohya_ss + sd-scripts、musubi-tuner 源码），无需代理 |
 | `configs/` | 训练配置模板（运行时自动生成实际配置） |
 | `models/base/` | **把你的底模放这里**（程序自动扫描识别） |
 | `wd14_tagger_model/` | **内置 WD14 打标模型**（人物模式自动打标，开箱即用、自动走 GPU） |
