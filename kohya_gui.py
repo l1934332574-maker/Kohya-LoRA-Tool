@@ -625,7 +625,8 @@ class App:
                                           dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150",
                                           command=lambda _e: self._on_mode_change())
         self.mode_combo.pack(side="left", padx=(10, 22))
-        ctk.CTkLabel(row2, text="基础底模", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
+        self.base_label = ctk.CTkLabel(row2, text="基础底模", font=ui_font(FONT_BODY), text_color=SUB)
+        self.base_label.pack(side="left")
         self.base_combo = ctk.CTkComboBox(row2, values=[], width=200, height=30,
                                           fg_color=CARD2, border_color=BORDER, button_color=CARD2, button_hover_color="#3a4150",
                                           text_color=TXT, font=ui_font(FONT_BODY), dropdown_font=ui_font(FONT_BODY),
@@ -645,6 +646,15 @@ class App:
                                                border_width=1, border_color=ACC, text_color=ACC, corner_radius=6,
                                                font=ui_font(FONT_BODY), command=self.cmd_download_base)
         self.btn_download_base.pack(side="left", padx=4)
+        # Krea2 模型状态（仅 Krea2 模式显示，替代底模下拉）
+        self.krea2_row = ctk.CTkFrame(row2, fg_color="transparent")
+        self.krea2_model_var = tk.StringVar(value="")
+        ctk.CTkLabel(self.krea2_row, textvariable=self.krea2_model_var, font=ui_font(FONT_BODY), text_color=ACC).pack(side="left")
+        self.btn_krea2_models = ctk.CTkButton(self.krea2_row, text="📂 打开 Krea2 模型文件夹", width=170, height=30,
+                                              fg_color=CARD2, hover_color="#343a46", border_width=1, border_color=BORDER,
+                                              text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
+                                              command=self.cmd_open_krea2_models)
+        self.btn_krea2_models.pack(side="left", padx=(10, 4))
         # AMD 兼容模式（实验性）：仅 AMD 显卡显示
         self.amd_bar = ctk.CTkFrame(top, fg_color="transparent")
         if self._gpu_info.get("vendor") == "amd":
@@ -1398,6 +1408,31 @@ class App:
             self.trigger_hint_var.set(_hint)
         except Exception:
             pass
+        # Krea2 模式：隐藏底模下拉，显示 Krea2 模型状态（Krea2 不用 SD/SDXL/FLUX/Anima 底模）
+        try:
+            if self.mode == "krea2":
+                for w in (self.base_label, self.base_combo, self.btn_pick_base, self.btn_refresh_base, self.btn_download_base):
+                    try:
+                        w.pack_forget()
+                    except Exception:
+                        pass
+                _files = core.krea2_model_files()
+                _miss = "、".join(core.KREA2_MODEL_LINKS[k][0] for k in ("raw", "vae", "te") if not _files.get(k))
+                self.krea2_model_var.set(("Krea2 模型：缺 " + _miss) if _miss else "Krea2 模型：齐全 ✓")
+                self.krea2_row.pack(side="left", padx=(0, 10))
+            else:
+                try:
+                    self.krea2_row.pack_forget()
+                except Exception:
+                    pass
+                for _w, _p in ((self.base_label, 0), (self.base_combo, (10, 10)),
+                               (self.btn_pick_base, 4), (self.btn_refresh_base, 4), (self.btn_download_base, 4)):
+                    try:
+                        _w.pack(side="left", padx=_p)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         # 画风模式：隐藏触发词/正则卡片内容（用 pack_forget 显示/隐藏行）
         try:
             self.trigger_entry.master.master.master.configure(
@@ -1676,6 +1711,7 @@ class App:
             (getattr(self, "btn_one_click", None), "小白专用：自动过滤模糊/过小/损坏图 → 正方形裁剪 → 去重 → 打标签 → 开始训练，全程不用管。"),
             (getattr(self, "btn_stop", None), "任务进行中（训练/预处理/安装）可用：立即终止当前进程。训练中断后进度快照会保留，下次可断点续训。"),
             (getattr(self, "_guide_btns", {}).get("musubi"), "第二训练引擎（Krea2 图像 LoRA + 视频 LoRA）：独立环境安装，不影响现有画风/人物训练。装好后才能用 Krea2/视频模式（即将上线）。"),
+            (getattr(self, "btn_krea2_models", None), "打开 Krea2 模型文件夹（models/krea2），把 RAW/VAE/文本编码器 3 个文件放进去；软件内提供国内镜像下载链接。"),
         ]
         for w, t in tips:
             self._tip(w, t)
@@ -1778,6 +1814,14 @@ class App:
         except Exception as e:
             self._log(f"[ERROR] 打开标签编辑器失败：{e}")
             traceback.print_exc()
+
+    def cmd_open_krea2_models(self):
+        d = core.krea2_models_dir()
+        try:
+            os.makedirs(d, exist_ok=True)
+            os.startfile(d)
+        except Exception as e:
+            messagebox.showerror(core.APP_NAME, f"打开失败：{e}")
 
     # ============ 预处理 / 训练 ============
     def cmd_preprocess(self):
