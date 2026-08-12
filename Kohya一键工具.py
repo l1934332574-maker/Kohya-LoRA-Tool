@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.5.4"
+APP_VERSION = "0.5.5"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1868,6 +1868,52 @@ def _wheel_valid(path):
         return False
 
 
+def _ensure_kohya_deps(vpy, kdir, logf=print):
+    """确保训练环境具备工具运行时需要的依赖，缺失自动补装（内置 wheel + 国内镜像 + 重试）。
+
+    覆盖：PIL/numpy（预处理）、transformers/huggingface_hub（分词器缓存 + Anima/FLUX 组件下载）、
+    toml/voluptuous/safetensors/diffusers/accelerate/omegaconf（sd-scripts 训练）。
+    返回 True=就绪；False=补装失败（网络问题）。
+    """
+    # 用 find_spec 只查包是否存在（不 import，秒级；import transformers 太重会拖慢每次训练启动）
+    code = ("import importlib.util;m=['PIL','numpy','transformers','huggingface_hub','toml',"
+            "'voluptuous','safetensors','diffusers','accelerate','omegaconf'];"
+            "import sys;sys.exit(0 if all(importlib.util.find_spec(x) is not None for x in m) else 1)")
+    try:
+        r = subprocess.run([vpy, "-c", code], capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            return True
+    except Exception:
+        pass
+    logf("[环境] 训练环境缺少运行时依赖（PIL/numpy/transformers/huggingface_hub/toml 等），正在自动补装…")
+    subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
+                    "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
+    env = build_env()
+    wheels = _bundled_pip_wheels()
+    if wheels:
+        if run_stream([vpy, "-m", "pip", "install", "--no-input", "--no-index"] + wheels,
+                      cwd=kdir, env=env, logf=logf) == 0:
+            _r = subprocess.run([vpy, "-c",
+                                 "import importlib.util; import sys; sys.exit(0 if importlib.util.find_spec('PIL') and importlib.util.find_spec('numpy') else 1)"],
+                                capture_output=True, text=True, timeout=60)
+            if _r.returncode != 0:
+                logf("[环境] pillow/numpy 离线安装异常，改走镜像…")
+                wheels = []
+    pkgs = ["transformers", "huggingface-hub", "toml", "voluptuous", "safetensors",
+            "diffusers", "accelerate", "omegaconf"]
+    ok = False
+    for _idx in ("https://pypi.tuna.tsinghua.edu.cn/simple", "https://mirrors.aliyun.com/pypi/simple/"):
+        if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                       "--index-url", _idx] + pkgs, cwd=kdir, env=env, logf=logf) == 0:
+            ok = True
+            break
+        logf("[环境] 当前镜像下载失败，切换备用镜像重试…")
+    if not ok:
+        return False
+    logf("[环境] 训练环境运行时依赖补装完成")
+    return True
+
+
 def _download_with_resume(url, dest, logf=print):
     """用 curl 断点续传下载大文件（repo.radeon.com 网络不稳时关键，断了可续传）。
 
@@ -2543,25 +2589,11 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
                 "AMD 显卡需要先配置 ROCm 版 PyTorch 或 ZLUDA 才能训练。\n"
                 "请按「使用说明」的 AMD 章节配置环境，或在界面关闭 AMD 兼容模式。" % (_bk or "未知"))
         logf("[训练] AMD 兼容模式（实验性）：torch 后端 = %s，参数已自动适配" % _bk)
-        # 自愈：确认 AMD 训练环境有 sd-scripts 需要的依赖（toml/voluptuous 等小包，
-        # 之前 AMD 依赖安装列表漏了它们会导致训练报 ModuleNotFoundError: toml）
-        try:
-            _r = subprocess.run(
-                [vpy, "-c", "import toml, voluptuous, safetensors, transformers, diffusers, accelerate, omegaconf"],
-                capture_output=True, text=True, timeout=120)
-            if _r.returncode != 0:
-                logf("[AMD] 训练环境缺少 sd-scripts 依赖（如 toml/voluptuous），正在自动补装…")
-                subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
-                                "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
-                if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
-                               "toml", "voluptuous", "safetensors", "transformers", "diffusers", "accelerate", "omegaconf"],
-                              cwd=kdir, env=build_env(), logf=logf) != 0:
-                    raise RuntimeError("AMD 训练环境依赖补装失败（网络不稳），请检查网络后重试，或重跑【AMD 环境检查 / 安装引导】")
-                logf("[AMD] 训练环境依赖补装完成")
-        except RuntimeError:
-            raise
-        except Exception as e:
-            logf(f"[AMD] 训练环境依赖检查失败（忽略，继续尝试）: {e}")
+    # 自愈：确保训练环境（AMD=venv_amd，普通=kohya venv）具备完整运行时依赖
+    # （PIL/numpy/transformers/huggingface_hub/toml 等，缺了会导致分词器缓存、
+    #  Anima/FLUX 组件下载、sd-scripts 训练报 ModuleNotFoundError）
+    if not _ensure_kohya_deps(vpy, kdir, logf):
+        raise RuntimeError("训练环境依赖补装失败（网络不稳），请检查网络后重试，或重跑【② 安装训练内核 / AMD 环境引导】")
     sds = os.path.join(kdir, "sd-scripts")
     base_type = params.get("base_type", "sd15")
     arch_info = ARCH_INFO.get(base_type, ARCH_INFO["sd15"])
