@@ -265,6 +265,10 @@ class App:
         self.base_model_var = tk.StringVar()
         self.unet_only_var = tk.BooleanVar(value=False)
         self.guide_status = {"env": "未做", "kohya": "未做", "base": "未选", "raw": "未选"}
+        self._guide_vars = {}          # 动态引导：步骤 id -> StringVar
+        self._guide_row_widgets = []   # 动态引导：已渲染的行控件
+        self._guide_hl_after = None    # 引导高亮闪烁定时器
+        self._guide_hl_step = None     # 当前高亮的步骤 id
         self._badge_widgets = []
         self._main_widgets = []
         self._adv_entries = {}
@@ -551,29 +555,14 @@ class App:
 
         self._guide_dots = {}
         self._guide_btns = {}
-        def _guide(key, label, var, btn_text, cmd):
-            row = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-            row.pack(fill="x", padx=14, pady=3)
-            dot = ctk.CTkFrame(row, width=10, height=10, corner_radius=5, fg_color="#4a3636")
-            dot.pack(side="left", padx=(2, 8), pady=9)
-            self._guide_dots[key] = dot
-            ctk.CTkLabel(row, text=label, font=ui_font(FONT_BODY), text_color=TXT, width=92, anchor="w").pack(side="left")
-            ctk.CTkLabel(row, textvariable=var, font=ui_font(FONT_HINT), text_color=HINT, width=26, anchor="w").pack(side="left")
-            b = ctk.CTkButton(row, text=btn_text, width=56, height=28, fg_color=CARD2, hover_color="#343a46",
-                              border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
-                              font=ui_font(FONT_HINT), command=cmd)
-            b.pack(side="right")
-            self._guide_btns[key] = b
-        self.guide_env_var = tk.StringVar(value="未装")
-        self.guide_kohya_var = tk.StringVar(value="未装")
-        self.guide_musubi_var = tk.StringVar(value="未装")
-        self.guide_base_var = tk.StringVar(value="未选")
-        self.guide_raw_var = tk.StringVar(value="未选")
-        _guide("env", "① 环境准备", self.guide_env_var, "去准备", self.cmd_env)
-        _guide("kohya", "② 安装训练内核", self.guide_kohya_var, "去安装", self.cmd_install)
-        _guide("musubi", "②' 第二引擎(可选)", self.guide_musubi_var, "去安装", self.cmd_install_musubi)
-        _guide("base", "③ 选择底模+模式", self.guide_base_var, "去选底模", self.cmd_pick_base)
-        _guide("raw", "④ 选择图片文件夹", self.guide_raw_var, "去选文件夹", self.cmd_pick_raw)
+        self._guide_vars = {}
+        # 引导标题 + 占位 + 步骤容器：步骤按模式动态渲染（core.GUIDE_STEPS 数据驱动）
+        self.guide_title = ctk.CTkLabel(self.sidebar, text="🎓 新手引导（按顺序做）", font=ui_font(FONT_HINT), text_color=SUB)
+        self.guide_placeholder = ctk.CTkLabel(self.sidebar,
+                                              text="👆 请先打开/新建项目\n然后选择训练模式\n\n引导会按模式自动生成",
+                                              font=ui_font(FONT_HINT), text_color=SUB, justify="left")
+        self.guide_placeholder.pack(anchor="w", padx=16, pady=(6, 2))
+        self.guide_host = ctk.CTkFrame(self.sidebar, fg_color="transparent")
 
         self.btn_one_click = ctk.CTkButton(self.sidebar, text="🚀 一键开始训练", height=42,
                                            fg_color=CARD2, hover_color="#343a46", corner_radius=8,
@@ -824,9 +813,9 @@ class App:
         self.work_frame.pack_forget()
         self.home_frame.pack(fill="both", expand=True)
         self._build_home()
-        # 徽章在 work_frame（主页不可见），只更新左侧引导状态，避免重复跑环境检测
+        # 徽章在 work_frame（主页不可见），主页只渲染引导占位（不显示步骤）
         try:
-            self._refresh_guide_only()
+            self._render_guide()
         except Exception:
             pass
 
@@ -845,25 +834,152 @@ class App:
         self.home_frame.pack_forget()
         self._ensure_main_cards()
         self.work_frame.pack(fill="both", expand=True)
+        try:
+            self._render_guide()
+        except Exception:
+            pass
 
     def _refresh_guide_only(self):
         """只刷新左侧引导状态（用缓存的环境结果），不重复跑子进程检测。"""
+        self._refresh_guide()
+
+
+    def _current_steps(self):
+        """当前模式的新手引导步骤（数据驱动，来自 core.GUIDE_STEPS）。"""
+        return list(core.GUIDE_STEPS.get(self.mode, []))
+
+    def _guide_done(self, check):
+        """按 check 类型判定引导步骤是否完成（环境/引擎/模型=全局；底模/数据=当前项目）。"""
         try:
-            sts = core.system_status()
-            self.guide_env_var.set("已装" if sts.get("git") and sts.get("python") else "未装")
-            self.guide_kohya_var.set("已装" if sts.get("kohya_ok") else "未装")
-            def _dot(key, ok_):
-                try:
-                    self._guide_dots[key].configure(fg_color=("#5c7c66" if ok_ else "#6e4545"))
-                except Exception:
-                    pass
-            _dot("env", bool(sts.get("git") and sts.get("python")))
-            _dot("kohya", bool(sts.get("kohya_ok")))
-            _dot("base", bool(self.base_model_var.get()))
-            _dot("raw", bool(self.raw_dir_var.get()))
-            self._refresh_one_click_state()
+            if check == "env":
+                sts = core.system_status()
+                return bool(sts.get("git") and sts.get("python"))
+            if check == "kohya":
+                return bool(core.system_status().get("kohya_ok"))
+            if check == "musubi":
+                return bool(core.system_status().get("musubi_ok"))
+            if check == "at":
+                return bool(core.system_status().get("at_ok"))
+            if check == "krea2_models":
+                return not core.krea2_missing_models()
+            if check == "h3_models":
+                return not core.h3_missing_models()
+            if check == "base":
+                return bool(self.base_model_var.get())
+            if check == "raw":
+                return bool(self.raw_dir_var.get())
         except Exception:
             pass
+        return False
+
+    def _stop_guide_highlight(self):
+        self._guide_hl_step = None
+        if self._guide_hl_after:
+            try:
+                self.root.after_cancel(self._guide_hl_after)
+            except Exception:
+                pass
+            self._guide_hl_after = None
+        for btn in list(self._guide_btns.values()):
+            try:
+                btn.configure(fg_color=CARD2, hover_color="#343a46", text_color=TXT)
+            except Exception:
+                pass
+
+    def _highlight_guide(self, step_id):
+        """第一个未完成步骤的按钮做呼吸闪烁，引导小白点它。"""
+        self._stop_guide_highlight()
+        if not step_id or step_id not in self._guide_btns:
+            return
+        btn = self._guide_btns[step_id]
+        self._guide_hl_step = step_id
+        self._guide_hl_toggle = False
+
+        def _pulse():
+            if getattr(self, "_guide_hl_step", None) != step_id:
+                return
+            self._guide_hl_toggle = not self._guide_hl_toggle
+            try:
+                btn.configure(fg_color=(ACC if self._guide_hl_toggle else CARD2),
+                              text_color=("#ffffff" if self._guide_hl_toggle else TXT))
+            except Exception:
+                pass
+            self._guide_hl_after = self.root.after(500, _pulse)
+
+        _pulse()
+
+    def _render_guide(self):
+        """按当前模式重建左侧新手引导（主页=占位；工作区=该模式专属步骤）。"""
+        for w in self._guide_row_widgets:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self._guide_row_widgets = []
+        self._guide_dots = {}
+        self._guide_btns = {}
+        self._guide_vars = {}
+        self._stop_guide_highlight()
+        try:
+            self.guide_title.pack_forget()
+            self.guide_host.pack_forget()
+            self.guide_placeholder.pack_forget()
+        except Exception:
+            pass
+        if self.current_project is None:
+            self.guide_placeholder.configure(text="👆 请先打开/新建项目\\n然后选择训练模式\\n\\n引导会按模式自动生成")
+            self.guide_placeholder.pack(anchor="w", padx=16, pady=(6, 2))
+            return
+        self.guide_title.pack(anchor="w", padx=16, pady=(0, 4))
+        steps = self._current_steps()
+        if not steps:
+            self.guide_placeholder.configure(text="👆 请先选择训练模式\\n\\n引导会按模式自动生成")
+            self.guide_placeholder.pack(anchor="w", padx=16, pady=(6, 2))
+            return
+        self.guide_host.pack(fill="x", padx=14, pady=3)
+        for step in steps:
+            row = ctk.CTkFrame(self.guide_host, fg_color="transparent")
+            row.pack(fill="x", pady=3)
+            dot = ctk.CTkFrame(row, width=10, height=10, corner_radius=5, fg_color="#4a3636")
+            dot.pack(side="left", padx=(2, 8), pady=9)
+            ctk.CTkLabel(row, text=step["label"], font=ui_font(FONT_BODY), text_color=TXT,
+                         width=100, anchor="w").pack(side="left")
+            var = tk.StringVar(value="·")
+            ctk.CTkLabel(row, textvariable=var, font=ui_font(FONT_HINT), text_color=HINT,
+                         width=18, anchor="w").pack(side="left")
+            btn = ctk.CTkButton(row, text=step["btn"], width=62, height=28, fg_color=CARD2,
+                                hover_color="#343a46", border_width=1, border_color=BORDER,
+                                text_color=TXT, corner_radius=6, font=ui_font(FONT_HINT),
+                                command=getattr(self, step["act"], lambda: None))
+            btn.pack(side="right")
+            self._guide_dots[step["id"]] = dot
+            self._guide_vars[step["id"]] = var
+            self._guide_btns[step["id"]] = btn
+            self._guide_row_widgets.append(row)
+            if step.get("tip"):
+                self._tip(btn, step["tip"])
+        self._refresh_guide()
+
+    def _refresh_guide(self):
+        """刷新引导步骤状态：✓/·、圆点颜色、高亮第一个未完成步骤、一键按钮状态。"""
+        first_pending = None
+        for step in self._current_steps():
+            done = self._guide_done(step["check"])
+            var = self._guide_vars.get(step["id"])
+            if var is not None:
+                var.set("✓" if done else "·")
+            dot = self._guide_dots.get(step["id"])
+            if dot is not None:
+                try:
+                    dot.configure(fg_color=("#5c7c66" if done else "#6e4545"))
+                except Exception:
+                    pass
+            if not done and first_pending is None:
+                first_pending = step["id"]
+        self._highlight_guide(first_pending)
+        self._refresh_one_click_state()
+
+
 
     def _bind_autosave_traces(self):
         """给所有输入控件绑定变更回调，自动保存项目。"""
@@ -923,8 +1039,6 @@ class App:
             self.train_env_var.set("")
         except Exception:
             pass
-        self.guide_base_var.set("未选")
-        self.guide_raw_var.set("未选")
         try:
             self.base_combo.set(core.BASE_TYPE_LABELS.get(self.base_type, list(core.BASE_TYPE_LABELS.values())[0]))
         except Exception:
@@ -1309,24 +1423,14 @@ class App:
                OK_TX if sts.get("kohya_ok") else "#c9a8a8")
         _gpu = sts.get("gpu")
         _badge(f"● {_gpu}" if _gpu else "● 未检测到 N 卡", HW_BG, HW_TX)
-        self.guide_env_var.set("已装" if sts.get("git") and sts.get("python") else "未装")
-        self.guide_kohya_var.set("已装" if sts.get("kohya_ok") else "未装")
-        def _dot(key, ok_):
-            try:
-                self._guide_dots[key].configure(fg_color=("#5c7c66" if ok_ else "#6e4545"))
-            except Exception:
-                pass
-        _dot("env", bool(sts.get("git") and sts.get("python")))
-        _dot("kohya", bool(sts.get("kohya_ok")))
-        self.guide_musubi_var.set("已装" if sts.get("musubi_ok") else "未装")
-        _dot("musubi", bool(sts.get("musubi_ok")))
-        _dot("base", bool(self.base_model_var.get()) or (self.mode == "krea2" and not core.krea2_missing_models()))
-        _dot("raw", bool(self.raw_dir_var.get()))
+        try:
+            self._refresh_guide()
+        except Exception:
+            pass
         try:
             self._refresh_h3_status()
         except Exception:
             pass
-        self._refresh_one_click_state()
 
     def _refresh_status(self):
         try:
@@ -1441,6 +1545,10 @@ class App:
         self.mode = self._current_mode()
         self._apply_presets()
         self._update_mode_ui()
+        try:
+            self._render_guide()
+        except Exception:
+            pass
         self._schedule_autosave()
 
     def _update_mode_ui(self):
@@ -1608,7 +1716,6 @@ class App:
             model = self._find_model_of_type(payload)
             if model:
                 self.base_model_var.set(model[0])
-                self.guide_base_var.set("已选")
                 self._log(f"[底模] 目录里找到 {core.BASE_TYPE_LABELS[payload]} 模型：{model[1]}")
             else:
                 self.base_model_var.set("")
@@ -1616,7 +1723,6 @@ class App:
                 self.root.after(60, lambda: self._ask_download_or_open(payload))
         else:
             self.base_model_var.set(payload)
-            self.guide_base_var.set("已选")
             bt = core.detect_base_type(payload)
             if bt in ("sd15", "sdxl"):
                 self._set_base_type(bt)
@@ -1669,12 +1775,7 @@ class App:
             messagebox.showwarning(core.APP_NAME, "请选择 .safetensors 或 .ckpt 格式的底模文件。")
             return
         self.base_model_var.set(f)
-        self.guide_base_var.set("已选")
-        self._refresh_one_click_state()
-        try:
-            self._guide_dots["base"].configure(fg_color="#5c7c66")
-        except Exception:
-            pass
+        self._refresh_guide()
         bt = core.detect_base_type(f)
         if bt in ("sd15", "sdxl"):
             self._set_base_type(bt)
@@ -1694,12 +1795,7 @@ class App:
         d = filedialog.askdirectory(title=_title)
         if d:
             self.raw_dir_var.set(d)
-            self.guide_raw_var.set("已选")
-            self._refresh_one_click_state()
-            try:
-                self._guide_dots["raw"].configure(fg_color="#5c7c66")
-            except Exception:
-                pass
+            self._refresh_guide()
             self._log(f"[预处理] 已选{'视频' if self.mode == 'video' else '原始图片'}文件夹：{d}")
 
     def cmd_pick_reg(self):
@@ -1831,7 +1927,6 @@ class App:
             (getattr(self, "btn_download_base", None), "没有底模？点这里选下载方式：推荐「应用内下载」（软件里直接下载，带进度/断点续传/下完自动识别）。"),
             (getattr(self, "btn_one_click", None), "小白专用：自动过滤模糊/过小/损坏图 → 正方形裁剪 → 去重 → 打标签 → 开始训练，全程不用管。"),
             (getattr(self, "btn_stop", None), "任务进行中（训练/预处理/安装）可用：立即终止当前进程。训练中断后进度快照会保留，下次可断点续训。"),
-            (getattr(self, "_guide_btns", {}).get("musubi"), "第二训练引擎（Krea2 图像 LoRA + 视频 LoRA）：独立环境安装，不影响现有画风/人物训练。装好后才能用 Krea2/视频模式（即将上线）。"),
             (getattr(self, "btn_krea2_models", None), "打开 Krea2 模型文件夹（models/krea2），把 RAW/VAE/文本编码器 3 个文件放进去；软件内提供国内镜像下载链接。"),
             (getattr(self, "btn_krea2_guide", None), "打开 Krea2 训练详细逐步引导（装环境→下模型→选图→预处理→训练→出图，含常见问题）。"),
             (getattr(self, "btn_h3_models", None), "打开 MiniMax H3 模型文件夹（models/minimax_h3），把下载的 DiT/文本编码器/VAE 文件放进去。"),
@@ -2967,16 +3062,18 @@ class App:
 
 
     def _refresh_one_click_state(self):
-        need_base = self.mode != "krea2"
-        _base_ok = bool(self.base_model_var.get()) or (not need_base and not core.krea2_missing_models())
-        ready = (self.guide_env_var.get() == "已装" and self.guide_kohya_var.get() == "已装"
-                 and _base_ok and bool(self.raw_dir_var.get()))
+        steps = self._current_steps()
+        ready = bool(steps) and all(self._guide_done(s["check"]) for s in steps)
         try:
             self.btn_one_click.configure(state=("normal" if ready else "disabled"),
                                          fg_color=(ACC if ready else CARD2),
                                          hover_color=(ACC_H if ready else "#343a46"))
-            self.btn_one_click_hint.configure(
-                text=("✓ 准备就绪，点击开始训练" if ready else "完成 ①②③④ 后自动点亮"))
+            if ready:
+                self.btn_one_click_hint.configure(text="✓ 准备就绪，点击开始训练")
+            else:
+                pend = next((s for s in steps if not self._guide_done(s["check"])), None)
+                self.btn_one_click_hint.configure(
+                    text=("还差「%s」" % pend["label"]) if pend else "完成引导后自动点亮")
         except Exception:
             pass
 

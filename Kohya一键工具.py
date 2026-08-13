@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.6.1"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -237,6 +237,57 @@ DATASET_TIPS = {
 }
 
 OUTPUT_NAMES = {"style": "anime_style_lora", "character": "character_lora", "krea2": "krea2_lora", "video": "h3_video_lora"}
+# ---------- 新手引导步骤（数据驱动，按模式渲染） ----------
+# 每步：id(唯一) / label(显示文案) / btn(按钮文字) / check(完成判定类型) / act(GUI 动作方法名) / tip(悬停提示)
+# check 类型：
+#   env=Git+Python 全局已装 | kohya/musubi/at=对应训练引擎全局已装
+#   krea2_models/h3_models=对应模型文件齐全（全局，训练前必须）
+#   base=当前项目已选底模 | raw=当前项目已选数据文件夹（图片/视频）
+# 每种模式只列它真正需要的步骤：只训 H3 的小白不会看到 kohya/musubi。
+GUIDE_STEPS = {
+    "style": [
+        {"id": "env", "label": "① 环境准备", "btn": "去准备", "check": "env", "act": "cmd_env",
+         "tip": "安装 Git 和 Python（只需一次，全部项目通用）。"},
+        {"id": "kohya", "label": "② 安装训练内核", "btn": "去安装", "check": "kohya", "act": "cmd_install",
+         "tip": "安装 Kohya 训练内核（画风/人物模式需要，只需一次）。"},
+        {"id": "base", "label": "③ 选择底模", "btn": "去选底模", "check": "base", "act": "cmd_pick_base",
+         "tip": "选择基础底模（.safetensors），SD1.5/SDXL/FLUX/Anima 都可。"},
+        {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
+         "tip": "选择原始图片文件夹（jpg/png/webp 等）。"},
+    ],
+    "character": [
+        {"id": "env", "label": "① 环境准备", "btn": "去准备", "check": "env", "act": "cmd_env",
+         "tip": "安装 Git 和 Python（只需一次，全部项目通用）。"},
+        {"id": "kohya", "label": "② 安装训练内核", "btn": "去安装", "check": "kohya", "act": "cmd_install",
+         "tip": "安装 Kohya 训练内核（画风/人物模式需要，只需一次）。"},
+        {"id": "base", "label": "③ 选择底模", "btn": "去选底模", "check": "base", "act": "cmd_pick_base",
+         "tip": "选择基础底模（.safetensors），建议和出图用的底模同系列。"},
+        {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
+         "tip": "选择同一人物的图片文件夹（15~30 张）。"},
+    ],
+    "krea2": [
+        {"id": "env", "label": "① 环境准备", "btn": "去准备", "check": "env", "act": "cmd_env",
+         "tip": "安装 Git 和 Python（只需一次，全部项目通用）。"},
+        {"id": "musubi", "label": "② 安装第二引擎", "btn": "去安装", "check": "musubi", "act": "cmd_install_musubi",
+         "tip": "安装第二引擎 musubi-tuner（Krea2 模式需要，只需一次）。"},
+        {"id": "krea2_models", "label": "③ 下载 Krea2 模型", "btn": "去下载", "check": "krea2_models", "act": "cmd_open_krea2_models",
+         "tip": "把 Krea2 的 RAW/VAE/文本编码器 3 个文件放进 models/krea2/（软件内提供国内镜像）。"},
+        {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
+         "tip": "选择图片文件夹（15~30 张同一人物/风格）。"},
+    ],
+    "video": [
+        {"id": "env", "label": "① 环境准备", "btn": "去准备", "check": "env", "act": "cmd_env",
+         "tip": "安装 Git 和 Python（只需一次，全部项目通用）。"},
+        {"id": "at", "label": "② 安装第三引擎", "btn": "去安装", "check": "at", "act": "cmd_install_at",
+         "tip": "安装第三引擎 AI Toolkit（MiniMax H3 视频模式需要，只需一次，需 NVIDIA 显卡）。"},
+        {"id": "h3_models", "label": "③ 下载 H3 模型", "btn": "去下载", "check": "h3_models", "act": "cmd_open_h3_models",
+         "tip": "把 MiniMax H3 的 DiT/文本编码器/VAE 放进 models/minimax_h3/（约 40GB，国内镜像）。"},
+        {"id": "raw", "label": "④ 选择视频文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
+         "tip": "选择视频数据集文件夹（3~10 段 mp4 + 同名 txt 字幕）。"},
+    ],
+}
+
+
 
 
 
@@ -3380,6 +3431,10 @@ def system_status(force=False):
         _musubi_ok = _musubi_marker_ok()
     except Exception:
         _musubi_ok = False
+    try:
+        _at_ok = _at_marker_ok()
+    except Exception:
+        _at_ok = False
     data = {
         "git": git or None,
         "python": f"{ver}" if ver else None,
@@ -3387,6 +3442,7 @@ def system_status(force=False):
         "kohya_dir": kdir if kohya_ok else None,
         "gpu": gpu,
         "musubi_ok": _musubi_ok,
+        "at_ok": _at_ok,
     }
     _SYSTEM_STATUS_CACHE["t"] = _now
     _SYSTEM_STATUS_CACHE["data"] = data
