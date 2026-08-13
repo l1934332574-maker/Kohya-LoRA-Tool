@@ -128,7 +128,15 @@
 - 左侧新手引导新增「②' 第二引擎(可选)」：安装独立 musubi-tuner 环境（不碰现有 Kohya 环境）。
 - 模式下拉新增 **「🖼 Krea 2 图像LoRA」**：基于 Krea 2（12.9B MMDiT）训练，预设 rank32/alpha32/1024px。
 - Krea2 训练前需把模型放进 `models/krea2/`（RAW 底模 13~26GB / Qwen-Image VAE / Qwen3-VL 文本编码器，软件内提供国内镜像直链）；推荐 16G 显存（最低 12G，自动 fp8 + block swap 省显存）。
-- 视频 LoRA 训练（Wan 等）开发中。
+### 第三训练引擎（MiniMax H3 视频 LoRA，实验性，v0.6.0 新增）
+
+- 新增 **「🎬 视频LoRA（MiniMax H3）」** 模式：基于 MiniMax-H3（33.1B 全模态视频模型，24fps + 音频）训练 T2V LoRA。
+- 训练内核为 **AI Toolkit（Ostris）**，独立 `ai_toolkit_venv`，完全不碰 Kohya / musubi 环境；安装入口在视频模式顶部的「⚙ 安装第三引擎」。
+- 训练前需把模型放进 `models/minimax_h3/`（FL2VA pruned int8 DiT / Qwen3-VL-32B 文本编码器 / 视频VAE，共约 40GB，软件内提供国内镜像直链）。
+- 数据集：一个文件夹放 3~10 段 3~10 秒的 `.mp4` + 同名 `.txt` 字幕（描述画面内容），训练时自动抽帧（默认 73 帧 ≈ 3 秒）。
+- 预设：rank32 / alpha32 / lr 2e-4 / 训练步数 2000（上限 3000 防过拟合）。
+- ⚠ 硬性要求：**NVIDIA 显卡 + 24GB 及以上显存**（训练走 CUDA/NVFP4）；AMD 显卡暂不支持该模式，请继续使用画风/人物/Krea2 模式。
+- ⚠ 许可：MiniMax H3 为社区许可证（开放权重），商用请自行确认条款。
 
 ### 模式与预设
 - 顶部切换 **画风/人物**，自动填充整套预设参数（rank/alpha/学习率/repeats/epochs）；手动改过的参数切换模式不会被覆盖，点「↺ 恢复预设」可重载

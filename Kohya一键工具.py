@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.5.7"
+APP_VERSION = "0.6.0"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -97,8 +97,9 @@ MODE_LABELS = {
     "style": "🎨 画风LoRA模式",
     "character": "👤 人物角色LoRA模式",
     "krea2": "🖼 Krea 2 图像LoRA",
+    "video": "🎬 视频LoRA（MiniMax H3）",
 }
-MODE_KEYS = ["style", "character", "krea2"]
+MODE_KEYS = ["style", "character", "krea2", "video"]
 
 # 架构注册表（对标秋叶：SD1.5 / SDXL / FLUX.1 / Anima）
 # family: sd=U-Net 架构；flux=DiT；anima=DiT+Qwen3
@@ -173,10 +174,20 @@ PRESETS = {
         "anima": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
                   "repeats": "2", "max_epochs": "16", "resolution": "1024"},
     },
+    "video": {
+        "sd15": {"rank": "32", "alpha": "32", "unet_lr": "2e-4", "te_lr": "1e-4",
+                 "repeats": "1", "max_epochs": "20", "resolution": "1280", "video_steps": "2000"},
+        "sdxl": {"rank": "32", "alpha": "32", "unet_lr": "2e-4", "te_lr": "1e-4",
+                 "repeats": "1", "max_epochs": "20", "resolution": "1280", "video_steps": "2000"},
+        "flux": {"rank": "32", "alpha": "32", "unet_lr": "2e-4", "te_lr": "1e-4",
+                 "repeats": "1", "max_epochs": "20", "resolution": "1280", "video_steps": "2000"},
+        "anima": {"rank": "32", "alpha": "32", "unet_lr": "2e-4", "te_lr": "1e-4",
+                  "repeats": "1", "max_epochs": "20", "resolution": "1280", "video_steps": "2000"},
+    },
 }
 
 RESOLUTIONS = {k: v["resolution"] for k, v in ARCH_INFO.items()}
-MIN_IMAGES = {"style": 20, "character": 15, "krea2": 15}   # 一键训练最少可用图片数
+MIN_IMAGES = {"style": 20, "character": 15, "krea2": 15, "video": 3}   # 一键训练最少可用图片/视频数
 MAX_AUTO_STEPS = 12000                          # 一键训练自动约束的最大总步数（防过拟合）
 
 PARAM_LABELS = {
@@ -187,6 +198,7 @@ PARAM_LABELS = {
     "repeats": "repeats",
     "max_epochs": "最大epoch",
     "resolution": "训练分辨率",
+    "video_steps": "训练步数",
 }
 
 # 高级参数通俗中文提示（鼠标悬停显示）
@@ -198,6 +210,7 @@ PARAM_TIPS = {
     "repeats": "每张图片重复次数：越多学得越用力，小心过拟合。",
     "max_epochs": "最大训练轮数：轮数越多学得越久，够用就好。",
     "resolution": "训练分辨率：512 最省显存最快，768 平衡，1024 画质最好。16G 显存跑 Krea2/SDXL 建议降到 768 或 512，防止爆显存。",
+    "video_steps": "视频 LoRA 总训练步数：2000 左右较稳；步数过高会死记视频内容（过拟合）。上限 3000。",
 }
 
 TRIGGER_HINT_CHARACTER = ("💡提示：填一个网上很少见到的英文单词，比如 my_oc01\n"
@@ -212,13 +225,18 @@ TRIGGER_HINT_STYLE = ("💡提示：填一个网上很少见到的英文单词�
                       "⚠重要：你的训练图片不能全是同一个人，不然画风套不到别的东西上。\n"
                       "训练之后输入这个单词，就能一键套用这个画风。\n"
                       "不填也可以正常训练。")
+TRIGGER_HINT_VIDEO = ("💡提示：填一个网上很少见到的英文单词（如 my_oc01）\n"
+                      "训练后输入这个单词，就能在视频里召唤这个角色/风格。\n"
+                      "⚠ 视频 LoRA 需要 24G+ 显存（NVIDIA 显卡），且模型文件很大（40GB+）。\n"
+                      "不填也可以正常训练。")
 DATASET_TIPS = {
     "style": "📌 数据集提示：建议 20~60 张图片，尽量多不同人物、不同姿态，避免五官固化。画风模式自动过滤强人物五官标签；可填画风专属触发词，不需要正则图。",
     "character": "📌 数据集提示：建议 15~30 张同一人物，多角度、不同服装，推荐设置唯一 trigger 触发词；可配合正则数据集防过拟合。",
     "krea2": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Krea 2 模型放进 models/krea2/（RAW+VAE+文本编码器）。推荐 12G+ 显存。",
+    "video": "📌 视频数据集提示：准备 3~10 段 3~10 秒的同角色/同风格视频（mp4），每段配一个同名 .txt 字幕描述内容。H3 模型 40GB+，训练推荐 24G 显存（NVIDIA）。",
 }
 
-OUTPUT_NAMES = {"style": "anime_style_lora", "character": "character_lora", "krea2": "krea2_lora"}
+OUTPUT_NAMES = {"style": "anime_style_lora", "character": "character_lora", "krea2": "krea2_lora", "video": "h3_video_lora"}
 
 
 
@@ -1325,6 +1343,421 @@ def _write_krea2_template(mode, params, output_name, out_dir=None):
     with open(path, "w", encoding="utf-8-sig") as f:
         f.write(text)
     return path
+
+
+
+# ---------- 第三训练引擎（AI Toolkit：MiniMax H3 视频 LoRA） ----------
+# MiniMax-H3：33.1B 全模态视频 DiT（24fps + 32kHz 立体声音频），开放权重（社区许可证）。
+# 训练内核用 Ostris AI Toolkit（已官方支持 H3 T2V/I2V LoRA，消费级 GPU 优化）。
+# 权重用 Comfy-Org/MiniMax-H3 repack：pruned int8 DiT + nvfp4 AWQ Qwen3-VL-32B + fp16 视频VAE + fp32 音频VAE。
+
+H3_FPS = 24
+H3_MAX_STEPS = 3000            # 视频训练步数上限（防过拟合）
+H3_DEFAULT_STEPS = 2000        # 默认总训练步数
+H3_FRAMES = 73                 # 默认抽帧数（17n+5=73，约 3 秒 @24fps）
+
+# H3 模型文件（放 models/minimax_h3/，不内置；国内镜像直链）
+H3_MODEL_LINKS = {
+    "dit": ("minimax_h3_fl2va_pruned_int8_convrot.safetensors", "H3 主模型 FL2VA（pruned int8，约 22GB，训练必需）",
+            "https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"),
+    "te": ("qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "Qwen3-VL-32B 文本编码器（nvfp4 AWQ，约 18GB）",
+           "https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"),
+    "video_vae": ("minimax_h3_video_vae_fp16.safetensors", "视频 VAE（fp16，约 1GB）",
+                  "https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors"),
+    "audio_vae": ("minimax_h3_audio_vae_fp32.safetensors", "音频 VAE（fp32，约 1GB，可选）",
+                  "https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors"),
+}
+
+VIDEO_EXTS = {".mp4", ".avi", ".mov", ".webm", ".mkv", ".wmv", ".m4v", ".flv"}
+
+
+def h3_models_dir():
+    return os.path.join(KIT_DIR, "models", "minimax_h3")
+
+
+def h3_model_files():
+    """扫描 models/minimax_h3（含子目录），返回 {dit,te,video_vae,audio_vae} 路径或 None。"""
+    d = h3_models_dir()
+    out = {"dit": None, "te": None, "video_vae": None, "audio_vae": None}
+    if not os.path.isdir(d):
+        return out
+    want = {
+        "dit": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "te": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "video_vae": "minimax_h3_video_vae_fp16.safetensors",
+        "audio_vae": "minimax_h3_audio_vae_fp32.safetensors",
+    }
+    for root, _dirs, files in os.walk(d):
+        for f in files:
+            low = f.lower()
+            for key, fname in want.items():
+                if out[key] is None and low == fname:
+                    out[key] = os.path.join(root, f)
+    return out
+
+
+def h3_missing_models():
+    """返回缺失的 H3 模型说明列表（含国内镜像直链）；音频 VAE 可选不算缺失。"""
+    files = h3_model_files()
+    missing = []
+    for key in ("dit", "te", "video_vae"):
+        if not files.get(key):
+            fname, desc, url = H3_MODEL_LINKS[key]
+            missing.append(f"· {desc}\n  文件: {fname}\n  下载: {url}")
+    return missing
+
+
+def _at_marker_ok():
+    """第三引擎快速标记检查（秒级）：ai_toolkit_venv + ai-toolkit 源码 + run.py。"""
+    kdir = get_kohya_dir()
+    vpy = os.path.join(kdir, "ai_toolkit_venv", "Scripts", "python.exe")
+    if not os.path.isfile(vpy):
+        return False
+    return os.path.isfile(os.path.join(kdir, "ai-toolkit", "run.py"))
+
+
+def ai_toolkit_engine_status():
+    """第三训练引擎（AI Toolkit）状态：返回 (ok, detail, venv_python)。"""
+    kdir = get_kohya_dir()
+    vpy = os.path.join(kdir, "ai_toolkit_venv", "Scripts", "python.exe")
+    at_dir = os.path.join(kdir, "ai-toolkit")
+    if not os.path.isfile(vpy):
+        return False, "未安装（ai_toolkit_venv 不存在）", vpy
+    if not os.path.isfile(os.path.join(at_dir, "run.py")):
+        return False, "ai-toolkit 源码缺失", vpy
+    try:
+        r = subprocess.run(
+            [vpy, "-c", "import torch; from toolkit.config_modules import ModelConfig; print('ok')"],
+            capture_output=True, text=True, timeout=120, cwd=at_dir)
+        if r.returncode == 0:
+            return True, "已就绪（MiniMax H3 视频）", vpy
+        return False, "环境异常（import 失败）", vpy
+    except Exception:
+        return False, "环境异常", vpy
+
+
+def install_ai_toolkit_engine(logf=print):
+    """安装第三训练引擎 AI Toolkit（MiniMax H3 视频 LoRA）。
+
+    - 独立 ai_toolkit_venv（不碰 kohya / musubi venv）；
+    - 源码 git clone（无内置包）；torch cu130 + requirements 走国内镜像；
+    - 已安装则跳过（幂等）。返回 ai_toolkit_venv 的 python 路径。
+    """
+    git = find_git()
+    py, pyver = find_python()
+    if not git or not py:
+        raise RuntimeError("请先点击【环境准备】安装 Git / Python")
+    kdir = get_kohya_dir()
+    logf(f"[第三引擎] 安装目录: {kdir}")
+    lock_f = _acquire_kohya_install_lock(kdir, logf)
+    if lock_f is None:
+        raise RuntimeError("检测到另一个安装任务正在运行，请先等待完成后再试。")
+    try:
+        at_dir = os.path.join(kdir, "ai-toolkit")
+        if not os.path.isfile(os.path.join(at_dir, "run.py")):
+            logf("[第三引擎] git clone ai-toolkit（Ostris，H3 视频训练内核）…")
+            os.makedirs(at_dir, exist_ok=True)
+            if _git_clone(git, "https://github.com/ostris/ai-toolkit.git", at_dir, logf) != 0:
+                raise RuntimeError("git clone ai-toolkit 失败，请检查网络/代理后重试")
+        else:
+            logf("[第三引擎] ai-toolkit 源码已存在，跳过克隆")
+        av = os.path.join(kdir, "ai_toolkit_venv")
+        vpy = os.path.join(av, "Scripts", "python.exe")
+        if not os.path.isfile(vpy):
+            logf("[第三引擎] 创建独立虚拟环境 ai_toolkit_venv（不影响 kohya/musubi）…")
+            if run_stream([py, "-m", "venv", av], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
+                raise RuntimeError("创建 ai_toolkit_venv 失败")
+        # 已装验证
+        try:
+            r = subprocess.run(
+                [vpy, "-c", "import torch; from toolkit.config_modules import ModelConfig"],
+                capture_output=True, text=True, timeout=180, cwd=at_dir)
+            torch_ok = r.returncode == 0
+        except Exception:
+            torch_ok = False
+        if torch_ok:
+            logf("[第三引擎] 检测到已安装（torch + ai-toolkit 可用），跳过重复安装。")
+            return vpy
+        # pip 镜像
+        subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
+                        "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
+        logf("[第三引擎] 升级 pip / setuptools / wheel …")
+        if run_stream([vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q"],
+                      cwd=kdir, logf=logf) != 0:
+            raise RuntimeError("pip 升级失败，请重试")
+        env = build_env([os.path.dirname(git)])
+        # torch cu130（AI Toolkit 官方要求；需较新 NVIDIA 驱动 ≥570）
+        logf("[第三引擎] 安装 PyTorch cu130（约 3GB，需较新 NVIDIA 驱动；首次可能较慢）…")
+        if run_stream(
+            [vpy, "-m", "pip", "install", "torch==2.13.0", "torchvision==0.28.0", "torchaudio==2.11.0",
+             "--index-url", "https://download.pytorch.org/whl/cu130"],
+            cwd=kdir, env=env, logf=logf) != 0:
+            raise RuntimeError("torch cu130 安装失败，请检查网络/代理/驱动后重试")
+        # ai-toolkit 依赖
+        logf("[第三引擎] 安装 ai-toolkit 依赖（较大，国内镜像 + 重试）…")
+        if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                       "-r", os.path.join(at_dir, "requirements.txt")], cwd=at_dir, env=env, logf=logf) != 0:
+            raise RuntimeError("ai-toolkit 依赖安装失败")
+        # 验证
+        try:
+            r = subprocess.run(
+                [vpy, "-c", "import torch; from toolkit.config_modules import ModelConfig;"
+                            "from extensions_built_in.diffusion_models.minimax_h3 import MinimaxH3Model;"
+                            "print(torch.__version__); print(torch.cuda.is_available())"],
+                capture_output=True, text=True, timeout=300, cwd=at_dir)
+            out = (r.stdout or "").strip().splitlines()
+            logf(f"[第三引擎] 验证：torch {out[0] if out else '?'} | CUDA 可用: {out[1] if len(out) > 1 else '?'} | H3 扩展已注册")
+            if r.returncode != 0:
+                raise RuntimeError("第三引擎验证失败：" + (r.stderr or "")[-300:])
+        except Exception as e:
+            logf(f"[第三引擎] 验证失败: {e}")
+            raise
+        logf("[第三引擎] 安装完成：MiniMax H3 视频 LoRA 可用。")
+        return vpy
+    finally:
+        _release_kohya_install_lock(lock_f)
+
+
+def scan_video_dataset(folder):
+    """扫描视频数据集文件夹，返回 (视频文件列表, 总时长秒, 无字幕视频数)。
+
+    AI Toolkit 数据集：文件夹内 .mp4 等视频 + 同名 .txt 字幕（myvideo.mp4 + myvideo.txt）。
+    """
+    if not folder or not os.path.isdir(folder):
+        return [], 0.0, 0
+    videos = []
+    no_caption = 0
+    for f in sorted(os.listdir(folder)):
+        p = os.path.join(folder, f)
+        if os.path.isfile(p) and os.path.splitext(f)[1].lower() in VIDEO_EXTS:
+            videos.append(p)
+            if not os.path.isfile(os.path.splitext(p)[0] + ".txt"):
+                no_caption += 1
+    total = 0.0
+    ff = shutil.which("ffprobe") or shutil.which("ffprobe.exe")
+    if ff:
+        for v in videos[:60]:
+            try:
+                r = subprocess.run([ff, "-v", "error", "-show_entries", "format=duration",
+                                    "-of", "default=noprint_wrappers=1:nokey=1", v],
+                                   capture_output=True, text=True, timeout=60)
+                if r.returncode == 0 and r.stdout.strip():
+                    try:
+                        total += float(r.stdout.strip())
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    return videos, total, no_caption
+
+
+def h3_generate_placeholder_captions(folder, trigger="", logf=print):
+    """为没有字幕的视频生成占位 txt（内容 = trigger 或通用描述），避免训练缺字幕报错。"""
+    if not folder or not os.path.isdir(folder):
+        return 0
+    base = trigger.strip() if trigger.strip() else "a video"
+    n = 0
+    for f in os.listdir(folder):
+        p = os.path.join(folder, f)
+        if os.path.isfile(p) and os.path.splitext(f)[1].lower() in VIDEO_EXTS:
+            txt = os.path.splitext(p)[0] + ".txt"
+            if not os.path.isfile(txt):
+                try:
+                    with open(txt, "w", encoding="utf-8") as fh:
+                        fh.write(base + "\n")
+                    n += 1
+                except Exception:
+                    pass
+    if n:
+        logf(f"[视频] 已为 {n} 个无字幕视频生成占位字幕（内容：{base}）")
+    return n
+
+
+def _yq(s):
+    """生成合法 yaml 字符串标量（含中文/空格/转义都安全）。"""
+    import json
+    return json.dumps(str(s), ensure_ascii=False)
+
+
+def write_h3_train_yaml(params, video_dir, out_dir, cfg_path):
+    """生成 AI Toolkit 的 MiniMax H3 训练 yaml（增量、可复用）。返回 yaml 路径。"""
+    name = _sanitize_dirname(params.get("project")) or "h3_video_lora"
+    rank = int(params.get("rank", 32))
+    alpha = int(params.get("alpha", 32))
+    lr = float(params.get("unet_lr", 2e-4))
+    steps = int(params.get("video_steps", H3_DEFAULT_STEPS))
+    steps = max(100, min(H3_MAX_STEPS, steps))
+    frames = int(params.get("video_frames", H3_FRAMES))
+    trig = params.get("trigger") or ""
+    model_dir = h3_models_dir().replace("\\", "/")
+    video_dir = os.path.abspath(video_dir).replace("\\", "/")
+    out_dir = os.path.abspath(out_dir).replace("\\", "/")
+    sample_prompt = (trig + ", ") if trig else ""
+    text = (
+        "job: extension\n"
+        "config:\n"
+        "  name: " + _yq(name) + "\n"
+        "  process:\n"
+        "    - type: 'sd_trainer'\n"
+        "      training_folder: " + _yq(out_dir) + "\n"
+        "      device: cuda:0\n"
+        "      trigger_word: " + _yq(trig) + "\n"
+        "      network:\n"
+        "        type: \"lora\"\n"
+        "        linear: " + str(rank) + "\n"
+        "        linear_alpha: " + str(alpha) + "\n"
+        "      save:\n"
+        "        dtype: float16\n"
+        "        save_every: 200\n"
+        "        max_step_saves_to_keep: 5\n"
+        "      datasets:\n"
+        "        - folder_path: " + _yq(video_dir) + "\n"
+        "          caption_ext: \"txt\"\n"
+        "          num_frames: " + str(frames) + "\n"
+        "          resolution: [1280, 1280]\n"
+        "      train:\n"
+        "        batch_size: 1\n"
+        "        steps: " + str(steps) + "\n"
+        "        gradient_accumulation: 1\n"
+        "        train_unet: true\n"
+        "        train_text_encoder: false\n"
+        "        gradient_checkpointing: true\n"
+        "        noise_scheduler: \"flowmatch\"\n"
+        "        timestep_type: 'linear'\n"
+        "        optimizer: \"adamw8bit\"\n"
+        "        lr: " + repr(lr) + "\n"
+        "        dtype: bf16\n"
+        "        cache_text_embeddings: true\n"
+        "      model:\n"
+        "        name_or_path: " + _yq(model_dir) + "\n"
+        "        arch: 'minimax_h3'\n"
+        "        model_kwargs:\n"
+        "          partition: \"fl2va_pruned\"\n"
+        "        quantize: false\n"
+        "      sample:\n"
+        "        sampler: \"flowmatch\"\n"
+        "        sample_every: 250\n"
+        "        width: 1280\n"
+        "        height: 720\n"
+        "        num_frames: " + str(frames) + "\n"
+        "        fps: 24\n"
+        "        prompts:\n"
+        "          - " + _yq(sample_prompt + "a subject performing a simple action, cinematic lighting, high quality") + "\n"
+        "        seed: 42\n"
+        "        walk_seed: true\n"
+        "        guidance_scale: 1.0\n"
+        "        sample_steps: 20\n"
+        "meta:\n"
+        "  name: " + _yq(name) + "\n"
+        "  version: '1.0'\n"
+    )
+    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return cfg_path
+
+
+def _find_latest_safetensors(root):
+    best, best_t = None, 0
+    if not os.path.isdir(root):
+        return None
+    for dp, _dirs, fns in os.walk(root):
+        for fn in fns:
+            if fn.endswith(".safetensors"):
+                p = os.path.join(dp, fn)
+                try:
+                    t = os.path.getmtime(p)
+                except Exception:
+                    continue
+                if t > best_t:
+                    best, best_t = p, t
+    return best
+
+
+def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from=None, progress=None):
+    """MiniMax H3 视频 LoRA 训练（第三引擎 AI Toolkit，T2V）。"""
+    params = params or {}
+    ok, detail, vpy = ai_toolkit_engine_status()
+    if not ok:
+        raise RuntimeError("第三训练引擎未安装，请点顶部「⚙ 安装第三引擎」安装。\n" + detail)
+    kdir = get_kohya_dir()
+    at_dir = os.path.join(kdir, "ai-toolkit")
+    if not os.path.isfile(os.path.join(at_dir, "run.py")):
+        raise RuntimeError("ai-toolkit 源码缺失，请重装第三引擎")
+    missing = h3_missing_models()
+    if missing:
+        raise RuntimeError(
+            "MiniMax H3 训练缺少模型文件，请下载放入 models/minimax_h3/ 文件夹：\n\n" + "\n".join(missing) +
+            "\n\n（在软件里点「📂 打开 H3 模型文件夹」，用浏览器打开上面的国内镜像直链下载后放进去）")
+    video_dir = params.get("raw_dir") or ""
+    if not os.path.isdir(video_dir):
+        raise RuntimeError("请先选择视频数据集文件夹（放 .mp4 + 同名 .txt 字幕）")
+    videos, total_sec, no_cap = scan_video_dataset(video_dir)
+    if not videos:
+        raise RuntimeError(f"视频文件夹里没有找到视频文件（支持 mp4/avi/mov/webm/mkv/wmv/m4v/flv）：{video_dir}")
+    if no_cap == len(videos):
+        raise RuntimeError(
+            "所有视频都没有同名 .txt 字幕。\n\n每个视频需要一个同名 txt 描述内容（如 myvideo.mp4 + myvideo.txt）。\n"
+            "也可以在「📖 使用引导」里用「一键生成占位字幕」先用触发词顶上。")
+    if vram_gb is not None and vram_gb < 24:
+        logf(f"[视频] ⚠ 检测到显存 {vram_gb}GB：MiniMax H3 训练推荐 24GB 及以上（NVIDIA），显存不足容易 OOM 或极慢。")
+    proj = _sanitize_dirname(params.get("project")) or "video"
+    out_dir = data_sub("output", proj)
+    os.makedirs(out_dir, exist_ok=True)
+    cfg_path = os.path.join(KIT_DIR, "configs", "h3_train.yaml")
+    write_h3_train_yaml(params, video_dir, out_dir, cfg_path)
+    steps = int(params.get("video_steps", H3_DEFAULT_STEPS))
+    logf(f"[视频] 数据集: {video_dir}（{len(videos)} 个视频，共约 {total_sec/60:.1f} 分钟，{no_cap} 个缺字幕）")
+    _files = h3_model_files()
+    logf(f"[视频] H3 模型: {os.path.basename(_files.get('dit') or '？')}")
+    logf(f"[视频] LoRA 参数: dim={params.get('rank',32)}, alpha={params.get('alpha',32)}, lr={params.get('unet_lr','2e-4')}, steps={steps}")
+    logf(f"[视频] 显存 {vram_gb if vram_gb else '?'}GB（推荐 24GB+）| bf16 + 梯度检查点 + 文本嵌入缓存")
+    env = build_env()
+    env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    _px = system_proxy()
+    if _px:
+        env.setdefault("HTTP_PROXY", _px)
+        env.setdefault("HTTPS_PROXY", _px)
+    if progress is not None:
+        try:
+            progress.set_total(steps)
+        except Exception:
+            pass
+    logf("[视频] 启动 AI Toolkit 训练（首次要加载 30GB+ 模型，请耐心等待）…")
+    rc = run_stream([vpy, os.path.join(at_dir, "run.py"), cfg_path], cwd=at_dir, env=env, logf=logf)
+    if rc != 0:
+        raise RuntimeError(f"MiniMax H3 训练结束，退出码 {rc}，请查看上方日志")
+    model_path = _find_latest_safetensors(out_dir) or os.path.join(out_dir, "h3_video_lora.safetensors")
+    logf(f"[视频] 完成！模型: {model_path}")
+    try:
+        _write_h3_template(mode, params, os.path.splitext(os.path.basename(model_path))[0], out_dir=os.path.dirname(model_path))
+        write_params_report(mode, params, os.path.splitext(os.path.basename(model_path))[0], out_dir=os.path.dirname(model_path))
+    except Exception as e:
+        logf(f"[视频] 生成模板/报告失败（忽略）: {e}")
+    return model_path
+
+
+def _write_h3_template(mode, params, output_name, out_dir=None):
+    """MiniMax H3 视频 LoRA 使用模板。"""
+    out_dir = out_dir or data_sub("output")
+    path = os.path.join(out_dir, output_name + "_使用模板.txt")
+    trig = ", ".join(split_triggers(params.get("trigger"))) if params.get("trigger") else "<你的触发词>"
+    text = (
+        "【MiniMax H3 视频 LoRA 使用模板】\n"
+        f"模型文件：{output_name}.safetensors\n"
+        f"Trigger 触发词：{trig}\n"
+        "适用底模：MiniMax H3（33.1B 全模态视频模型，含音频）\n"
+        "训练方式：T2V（文生视频，约 24fps）\n\n"
+        "使用建议：\n"
+        f"1. 提示词以触发词开头：{trig}, <角色/风格描述>, <动作/运镜>，例如 {trig}, a girl walking in the rain, cinematic\n"
+        "2. 该 LoRA 只能用于 MiniMax H3 系列模型（不支持 SD/SDXL/Wan/Hunyuan）。\n"
+        "3. 生成视频建议 480~720p、3~10 秒，显存不足请降低分辨率或缩短时长。\n"
+        "4. 许可：MiniMax H3 为社区许可证（开放权重），商用请自行确认条款。\n"
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return path
+
 
 
 # ---------- 预处理 / UI / 训练 ----------

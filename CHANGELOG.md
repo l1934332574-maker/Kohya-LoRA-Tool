@@ -12,6 +12,22 @@
 
 # 更新日志（Changelog）
 
+## v0.6.0（2026-08-13）
+
+### 新增
+- **🎬 视频 LoRA（MiniMax H3，实验性）**：新增第三训练引擎 AI Toolkit（Ostris），支持 MiniMax-H3
+  （33.1B 全模态视频模型）T2V LoRA 训练。
+- 新训练模式「视频LoRA（MiniMax H3）」：独立 ai_toolkit_venv，不碰 kohya/musubi 环境；
+  视频数据集（mp4 + 同名 txt 字幕）自动扫描/时长统计/占位字幕生成；训练 yaml 自动生成；
+  H3 模型国内镜像下载引导（models/minimax_h3，约 40GB）。
+- 显存适配：视频模式按 24GB 推荐做警告；LoRA rank32 / lr 2e-4 / 默认 2000 步（上限 3000 防过拟合）。
+- ⚠ 说明：H3 训练为 NVIDIA 专属（CUDA/NVFP4），需要 24G+ 显存；AMD 用户不受影响（继续用其他模式）。
+
+### 修复
+- （承接 v0.5.7）AMD 训练环境 transformers/diffusers 版本校正。
+
+---
+
 ## v0.5.7（2026-08-13）
 
 ### 新增

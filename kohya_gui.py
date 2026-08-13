@@ -662,6 +662,32 @@ class App:
                                              text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
                                              command=self._show_krea2_guide)
         self.btn_krea2_guide.pack(side="left", padx=(6, 4))
+        # MiniMax H3 模型状态（仅视频模式显示，独立一行占满宽度）
+        self.h3_row = ctk.CTkFrame(top, fg_color="transparent")
+        self.h3_model_var = tk.StringVar(value="")
+        ctk.CTkLabel(self.h3_row, textvariable=self.h3_model_var, font=ui_font(FONT_BODY), text_color=ACC).pack(side="left")
+        self.btn_h3_models = ctk.CTkButton(self.h3_row, text="📂 打开 H3 模型文件夹", width=170, height=30,
+                                           fg_color=CARD2, hover_color="#343a46", border_width=1, border_color=BORDER,
+                                           text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
+                                           command=self.cmd_open_h3_models)
+        self.btn_h3_models.pack(side="left", padx=(10, 4))
+        self.btn_at_install = ctk.CTkButton(self.h3_row, text="⚙ 安装第三引擎", width=108, height=30,
+                                            fg_color="transparent", hover_color="#252a36", border_width=1,
+                                            border_color=ACC, text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
+                                            command=self.cmd_install_at)
+        self.btn_at_install.pack(side="left", padx=(4, 4))
+        self.btn_h3_captions = ctk.CTkButton(self.h3_row, text="一键生成占位字幕", width=120, height=30,
+                                             fg_color=CARD2, hover_color="#343a46", border_width=1, border_color=BORDER,
+                                             text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
+                                             command=self.cmd_gen_h3_captions)
+        self.btn_h3_captions.pack(side="left", padx=(4, 4))
+        self.btn_h3_guide = ctk.CTkButton(self.h3_row, text="📖 使用引导", width=92, height=30,
+                                          fg_color="transparent", hover_color="#252a36", border_width=1,
+                                          border_color=ACC, text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
+                                          command=self._show_h3_guide)
+        self.btn_h3_guide.pack(side="left", padx=(6, 4))
+        ctk.CTkLabel(self.h3_row, text="24G 显存推荐 · NVIDIA 专属（实验性）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(8, 0))
+
         # AMD 兼容模式（实验性）：仅 AMD 显卡显示
         self.amd_bar = ctk.CTkFrame(top, fg_color="transparent")
         if self._gpu_info.get("vendor") == "amd":
@@ -1195,7 +1221,8 @@ class App:
         # 卡片1：数据准备
         c1, card1 = create_soft_shadow_card(s); c1.pack(fill="x", pady=(2, 10))
         self._main_widgets += [c1, card1]
-        ctk.CTkLabel(card1, text="① 准备图片数据", font=ui_font(FONT_TITLE), text_color=TITLE_C).pack(anchor="w", padx=22, pady=(14, 8))
+        self.card1_title = ctk.CTkLabel(card1, text="① 准备图片数据", font=ui_font(FONT_TITLE), text_color=TITLE_C)
+        self.card1_title.pack(anchor="w", padx=22, pady=(14, 8))
         r1 = ctk.CTkFrame(card1, fg_color="transparent"); r1.pack(fill="x", padx=22, pady=(0, 4))
         ctk.CTkLabel(r1, text="原始图片文件夹", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
         self.raw_entry = ctk.CTkEntry(r1, width=400, height=30, textvariable=self.raw_dir_var,
@@ -1205,14 +1232,16 @@ class App:
                                           border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
                                           font=ui_font(FONT_BODY), command=self.cmd_pick_raw)
         self.btn_pick_raw.pack(side="left")
-        ctk.CTkLabel(card1, text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好",
-                     font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w", padx=22, pady=(2, 14))
+        self.card1_hint = ctk.CTkLabel(card1, text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好",
+                                        font=ui_font(FONT_HINT), text_color=HINT)
+        self.card1_hint.pack(anchor="w", padx=22, pady=(2, 14))
 
         # 卡片2：触发词 + 正则（人物模式）
         c2, card2 = create_soft_shadow_card(s); c2.pack(fill="x", pady=(0, 10))
         self._main_widgets += [c2, card2]
         self.trig_card = card2
-        ctk.CTkLabel(card2, text="② 设置触发词（人物模式）", font=ui_font(FONT_TITLE), text_color=TITLE_C).pack(anchor="w", padx=22, pady=(14, 8))
+        self.trig_card_title = ctk.CTkLabel(card2, text="② 设置触发词（人物模式）", font=ui_font(FONT_TITLE), text_color=TITLE_C)
+        self.trig_card_title.pack(anchor="w", padx=22, pady=(14, 8))
         r2 = ctk.CTkFrame(card2, fg_color="transparent"); r2.pack(fill="x", padx=22, pady=(0, 4))
         ctk.CTkLabel(r2, text="Trigger 触发词", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
         self.trigger_entry = ctk.CTkEntry(r2, width=200, height=30, textvariable=self.trigger_var,
@@ -1293,6 +1322,10 @@ class App:
         _dot("musubi", bool(sts.get("musubi_ok")))
         _dot("base", bool(self.base_model_var.get()) or (self.mode == "krea2" and not core.krea2_missing_models()))
         _dot("raw", bool(self.raw_dir_var.get()))
+        try:
+            self._refresh_h3_status()
+        except Exception:
+            pass
         self._refresh_one_click_state()
 
     def _refresh_status(self):
@@ -1380,11 +1413,16 @@ class App:
         try:
             pre = core.PRESETS[self.mode][self.base_type]
             te = "仅UNet" if self.unet_only_var.get() else "UNet+文本编码器"
-            self.preset_summary.configure(
-                text=f"当前预设：rank {pre.get('rank')} · alpha {pre.get('alpha')} · "
-                     f"学习率 {pre.get('unet_lr')} · 文本编码器学习率 {pre.get('te_lr')} · "
-                     f"repeats {pre.get('repeats')} · 最大epoch {pre.get('max_epochs')} · "
-                     f"分辨率 {pre.get('resolution')}px · {te}")
+            if self.mode == "video":
+                self.preset_summary.configure(
+                    text=f"当前预设：rank {pre.get('rank')} · alpha {pre.get('alpha')} · "
+                         f"学习率 {pre.get('unet_lr')} · 训练步数 {pre.get('video_steps')} · 视频 24fps")
+            else:
+                self.preset_summary.configure(
+                    text=f"当前预设：rank {pre.get('rank')} · alpha {pre.get('alpha')} · "
+                         f"学习率 {pre.get('unet_lr')} · 文本编码器学习率 {pre.get('te_lr')} · "
+                         f"repeats {pre.get('repeats')} · 最大epoch {pre.get('max_epochs')} · "
+                         f"分辨率 {pre.get('resolution')}px · {te}")
         except Exception:
             pass
 
@@ -1411,8 +1449,14 @@ class App:
         except Exception:
             pass
         try:
-            _hint = core.TRIGGER_HINT_KREA2 if self.mode == "krea2" else (
-                core.TRIGGER_HINT_CHARACTER if self.mode == "character" else core.TRIGGER_HINT_STYLE)
+            if self.mode == "video":
+                _hint = core.TRIGGER_HINT_VIDEO
+            elif self.mode == "krea2":
+                _hint = core.TRIGGER_HINT_KREA2
+            elif self.mode == "character":
+                _hint = core.TRIGGER_HINT_CHARACTER
+            else:
+                _hint = core.TRIGGER_HINT_STYLE
             self.trigger_hint_var.set(_hint)
         except Exception:
             pass
@@ -1420,8 +1464,8 @@ class App:
         try:
             _tef = getattr(self, "_adv_frames", {}).get("te_lr")
             if _tef is not None:
-                if self.mode == "krea2":
-                    _tef.grid_remove()   # Krea2 文本编码器是预缓存/不训练，该参数无效
+                if self.mode in ("krea2", "video"):
+                    _tef.grid_remove()   # Krea2/视频：文本编码器不训练，该参数无效
                 else:
                     try:
                         _tef.grid()
@@ -1430,28 +1474,81 @@ class App:
         except Exception:
             pass
         try:
-            if self.mode == "krea2":
-                for w in (self.base_label, self.base_combo, self.btn_pick_base, self.btn_refresh_base, self.btn_download_base):
-                    try:
-                        w.pack_forget()
-                    except Exception:
-                        pass
-                _files = core.krea2_model_files()
-                _short = {"raw": "RAW", "vae": "VAE", "te": "文本编码器"}
-                _miss = "、".join(_short[k] for k in ("raw", "vae", "te") if not _files.get(k))
-                self.krea2_model_var.set(("Krea2 模型：缺 " + _miss + "（点📂查看文件名/镜像）") if _miss else "Krea2 模型：齐全 ✓")
-                self.krea2_row.pack(fill="x", pady=(8, 0))
-            else:
+            _hide_base = self.mode in ("krea2", "video")
+            for w in (self.base_label, self.base_combo, self.btn_pick_base, self.btn_refresh_base, self.btn_download_base):
                 try:
-                    self.krea2_row.pack_forget()
+                    if _hide_base:
+                        w.pack_forget()
                 except Exception:
                     pass
+            if not _hide_base:
                 for _w, _p in ((self.base_label, 0), (self.base_combo, (10, 10)),
                                (self.btn_pick_base, 4), (self.btn_refresh_base, 4), (self.btn_download_base, 4)):
                     try:
                         _w.pack(side="left", padx=_p)
                     except Exception:
                         pass
+            try:
+                if self.mode == "krea2":
+                    _files = core.krea2_model_files()
+                    _short = {"raw": "RAW", "vae": "VAE", "te": "文本编码器"}
+                    _miss = "、".join(_short[k] for k in ("raw", "vae", "te") if not _files.get(k))
+                    self.krea2_model_var.set(("Krea2 模型：缺 " + _miss + "（点📂查看文件名/镜像）") if _miss else "Krea2 模型：齐全 ✓")
+                    self.krea2_row.pack(fill="x", pady=(8, 0))
+                else:
+                    try:
+                        self.krea2_row.pack_forget()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                if self.mode == "video":
+                    self._refresh_h3_status()
+                    self.h3_row.pack(fill="x", pady=(8, 0))
+                else:
+                    try:
+                        self.h3_row.pack_forget()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+        # 视频模式：repeats/max_epochs/分辨率 无效，隐藏；显示"训练步数"
+        try:
+            _adv = getattr(self, "_adv_frames", {})
+            for _k in ("repeats", "max_epochs", "resolution"):
+                _f = _adv.get(_k)
+                if _f is not None:
+                    try:
+                        if self.mode == "video":
+                            _f.grid_remove()
+                        else:
+                            _f.grid()
+                    except Exception:
+                        pass
+            _vf = _adv.get("video_steps")
+            if _vf is not None:
+                try:
+                    if self.mode == "video":
+                        _vf.grid()
+                    else:
+                        _vf.grid_remove()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # 主卡片①/② 文案：视频模式切换提示
+        try:
+            if self.mode == "video":
+                self.card1_title.configure(text="① 准备视频数据")
+                self.card1_hint.configure(text="3~10 段 3~10 秒的同角色/同风格 mp4，每段配同名 .txt 字幕；H3 训练需 24G 显存")
+                self.trig_card_title.configure(text="② 设置触发词（视频模式）")
+            else:
+                self.card1_title.configure(text="① 准备图片数据")
+                self.card1_hint.configure(text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好")
+                self.trig_card_title.configure(text="② 设置触发词（人物模式）")
         except Exception:
             pass
         # 画风模式：隐藏触发词/正则卡片内容（用 pack_forget 显示/隐藏行）
@@ -1593,7 +1690,8 @@ class App:
         self._download_choice_dialog()
 
     def cmd_pick_raw(self):
-        d = filedialog.askdirectory(title="选择原始图片文件夹")
+        _title = "选择视频数据集文件夹（mp4 + 同名txt字幕）" if self.mode == "video" else "选择原始图片文件夹"
+        d = filedialog.askdirectory(title=_title)
         if d:
             self.raw_dir_var.set(d)
             self.guide_raw_var.set("已选")
@@ -1602,7 +1700,7 @@ class App:
                 self._guide_dots["raw"].configure(fg_color="#5c7c66")
             except Exception:
                 pass
-            self._log(f"[预处理] 已选原始图片文件夹：{d}")
+            self._log(f"[预处理] 已选{'视频' if self.mode == 'video' else '原始图片'}文件夹：{d}")
 
     def cmd_pick_reg(self):
         d = filedialog.askdirectory(title="选择正则数据集文件夹（人物模式）")
@@ -1644,7 +1742,7 @@ class App:
         ctk.CTkLabel(prow, text="（动漫偏精细、写实偏自然；选完仍可手动微调）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         items = [("rank", "rank"), ("alpha", "alpha"), ("学习率", "unet_lr"),
                  ("文本编码器学习率", "te_lr"), ("repeats", "repeats"), ("最大 epoch", "max_epochs"),
-                 ("训练分辨率", "resolution")]
+                 ("训练分辨率", "resolution"), ("训练步数", "video_steps")]
         for i, (label, key) in enumerate(items):
             f = ctk.CTkFrame(g, fg_color="transparent"); f.grid(row=0, column=i, padx=10, pady=8, sticky="w")
             ctk.CTkLabel(f, text=label, font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w")
@@ -1736,6 +1834,10 @@ class App:
             (getattr(self, "_guide_btns", {}).get("musubi"), "第二训练引擎（Krea2 图像 LoRA + 视频 LoRA）：独立环境安装，不影响现有画风/人物训练。装好后才能用 Krea2/视频模式（即将上线）。"),
             (getattr(self, "btn_krea2_models", None), "打开 Krea2 模型文件夹（models/krea2），把 RAW/VAE/文本编码器 3 个文件放进去；软件内提供国内镜像下载链接。"),
             (getattr(self, "btn_krea2_guide", None), "打开 Krea2 训练详细逐步引导（装环境→下模型→选图→预处理→训练→出图，含常见问题）。"),
+            (getattr(self, "btn_h3_models", None), "打开 MiniMax H3 模型文件夹（models/minimax_h3），把下载的 DiT/文本编码器/VAE 文件放进去。"),
+            (getattr(self, "btn_at_install", None), "安装第三训练引擎（AI Toolkit）：MiniMax H3 视频 LoRA 专用，独立环境，不影响其他模式。"),
+            (getattr(self, "btn_h3_captions", None), "为没有字幕的视频生成占位 txt（内容=触发词），避免训练缺字幕报错；建议之后手动改成具体描述。"),
+            (getattr(self, "btn_h3_guide", None), "打开 MiniMax H3 视频 LoRA 训练详细引导（装引擎→下模型→准备视频→训练→出视频）。"),
         ]
         for w, t in tips:
             self._tip(w, t)
@@ -1792,6 +1894,7 @@ class App:
             "repeats": int(float(_getv("repeats", "5"))),
             "max_epochs": int(float(_getv("max_epochs", "8"))),
             "resolution": int(float(_getv("resolution", "1024" if self.mode == "krea2" else str(core.RESOLUTIONS.get(self.base_type, 512))))),
+            "video_steps": int(float(_getv("video_steps", "2000"))),
             "train_text_encoder": not self.unet_only_var.get(),
             "global_pos": self.global_pos_var.get().strip(),
             "global_neg": self.global_neg_var.get().strip(),
@@ -1905,6 +2008,157 @@ class App:
         txt.insert("1.0", guide)
         txt.configure(state="disabled")
 
+
+    def cmd_open_h3_models(self):
+        d = core.h3_models_dir()
+        try:
+            os.makedirs(d, exist_ok=True)
+            os.startfile(d)
+        except Exception as e:
+            messagebox.showerror(core.APP_NAME, f"打开失败：{e}")
+
+    def cmd_install_at(self):
+        """安装第三训练引擎（AI Toolkit · MiniMax H3 视频 LoRA）。"""
+        if self.busy:
+            messagebox.showinfo(core.APP_NAME, "有任务正在运行，请先等待当前任务完成。")
+            return
+        if not messagebox.askyesno(core.APP_NAME,
+                "安装第三训练引擎（AI Toolkit · MiniMax H3 视频 LoRA）？\n\n"
+                "· 独立环境，完全不影响现有画风/人物/Krea2 训练\n"
+                "· 需下载 PyTorch cu130（约 3GB，需较新 NVIDIA 驱动）\n"
+                "· H3 模型 40GB+ 按需另行下载（国内镜像）\n\n是否开始安装？"):
+            return
+        self._start_worker(self._install_at_worker, "安装第三引擎")
+
+    def _install_at_worker(self):
+        try:
+            core.install_ai_toolkit_engine(self._log)
+            self.q.put(("STATUS",))
+        except Exception as e:
+            self._log(f"[ERROR] 第三引擎安装失败：{e}")
+            traceback.print_exc()
+        finally:
+            self.q.put("__DONE__")
+
+    def cmd_gen_h3_captions(self):
+        """为无字幕视频生成占位字幕（内容=触发词或 a video）。"""
+        params = self._collect_params()
+        d = params.get("raw_dir") or ""
+        if not d or not os.path.isdir(d):
+            messagebox.showwarning(core.APP_NAME, "请先选择视频数据集文件夹。")
+            return
+        n = core.h3_generate_placeholder_captions(d, params.get("trigger") or "", self._log)
+        if n:
+            messagebox.showinfo(core.APP_NAME,
+                                f"已为 {n} 个视频生成占位字幕（内容=触发词或 a video）。\n建议手动打开 txt 改成更具体的画面描述（英文效果更好）。")
+        else:
+            messagebox.showinfo(core.APP_NAME, "所有视频都已有同名 txt 字幕，无需生成。")
+
+    def _ensure_video_ready(self):
+        """视频模式训练前检查：第三引擎已装 + H3 模型齐全 + 数据集有视频与字幕。返回是否可继续。"""
+        try:
+            ok, detail, _ = core.ai_toolkit_engine_status()
+        except Exception as e:
+            ok, detail = False, str(e)
+        if not ok:
+            messagebox.showwarning(core.APP_NAME,
+                                   "第三训练引擎未安装。\n请点顶部「⚙ 安装第三引擎」安装。\n\n" + detail)
+            return False
+        missing = core.h3_missing_models()
+        if missing:
+            d = core.h3_models_dir()
+            if messagebox.askyesno(core.APP_NAME,
+                    "MiniMax H3 还缺少模型文件，需要先下载放入 models/minimax_h3/：\n\n" + "\n".join(missing) +
+                    f"\n\n模型文件夹：{d}\n\n是否现在打开该文件夹？（下载完成后把文件放进去）"):
+                try:
+                    os.makedirs(d, exist_ok=True)
+                    os.startfile(d)
+                except Exception:
+                    pass
+            return False
+        vd = (self._collect_params().get("raw_dir") or "")
+        videos, _t, no_cap = core.scan_video_dataset(vd)
+        if not videos:
+            messagebox.showwarning(core.APP_NAME, "请先选择视频数据集文件夹（放 .mp4 + 同名 .txt 字幕）。")
+            return False
+        if no_cap == len(videos):
+            messagebox.showwarning(core.APP_NAME,
+                                   "所有视频都没有同名 .txt 字幕。\n\n每个视频需要一个同名 txt 描述内容（如 myvideo.mp4 + myvideo.txt）。\n"
+                                   "可以点「一键生成占位字幕」先用触发词顶上。")
+            return False
+        return True
+
+    def _refresh_h3_status(self):
+        try:
+            ok, detail, _ = core.ai_toolkit_engine_status()
+            _files = core.h3_model_files()
+            _miss = "、".join(k for k in ("dit", "te", "video_vae") if not _files.get(k))
+            if not ok:
+                self.h3_model_var.set("第三引擎：未装（点⚙安装） · H3 模型：" + ("缺 " + _miss if _miss else "齐全"))
+            elif _miss:
+                self.h3_model_var.set("H3 模型：缺 " + _miss + "（点📂查看文件名/镜像）")
+            else:
+                self.h3_model_var.set("H3 模型：齐全 ✓ 第三引擎：就绪")
+        except Exception:
+            pass
+
+    def _show_h3_guide(self):
+        """MiniMax H3 视频 LoRA 训练 · 详细逐步引导（小白版）。"""
+        w = ctk.CTkToplevel(self.root)
+        w.title("MiniMax H3 视频 LoRA · 使用引导")
+        w.geometry("780x840")
+        w.transient(self.root)
+        txt = ctk.CTkTextbox(w, fg_color="#16181e", text_color="#c6ccd8", corner_radius=8,
+                             border_width=1, border_color=BORDER, font=ui_font(FONT_BODY), wrap="word")
+        txt.pack(fill="both", expand=True, padx=18, pady=18)
+        h3 = core.H3_MODEL_LINKS
+        guide = (
+            "📖 MiniMax H3 视频 LoRA 训练 · 详细引导（小白版）\n\n"
+            "▍原理一句话\n"
+            "H3 是 33.1B 的全模态视频模型（视频+声音一起生成）。用几段短视频就能训出「你的角色/风格」视频 LoRA。\n"
+            "⚠ 实验性功能：需要 24G+ NVIDIA 显存，模型文件 40GB+，训练一次要数小时。\n\n"
+            "▍第 1 步：安装第三引擎\n"
+            "· 切到「🎬 视频LoRA（MiniMax H3）」模式 → 点「⚙ 安装第三引擎」\n"
+            "· 自动创建独立环境（不影响现有画风/人物/Krea2）\n"
+            "· 下载 PyTorch cu130 约 3GB；需较新 NVIDIA 驱动（570+）\n"
+            "· 装完状态行变「第三引擎：就绪」\n\n"
+            "▍第 2 步：下载 H3 模型（3~4 个文件，放进 models/minimax_h3/）\n"
+            f"1) {h3['dit'][0]} —— {h3['dit'][1]}\n"
+            f"   国内镜像：{h3['dit'][2]}\n"
+            f"2) {h3['te'][0]} —— {h3['te'][1]}\n"
+            f"   国内镜像：{h3['te'][2]}\n"
+            f"3) {h3['video_vae'][0]} —— {h3['video_vae'][1]}\n"
+            f"   国内镜像：{h3['video_vae'][2]}\n"
+            f"4)（可选）{h3['audio_vae'][0]} —— {h3['audio_vae'][1]}\n"
+            f"   国内镜像：{h3['audio_vae'][2]}\n"
+            "· 下完放进去，状态变「H3 模型：齐全 ✓」\n\n"
+            "▍第 3 步：准备视频数据集\n"
+            "· 新建一个文件夹，放 3~10 段 3~10 秒的同角色/同风格 mp4\n"
+            "· 每个视频配一个同名 .txt 字幕（描述画面内容，英文效果最好）\n"
+            "· 例：myvideo.mp4 + myvideo.txt（内容如：a girl with red hair walking in rain）\n"
+            "· 没字幕可先点「一键生成占位字幕」用触发词顶上，再手动补\n\n"
+            "▍第 4 步：训练\n"
+            "· 顶部选「🎬 视频LoRA（MiniMax H3）」→ 选视频文件夹 → 填 Trigger 触发词\n"
+            "· 点「🚀 一键开始训练」；首次要加载 30GB+ 模型，请耐心等待\n"
+            "· 默认 2000 步，可改「训练步数」（上限 3000，防过拟合）\n\n"
+            "▍第 5 步：训练完成\n"
+            "· 模型在 output\\<项目名>\\ 下（.safetensors），并自动生成使用模板\n"
+            "· 该 LoRA 只能用于 MiniMax H3 系列模型出视频\n\n"
+            "❓ 常见问题\n"
+            "Q: 显存不够？\n"
+            "A: H3 是 33B 大模型，16G 以下不建议训练（会 OOM 或极慢）；24G 是推荐起点。\n\n"
+            "Q: AMD 显卡能训吗？\n"
+            "A: 不能。AI Toolkit 训练走 CUDA/NVFP4，是 NVIDIA 专属；AMD 用户请继续用画风/人物/Krea2 模式。\n\n"
+            "Q: 下载慢/老断？\n"
+            "A: 模型走国内镜像（hf-mirror），支持断点续传，断了接着下。\n\n"
+            "Q: 训练完视频召唤不出来？\n"
+            "A: 提示词以触发词开头；确认训练时字幕里带了触发词。\n\n"
+            "⚠ 许可提醒：MiniMax H3 为社区许可证（开放权重），商用请自行确认条款。\n"
+        )
+        txt.insert("1.0", guide)
+        txt.configure(state="disabled")
+
+
     # ============ 预处理 / 训练 ============
     def cmd_preprocess(self):
         params = self._collect_params()
@@ -1917,6 +2171,11 @@ class App:
         core.reset_stop()
         try:
             report = os.path.join(os.environ.get("TEMP", "."), "kohya_auto_report.json")
+            if params.get("mode") == "video":
+                videos, _t, _n = core.scan_video_dataset(params.get("raw_dir"))
+                stats = {"ok": len(videos), "skipped_existing": 0}
+                self.q.put(("AUTO_CONFIRM", params, stats, len(videos)))
+                return
             pp_mode = "character" if params.get("mode") == "krea2" else params["mode"]
             core.preprocess(
                 self._log, input_dir=params["raw_dir"],
@@ -1937,7 +2196,10 @@ class App:
 
     def cmd_train(self):
         params = self._collect_params()
-        if params.get("mode") == "krea2":
+        if params.get("mode") == "video":
+            if not self._ensure_video_ready():
+                return
+        elif params.get("mode") == "krea2":
             if not self._ensure_krea2_ready():
                 return
         else:
@@ -1960,7 +2222,10 @@ class App:
         try:
             vram = core.detect_vram_gb()
             params["project"] = self.current_project or ""
-            if params.get("mode") == "krea2":
+            if params.get("mode") == "video":
+                core.train_video(self._log, mode="video", params=params,
+                                 vram_gb=vram, resume_from=resume, progress=self._train_mon)
+            elif params.get("mode") == "krea2":
                 core.train_krea2(self._log, mode="krea2", params=params,
                                  vram_gb=vram, resume_from=resume, progress=self._train_mon)
             else:
@@ -1983,11 +2248,15 @@ class App:
     def cmd_one_click_train(self):
         params = self._collect_params()
         if not params["raw_dir"]:
-            messagebox.showwarning(core.APP_NAME, "请先选择原始图片文件夹（步骤④）。")
+            messagebox.showwarning(core.APP_NAME, "请先选择原始图片/视频文件夹（步骤④）。")
             return
-        if not params["base_model"]:
-            messagebox.showwarning(core.APP_NAME, "请先选择底模（步骤③）。")
-            return
+        if params.get("mode") == "video":
+            if not self._ensure_video_ready():
+                return
+        else:
+            if not params["base_model"]:
+                messagebox.showwarning(core.APP_NAME, "请先选择底模（步骤③）。")
+                return
         if self.mode == "character" and not params["trigger"]:
             messagebox.showwarning(core.APP_NAME, "人物模式建议填写 Trigger 触发词（步骤②）。")
             return
@@ -2413,7 +2682,10 @@ class App:
 
     def _warn_low_vram(self, params):
         """按架构显存建议弹窗警告（须在主线程调用）。返回 True=继续。"""
-        if params.get("mode") == "krea2":
+        if params.get("mode") == "video":
+            need = 24
+            label = "MiniMax H3 视频（33.1B）"
+        elif params.get("mode") == "krea2":
             need = 16
             label = "Krea 2（12.9B）"
         else:
@@ -2455,6 +2727,17 @@ class App:
                 f"repeats     : {params['repeats']}\n"
                 f"最大 epoch  : {params['max_epochs']}\n"
                 f"分辨率      : {params.get('resolution', 1024)}px\n"
+                f"Trigger     : {params['trigger'] or '（未填写）'}"
+            )
+        elif params.get("mode") == "video":
+            _files = core.h3_model_files()
+            msg = (
+                "即将开始 MiniMax H3 视频训练，请确认以下参数：\n\n"
+                f"模式        : {core.MODE_LABELS.get('video')}\n"
+                f"H3 底模     : {os.path.basename(_files.get('dit') or '？')}\n"
+                f"rank / alpha: {params['rank']} / {params['alpha']}\n"
+                f"学习率      : {params['unet_lr']}\n"
+                f"训练步数    : {params.get('video_steps', 2000)}\n"
                 f"Trigger     : {params['trigger'] or '（未填写）'}"
             )
         else:
