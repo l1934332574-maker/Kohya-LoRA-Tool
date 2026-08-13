@@ -24,6 +24,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('..\\preprocess.py', '.'),
+        ('..\\video_caption.py', '.'),
         ('..\\model_downloader.py', '.'),
         ('..\\README_使用说明.md', '.'),
         ('..\\LICENSE', '.'),

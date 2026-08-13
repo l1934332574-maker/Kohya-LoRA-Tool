@@ -26,6 +26,7 @@ set "PKG=build_exe\dist\Kohya一键工具"
 
 echo [2/3] 复制代码/脚本/配置/离线安装包进便携包 ...
 copy /y "preprocess.py" "%PKG%\" >nul
+copy /y "video_caption.py" "%PKG%\" >nul
 copy /y "model_downloader.py" "%PKG%\" >nul
 copy /y "README_使用说明.md" "%PKG%\" >nul
 copy /y "LICENSE" "%PKG%\" >nul

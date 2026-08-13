@@ -234,6 +234,7 @@ class App:
         self._base_models = []
         self._base_items = []
         self._dl = None
+        self._dl_kind = "base"          # 当前下载任务类型：base=底模 / h3=H3模型
         self.ui_proc = None
         self._label_editor = None
         # ---- 项目化管理状态 ----
@@ -659,6 +660,11 @@ class App:
                                            text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
                                            command=self.cmd_open_h3_models)
         self.btn_h3_models.pack(side="left", padx=(10, 4))
+        self.btn_h3_dl = ctk.CTkButton(self.h3_row, text="⬇ 下载 H3 模型", width=120, height=30,
+                                       fg_color=ACC, hover_color=ACC_H, corner_radius=6,
+                                       text_color="#ffffff", font=ui_font(FONT_BODY),
+                                       command=self.cmd_dl_h3_models)
+        self.btn_h3_dl.pack(side="left", padx=(4, 4))
         self.btn_at_install = ctk.CTkButton(self.h3_row, text="⚙ 安装第三引擎", width=108, height=30,
                                             fg_color="transparent", hover_color="#252a36", border_width=1,
                                             border_color=ACC, text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
@@ -669,6 +675,12 @@ class App:
                                              text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
                                              command=self.cmd_gen_h3_captions)
         self.btn_h3_captions.pack(side="left", padx=(4, 4))
+        self.btn_h3_caption_ai = ctk.CTkButton(self.h3_row, text="✨ AI 自动描述", width=112, height=30,
+                                               fg_color=CARD2, hover_color="#343a46", border_width=1,
+                                               border_color=BORDER, text_color=TXT, corner_radius=6,
+                                               font=ui_font(FONT_BODY),
+                                               command=self.cmd_video_caption)
+        self.btn_h3_caption_ai.pack(side="left", padx=(4, 4))
         self.btn_h3_guide = ctk.CTkButton(self.h3_row, text="📖 使用引导", width=92, height=30,
                                           fg_color="transparent", hover_color="#252a36", border_width=1,
                                           border_color=ACC, text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
@@ -1929,8 +1941,10 @@ class App:
             (getattr(self, "btn_krea2_models", None), "打开 Krea2 模型文件夹（models/krea2），把 RAW/VAE/文本编码器 3 个文件放进去；软件内提供国内镜像下载链接。"),
             (getattr(self, "btn_krea2_guide", None), "打开 Krea2 训练详细逐步引导（装环境→下模型→选图→预处理→训练→出图，含常见问题）。"),
             (getattr(self, "btn_h3_models", None), "打开 MiniMax H3 模型文件夹（models/minimax_h3），把下载的 DiT/文本编码器/VAE 文件放进去。"),
+            (getattr(self, "btn_h3_dl", None), "应用内下载 H3 模型（约 40GB，带进度/断点续传，下完自动识别）。"),
             (getattr(self, "btn_at_install", None), "安装第三训练引擎（AI Toolkit）：MiniMax H3 视频 LoRA 专用，独立环境，不影响其他模式。"),
             (getattr(self, "btn_h3_captions", None), "为没有字幕的视频生成占位 txt（内容=触发词），避免训练缺字幕报错；建议之后手动改成具体描述。"),
+            (getattr(self, "btn_h3_caption_ai", None), "用 Qwen2.5-VL 自动给视频生成英文描述（首次下载模型约 6~7GB，已有 txt 的会跳过）。"),
             (getattr(self, "btn_h3_guide", None), "打开 MiniMax H3 视频 LoRA 训练详细引导（装引擎→下模型→准备视频→训练→出视频）。"),
         ]
         for w, t in tips:
@@ -2147,6 +2161,45 @@ class App:
                                 f"已为 {n} 个视频生成占位字幕（内容=触发词或 a video）。\n建议手动打开 txt 改成更具体的画面描述（英文效果更好）。")
         else:
             messagebox.showinfo(core.APP_NAME, "所有视频都已有同名 txt 字幕，无需生成。")
+
+
+    def cmd_video_caption(self):
+        """用 Qwen2.5-VL 给视频自动生成英文描述（写同名 txt）。"""
+        params = self._collect_params()
+        d = params.get("raw_dir") or ""
+        if not d or not os.path.isdir(d):
+            messagebox.showwarning(core.APP_NAME, "请先选择视频数据集文件夹。")
+            return
+        videos, _t, _n = core.scan_video_dataset(d)
+        if not videos:
+            messagebox.showwarning(core.APP_NAME, "视频文件夹里没有找到视频。")
+            return
+        if self.busy:
+            messagebox.showinfo(core.APP_NAME, "有任务正在运行，请先等待当前任务完成。")
+            return
+        if not messagebox.askyesno(core.APP_NAME,
+                "用 Qwen2.5-VL 给视频自动生成英文描述？\n\n"
+                "· 首次使用会下载打标模型（约 6~7GB，国内镜像）\n"
+                "· 已有 txt 的视频会跳过（不覆盖手写描述）\n"
+                "· 需要 4G+ 显存（N 卡优先；没有会回退 CPU，较慢）\n\n是否开始？"):
+            return
+        params = self._collect_params()
+        self._start_worker(lambda: self._video_caption_worker(params), "视频自动打标")
+
+    def _video_caption_worker(self, params):
+        core.reset_stop()
+        try:
+            core.run_video_caption(self._log, video_dir=params["raw_dir"],
+                                   trigger=params.get("trigger") or "", frames=6)
+            self._log("[OK] 视频自动打标完成")
+        except core.StopRequested:
+            self._log("[停止] 打标已手动停止")
+        except Exception as e:
+            self._log(f"[ERROR] 视频自动打标失败：{e}")
+            traceback.print_exc()
+        finally:
+            self.q.put("__DONE__")
+
 
     def _ensure_video_ready(self):
         """视频模式训练前检查：第三引擎已装 + H3 模型齐全 + 数据集有视频与字幕。返回是否可继续。"""
@@ -3000,6 +3053,7 @@ class App:
                 except Exception:
                     pass
         self._downloading = True
+        self._dl_kind = "base"
         self._show_dl_ui(fname, fsize)
         self._log(f"[下载] 开始下载底模：{fname}（{fsize}）")
         self._log(f"[下载] 保存到：{dest}")
@@ -3040,16 +3094,102 @@ class App:
 
     def _handle_dl_done(self, ok, dest):
         self._downloading = False
+        kind = getattr(self, "_dl_kind", "base")
+        self._dl_kind = "base"
         try:
             self.dl_win.destroy()
         except Exception:
             pass
         if ok:
-            self._log(f"[底模] 下载完成：{dest}")
-            self._scan_base_models()
-            messagebox.showinfo(core.APP_NAME, f"底模下载完成：\n{dest}\n\n已自动扫描并加入底模列表。")
+            if kind == "h3":
+                self._log(f"[H3] 下载完成：{dest}")
+                self._refresh_h3_status()
+                messagebox.showinfo(core.APP_NAME, f"H3 模型下载完成：\n{os.path.basename(dest)}\n\n已自动识别（状态已刷新）。")
+            else:
+                self._log(f"[底模] 下载完成：{dest}")
+                self._scan_base_models()
+                messagebox.showinfo(core.APP_NAME, f"底模下载完成：\n{dest}\n\n已自动扫描并加入底模列表。")
         else:
-            self._log("[ERROR] 底模下载失败或已取消")
+            self._log("[ERROR] 下载失败或已取消")
+
+
+    def cmd_dl_h3_models(self):
+        """H3 模型下载对话框：列出 4 个文件，应用内下载（断点续传）或浏览器直链。"""
+        files = core.h3_model_files()
+        links = core.H3_MODEL_LINKS
+        dlg = ctk.CTkToplevel(self.root)
+        dlg.title("下载 MiniMax H3 模型")
+        dlg.geometry("640x400")
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        ctk.CTkLabel(dlg, text="MiniMax H3 训练需要以下文件（共约 40GB，应用内下载带断点续传、断了接着下）：",
+                     font=ui_font(FONT_BODY), text_color=TXT, justify="left", wraplength=580).pack(padx=20, pady=(14, 8), anchor="w")
+        for key, (fname, desc, url) in links.items():
+            row = ctk.CTkFrame(dlg, fg_color="transparent"); row.pack(fill="x", padx=20, pady=3)
+            done = files.get(key) is not None
+            mark = "✓" if done else "○"
+            ctk.CTkLabel(row, text=f"{mark} {fname}", font=ui_font(FONT_HINT),
+                         text_color=(OK_TX if done else TXT), width=350, anchor="w").pack(side="left")
+            if done:
+                ctk.CTkLabel(row, text="已下载", font=ui_font(FONT_HINT), text_color=OK_TX).pack(side="left", padx=6)
+            else:
+                ctk.CTkButton(row, text="⬇ 应用内", width=76, height=26, fg_color=ACC, hover_color=ACC_H,
+                              corner_radius=6, font=ui_font(FONT_HINT),
+                              command=lambda k=key: self._start_h3_dl(k)).pack(side="left", padx=4)
+                ctk.CTkButton(row, text="🌐 浏览器", width=76, height=26, fg_color=CARD2, hover_color="#343a46",
+                              border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                              font=ui_font(FONT_HINT), command=lambda u=url: webbrowser.open(u)).pack(side="left", padx=4)
+            self._tip(row, desc)
+        bf = ctk.CTkFrame(dlg, fg_color="transparent"); bf.pack(pady=(10, 14))
+        ctk.CTkButton(bf, text="📂 打开模型文件夹", width=140, height=28, fg_color=CARD2, hover_color="#343a46",
+                      border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6, font=ui_font(FONT_HINT),
+                      command=self.cmd_open_h3_models).pack(side="left", padx=4)
+        ctk.CTkButton(bf, text="刷新状态", width=92, height=28, fg_color=CARD2, hover_color="#343a46",
+                      border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6, font=ui_font(FONT_HINT),
+                      command=self._refresh_h3_status).pack(side="left", padx=4)
+        ctk.CTkButton(bf, text="关闭", width=72, height=28, fg_color=CARD2, hover_color="#343a46",
+                      border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6, font=ui_font(FONT_HINT),
+                      command=dlg.destroy).pack(side="left", padx=4)
+        dlg.grab_set()
+
+    def _start_h3_dl(self, key):
+        """启动单个 H3 模型文件的应用内下载（复用底模下载 UI，断点续传）。"""
+        if _ModelDownloader is None:
+            messagebox.showerror(core.APP_NAME, "下载模块加载失败，请使用「🌐 浏览器」下载。")
+            return
+        if getattr(self, "_downloading", False):
+            messagebox.showinfo(core.APP_NAME, "已有下载任务在进行中，请先完成或取消。")
+            return
+        fname, desc, url = core.H3_MODEL_LINKS[key]
+        d = core.h3_models_dir()
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+        dest = os.path.join(d, fname)
+        if os.path.isfile(dest):
+            messagebox.showinfo(core.APP_NAME, f"{fname} 已存在，无需重复下载。")
+            self._refresh_h3_status()
+            return
+        part = dest + ".part"
+        if os.path.isfile(part) and os.path.getsize(part) > 0:
+            if not messagebox.askyesno(core.APP_NAME,
+                    f"发现上次未完成的下载进度（{os.path.getsize(part)/1048576:.1f} MB）。\\n要不要从断点继续下载？"):
+                try:
+                    os.remove(part)
+                except Exception:
+                    pass
+        self._downloading = True
+        self._dl_kind = "h3"
+        self._show_dl_ui(fname, desc)
+        self._log(f"[下载] 开始下载 H3 模型：{fname}（{desc}）")
+        self._log(f"[下载] 保存到：{dest}")
+        self._dl = _ModelDownloader(url, dest,
+                                    progress_cb=self._dl_progress_cb,
+                                    done_cb=self._dl_done_cb,
+                                    logf=self._log)
+        self._dl.start()
+
 
     def cmd_dl_cancel(self):
         try:

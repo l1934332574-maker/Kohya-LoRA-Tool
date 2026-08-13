@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.6.1"
+APP_VERSION = "0.6.2"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -280,8 +280,8 @@ GUIDE_STEPS = {
          "tip": "安装 Git 和 Python（只需一次，全部项目通用）。"},
         {"id": "at", "label": "② 安装第三引擎", "btn": "去安装", "check": "at", "act": "cmd_install_at",
          "tip": "安装第三引擎 AI Toolkit（MiniMax H3 视频模式需要，只需一次，需 NVIDIA 显卡）。"},
-        {"id": "h3_models", "label": "③ 下载 H3 模型", "btn": "去下载", "check": "h3_models", "act": "cmd_open_h3_models",
-         "tip": "把 MiniMax H3 的 DiT/文本编码器/VAE 放进 models/minimax_h3/（约 40GB，国内镜像）。"},
+        {"id": "h3_models", "label": "③ 下载 H3 模型", "btn": "去下载", "check": "h3_models", "act": "cmd_dl_h3_models",
+         "tip": "应用内下载 MiniMax H3 的 DiT/文本编码器/VAE（约 40GB，断点续传），下完自动识别。"},
         {"id": "raw", "label": "④ 选择视频文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
          "tip": "选择视频数据集文件夹（3~10 段 mp4 + 同名 txt 字幕）。"},
     ],
@@ -1622,6 +1622,41 @@ def h3_generate_placeholder_captions(folder, trigger="", logf=print):
     if n:
         logf(f"[视频] 已为 {n} 个无字幕视频生成占位字幕（内容：{base}）")
     return n
+
+
+def run_video_caption(logf=print, video_dir="", trigger="", frames=6, overwrite=False):
+    """用 Qwen2.5-VL 给视频文件夹里的视频自动生成英文描述（写同名 txt）。
+
+    用 kohya venv（transformers 4.54 已支持 Qwen2.5-VL），模型按需下载（走 hf-mirror）。
+    已有同名 txt 默认跳过（避免覆盖手写描述），overwrite=True 强制重写。
+    """
+    vpy = venv_python()
+    if not os.path.isfile(vpy):
+        raise RuntimeError("Kohya 尚未安装，请先点击【一键安装】")
+    if not video_dir or not os.path.isdir(video_dir):
+        raise RuntimeError("请先选择视频数据集文件夹")
+    script = os.path.join(KIT_DIR, "video_caption.py")
+    if not os.path.isfile(script):
+        raise RuntimeError("缺少 video_caption.py（打包异常），请重新安装")
+    # 确保 kohya venv 依赖可用（transformers 等）
+    _ensure_kohya_deps(vpy, get_kohya_dir(), logf)
+    env = build_env()
+    env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    _px = system_proxy()
+    if _px:
+        env.setdefault("HTTP_PROXY", _px)
+        env.setdefault("HTTPS_PROXY", _px)
+    cmd = [vpy, script, "--video_dir", video_dir, "--frames", str(frames)]
+    if trigger:
+        cmd += ["--trigger", trigger]
+    if overwrite:
+        cmd += ["--overwrite"]
+    logf(f"[打标] 启动 Qwen2.5-VL 自动描述：{video_dir}（首次会下载模型约 6~7GB，请耐心等待）")
+    rc = run_stream(cmd, cwd=KIT_DIR, env=env, logf=logf)
+    if rc != 0:
+        raise RuntimeError(f"视频自动打标失败（退出码 {rc}），请查看上方日志")
+    return True
+
 
 
 def _yq(s):
