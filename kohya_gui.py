@@ -550,19 +550,18 @@ class App:
         logo.pack(fill="x", padx=16, pady=(20, 12))
         ctk.CTkFrame(logo, width=26, height=26, fg_color="#4a5568", corner_radius=5).pack(side="left")
         ctk.CTkLabel(logo, text="Kohya-LoRA", font=ui_font(FONT_BODY), text_color=TXT).pack(side="left", padx=(9, 0))
-        ctk.CTkLabel(self.sidebar, text="🎓 新手引导（按顺序做）", font=ui_font(FONT_HINT),
-                     text_color=SUB).pack(anchor="w", padx=16, pady=(0, 4))
-
         self._guide_dots = {}
         self._guide_btns = {}
         self._guide_vars = {}
-        # 引导标题 + 占位 + 步骤容器：步骤按模式动态渲染（core.GUIDE_STEPS 数据驱动）
-        self.guide_title = ctk.CTkLabel(self.sidebar, text="🎓 新手引导（按顺序做）", font=ui_font(FONT_HINT), text_color=SUB)
-        self.guide_placeholder = ctk.CTkLabel(self.sidebar,
+        # 引导区：固定位置（logo 正下方，不参与顶部 pack 顺序变动），内容按模式动态切换
+        self.guide_area = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.guide_area.pack(fill="x", padx=14, pady=(0, 6))
+        self.guide_title = ctk.CTkLabel(self.guide_area, text="🎓 新手引导（按顺序做）", font=ui_font(FONT_HINT), text_color=SUB)
+        self.guide_placeholder = ctk.CTkLabel(self.guide_area,
                                               text="👆 请先打开/新建项目\n然后选择训练模式\n\n引导会按模式自动生成",
                                               font=ui_font(FONT_HINT), text_color=SUB, justify="left")
-        self.guide_placeholder.pack(anchor="w", padx=16, pady=(6, 2))
-        self.guide_host = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.guide_placeholder.pack(anchor="w", pady=(6, 2))
+        self.guide_host = ctk.CTkFrame(self.guide_area, fg_color="transparent")
 
         self.btn_one_click = ctk.CTkButton(self.sidebar, text="🚀 一键开始训练", height=42,
                                            fg_color=CARD2, hover_color="#343a46", corner_radius=8,
@@ -928,15 +927,15 @@ class App:
             pass
         if self.current_project is None:
             self.guide_placeholder.configure(text="👆 请先打开/新建项目\\n然后选择训练模式\\n\\n引导会按模式自动生成")
-            self.guide_placeholder.pack(anchor="w", padx=16, pady=(6, 2))
+            self.guide_placeholder.pack(anchor="w", pady=(6, 2))
             return
-        self.guide_title.pack(anchor="w", padx=16, pady=(0, 4))
+        self.guide_title.pack(anchor="w", pady=(0, 4))
         steps = self._current_steps()
         if not steps:
             self.guide_placeholder.configure(text="👆 请先选择训练模式\\n\\n引导会按模式自动生成")
-            self.guide_placeholder.pack(anchor="w", padx=16, pady=(6, 2))
+            self.guide_placeholder.pack(anchor="w", pady=(6, 2))
             return
-        self.guide_host.pack(fill="x", padx=14, pady=3)
+        self.guide_host.pack(fill="x", pady=3)
         for step in steps:
             row = ctk.CTkFrame(self.guide_host, fg_color="transparent")
             row.pack(fill="x", pady=3)
