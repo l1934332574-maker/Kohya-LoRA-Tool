@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.6.2"
+APP_VERSION = "0.6.3"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2402,7 +2402,7 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
     # 不查（工具只用 AdamW/AdamW8bit，装全量时顺带补上即可）
     code = ("import importlib.util;m=['PIL','numpy','transformers','huggingface_hub','toml',"
             "'voluptuous','safetensors','diffusers','accelerate','omegaconf','imagesize','rich',"
-            "'ftfy','einops','cv2','sentencepiece'];"
+            "'ftfy','einops','cv2','sentencepiece','google.protobuf'];"
             "import sys;sys.exit(0 if all(importlib.util.find_spec(x) is not None for x in m) else 1)")
     need_install = True
     try:
@@ -2447,7 +2447,7 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
             "diffusers==0.32.1", "accelerate", "omegaconf", "imagesize", "rich", "ftfy",
             "lion-pytorch", "schedulefree", "pytorch-optimizer",
             "prodigy-plus-schedule-free", "prodigyopt", "einops", "opencv-python", "sentencepiece",
-            "scipy"]   # scipy 太旧(<1.13)与 numpy2 冲突会崩 transformers，补装时顺带升级
+            "scipy", "protobuf"]   # scipy 太旧(<1.13)与 numpy2 冲突会崩 transformers；protobuf 为 tokenizer 加载必需
     ok = False
     for _idx in ("https://pypi.tuna.tsinghua.edu.cn/simple", "https://mirrors.aliyun.com/pypi/simple/"):
         if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
@@ -3080,25 +3080,50 @@ def write_usage_template(mode, params, output_name, out_dir=None):
     return path
 
 
-def _ensure_tokenizer_cached(cache_dir, model_id, logf=print, kind="clip"):
-    """预缓存分词器（kohya 期望的平铺目录格式），避免训练时联网下载失败。
+def _ensure_tokenizer_cached(cache_dir, model_id, logf=print, kind="clip", vpy=None):
+    """预缓存分词器（kohya 期望的平铺目录格式），完整性校验 + 不完整自动重建。
 
+    用训练环境（kohya/AMD venv）的 python 执行下载，避免打包环境无 transformers；
+    缓存目录不完整（缺关键文件）会被清理重建，防止训练时 from_pretrained 崩。
     kind: 'clip'=CLIPTokenizer；其他（t5/qwen3 等）=AutoTokenizer。
     """
     target = os.path.join(cache_dir, model_id.replace("/", "_"))
-    if os.path.isfile(os.path.join(target, "vocab.json")) or os.path.isfile(os.path.join(target, "tokenizer.json")):
+
+    def _complete():
+        try:
+            if kind == "clip":
+                need = ("vocab.json", "merges.txt", "tokenizer_config.json", "special_tokens_map.json")
+            else:
+                need = ("tokenizer_config.json", "tokenizer.json")
+            return all(os.path.isfile(os.path.join(target, n)) for n in need)
+        except Exception:
+            return False
+
+    if _complete():
         return True
+    if os.path.isdir(target):
+        try:
+            shutil.rmtree(target)
+            logf(f"[训练] 分词器缓存不完整，已清理重建 {model_id}")
+        except Exception:
+            pass
+    py = vpy or venv_python()
+    if not os.path.isfile(py):
+        return False
+    cls = "CLIPTokenizer" if kind == "clip" else "AutoTokenizer"
+    code = ("import sys, os;"
+            "from transformers import " + cls + ";"
+            "t=" + cls + ".from_pretrained(%r);"
+            "os.makedirs(%r, exist_ok=True);"
+            "t.save_pretrained(%r);"
+            "print('tok_ok')") % (model_id, target, target)
     try:
-        if kind == "clip":
-            from transformers import CLIPTokenizer
-            tok = CLIPTokenizer.from_pretrained(model_id)
-        else:
-            from transformers import AutoTokenizer
-            tok = AutoTokenizer.from_pretrained(model_id, use_fast=True)
-        os.makedirs(target, exist_ok=True)
-        tok.save_pretrained(target)
-        logf(f"[训练] 已预缓存分词器 {model_id} -> {target}")
-        return True
+        r = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=900)
+        if r.returncode == 0 and "tok_ok" in (r.stdout or ""):
+            logf(f"[训练] 已预缓存分词器 {model_id}")
+            return True
+        logf(f"[训练] 分词器 {model_id} 预缓存失败（{(r.stderr or '')[-160:]}），将尝试联网加载")
+        return False
     except Exception as e:
         logf(f"[训练] 分词器 {model_id} 预缓存失败（{e}），将尝试联网加载")
         return False
@@ -3165,7 +3190,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     data_sub("output")
     data_sub("logs")
     for _tid, _kind in arch_info["tokenizers"]:
-        _ensure_tokenizer_cached(data_sub("tokenizers"), _tid, logf, _kind)
+        _ensure_tokenizer_cached(data_sub("tokenizers"), _tid, logf, _kind, vpy)
 
     # ---- 全局正向提示词：训练期注入（不写进原 txt） ----
     global_dataset = None

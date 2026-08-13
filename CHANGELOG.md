@@ -12,6 +12,17 @@
 
 # 更新日志（Changelog）
 
+## v0.6.3（2026-08-13）
+
+### 修复
+- **分词器缓存完整性修复**：训练前预缓存改为用训练环境（kohya/AMD venv）的 python 执行下载，
+  并做完整性校验（clip 需 vocab/merges/config/special_tokens，其他需 tokenizer_config/tokenizer.json）；
+  缓存不完整自动清理重建，避免训练时 from_pretrained 因缺文件崩（vocab_file=None）。
+- **训练依赖自愈补 protobuf**：transformers 4.54 加载 tokenizer 的路径需要 protobuf，缺失会报
+  "requires the protobuf library"，现加入检查与补装。
+
+---
+
 ## v0.6.2（2026-08-13）
 
 ### 新增
