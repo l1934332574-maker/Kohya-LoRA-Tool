@@ -12,6 +12,17 @@
 
 # 更新日志（Changelog）
 
+## v0.6.4（2026-08-13）
+
+### 修复
+- **AMD 训练收尾崩溃自动兼容**：AMD 版 PyTorch 的 torch.distributed 可能是残缺构建
+  （缺 is_initialized 等），训练全程正常但收尾时 accelerate 崩、最终模型保存失败。
+  现在 AMD 模式训练前自动检测，残缺则写入条件生效的 sitecustomize 兼容层
+  （仅训练进程补默认接口，不拖慢 pip/普通 python），幂等可重复。
+- （承接 v0.6.3）分词器缓存完整性自愈 + 依赖补 protobuf。
+
+---
+
 ## v0.6.3（2026-08-13）
 
 ### 修复
