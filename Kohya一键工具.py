@@ -2380,7 +2380,9 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
         # 5.x / 0.39 改了 CLIP 文本编码器结构，加载 SD1.5 底模会报 state_dict key 不匹配
         vcode = ("from importlib.metadata import version;import sys;"
                  "t=version('transformers').split('.');d=version('diffusers').split('.');"
-                 "sys.exit(0 if t[0]=='4' and d[0]=='0' and d[1]=='32' else 1)")
+                 "s=version('scipy').split('.');"
+                 "scipy_ok=int(s[0])>1 or (int(s[0])==1 and int(s[1])>=13);"
+                 "sys.exit(0 if t[0]=='4' and d[0]=='0' and d[1]=='32' and scipy_ok else 1)")
         try:
             rv = subprocess.run([vpy, "-c", vcode], capture_output=True, text=True, timeout=60)
             need_install = rv.returncode != 0
@@ -2409,7 +2411,8 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
     pkgs = ["transformers==4.54.1", "huggingface-hub", "toml", "voluptuous", "safetensors",
             "diffusers==0.32.1", "accelerate", "omegaconf", "imagesize", "rich", "ftfy",
             "lion-pytorch", "schedulefree", "pytorch-optimizer",
-            "prodigy-plus-schedule-free", "prodigyopt", "einops", "opencv-python", "sentencepiece"]
+            "prodigy-plus-schedule-free", "prodigyopt", "einops", "opencv-python", "sentencepiece",
+            "scipy"]   # scipy 太旧(<1.13)与 numpy2 冲突会崩 transformers，补装时顺带升级
     ok = False
     for _idx in ("https://pypi.tuna.tsinghua.edu.cn/simple", "https://mirrors.aliyun.com/pypi/simple/"):
         if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
