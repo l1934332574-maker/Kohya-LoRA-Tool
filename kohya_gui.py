@@ -988,7 +988,10 @@ class App:
         self._refresh_guide()
 
     def _refresh_guide(self):
-        """刷新引导步骤状态：✓/·、圆点颜色、高亮第一个未完成步骤、一键按钮状态。"""
+        """刷新引导步骤状态：✓/·、圆点颜色、高亮第一个未完成步骤、一键按钮状态。
+
+        模型自动下载类步骤（at_model）只显示状态、不阻塞一键训练、不高亮。
+        """
         first_pending = None
         for step in self._current_steps():
             done = self._guide_done(step["check"])
@@ -1001,6 +1004,8 @@ class App:
                     dot.configure(fg_color=("#5c7c66" if done else "#6e4545"))
                 except Exception:
                     pass
+            if step["check"] == "at_model":
+                continue  # 模型自动下载，不作为待办步骤
             if not done and first_pending is None:
                 first_pending = step["id"]
         self._highlight_guide(first_pending)
@@ -3304,7 +3309,7 @@ class App:
 
 
     def _refresh_one_click_state(self):
-        steps = self._current_steps()
+        steps = [s for s in self._current_steps() if s["check"] != "at_model"]
         ready = bool(steps) and all(self._guide_done(s["check"]) for s in steps)
         try:
             self.btn_one_click.configure(state=("normal" if ready else "disabled"),
