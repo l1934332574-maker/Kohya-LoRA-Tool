@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.7.1"
+APP_VERSION = "0.7.2"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1545,6 +1545,19 @@ def install_ai_toolkit_engine(logf=print):
     py, pyver = find_python()
     if not git or not py:
         raise RuntimeError("请先点击【环境准备】安装 Git / Python")
+    # PyTorch cu130 需要 NVIDIA 驱动 570+：驱动过旧时装完首次初始化 CUDA 可能驱动崩溃（蓝屏）。
+    # 提前检测并阻止，引导用户先更新驱动。
+    try:
+        _drv = nvidia_driver_version()
+        if _drv is not None and _drv < 570:
+            raise RuntimeError(
+                "检测到 NVIDIA 驱动版本过低（当前 %d，PyTorch cu130 需要 570+）。\n\n"
+                "直接安装可能导致首次运行 CUDA 时驱动崩溃（蓝屏）。\n"
+                "请先更新 NVIDIA 显卡驱动到 570 及以上版本（GeForce 官网或 Windows 更新），再重试安装第三引擎。" % _drv)
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
     kdir = get_kohya_dir()
     logf(f"[第三引擎] 安装目录: {kdir}")
     lock_f = _acquire_kohya_install_lock(kdir, logf)
@@ -1608,10 +1621,10 @@ def install_ai_toolkit_engine(logf=print):
             r = subprocess.run(
                 [vpy, "-c", "import torch; from toolkit.config_modules import ModelConfig;"
                             "from extensions_built_in.diffusion_models.minimax_h3 import MinimaxH3Model;"
-                            "print(torch.__version__); print(torch.cuda.is_available())"],
+                            "print(torch.__version__)"],
                 capture_output=True, text=True, timeout=300, cwd=at_dir)
             out = (r.stdout or "").strip().splitlines()
-            logf(f"[第三引擎] 验证：torch {out[0] if out else '?'} | CUDA 可用: {out[1] if len(out) > 1 else '?'} | H3 扩展已注册")
+            logf(f"[第三引擎] 验证：torch {out[0] if out else '?'} | H3 扩展已注册（验证不初始化 CUDA，避免旧驱动崩溃）")
             if r.returncode != 0:
                 raise RuntimeError("第三引擎验证失败：" + (r.stderr or "")[-300:])
         except Exception as e:
@@ -2254,6 +2267,23 @@ def detect_nvidia_gpu():
         return r.returncode == 0 and bool((r.stdout or "").strip())
     except Exception:
         return False
+
+
+def nvidia_driver_version():
+    """读取 NVIDIA 驱动主版本号（nvidia-smi 的 Driver Version，如 572.xx -> 572）。失败返回 None。"""
+    try:
+        r = subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=20)
+        for line in (r.stdout or "").splitlines():
+            if "Driver Version" in line:
+                m = re.search(r"Driver Version:\s*([\d.]+)", line)
+                if m:
+                    try:
+                        return int(m.group(1).split(".")[0])
+                    except Exception:
+                        return None
+        return None
+    except Exception:
+        return None
 
 
 def _dxgi_adapters():
