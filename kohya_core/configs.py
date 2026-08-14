@@ -253,3 +253,33 @@ GUIDE_STEPS = {
 PY_MIN = (3, 10, 9)
 PY_MAX = (3, 13, 0)
 
+
+PROJECT_TEMPLATES = {
+    "动漫画风": {
+        "mode": "style",
+        "base_type": "sdxl",
+        "note": "适合动漫/插画风格 LoRA：默认 SDXL 分辨率 1024，rank 16，低学习率防过拟合。",
+        "params": {"rank": "16", "alpha": "8", "unet_lr": "1.5e-4", "te_lr": "7.5e-5",
+                   "repeats": "5", "max_epochs": "8"},
+    },
+    "写实人物": {
+        "mode": "character",
+        "base_type": "sdxl",
+        "note": "适合真人/角色 LoRA：默认 SDXL 分辨率 1024，rank 32，配 trigger 触发词效果更好。",
+        "params": {"rank": "32", "alpha": "16", "unet_lr": "7e-5", "te_lr": "4e-5",
+                   "repeats": "3", "max_epochs": "6"},
+    },
+    "SD1.5 动漫": {
+        "mode": "style",
+        "base_type": "sd15",
+        "note": "轻量底模（512 分辨率），显存要求低，适合老显卡快速出效果。",
+        "params": {"rank": "12", "alpha": "6", "unet_lr": "3e-4", "te_lr": "1.5e-4",
+                   "repeats": "5", "max_epochs": "8"},
+    },
+    "自定义": {
+        "mode": "character",
+        "base_type": "sdxl",
+        "note": "全部参数自己调，程序按当前模式+底模填默认值。",
+        "params": {},
+    },
+}
