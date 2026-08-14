@@ -2692,21 +2692,36 @@ def write_usage_template(mode, params, output_name, out_dir=None):
             "4. 想强调角色时提高权重，想自然融入时用 0.6 左右。\n"
         )
     else:
-        pos_example = ((gpos + ", ") if gpos else "") + (
-            "anime cel-shading, clean thin black outlines, flat color, simple soft cel shading, "
-            "tv anime screenshot, limited color palette, 1girl, cherry blossoms")
-        text = (
-            "【画风 LoRA 使用模板】\n"
-            f"模型文件：{output_name}.safetensors\n"
-            "本 LoRA 无 trigger 触发词，提示词直接写画风标签即可。\n"
-            f"训练分辨率：{reso}px\n\n"
-            "使用建议：\n"
-            "1. 推荐 LoRA 权重 0.5 ~ 0.7。\n"
-            f"2. 正向提示词示例：{pos_example}\n"
-            "3. 不要输入角色名/trigger 词（这个 LoRA 没有也不应该有）。\n"
-            f"4. 负面提示词建议：{neg}\n"
-            "5. 想弱化风格时把权重降到 0.4。\n"
-        )
+        _trig2 = ", ".join(split_triggers(params.get("trigger")))
+        if _trig2:
+            pos_example = ((gpos + ", ") if gpos else "") + _trig2 + ", 1girl, <动作/场景描述>"
+            text = (
+                "【画风 LoRA 使用模板】\n"
+                f"模型文件：{output_name}.safetensors\n"
+                f"Trigger 触发词：{_trig2}（画图时输入这个词即可激活画风）\n"
+                f"训练分辨率：{reso}px\n\n"
+                "使用建议：\n"
+                "1. 推荐 LoRA 权重 0.5 ~ 0.7。\n"
+                f"2. 正向提示词以触发词开头：{pos_example}\n"
+                f"3. 负面提示词建议：{neg}\n"
+                "4. 想弱化风格时把权重降到 0.4。\n"
+            )
+        else:
+            pos_example = ((gpos + ", ") if gpos else "") + (
+                "anime cel-shading, clean thin black outlines, flat color, simple soft cel shading, "
+                "tv anime screenshot, limited color palette, 1girl, cherry blossoms")
+            text = (
+                "【画风 LoRA 使用模板】\n"
+                f"模型文件：{output_name}.safetensors\n"
+                "本 LoRA 无 trigger 触发词，提示词直接写画风标签即可。\n"
+                f"训练分辨率：{reso}px\n\n"
+                "使用建议：\n"
+                "1. 推荐 LoRA 权重 0.5 ~ 0.7。\n"
+                f"2. 正向提示词示例：{pos_example}\n"
+                "3. 不要输入角色名/trigger 词（这个 LoRA 没有也不应该有）。\n"
+                f"4. 负面提示词建议：{neg}\n"
+                "5. 想弱化风格时把权重降到 0.4。\n"
+            )
     with open(path, "w", encoding="utf-8-sig") as f:
         f.write(text)
     return path
@@ -2842,16 +2857,19 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         logf(f"[训练] 已注入全局正向提示词，使用临时数据集: {global_dataset}")
 
     keep_tokens = 0
-    if mode == "character":
-        keep_tokens = max(1, len(split_triggers(params.get("trigger"))))
-        # 训练前把当前 trigger 同步进标签：用户可能改过 trigger 但没重新预处理，
-        # 若标签第一行没有当前 trigger，LoRA 就学不到它，生图"召唤不出来"。
-        try:
-            _synced = _sync_trigger_to_labels(train_dir, params.get("trigger"), logf)
-            if _synced:
-                logf(f"[训练] 已把 trigger「{params.get('trigger')}」同步到 {_synced} 张标签第一行")
-        except Exception as _e:
-            logf(f"[训练] trigger 标签同步失败（忽略）: {_e}")
+    if mode in ("character", "style"):
+        _trig = params.get("trigger") or ""
+        if _trig.strip():
+            keep_tokens = max(1, len(split_triggers(_trig)))
+            _tlabel = "画风" if mode == "style" else ""
+            # 训练前把当前 trigger 同步进标签：用户可能改过 trigger 但没重新预处理，
+            # 若标签第一行没有当前 trigger，LoRA 就学不到它，生图"召唤不出来"。
+            try:
+                _synced = _sync_trigger_to_labels(train_dir, _trig, logf)
+                if _synced:
+                    logf(f"[训练] 已把{_tlabel} trigger「{_trig}」同步到 {_synced} 张标签第一行")
+            except Exception as _e:
+                logf(f"[训练] trigger 标签同步失败（忽略）: {_e}")
     # 数据集子集：支持秋叶式 repeats_名称 子目录结构（每个子目录独立 repeats）
     try:
         subsets = scan_dataset_subsets(dataset_dir, int(params.get("repeats", 5)))

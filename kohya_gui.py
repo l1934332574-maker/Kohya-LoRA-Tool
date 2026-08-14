@@ -1699,6 +1699,10 @@ class App:
                 self.card1_title.configure(text="① 准备视频数据")
                 self.card1_hint.configure(text="3~10 段 3~10 秒的同角色/同风格 mp4，每段配同名 .txt 字幕；H3 训练需 24G 显存")
                 self.trig_card_title.configure(text="② 设置触发词（视频模式）")
+            elif self.mode == "style":
+                self.card1_title.configure(text="① 准备图片数据")
+                self.card1_hint.configure(text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好")
+                self.trig_card_title.configure(text="② 设置触发词（画风模式，一个词即可激活画风）")
             else:
                 self.card1_title.configure(text="① 准备图片数据")
                 self.card1_hint.configure(text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好")
