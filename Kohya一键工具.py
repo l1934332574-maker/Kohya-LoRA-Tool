@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.7.2"
+APP_VERSION = "0.7.3"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1718,7 +1718,7 @@ def _write_at_image_template(mode, params, output_name, out_dir=None):
 def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
                reg_dir=None, repeats=5, dedup=False, wd14=True,
                square_crop=False, min_size=0, blur_threshold=0.0, report=None,
-               keep_tokens=None, project=None):
+               keep_tokens=None, project=None, style_caption=""):
     vpy = venv_python()
     if not os.path.isfile(vpy):
         raise RuntimeError("Kohya 尚未安装，请先点击【一键安装】")
@@ -1780,6 +1780,8 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
     else:
         if trigger:
             cmd += ["--trigger", trigger]
+        if (style_caption or "").strip():
+            cmd += ["--caption", style_caption.strip()]
         if dedup:
             cmd.append("--dedup")
     if square_crop:

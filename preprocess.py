@@ -753,17 +753,17 @@ def main():
             if not args.no_caption:
                 raw_txt = os.path.join(input_dir, os.path.splitext(_rel)[0] + ".txt")
                 if mode == "style":
-                    # 画风模式：优先用原图自带 .txt（过滤人物标签），否则统一画风 caption
-                    cap = ""
-                    if os.path.isfile(raw_txt):
+                    # 画风模式：优先画风描述词（用户提供）；否则记录原图自带 txt，
+                    # 稍后统一 WD14 打标 + 过滤人物标签（不再默认写死动漫 caption）
+                    if style_caption.strip():
+                        with open(out_txt, "w", encoding="utf-8") as f:
+                            f.write(style_caption)
+                    elif os.path.isfile(raw_txt):
                         try:
                             with open(raw_txt, "r", encoding="utf-8") as f:
-                                cap = f.read()
+                                user_captions[stem] = f.read()
                         except Exception:
-                            cap = ""
-                    cap = filter_character_tags(cap if cap.strip() else style_caption)
-                    with open(out_txt, "w", encoding="utf-8") as f:
-                        f.write(cap)
+                            user_captions[stem] = ""
                 else:
                     # 人物模式：先记录原图自带 .txt，打标/兜底之后统一写入
                     if os.path.isfile(raw_txt):
@@ -818,6 +818,43 @@ def main():
                         fh.write(insert_trigger(cur, trigger))
                     n_trig += 1
             print(f"[INFO] 已把 trigger「{trigger}」插入 {n_trig} 张图片的标签第一行")
+
+    # ---- 画风模式：无画风描述词时，用 WD14 打标 + 过滤人物标签（替代写死的动漫 caption） ----
+    if mode == "style" and not args.no_caption and (ok + skipped) and not style_caption.strip():
+        tagger = find_wd14_tagger()
+        use_wd14 = (not args.no_wd14) and bool(tagger)
+        imgs_no_txt = [f for f in os.listdir(output_dir)
+                       if os.path.splitext(f)[1].lower() in IMAGE_EXTS
+                       and not os.path.isfile(os.path.join(output_dir, os.path.splitext(f)[0] + ".txt"))]
+        if use_wd14:
+            if imgs_no_txt:
+                run_wd14_tagger(output_dir)
+            else:
+                print("[INFO] 图片标签已齐全，跳过 WD14 打标。")
+        else:
+            _fill_missing_captions(output_dir, DEFAULT_CHARACTER_CAPTION)
+            if not tagger:
+                print("[WARN] 未找到 kohya 官方 WD14 打标脚本，缺少标签的图片使用了兜底 caption。")
+        # 还原原图自带 txt（过滤人物标签）
+        for stem, cap in user_captions.items():
+            if cap.strip():
+                with open(os.path.join(output_dir, stem + ".txt"), "w", encoding="utf-8") as f:
+                    f.write(filter_character_tags(cap))
+        # 对全部 txt 过滤人物/五官标签（WD14 打的也过滤，保留画风/内容标签）
+        n_f = 0
+        for f in sorted(os.listdir(output_dir)):
+            if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
+                continue
+            t = os.path.join(output_dir, os.path.splitext(f)[0] + ".txt")
+            if os.path.isfile(t):
+                with open(t, "r", encoding="utf-8") as fh:
+                    cur = fh.read()
+                ncur = filter_character_tags(cur)
+                if ncur != cur:
+                    with open(t, "w", encoding="utf-8") as fh:
+                        fh.write(ncur)
+                    n_f += 1
+        print(f"[INFO] 画风模式：已用 WD14 打标并过滤人物/五官标签 {n_f} 张（保留画风/内容标签）")
 
     # ---- 画风模式：同样支持画风专属触发词（插入每张 txt 第一行，不动 WD14 打标逻辑） ----
     if mode == "style" and not args.no_caption and (ok + skipped) and trigger:

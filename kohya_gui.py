@@ -1402,6 +1402,16 @@ class App:
                                           border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
                                           font=ui_font(FONT_BODY), command=self.cmd_pick_reg)
         self.btn_pick_reg.pack(side="left")
+        # 画风描述词（画风模式专用，默认隐藏）
+        self.style_caption_var = tk.StringVar()
+        self.style_caption_row = ctk.CTkFrame(card2, fg_color="transparent")
+        ctk.CTkLabel(self.style_caption_row, text="画风描述词（可选）", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
+        self.style_caption_entry = ctk.CTkEntry(self.style_caption_row, width=300, height=30, textvariable=self.style_caption_var,
+                                                fg_color=CARD2, border_color=BORDER, text_color=TXT,
+                                                placeholder_text="如 hand-drawn sketch / black and white line art", font=ui_font(FONT_BODY))
+        self.style_caption_entry.pack(side="left", padx=(12, 8))
+        ctk.CTkLabel(self.style_caption_row, text="留空=自动打标；填了用它（画风更准）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        # 默认隐藏，画风模式显示
         self.trigger_hint_var = tk.StringVar()
         self.trigger_hint = ctk.CTkLabel(card2, textvariable=self.trigger_hint_var, font=ui_font(FONT_HINT), text_color=HINT)
         self.trigger_hint.pack(anchor="w", padx=22, pady=(2, 14))
@@ -1707,6 +1717,14 @@ class App:
                 self.card1_title.configure(text="① 准备图片数据")
                 self.card1_hint.configure(text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好")
                 self.trig_card_title.configure(text="② 设置触发词（人物模式）")
+        except Exception:
+            pass
+        # 画风描述词行：仅画风模式显示
+        try:
+            if self.mode == "style":
+                self.style_caption_row.pack(fill="x", padx=22, pady=(0, 4))
+            else:
+                self.style_caption_row.pack_forget()
         except Exception:
             pass
         # 画风模式：隐藏触发词/正则卡片内容（用 pack_forget 显示/隐藏行）
@@ -2045,6 +2063,7 @@ class App:
             "resolution": int(float(_getv("resolution", "1024" if self.mode == "krea2" else str(core.RESOLUTIONS.get(self.base_type, 512))))),
             "video_steps": int(float(_getv("video_steps", "2000"))),
             "train_text_encoder": not self.unet_only_var.get(),
+            "style_caption": getattr(self, "style_caption_var", tk.StringVar()).get().strip(),
             "global_pos": self.global_pos_var.get().strip(),
             "global_neg": self.global_neg_var.get().strip(),
             "amd_mode": bool(self.amd_var.get()),
@@ -2419,7 +2438,8 @@ class App:
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=True,
                 min_size=256, blur_threshold=30.0, report=report,
-                keep_tokens=None, project=self.current_project)
+                keep_tokens=None, project=self.current_project,
+                style_caption=params.get("style_caption") or "")
             self._log("[OK] 预处理完成")
         except core.StopRequested:
             self._log("[停止] 预处理已手动停止")
@@ -2523,7 +2543,8 @@ class App:
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=True,
                 min_size=256, blur_threshold=30.0, report=report,
-                keep_tokens=None, project=self.current_project)
+                keep_tokens=None, project=self.current_project,
+                style_caption=params.get("style_caption") or "")
             stats = {}
             if os.path.isfile(report):
                 try:
