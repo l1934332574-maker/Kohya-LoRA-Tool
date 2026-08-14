@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.7.1"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1553,6 +1553,13 @@ def install_ai_toolkit_engine(logf=print):
     try:
         at_dir = os.path.join(kdir, "ai-toolkit")
         if not os.path.isfile(os.path.join(at_dir, "run.py")):
+            # 目录存在但源码不完整（clone 中断残留等），清理后重新克隆，避免 git clone 到非空目录失败
+            if os.path.isdir(at_dir):
+                logf("[第三引擎] ai-toolkit 目录不完整（缺 run.py），正在清理后重新克隆…")
+                try:
+                    shutil.rmtree(at_dir, ignore_errors=True)
+                except Exception:
+                    pass
             logf("[第三引擎] git clone ai-toolkit（Ostris，H3 视频训练内核）…")
             os.makedirs(at_dir, exist_ok=True)
             if _git_clone(git, "https://github.com/ostris/ai-toolkit.git", at_dir, logf) != 0:

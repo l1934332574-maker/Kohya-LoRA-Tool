@@ -12,6 +12,15 @@
 
 # 更新日志（Changelog）
 
+## v0.7.1（2026-08-14）
+
+### 修复
+- **第三引擎安装失败修复**：ai-toolkit 目录若存在但不完整（clone 中断残留、缺 run.py），
+  安装时先清理再重新克隆，不再报 "destination path already exists and is not an empty directory"。
+- （承接 v0.7.0）Z-Image / Qwen-Image 模型步骤不阻塞一键训练。
+
+---
+
 ## v0.7.0（2026-08-14）
 
 ### 新增
