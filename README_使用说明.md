@@ -155,6 +155,15 @@
 
 ---
 
+### AI Toolkit 图像 LoRA（Qwen-Image / Z-Image，实验性，v0.7.0 新增）
+
+- 新增 **「🖼 Qwen-Image LoRA」** 与 **「🖼 Z-Image LoRA」** 两个模式，走第三引擎 AI Toolkit。
+- **Qwen-Image（20B）**：模型 `Qwen/Qwen-Image-2512`，约 40GB。显存：**16G 起步、24G 舒服（推荐）**。
+- **Z-Image（8B）**：模型 `Tongyi-MAI/Z-Image`，约 16GB。显存：**12G 起步、16G 舒服**。
+- 首次训练时自动从国内镜像（hf-mirror）下载模型，无需手动下载；训练用基础版，出图可配合 Turbo 加速。
+- 数据集：15~30 张同一人物/风格的图片，自动过滤/裁切/打标签；训练步数默认 2000。
+
+
 ## 5. 四种架构说明
 
 | 架构 | 训练脚本 | 说明 |

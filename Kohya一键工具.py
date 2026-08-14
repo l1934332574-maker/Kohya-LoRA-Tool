@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.6.4"
+APP_VERSION = "0.7.0"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -98,8 +98,10 @@ MODE_LABELS = {
     "character": "👤 人物角色LoRA模式",
     "krea2": "🖼 Krea 2 图像LoRA",
     "video": "🎬 视频LoRA（MiniMax H3）",
+    "qwen_image": "🖼 Qwen-Image LoRA",
+    "zimage": "🖼 Z-Image LoRA",
 }
-MODE_KEYS = ["style", "character", "krea2", "video"]
+MODE_KEYS = ["style", "character", "krea2", "video", "qwen_image", "zimage"]
 
 # 架构注册表（对标秋叶：SD1.5 / SDXL / FLUX.1 / Anima）
 # family: sd=U-Net 架构；flux=DiT；anima=DiT+Qwen3
@@ -184,10 +186,30 @@ PRESETS = {
         "anima": {"rank": "32", "alpha": "32", "unet_lr": "2e-4", "te_lr": "1e-4",
                   "repeats": "1", "max_epochs": "20", "resolution": "1280", "video_steps": "2000"},
     },
+    "qwen_image": {
+        "sd15": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
+                 "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
+        "sdxl": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
+                 "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
+        "flux": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
+                 "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
+        "anima": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
+                  "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
+    },
+    "zimage": {
+        "sd15": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
+                 "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
+        "sdxl": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
+                 "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
+        "flux": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
+                 "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
+        "anima": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
+                  "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
+    },
 }
 
 RESOLUTIONS = {k: v["resolution"] for k, v in ARCH_INFO.items()}
-MIN_IMAGES = {"style": 20, "character": 15, "krea2": 15, "video": 3}   # 一键训练最少可用图片/视频数
+MIN_IMAGES = {"style": 20, "character": 15, "krea2": 15, "video": 3, "qwen_image": 15, "zimage": 15}   # 一键训练最少可用图片/视频数
 MAX_AUTO_STEPS = 12000                          # 一键训练自动约束的最大总步数（防过拟合）
 
 PARAM_LABELS = {
@@ -229,14 +251,19 @@ TRIGGER_HINT_VIDEO = ("💡提示：填一个网上很少见到的英文单词�
                       "训练后输入这个单词，就能在视频里召唤这个角色/风格。\n"
                       "⚠ 视频 LoRA 需要 24G+ 显存（NVIDIA 显卡），且模型文件很大（40GB+）。\n"
                       "不填也可以正常训练。")
+TRIGGER_HINT_AT = ("💡提示：填一个网上很少见到的英文单词（如 my_oc01）\n"
+                   "训练后输入这个单词，就能召唤这个角色/风格。\n"
+                   "不填也可以正常训练（但召唤效果弱）。")
 DATASET_TIPS = {
     "style": "📌 数据集提示：建议 20~60 张图片，尽量多不同人物、不同姿态，避免五官固化。画风模式自动过滤强人物五官标签；可填画风专属触发词，不需要正则图。",
     "character": "📌 数据集提示：建议 15~30 张同一人物，多角度、不同服装，推荐设置唯一 trigger 触发词；可配合正则数据集防过拟合。",
     "krea2": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Krea 2 模型放进 models/krea2/（RAW+VAE+文本编码器）。推荐 12G+ 显存。",
     "video": "📌 视频数据集提示：准备 3~10 段 3~10 秒的同角色/同风格视频（mp4），每段配一个同名 .txt 字幕描述内容。H3 模型 40GB+，训练推荐 24G 显存（NVIDIA）。",
+    "qwen_image": "📌 数据集提示：15~30 张同一人物/风格图片。Qwen-Image 是 20B 大模型：16G 显存起步、24G 舒服（推荐）；首次训练自动下载模型约 40GB（国内镜像）。",
+    "zimage": "📌 数据集提示：15~30 张同一人物/风格图片。Z-Image 是 8B 轻量模型：12G 显存起步、16G 舒服；首次训练自动下载模型约 16GB（国内镜像）。",
 }
 
-OUTPUT_NAMES = {"style": "anime_style_lora", "character": "character_lora", "krea2": "krea2_lora", "video": "h3_video_lora"}
+OUTPUT_NAMES = {"style": "anime_style_lora", "character": "character_lora", "krea2": "krea2_lora", "video": "h3_video_lora", "qwen_image": "qwen_image_lora", "zimage": "zimage_lora"}
 # ---------- 新手引导步骤（数据驱动，按模式渲染） ----------
 # 每步：id(唯一) / label(显示文案) / btn(按钮文字) / check(完成判定类型) / act(GUI 动作方法名) / tip(悬停提示)
 # check 类型：
@@ -284,6 +311,26 @@ GUIDE_STEPS = {
          "tip": "应用内下载 MiniMax H3 的 DiT/文本编码器/VAE（约 40GB，断点续传），下完自动识别。"},
         {"id": "raw", "label": "④ 选择视频文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
          "tip": "选择视频数据集文件夹（3~10 段 mp4 + 同名 txt 字幕）。"},
+    ],
+    "qwen_image": [
+        {"id": "env", "label": "① 环境准备", "btn": "去准备", "check": "env", "act": "cmd_env",
+         "tip": "安装 Git 和 Python（只需一次，全部项目通用）。"},
+        {"id": "at", "label": "② 安装第三引擎", "btn": "去安装", "check": "at", "act": "cmd_install_at",
+         "tip": "安装第三引擎 AI Toolkit（Qwen-Image / Z-Image 模式需要，只需一次，需 NVIDIA 显卡）。"},
+        {"id": "at_model", "label": "③ Qwen-Image 模型", "btn": "查看说明", "check": "at_model", "act": "cmd_at_model_help",
+         "tip": "Qwen-Image 是 20B 大模型：16G 显存起步、24G 舒服（推荐）。首次训练自动下载约 40GB（国内镜像）。"},
+        {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
+         "tip": "选择原始图片文件夹（15~30 张同一人物/风格）。"},
+    ],
+    "zimage": [
+        {"id": "env", "label": "① 环境准备", "btn": "去准备", "check": "env", "act": "cmd_env",
+         "tip": "安装 Git 和 Python（只需一次，全部项目通用）。"},
+        {"id": "at", "label": "② 安装第三引擎", "btn": "去安装", "check": "at", "act": "cmd_install_at",
+         "tip": "安装第三引擎 AI Toolkit（Qwen-Image / Z-Image 模式需要，只需一次，需 NVIDIA 显卡）。"},
+        {"id": "at_model", "label": "③ Z-Image 模型", "btn": "查看说明", "check": "at_model", "act": "cmd_at_model_help",
+         "tip": "Z-Image 是 8B 轻量模型：12G 显存起步、16G 舒服。首次训练自动下载约 16GB（国内镜像）；训练用基础版，出图可配 Turbo。"},
+        {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
+         "tip": "选择原始图片文件夹（15~30 张同一人物/风格）。"},
     ],
 }
 
@@ -1895,6 +1942,195 @@ def _write_h3_template(mode, params, output_name, out_dir=None):
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
     return path
+
+
+
+# ---------- AI Toolkit 图像 LoRA（Qwen-Image / Z-Image） ----------
+# 走第三引擎 AI Toolkit（与 H3 视频同引擎）：diffusers 格式，首次训练自动下载模型（国内镜像）。
+# 显存说明（写进引导/提示）：Qwen-Image 20B = 16G 起步、24G 舒服；Z-Image 8B = 12G 起步、16G 舒服。
+AT_IMAGE_MODELS = {
+    "qwen_image": {
+        "label": "Qwen-Image（20B）",
+        "arch": "qwen_image",
+        "model_id": "Qwen/Qwen-Image-2512",
+        "min_vram": 16, "rec_vram": 24,
+        "size": "约 40GB",
+        "hint": "Qwen-Image 是 20B 大模型：16G 显存起步、24G 舒服（推荐）。首次训练自动下载模型（约 40GB，国内镜像）。",
+    },
+    "zimage": {
+        "label": "Z-Image（8B）",
+        "arch": "zimage",
+        "model_id": "Tongyi-MAI/Z-Image",
+        "min_vram": 12, "rec_vram": 16,
+        "size": "约 16GB",
+        "hint": "Z-Image 是 8B 轻量模型：12G 显存起步、16G 舒服。首次训练自动下载模型（约 16GB，国内镜像）。训练用基础版，出图可配合 Turbo 加速。",
+    },
+}
+
+
+def at_image_model_ready(mode):
+    """检查 AI Toolkit 图像模型是否已下载（HF 缓存目录存在）。"""
+    info = AT_IMAGE_MODELS.get(mode)
+    if not info:
+        return False
+    try:
+        cache_root = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+        folder = "models--" + info["model_id"].replace("/", "--")
+        return os.path.isdir(os.path.join(cache_root, folder))
+    except Exception:
+        return False
+
+
+def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path):
+    """生成 AI Toolkit 图像 LoRA 训练 yaml（Qwen-Image / Z-Image 共用）。"""
+    name = _sanitize_dirname(params.get("project")) or "at_lora"
+    rank = int(params.get("rank", 16))
+    alpha = int(params.get("alpha", 16))
+    lr = float(params.get("unet_lr", 1e-4))
+    steps = max(100, min(6000, int(params.get("video_steps", 2000))))
+    trig = params.get("trigger") or ""
+    reso = int(params.get("resolution", 1024))
+    train_dir = os.path.abspath(train_dir).replace("\\", "/")
+    out_dir = os.path.abspath(out_dir).replace("\\", "/")
+    sample_prompt = (trig + ", ") if trig else ""
+    text = (
+        "job: extension\n"
+        "config:\n"
+        "  name: " + _yq(name) + "\n"
+        "  process:\n"
+        "    - type: 'sd_trainer'\n"
+        "      training_folder: " + _yq(out_dir) + "\n"
+        "      device: cuda:0\n"
+        "      trigger_word: " + _yq(trig) + "\n"
+        "      network:\n"
+        "        type: \"lora\"\n"
+        "        linear: " + str(rank) + "\n"
+        "        linear_alpha: " + str(alpha) + "\n"
+        "      save:\n"
+        "        dtype: float16\n"
+        "        save_every: 200\n"
+        "        max_step_saves_to_keep: 5\n"
+        "      datasets:\n"
+        "        - folder_path: " + _yq(train_dir) + "\n"
+        "          caption_ext: \"txt\"\n"
+        "          caption_dropout_rate: 0.05\n"
+        "          num_frames: 1\n"
+        "          resolution: [" + str(reso) + ", " + str(reso) + "]\n"
+        "      train:\n"
+        "        batch_size: 1\n"
+        "        steps: " + str(steps) + "\n"
+        "        gradient_accumulation: 1\n"
+        "        train_unet: true\n"
+        "        train_text_encoder: false\n"
+        "        gradient_checkpointing: true\n"
+        "        noise_scheduler: \"flowmatch\"\n"
+        "        timestep_type: 'linear'\n"
+        "        optimizer: \"adamw8bit\"\n"
+        "        lr: " + repr(lr) + "\n"
+        "        optimizer_params:\n"
+        "          weight_decay: 1e-4\n"
+        "        dtype: bf16\n"
+        "        cache_text_embeddings: true\n"
+        "      model:\n"
+        "        name_or_path: " + _yq(info["model_id"]) + "\n"
+        "        arch: '" + info["arch"] + "'\n"
+        "        quantize: true\n"
+        "        qtype: \"qfloat8\"\n"
+        "        low_vram: true\n"
+        "      sample:\n"
+        "        sampler: \"flowmatch\"\n"
+        "        sample_every: 250\n"
+        "        width: " + str(reso) + "\n"
+        "        height: " + str(reso) + "\n"
+        "        num_frames: 1\n"
+        "        prompts:\n"
+        "          - " + _yq(sample_prompt + "a high quality detailed portrait, masterpiece, best quality") + "\n"
+        "        seed: 42\n"
+        "        walk_seed: true\n"
+        "        guidance_scale: 4.0\n"
+        "        sample_steps: 20\n"
+        "meta:\n"
+        "  name: " + _yq(name) + "\n"
+        "  version: '1.0'\n"
+    )
+    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return cfg_path
+
+
+def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, resume_from=None, progress=None):
+    """AI Toolkit 图像 LoRA 训练（Qwen-Image / Z-Image，第三引擎）。"""
+    params = params or {}
+    info = AT_IMAGE_MODELS.get(mode)
+    if not info:
+        raise RuntimeError(f"未知模式: {mode}")
+    ok, detail, vpy = ai_toolkit_engine_status()
+    if not ok:
+        raise RuntimeError("第三训练引擎未安装，请点顶部「⚙ 安装第三引擎」安装。\n" + detail)
+    kdir = get_kohya_dir()
+    at_dir = os.path.join(kdir, "ai-toolkit")
+    if not os.path.isfile(os.path.join(at_dir, "run.py")):
+        raise RuntimeError("ai-toolkit 源码缺失，请重装第三引擎")
+    train_dir = dataset_train_dir(mode, params.get("project"))
+    if count_images(train_dir) == 0:
+        raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】或【一键开始训练】")
+    if vram_gb is not None and vram_gb < info["min_vram"]:
+        logf(f"[{info['label']}] ⚠ 显存 {vram_gb}GB 低于建议 {info['min_vram']}G：{info['hint']}")
+    proj = _sanitize_dirname(params.get("project")) or mode
+    out_dir = data_sub("output", proj)
+    os.makedirs(out_dir, exist_ok=True)
+    cfg_path = os.path.join(KIT_DIR, "configs", mode + "_train.yaml")
+    write_at_image_yaml(params, info, train_dir, out_dir, cfg_path)
+    steps = int(params.get("video_steps", 2000))
+    logf(f"[{info['label']}] 数据集: {train_dir}（{count_images(train_dir)} 张）")
+    logf(f"[{info['label']}] 模型: {info['model_id']}（首次训练自动下载 {info['size']}，国内镜像）")
+    logf(f"[{info['label']}] LoRA: dim={params.get('rank',16)}, alpha={params.get('alpha',16)}, lr={params.get('unet_lr','1e-4')}, steps={steps}")
+    env = build_env()
+    env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    _px = system_proxy()
+    if _px:
+        env.setdefault("HTTP_PROXY", _px)
+        env.setdefault("HTTPS_PROXY", _px)
+    if progress is not None:
+        try:
+            progress.set_total(steps)
+        except Exception:
+            pass
+    logf("[训练] 启动 AI Toolkit 训练（首次要下载/加载大模型，请耐心等待）…")
+    rc = run_stream([vpy, os.path.join(at_dir, "run.py"), cfg_path], cwd=at_dir, env=env, logf=logf)
+    if rc != 0:
+        raise RuntimeError(f"训练结束，退出码 {rc}，请查看上方日志")
+    model_path = _find_latest_safetensors(out_dir) or os.path.join(out_dir, "lora.safetensors")
+    logf(f"[{info['label']}] 完成！模型: {model_path}")
+    try:
+        _write_at_image_template(mode, params, os.path.splitext(os.path.basename(model_path))[0], out_dir=os.path.dirname(model_path))
+        write_params_report(mode, params, os.path.splitext(os.path.basename(model_path))[0], out_dir=os.path.dirname(model_path))
+    except Exception as e:
+        logf(f"生成模板/报告失败（忽略）: {e}")
+    return model_path
+
+
+def _write_at_image_template(mode, params, output_name, out_dir=None):
+    """Qwen-Image / Z-Image LoRA 使用模板。"""
+    out_dir = out_dir or data_sub("output")
+    path = os.path.join(out_dir, output_name + "_使用模板.txt")
+    info = AT_IMAGE_MODELS.get(mode, {})
+    trig = ", ".join(split_triggers(params.get("trigger"))) if params.get("trigger") else "<你的触发词>"
+    text = (
+        "【" + (info.get("label", "AI 图像") if info else "AI 图像") + " LoRA 使用模板】\n"
+        f"模型文件：{output_name}.safetensors\n"
+        f"Trigger 触发词：{trig}\n"
+        f"适用模型：{info.get('model_id', '')}（" + (info.get("size", "") if info else "") + "）\n\n"
+        "使用建议：\n"
+        f"1. 提示词以触发词开头：{trig}, <描述>\n"
+        "2. 推荐 LoRA 权重 0.6 ~ 0.9\n"
+        "3. 该 LoRA 只能用于对应模型系列（不支持 SD/SDXL）。\n"
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return path
+
 
 
 

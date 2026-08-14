@@ -12,6 +12,17 @@
 
 # 更新日志（Changelog）
 
+## v0.7.0（2026-08-14）
+
+### 新增
+- **🖼 Qwen-Image / Z-Image LoRA（实验性）**：新增两个图像 LoRA 模式，走 AI Toolkit 第三引擎。
+  - Qwen-Image（20B，Qwen/Qwen-Image-2512）：**16G 显存起步、24G 舒服（推荐）**，模型约 40GB。
+  - Z-Image（8B，Tongyi-MAI/Z-Image）：**12G 显存起步、16G 舒服**，模型约 16GB。
+  - 首次训练自动下载模型（国内镜像 hf-mirror），无需手动下载；训练用基础版，出图可配 Turbo 加速。
+  - 模型/显存说明已写入软件引导与提示（DATASET_TIPS/引导步骤/确认弹窗/显存警告）。
+
+---
+
 ## v0.6.4（2026-08-13）
 
 ### 修复

@@ -687,6 +687,20 @@ class App:
                                           command=self._show_h3_guide)
         self.btn_h3_guide.pack(side="left", padx=(6, 4))
         ctk.CTkLabel(self.h3_row, text="24G 显存推荐 · NVIDIA 专属（实验性）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(8, 0))
+        # AI Toolkit 图像模型状态行（Qwen-Image / Z-Image 模式显示）
+        self.at_row = ctk.CTkFrame(top, fg_color="transparent")
+        self.at_model_var = tk.StringVar(value="")
+        ctk.CTkLabel(self.at_row, textvariable=self.at_model_var, font=ui_font(FONT_BODY), text_color=ACC).pack(side="left")
+        self.btn_at_install = ctk.CTkButton(self.at_row, text="⚙ 安装第三引擎", width=108, height=30,
+                                            fg_color="transparent", hover_color="#252a36", border_width=1,
+                                            border_color=ACC, text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
+                                            command=self.cmd_install_at)
+        self.btn_at_install.pack(side="left", padx=(10, 4))
+        self.btn_at_model_help = ctk.CTkButton(self.at_row, text="📖 模型/显存说明", width=116, height=30,
+                                               fg_color=CARD2, hover_color="#343a46", border_width=1,
+                                               border_color=BORDER, text_color=TXT, corner_radius=6,
+                                               font=ui_font(FONT_BODY), command=self.cmd_at_model_help)
+        self.btn_at_model_help.pack(side="left", padx=(4, 4))
 
         # AMD 兼容模式（实验性）：仅 AMD 显卡显示
         self.amd_bar = ctk.CTkFrame(top, fg_color="transparent")
@@ -875,6 +889,8 @@ class App:
                 return not core.krea2_missing_models()
             if check == "h3_models":
                 return not core.h3_missing_models()
+            if check == "at_model":
+                return core.at_image_model_ready(self.mode)
             if check == "base":
                 return bool(self.base_model_var.get())
             if check == "raw":
@@ -1570,6 +1586,8 @@ class App:
         try:
             if self.mode == "video":
                 _hint = core.TRIGGER_HINT_VIDEO
+            elif self.mode in ("qwen_image", "zimage"):
+                _hint = core.TRIGGER_HINT_AT
             elif self.mode == "krea2":
                 _hint = core.TRIGGER_HINT_KREA2
             elif self.mode == "character":
@@ -1583,8 +1601,8 @@ class App:
         try:
             _tef = getattr(self, "_adv_frames", {}).get("te_lr")
             if _tef is not None:
-                if self.mode in ("krea2", "video"):
-                    _tef.grid_remove()   # Krea2/视频：文本编码器不训练，该参数无效
+                if self.mode in ("krea2", "video", "qwen_image", "zimage"):
+                    _tef.grid_remove()   # Krea2/视频/AI图像：文本编码器不训练，该参数无效
                 else:
                     try:
                         _tef.grid()
@@ -1593,7 +1611,7 @@ class App:
         except Exception:
             pass
         try:
-            _hide_base = self.mode in ("krea2", "video")
+            _hide_base = self.mode in ("krea2", "video", "qwen_image", "zimage")
             for w in (self.base_label, self.base_combo, self.btn_pick_base, self.btn_refresh_base, self.btn_download_base):
                 try:
                     if _hide_base:
@@ -1632,16 +1650,28 @@ class App:
                         pass
             except Exception:
                 pass
+            try:
+                if self.mode in ("qwen_image", "zimage"):
+                    self._refresh_at_status()
+                    self.at_row.pack(fill="x", pady=(8, 0))
+                else:
+                    try:
+                        self.at_row.pack_forget()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         except Exception:
             pass
-        # 视频模式：repeats/max_epochs/分辨率 无效，隐藏；显示"训练步数"
+        # 视频/AI图像模式：repeats/max_epochs/分辨率 无效，隐藏；显示"训练步数"
         try:
             _adv = getattr(self, "_adv_frames", {})
+            _use_steps = self.mode in ("video", "qwen_image", "zimage")
             for _k in ("repeats", "max_epochs", "resolution"):
                 _f = _adv.get(_k)
                 if _f is not None:
                     try:
-                        if self.mode == "video":
+                        if _use_steps:
                             _f.grid_remove()
                         else:
                             _f.grid()
@@ -1650,7 +1680,7 @@ class App:
             _vf = _adv.get("video_steps")
             if _vf is not None:
                 try:
-                    if self.mode == "video":
+                    if _use_steps:
                         _vf.grid()
                     else:
                         _vf.grid_remove()
@@ -1946,6 +1976,8 @@ class App:
             (getattr(self, "btn_h3_captions", None), "为没有字幕的视频生成占位 txt（内容=触发词），避免训练缺字幕报错；建议之后手动改成具体描述。"),
             (getattr(self, "btn_h3_caption_ai", None), "用 Qwen2.5-VL 自动给视频生成英文描述（首次下载模型约 6~7GB，已有 txt 的会跳过）。"),
             (getattr(self, "btn_h3_guide", None), "打开 MiniMax H3 视频 LoRA 训练详细引导（装引擎→下模型→准备视频→训练→出视频）。"),
+            (getattr(self, "btn_at_install", None), "安装第三引擎 AI Toolkit（Qwen-Image / Z-Image 模式需要）。"),
+            (getattr(self, "btn_at_model_help", None), "查看模型与显存说明：Qwen-Image 16G 起步/24G 舒服，Z-Image 12G 起步/16G 舒服。"),
         ]
         for w, t in tips:
             self._tip(w, t)
@@ -2201,6 +2233,53 @@ class App:
             self.q.put("__DONE__")
 
 
+
+    def _refresh_at_status(self):
+        try:
+            info = core.AT_IMAGE_MODELS.get(self.mode, {})
+            ok_e = core.ai_toolkit_engine_status()[0]
+            ok_m = core.at_image_model_ready(self.mode)
+            label = info.get("label", "")
+            if not ok_e:
+                self.at_model_var.set(f"{label}：第三引擎未装（点⚙安装） · 模型：未下载")
+            elif not ok_m:
+                self.at_model_var.set(f"{label}：模型未下载（首次训练自动下载 {info.get('size','')}，国内镜像）")
+            else:
+                self.at_model_var.set(f"{label}：模型已就绪 ✓")
+        except Exception:
+            pass
+
+    def cmd_at_model_help(self):
+        """Qwen-Image / Z-Image 模型与显存说明弹窗。"""
+        info = core.AT_IMAGE_MODELS.get(self.mode, {})
+        d = core.data_sub("models")  # 说明弹窗用
+        msg = (
+            f"📖 {info.get('label', '')} 说明\n\n"
+            f"· 模型：{info.get('model_id', '')}（{info.get('size', '')}）\n"
+            f"· 显存：{info.get('hint', '')}\n\n"
+            "· 模型会自动下载到 HuggingFace 缓存目录（国内镜像 hf-mirror），首次训练时自动完成，无需手动下载。\n"
+            "· 训练用基础版模型；出图可配合 Turbo 等加速版使用。\n\n"
+            "· 训练数据：选 15~30 张同一人物/风格的图片，自动过滤/裁切/打标签。"
+        )
+        messagebox.showinfo(core.APP_NAME, msg)
+
+    def _ensure_at_image_ready(self):
+        """Qwen-Image / Z-Image 模式训练前检查：第三引擎已装 + 数据集有图。模型首次训练自动下载。"""
+        try:
+            ok, detail, _ = core.ai_toolkit_engine_status()
+        except Exception as e:
+            ok, detail = False, str(e)
+        if not ok:
+            messagebox.showwarning(core.APP_NAME,
+                                   "第三训练引擎未安装。\n请点顶部「⚙ 安装第三引擎」安装。\n\n" + detail)
+            return False
+        vd = (self._collect_params().get("raw_dir") or "")
+        if not vd or not os.path.isdir(vd):
+            messagebox.showwarning(core.APP_NAME, "请先选择图片数据集文件夹。")
+            return False
+        return True
+
+
     def _ensure_video_ready(self):
         """视频模式训练前检查：第三引擎已装 + H3 模型齐全 + 数据集有视频与字幕。返回是否可继续。"""
         try:
@@ -2323,7 +2402,7 @@ class App:
                 stats = {"ok": len(videos), "skipped_existing": 0}
                 self.q.put(("AUTO_CONFIRM", params, stats, len(videos)))
                 return
-            pp_mode = "character" if params.get("mode") == "krea2" else params["mode"]
+            pp_mode = "character" if params.get("mode") in ("krea2", "qwen_image", "zimage") else params["mode"]
             core.preprocess(
                 self._log, input_dir=params["raw_dir"],
                 size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") == "krea2" else core.RESOLUTIONS.get(params["base_type"], 512))),
@@ -2343,7 +2422,10 @@ class App:
 
     def cmd_train(self):
         params = self._collect_params()
-        if params.get("mode") == "video":
+        if params.get("mode") in ("qwen_image", "zimage"):
+            if not self._ensure_at_image_ready():
+                return
+        elif params.get("mode") == "video":
             if not self._ensure_video_ready():
                 return
         elif params.get("mode") == "krea2":
@@ -2369,7 +2451,10 @@ class App:
         try:
             vram = core.detect_vram_gb()
             params["project"] = self.current_project or ""
-            if params.get("mode") == "video":
+            if params.get("mode") in ("qwen_image", "zimage"):
+                core.train_at_image(self._log, mode=params["mode"], params=params,
+                                    vram_gb=vram, resume_from=resume, progress=self._train_mon)
+            elif params.get("mode") == "video":
                 core.train_video(self._log, mode="video", params=params,
                                  vram_gb=vram, resume_from=resume, progress=self._train_mon)
             elif params.get("mode") == "krea2":
@@ -2397,7 +2482,10 @@ class App:
         if not params["raw_dir"]:
             messagebox.showwarning(core.APP_NAME, "请先选择原始图片/视频文件夹（步骤④）。")
             return
-        if params.get("mode") == "video":
+        if params.get("mode") in ("qwen_image", "zimage"):
+            if not self._ensure_at_image_ready():
+                return
+        elif params.get("mode") == "video":
             if not self._ensure_video_ready():
                 return
         else:
@@ -2832,6 +2920,10 @@ class App:
         if params.get("mode") == "video":
             need = 24
             label = "MiniMax H3 视频（33.1B）"
+        elif params.get("mode") in ("qwen_image", "zimage"):
+            info = core.AT_IMAGE_MODELS.get(params["mode"], {})
+            need = info.get("min_vram", 16)
+            label = info.get("label", params["mode"])
         elif params.get("mode") == "krea2":
             need = 16
             label = "Krea 2（12.9B）"
@@ -2882,6 +2974,17 @@ class App:
                 "即将开始 MiniMax H3 视频训练，请确认以下参数：\n\n"
                 f"模式        : {core.MODE_LABELS.get('video')}\n"
                 f"H3 底模     : {os.path.basename(_files.get('dit') or '？')}\n"
+                f"rank / alpha: {params['rank']} / {params['alpha']}\n"
+                f"学习率      : {params['unet_lr']}\n"
+                f"训练步数    : {params.get('video_steps', 2000)}\n"
+                f"Trigger     : {params['trigger'] or '（未填写）'}"
+            )
+        elif params.get("mode") in ("qwen_image", "zimage"):
+            _info = core.AT_IMAGE_MODELS.get(params["mode"], {})
+            msg = (
+                "即将开始 " + (_info.get("label", "") if _info else "") + " 训练，请确认以下参数：\n\n"
+                f"模式        : {core.MODE_LABELS.get(params['mode'], params['mode'])}\n"
+                f"模型        : {_info.get('model_id', '？') if _info else '？'}\n"
                 f"rank / alpha: {params['rank']} / {params['alpha']}\n"
                 f"学习率      : {params['unet_lr']}\n"
                 f"训练步数    : {params.get('video_steps', 2000)}\n"
