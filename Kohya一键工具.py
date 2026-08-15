@@ -3322,6 +3322,51 @@ def system_status(force=False):
     return data
 
 
+GITHUB_REPO = "l1934332574-maker/Kohya-LoRA-Tool"
+
+
+def parse_version(v):
+    """'v0.8.3' / '0.8.3' -> (0,8,3)；无法解析返回 None。"""
+    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", str(v or ""))
+    if m:
+        return tuple(int(x) for x in m.groups())
+    return None
+
+
+def check_update(timeout=20):
+    """检查 GitHub Releases 最新版。返回 dict 或 None（网络/限流失败返回 None）。
+
+    返回 {'version':'v0.8.3','setup_url':'...','notes':'...','newer':bool}
+    newer = 远端版本是否高于当前 APP_VERSION。
+    """
+    try:
+        import json
+        url = "https://api.github.com/repos/%s/releases/latest" % GITHUB_REPO
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0", "Accept": "application/vnd.github+json"})
+        r = urllib.request.urlopen(req, timeout=timeout)
+        rel = json.loads(r.read().decode("utf-8", "replace"))
+        tag = (rel.get("tag_name") or "").strip()
+        if not re.match(r"^v?\d+\.\d+\.\d+", tag):
+            return None
+        setup_url = None
+        for a in rel.get("assets", []) or []:
+            if (a.get("name") or "").lower() == "setup.exe":
+                setup_url = a.get("browser_download_url") or a.get("url")
+        if not setup_url:
+            return None
+        cur = parse_version(APP_VERSION)
+        lat = parse_version(tag)
+        return {
+            "version": tag,
+            "setup_url": setup_url,
+            "notes": (rel.get("body") or "").strip()[:400],
+            "newer": bool(cur and lat and lat > cur),
+        }
+    except Exception:
+        return None
+
+
 # ---------- 桌面 UI ----------
 
 # 基础底模不内置，从这里引导小白下载（两条国内直链）

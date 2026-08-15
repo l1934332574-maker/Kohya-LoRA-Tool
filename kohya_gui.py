@@ -294,6 +294,11 @@ class App:
         self._refresh_status_async()
         self.root.after(100, self._poll)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # 启动 8 秒后后台检查新版本（不阻塞界面，有新版本才提示）
+        try:
+            self.root.after(8000, self._auto_check_update)
+        except Exception:
+            pass
 
     # ---------- 日志 ----------
     def _log(self, text):
@@ -346,6 +351,12 @@ class App:
                 self._dl_progress_ui(item[1], item[2])
             elif kind == "DL_DONE":
                 self._handle_dl_done(item[1], item[2])
+            elif kind == "UPDATE_CHECK":
+                self._handle_update_check(item[1])
+            elif kind == "AUTO_UPDATE":
+                self._handle_auto_update(item[1])
+            elif kind == "UPDATE_DONE":
+                self._handle_update_done(item[1], item[2], item[3] if len(item) > 3 else None)
 
     def _start_worker(self, fn, title):
         # 防重入：同一时间只允许一个后台任务（安装/预处理/训练），
@@ -784,6 +795,12 @@ class App:
                                              font=ui_font(FONT_BODY), command=self.cmd_new_project)
         self.btn_new_project.pack(side="right")
         self._home_widgets.append(self.btn_new_project)
+        self.btn_check_update = ctk.CTkButton(head, text="🔄 检查更新", width=104, height=32,
+                                              fg_color="transparent", hover_color="#252a36",
+                                              border_width=1, border_color=BORDER, text_color=SUB,
+                                              corner_radius=6, font=ui_font(FONT_BODY), command=self.cmd_check_update)
+        self.btn_check_update.pack(side="right", padx=(0, 6))
+        self._home_widgets.append(self.btn_check_update)
         _hint = ctk.CTkLabel(f, text="每个项目保存一套完整的训练配置（模式 / 底模 / 数据集 / 触发词 / 全部参数），下次直接打开继续用。",
                              font=ui_font(FONT_HINT), text_color=HINT)
         _hint.pack(anchor="w", padx=26, pady=(0, 10))
@@ -1882,6 +1899,118 @@ class App:
 
     def cmd_readme(self):
         self._show_help_window()
+
+    def cmd_check_update(self):
+        """检查更新（手动按钮）。"""
+        if getattr(self, "_checking_update", False):
+            return
+        self._checking_update = True
+        self._log("[更新] 正在检查新版本…")
+        def work():
+            try:
+                info = core.check_update()
+            except Exception:
+                info = None
+            try:
+                self.q.put(("UPDATE_CHECK", info))
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _handle_update_check(self, info):
+        self._checking_update = False
+        if not info:
+            self._log("[更新] 检查失败（网络或 GitHub 限流），可稍后重试。")
+            messagebox.showinfo(core.APP_NAME,
+                                "检查更新失败：无法连接 GitHub（网络或限流问题）。\n可稍后重试，或直接到 GitHub Releases 手动下载。")
+            return
+        if not info.get("newer"):
+            self._log(f"[更新] 已是最新版本 v{core.APP_VERSION}")
+            messagebox.showinfo(core.APP_NAME, f"当前已是最新版本 v{core.APP_VERSION} ✅")
+            return
+        ver = info["version"]
+        self._log(f"[更新] 发现新版本 {ver}")
+        if messagebox.askyesno(
+                core.APP_NAME,
+                f"发现新版本 {ver}（当前 v{core.APP_VERSION}）\n\n"
+                f"{(info.get('notes') or '').strip()[:180]}\n\n"
+                "是否下载并安装？\n（约 445MB，支持断点续传，装完自动重启）"):
+            self._start_update(info["setup_url"], ver)
+
+    def _auto_check_update(self):
+        """启动后台静默检查：有新版本才提示。"""
+        if getattr(self, "_checking_update", False):
+            return
+        try:
+            self._log("[更新] 后台检查新版本…")
+        except Exception:
+            pass
+        def work():
+            try:
+                info = core.check_update()
+            except Exception:
+                info = None
+            try:
+                self.q.put(("AUTO_UPDATE", info))
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _handle_auto_update(self, info):
+        if not info or not info.get("newer"):
+            return
+        ver = info["version"]
+        self._log(f"[更新] 发现新版本 {ver}（当前 v{core.APP_VERSION}）")
+        if messagebox.askyesno(
+                core.APP_NAME,
+                f"发现新版本 {ver}（当前 v{core.APP_VERSION}）\n\n"
+                f"{(info.get('notes') or '').strip()[:180]}\n\n"
+                "是否下载并安装？\n（约 445MB，支持断点续传，装完自动重启）"):
+            self._start_update(info["setup_url"], ver)
+
+    def _start_update(self, url, ver):
+        if getattr(self, "_updating", False):
+            return
+        try:
+            os.makedirs(core.data_sub("cache", "update"), exist_ok=True)
+        except Exception:
+            pass
+        dest = os.path.join(core.data_sub("cache", "update"),
+                            "KohyaLoraTool_Setup_%s.exe" % ver.replace("v", ""))
+        self._updating = True
+        self._set_busy(True)
+        self._log(f"[更新] 开始下载 {ver}（约 445MB，断点续传，可随时停止）…")
+        def work():
+            ok = False
+            try:
+                ok = core._download_with_resume(url, dest, self._log)
+            except Exception as e:
+                self._log(f"[更新] 下载异常：{e}")
+            try:
+                self.q.put(("UPDATE_DONE", ok, dest, ver))
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _handle_update_done(self, ok, dest, ver):
+        self._updating = False
+        try:
+            self._set_busy(False)
+        except Exception:
+            pass
+        if not ok or not (dest and os.path.isfile(dest)):
+            self._log("[更新] 下载失败或已取消，可重试（断点续传）")
+            messagebox.showerror(core.APP_NAME, "更新包下载失败，请稍后重试（支持断点续传）。")
+            return
+        self._log(f"[更新] 下载完成，正在静默安装 {ver} …（装完自动重启）")
+        try:
+            subprocess.Popen([dest, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+        except Exception as e:
+            self._log(f"[更新] 启动安装失败：{e}")
+            messagebox.showerror(core.APP_NAME, f"启动安装失败：{e}")
+            return
+        # 关闭本程序，让安装器覆盖文件
+        self.root.after(1500, self.root.destroy)
     # ============ 高级参数 ============
     def _toggle_adv(self):
         self.adv_collapsed = not self.adv_collapsed
