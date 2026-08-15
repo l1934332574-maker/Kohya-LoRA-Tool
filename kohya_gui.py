@@ -645,6 +645,11 @@ class App:
                                               text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
                                               command=self.cmd_open_krea2_models)
         self.btn_krea2_models.pack(side="left", padx=(10, 4))
+        self.btn_krea2_dl = ctk.CTkButton(self.krea2_row, text="⬇ 下载 Krea2 模型", width=122, height=30,
+                                          fg_color=ACC, hover_color=ACC_H, corner_radius=6,
+                                          text_color="#ffffff", font=ui_font(FONT_BODY),
+                                          command=self.cmd_dl_krea2_models)
+        self.btn_krea2_dl.pack(side="left", padx=(4, 4))
         ctk.CTkLabel(self.krea2_row, text="RAW 训练 → LoRA 可用于 Turbo 出图", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(8, 0))
         self.btn_krea2_guide = ctk.CTkButton(self.krea2_row, text="📖 使用引导", width=92, height=30,
                                              fg_color="transparent", hover_color="#252a36", border_width=1, border_color=ACC,
@@ -1307,7 +1312,7 @@ class App:
             if bm:
                 self.base_model_var.set(bm)
                 bt2 = core.detect_base_type(bm)
-                if bt2 in ("sd15", "sdxl"):
+                if bt2 in core.BASE_TYPE_KEYS:
                     self._set_base_type(bt2)
                     try:
                         self.base_combo.set(core.BASE_TYPE_LABELS[bt2])
@@ -1642,10 +1647,7 @@ class App:
                         pass
             try:
                 if self.mode == "krea2":
-                    _files = core.krea2_model_files()
-                    _short = {"raw": "RAW", "vae": "VAE", "te": "文本编码器"}
-                    _miss = "、".join(_short[k] for k in ("raw", "vae", "te") if not _files.get(k))
-                    self.krea2_model_var.set(("Krea2 模型：缺 " + _miss + "（点📂查看文件名/镜像）") if _miss else "Krea2 模型：齐全 ✓")
+                    self._refresh_krea2_status()
                     self.krea2_row.pack(fill="x", pady=(8, 0))
                 else:
                     try:
@@ -1792,7 +1794,7 @@ class App:
         else:
             self.base_model_var.set(payload)
             bt = core.detect_base_type(payload)
-            if bt in ("sd15", "sdxl"):
+            if bt in core.BASE_TYPE_KEYS:
                 self._set_base_type(bt)
                 self._log(f"[底模] 已选择 {os.path.basename(payload)}（{core.BASE_TYPE_LABELS[bt]}）")
             else:
@@ -1845,7 +1847,7 @@ class App:
         self.base_model_var.set(f)
         self._refresh_guide()
         bt = core.detect_base_type(f)
-        if bt in ("sd15", "sdxl"):
+        if bt in core.BASE_TYPE_KEYS:
             self._set_base_type(bt)
             try:
                 self.base_combo.set(core.BASE_TYPE_LABELS[bt])
@@ -2146,7 +2148,7 @@ class App:
             f"   国内镜像：{k2['vae'][2]}\n"
             f"3) {k2['te'][0]} —— {k2['te'][1]}\n"
             f"   国内镜像：{k2['te'][2]}\n"
-            "· 下完把文件放进 models/krea2/（点「📂 打开 Krea2 模型文件夹」）\n"
+            "· 点「⬇ 下载 Krea2 模型」应用内下载（断点续传、下完自动识别），或点「📂 打开 Krea2 模型文件夹」手动放文件\n"
             "· 顶部状态变成「Krea2 模型：齐全 ✓」即可\n\n"
             "▍第 3 步：打开项目，切到 Krea2 模式\n"
             "· 顶部训练模式选「🖼 Krea 2 图像LoRA」\n"
@@ -2812,7 +2814,8 @@ class App:
                 except core.StopRequested:
                     self.root.after(0, lambda: self._amd_install_done(False, "已手动停止", False))
                 except Exception as e:
-                    self.root.after(0, lambda: self._amd_install_done(False, str(e), False))
+                    _err = str(e)
+                    self.root.after(0, lambda _err=_err: self._amd_install_done(False, _err, False))
                 finally:
                     self.root.after(0, lambda: self._set_busy(False))
             threading.Thread(target=work, daemon=True).start()
@@ -2897,12 +2900,12 @@ class App:
             d = core.krea2_models_dir()
             if messagebox.askyesno(core.APP_NAME,
                     "Krea 2 模式还缺少模型文件，需要先下载放入 models/krea2/：\n\n" + "\n".join(missing) +
-                    f"\n\n模型文件夹：{d}\n\n是否现在打开该文件夹？（下载完成后把文件放进去）"):
+                    f"\n\n是否现在打开「应用内下载」对话框？（带断点续传，下完自动识别）"):
                 try:
                     os.makedirs(d, exist_ok=True)
-                    os.startfile(d)
                 except Exception:
                     pass
+                self.cmd_dl_krea2_models()
             return False
         return True
 
@@ -3075,16 +3078,14 @@ class App:
         """新架构（FLUX/Anima）没有应用内一键下载，给出准备指引。"""
         if bt == "flux":
             msg = (
-                "FLUX.1 没有应用内一键下载（文件多且大）。\n\n"
-                "需要 4 个文件放在同一个文件夹：\n"
-                "· flux1-dev.safetensors（DiT，约 23GB）\n"
-                "· clip_l.safetensors\n"
-                "· t5xxl_fp16.safetensors（约 9GB）\n"
-                "· ae.safetensors\n\n"
-                "下载：HuggingFace black-forest-labs/FLUX.1-dev（DiT+AE）、"
-                "comfyanonymous/flux_text_encoders（clip_l/t5xxl），"
-                "国内可用 hf-mirror.com 镜像。\n"
-                "放好后点「选择底模文件」选 flux1-dev.safetensors 即可。")
+                "FLUX.1 支持应用内一键下载：\n\n"
+                "点「没有模型？点这里下载」会打开 FLUX 下载对话框，\n"
+                "4 个文件（DiT / clip_l / t5xxl_fp16 / ae）可逐个应用内下载（断点续传）到 models/base/，\n"
+                "下完点「↻ 刷新」即可在底模列表看到 flux1-dev.safetensors。\n\n"
+                "手动备选（国内 hf-mirror 镜像）：\n"
+                "· DiT：Comfy-Org/flux1-dev → flux1-dev.safetensors（23.8GB）\n"
+                "· clip_l / t5xxl_fp16：comfyanonymous/flux_text_encoders\n"
+                "· ae：Kijai/flux-fp8 → flux-vae-bf16.safetensors（保存为 ae.safetensors）")
         else:
             msg = (
                 "Anima 没有应用内一键下载。\n\n"
@@ -3099,6 +3100,10 @@ class App:
 
     def _download_choice_dialog(self, bt=None):
         bt = bt or self.base_type
+        if bt == "flux":
+            # FLUX 需要 4 个文件（DiT + CLIP-L + T5-XXL + AE），走专用多文件下载对话框
+            self.cmd_dl_flux_models()
+            return
         label = core.BASE_TYPE_LABELS.get(bt, "底模")
         models = core.get_download_models(bt)
         if not models:
@@ -3238,6 +3243,14 @@ class App:
                 self._log(f"[H3] 下载完成：{dest}")
                 self._refresh_h3_status()
                 messagebox.showinfo(core.APP_NAME, f"H3 模型下载完成：\n{os.path.basename(dest)}\n\n已自动识别（状态已刷新）。")
+            elif kind == "flux":
+                self._log(f"[FLUX] 下载完成：{dest}")
+                self._scan_base_models()
+                messagebox.showinfo(core.APP_NAME, f"FLUX 模型下载完成：\n{os.path.basename(dest)}\n\n已自动扫描底模列表；若还有其他 FLUX 文件没下完，回到下载对话框继续点「⬇ 应用内」。")
+            elif kind == "krea2":
+                self._log(f"[Krea2] 下载完成：{dest}")
+                self._refresh_krea2_status()
+                messagebox.showinfo(core.APP_NAME, f"Krea2 模型下载完成：\n{os.path.basename(dest)}\n\n已自动识别（状态已刷新）。")
             else:
                 self._log(f"[底模] 下载完成：{dest}")
                 self._scan_base_models()
@@ -3246,82 +3259,133 @@ class App:
             self._log("[ERROR] 下载失败或已取消")
 
 
-    def cmd_dl_h3_models(self):
-        """H3 模型下载对话框：列出 4 个文件，应用内下载（断点续传）或浏览器直链。"""
-        files = core.h3_model_files()
-        links = core.H3_MODEL_LINKS
+    def _build_links_dialog(self, title, intro, links, files, open_label, open_cmd, rebuild_cmd, dl_fn, hint=""):
+        """通用模型文件下载对话框（H3 / FLUX / Krea2 共用）：每文件应用内下载或浏览器直链。"""
         dlg = ctk.CTkToplevel(self.root)
-        dlg.title("下载 MiniMax H3 模型")
-        dlg.geometry("640x400")
+        dlg.title(title)
+        dlg.geometry("700x430")
         dlg.resizable(False, False)
         dlg.transient(self.root)
-        ctk.CTkLabel(dlg, text="MiniMax H3 训练需要以下文件（共约 40GB，应用内下载带断点续传、断了接着下）：",
-                     font=ui_font(FONT_BODY), text_color=TXT, justify="left", wraplength=580).pack(padx=20, pady=(14, 8), anchor="w")
+        ctk.CTkLabel(dlg, text=intro, font=ui_font(FONT_BODY), text_color=TXT, justify="left", wraplength=640).pack(padx=20, pady=(14, 8), anchor="w")
         for key, (fname, desc, url) in links.items():
             row = ctk.CTkFrame(dlg, fg_color="transparent"); row.pack(fill="x", padx=20, pady=3)
             done = files.get(key) is not None
             mark = "✓" if done else "○"
             ctk.CTkLabel(row, text=f"{mark} {fname}", font=ui_font(FONT_HINT),
-                         text_color=(OK_TX if done else TXT), width=350, anchor="w").pack(side="left")
+                         text_color=(OK_TX if done else TXT), width=370, anchor="w").pack(side="left")
             if done:
                 ctk.CTkLabel(row, text="已下载", font=ui_font(FONT_HINT), text_color=OK_TX).pack(side="left", padx=6)
             else:
                 ctk.CTkButton(row, text="⬇ 应用内", width=76, height=26, fg_color=ACC, hover_color=ACC_H,
                               corner_radius=6, font=ui_font(FONT_HINT),
-                              command=lambda k=key: self._start_h3_dl(k)).pack(side="left", padx=4)
+                              command=lambda k=key: dl_fn(k)).pack(side="left", padx=4)
                 ctk.CTkButton(row, text="🌐 浏览器", width=76, height=26, fg_color=CARD2, hover_color="#343a46",
                               border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
                               font=ui_font(FONT_HINT), command=lambda u=url: webbrowser.open(u)).pack(side="left", padx=4)
             self._tip(row, desc)
+        if hint:
+            ctk.CTkLabel(dlg, text=hint, font=ui_font(FONT_HINT), text_color=SUB, justify="left", wraplength=640).pack(padx=20, pady=(2, 4), anchor="w")
         bf = ctk.CTkFrame(dlg, fg_color="transparent"); bf.pack(pady=(10, 14))
-        ctk.CTkButton(bf, text="📂 打开模型文件夹", width=140, height=28, fg_color=CARD2, hover_color="#343a46",
+        ctk.CTkButton(bf, text=open_label, width=150, height=28, fg_color=CARD2, hover_color="#343a46",
                       border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6, font=ui_font(FONT_HINT),
-                      command=self.cmd_open_h3_models).pack(side="left", padx=4)
+                      command=open_cmd).pack(side="left", padx=4)
         ctk.CTkButton(bf, text="刷新状态", width=92, height=28, fg_color=CARD2, hover_color="#343a46",
                       border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6, font=ui_font(FONT_HINT),
-                      command=self._refresh_h3_status).pack(side="left", padx=4)
+                      command=lambda: (dlg.destroy(), rebuild_cmd())).pack(side="left", padx=4)
         ctk.CTkButton(bf, text="关闭", width=72, height=28, fg_color=CARD2, hover_color="#343a46",
                       border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6, font=ui_font(FONT_HINT),
                       command=dlg.destroy).pack(side="left", padx=4)
         dlg.grab_set()
+        return dlg
 
-    def _start_h3_dl(self, key):
-        """启动单个 H3 模型文件的应用内下载（复用底模下载 UI，断点续传）。"""
+    def cmd_dl_h3_models(self):
+        """H3 模型下载对话框：列出 4 个文件，应用内下载（断点续传）或浏览器直链。"""
+        self._build_links_dialog(
+            "下载 MiniMax H3 模型",
+            "MiniMax H3 训练需要以下文件（共约 40GB，应用内下载带断点续传、断了接着下）：",
+            core.H3_MODEL_LINKS, core.h3_model_files(),
+            "📂 打开 H3 模型文件夹", self.cmd_open_h3_models, self.cmd_dl_h3_models,
+            self._start_h3_dl, "保存到 models/minimax_h3/，下完自动识别。")
+
+    def cmd_dl_flux_models(self):
+        """FLUX.1 模型下载对话框：4 个文件放进 models/base/，应用内下载（断点续传）。"""
+        self._build_links_dialog(
+            "下载 FLUX.1 模型",
+            "FLUX.1 训练需要 4 个文件放在同一个文件夹（共约 33GB，应用内下载带断点续传）：",
+            core.FLUX_MODEL_LINKS, core.flux_model_files(),
+            "📂 打开底模文件夹", self.cmd_open_base_dir, self.cmd_dl_flux_models,
+            self._start_flux_dl, "保存到 models/base/，下完点「↻ 刷新」即可在底模列表看到 flux1-dev.safetensors。")
+
+    def cmd_dl_krea2_models(self):
+        """Krea2 模型下载对话框：RAW+VAE+文本编码器（turbo 可选），应用内下载（断点续传）。"""
+        self._build_links_dialog(
+            "下载 Krea 2 模型",
+            "Krea 2 训练需要以下文件（RAW 必需；turbo 可选用于出图；应用内下载带断点续传）：",
+            core.KREA2_MODEL_LINKS, core.krea2_model_files(),
+            "📂 打开 Krea2 模型文件夹", self.cmd_open_krea2_models, self.cmd_dl_krea2_models,
+            self._start_krea2_dl, "保存到 models/krea2/，下完自动识别（顶部状态变「齐全 ✓」）。")
+
+
+    def _start_model_file_dl(self, key, links, dest_dir, kind, label):
+        """启动单个模型文件的应用内下载（断点续传），H3 / FLUX / Krea2 共用。"""
         if _ModelDownloader is None:
             messagebox.showerror(core.APP_NAME, "下载模块加载失败，请使用「🌐 浏览器」下载。")
             return
         if getattr(self, "_downloading", False):
             messagebox.showinfo(core.APP_NAME, "已有下载任务在进行中，请先完成或取消。")
             return
-        fname, desc, url = core.H3_MODEL_LINKS[key]
-        d = core.h3_models_dir()
+        fname, desc, url = links[key]
         try:
-            os.makedirs(d, exist_ok=True)
+            os.makedirs(dest_dir, exist_ok=True)
         except Exception:
             pass
-        dest = os.path.join(d, fname)
+        dest = os.path.join(dest_dir, fname)
         if os.path.isfile(dest):
             messagebox.showinfo(core.APP_NAME, f"{fname} 已存在，无需重复下载。")
-            self._refresh_h3_status()
+            if kind == "h3":
+                self._refresh_h3_status()
+            elif kind == "krea2":
+                self._refresh_krea2_status()
+            elif kind == "flux":
+                self._scan_base_models()
             return
         part = dest + ".part"
         if os.path.isfile(part) and os.path.getsize(part) > 0:
             if not messagebox.askyesno(core.APP_NAME,
-                    f"发现上次未完成的下载进度（{os.path.getsize(part)/1048576:.1f} MB）。\\n要不要从断点继续下载？"):
+                    f"发现上次未完成的下载进度（{os.path.getsize(part)/1048576:.1f} MB）。\n要不要从断点继续下载？"):
                 try:
                     os.remove(part)
                 except Exception:
                     pass
         self._downloading = True
-        self._dl_kind = "h3"
+        self._dl_kind = kind
         self._show_dl_ui(fname, desc)
-        self._log(f"[下载] 开始下载 H3 模型：{fname}（{desc}）")
+        self._log(f"[下载] 开始下载 {label}：{fname}（{desc}）")
         self._log(f"[下载] 保存到：{dest}")
         self._dl = _ModelDownloader(url, dest,
                                     progress_cb=self._dl_progress_cb,
                                     done_cb=self._dl_done_cb,
                                     logf=self._log)
         self._dl.start()
+
+    def _start_h3_dl(self, key):
+        self._start_model_file_dl(key, core.H3_MODEL_LINKS, core.h3_models_dir(), "h3", "H3 模型")
+
+    def _start_flux_dl(self, key):
+        self._start_model_file_dl(key, core.FLUX_MODEL_LINKS, core.base_models_dir(), "flux", "FLUX 模型")
+
+    def _start_krea2_dl(self, key):
+        self._start_model_file_dl(key, core.KREA2_MODEL_LINKS, core.krea2_models_dir(), "krea2", "Krea2 模型")
+
+    def _refresh_krea2_status(self):
+        """Krea2 模型状态（顶部状态行）。"""
+        try:
+            _files = core.krea2_model_files()
+            _short = {"raw": "RAW", "vae": "VAE", "te": "文本编码器"}
+            _miss = "、".join(_short[k] for k in ("raw", "vae", "te") if not _files.get(k))
+            self.krea2_model_var.set(("Krea2 模型：缺 " + _miss + "（点⬇应用内下载）") if _miss else "Krea2 模型：齐全 ✓")
+        except Exception:
+            pass
 
 
     def cmd_dl_cancel(self):

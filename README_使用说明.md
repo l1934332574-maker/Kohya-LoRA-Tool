@@ -130,12 +130,12 @@
 
 - 左侧新手引导新增「②' 第二引擎(可选)」：安装独立 musubi-tuner 环境（不碰现有 Kohya 环境）。
 - 模式下拉新增 **「🖼 Krea 2 图像LoRA」**：基于 Krea 2（12.9B MMDiT）训练，预设 rank32/alpha32/1024px。
-- Krea2 训练前需把模型放进 `models/krea2/`（RAW 底模 13~26GB / Qwen-Image VAE / Qwen3-VL 文本编码器，软件内提供国内镜像直链）；推荐 16G 显存（最低 12G，自动 fp8 + block swap 省显存）。
+- Krea2 训练前需把模型放进 `models/krea2/`（RAW 底模 13~26GB / Qwen-Image VAE / Qwen3-VL 文本编码器，**应用内下载**（断点续传）或国内镜像直链）；推荐 16G 显存（最低 12G，自动 fp8 + block swap 省显存）。
 ### 第三训练引擎（MiniMax H3 视频 LoRA，实验性，v0.6.0 新增）
 
 - 新增 **「🎬 视频LoRA（MiniMax H3）」** 模式：基于 MiniMax-H3（33.1B 全模态视频模型，24fps + 音频）训练 T2V LoRA。
 - 训练内核为 **AI Toolkit（Ostris）**，独立 `ai_toolkit_venv`，完全不碰 Kohya / musubi 环境；安装入口在视频模式顶部的「⚙ 安装第三引擎」。
-- 训练前需把模型放进 `models/minimax_h3/`（FL2VA pruned int8 DiT / Qwen3-VL-32B 文本编码器 / 视频VAE，共约 40GB，软件内提供国内镜像直链）。
+- 训练前需把模型放进 `models/minimax_h3/`（FL2VA pruned int8 DiT / Qwen3-VL-32B 文本编码器 / 视频VAE，共约 40GB，**应用内下载**（断点续传）或国内镜像直链）。
 - 数据集：一个文件夹放 3~10 段 3~10 秒的 `.mp4` + 同名 `.txt` 字幕（描述画面内容），训练时自动抽帧（默认 73 帧 ≈ 3 秒）。
 - **视频自动打标（v0.6.2）**：顶部「✨ AI 自动描述」用 Qwen2.5-VL 自动给每段视频生成英文描述（首次下载模型约 6~7GB，国内镜像；已有 txt 的自动跳过，不覆盖手写描述）。
 - **应用内模型下载（v0.6.2）**：H3 模型（DiT/文本编码器/VAE）可在软件内直接下载，带进度/断点续传/下完自动识别；也可点「🌐 浏览器」走国内镜像直链。
@@ -252,12 +252,12 @@ dataset/train_character/
 - **Q：模型没效果？** 检查出图底模和 LoRA 架构是否匹配（SD1.5↔SD1.5、SDXL↔SDXL…）
 - **Q：图片太少被拦？** 过滤后人物至少 15 张、画风至少 20 张
 - **Q：训练中断了？** 自动检测断点，下次训练询问是否续训；任务中可点「⏹ 停止当前任务」
-- **Q：底模在哪下载？** 点「没有模型？点这里下载」→ 应用内下载（推荐，带进度/断点续传）或浏览器下载；下载后放进 `models/base` 自动识别
+- **Q：底模在哪下载？** 点「没有模型？点这里下载」→ 应用内下载（推荐，带进度/断点续传）或浏览器下载；SD1.5/SDXL/Anima 底模、FLUX 四件套、Krea2、H3 全部支持应用内下载，下载后放进对应文件夹自动识别
 - **Q：怎么检查/修改每张图的标签？** 主界面点「标签编辑器」：逐张看图改标签、批量删除/替换、置顶 trigger、标签频率统计
 - **Q：repeats_名称 子目录是什么？** 秋叶式结构：`数字_名称` 子目录的 repeats 取数字，根目录平铺图取高级参数里的 repeats；「标签编辑器 → 整理为 repeats_名称」可一键整理
 - **Q：需要代理 / 访问 GitHub 吗？** 不需要；离线安装包 + 国内镜像
 - **Q：为什么配置是 .toml？** sd-scripts 支持 json/toml，工具已自动生成
-- **Q：FLUX / Anima 需要额外文件？** FLUX 需同目录 clip_l/t5xxl/ae；Anima 会自动下载 Qwen3 文本编码器 + VAE（首次联网）
+- **Q：FLUX / Anima 需要额外文件？** FLUX 点「没有模型？点这里下载」应用内下载 4 个文件（DiT + clip_l + t5xxl + ae）到 `models/base`；Anima 底模应用内下载，Qwen3 文本编码器 + VAE 首次训练自动下载（国内镜像）
 
 > 程序内点「使用说明」可打开内置教学与 FAQ 弹窗。
 

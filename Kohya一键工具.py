@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.7.3"
+APP_VERSION = "0.8.1"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1028,6 +1028,16 @@ H3_MODEL_LINKS = {
     "audio_vae": ("minimax_h3_audio_vae_fp32.safetensors", "音频 VAE（fp32，约 1GB，可选）",
                   "https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors"),
 }
+FLUX_MODEL_LINKS = {
+    "dit": ("flux1-dev.safetensors", "FLUX.1-dev DiT 主模型（约 23.8GB，训练必需；非门禁镜像）",
+            "https://hf-mirror.com/Comfy-Org/flux1-dev/resolve/main/flux1-dev.safetensors"),
+    "clip_l": ("clip_l.safetensors", "CLIP-L 文本编码器（约 0.25GB）",
+               "https://hf-mirror.com/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors"),
+    "t5xxl": ("t5xxl_fp16.safetensors", "T5-XXL 文本编码器 fp16（约 9.2GB）",
+              "https://hf-mirror.com/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors"),
+    "ae": ("ae.safetensors", "FLUX AE（VAE，约 0.2GB；非门禁镜像，自动存为 ae.safetensors）",
+           "https://hf-mirror.com/Kijai/flux-fp8/resolve/main/flux-vae-bf16.safetensors"),
+}
 
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".webm", ".mkv", ".wmv", ".m4v", ".flv"}
 
@@ -1064,6 +1074,32 @@ def h3_missing_models():
     for key in ("dit", "te", "video_vae"):
         if not files.get(key):
             fname, desc, url = H3_MODEL_LINKS[key]
+            missing.append(f"· {desc}\n  文件: {fname}\n  下载: {url}")
+    return missing
+
+
+def flux_model_files():
+    """扫描 models/base，返回 {dit,clip_l,t5xxl,ae} 路径或 None（FLUX 4 件套）。"""
+    d = base_models_dir()
+    out = {"dit": None, "clip_l": None, "t5xxl": None, "ae": None}
+    if not os.path.isdir(d):
+        return out
+    want = {k: v[0].lower() for k, v in FLUX_MODEL_LINKS.items()}
+    for f in os.listdir(d):
+        low = f.lower()
+        for key, fname in want.items():
+            if out[key] is None and low == fname:
+                out[key] = os.path.join(d, f)
+    return out
+
+
+def flux_missing_models():
+    """返回缺失的 FLUX 模型说明列表（含国内镜像直链）；4 个文件都必需。"""
+    files = flux_model_files()
+    missing = []
+    for key in ("dit", "clip_l", "t5xxl", "ae"):
+        if not files.get(key):
+            fname, desc, url = FLUX_MODEL_LINKS[key]
             missing.append(f"· {desc}\n  文件: {fname}\n  下载: {url}")
     return missing
 
@@ -1841,23 +1877,43 @@ def start_ui(logf=print):
 def detect_system_pythons():
     """列出系统已安装的 Python 版本（Windows py launcher + 注册表 + 已知路径）。
     返回 ['3.12','3.11',...] 或 []。
-    仅靠 py -0p 在刚装完 Python 时可能检测不到（launcher 缓存/环境变量未刷新），
-    所以补充注册表与已知目录扫描。"""
+
+    注意：每个候选都会校验其 python.exe 真实存在且能运行，避免注册表 / py launcher
+    的残留记录（装失败 / 卸载残留 / 路径失效）导致误报“已安装”而跳过安装。
+    同时保留多来源扫描（刚装完 Python 时 launcher 缓存可能未刷新）。"""
     vers = []
     def _add(v):
         if v and v not in vers:
             vers.append(v)
-    # 1) py launcher（只匹配标准版本行：-V:3.12 / -V:3.12-64，排除 Astral/uv 等第三方）
+    def _runnable(p):
+        """python.exe 真实存在且能跑出版本号。"""
+        if not p or not os.path.isfile(p):
+            return False
+        try:
+            s, _parts = _py_version(p)
+            return bool(s)
+        except Exception:
+            return False
+    # 1) py launcher：解析版本 + 实际路径，校验路径真实存在（排除 Astral/uv 等第三方）
     try:
         r = subprocess.run(["py", "-0p"], capture_output=True, text=True, timeout=30)
         if r.returncode == 0:
             for ln in (r.stdout or "").splitlines():
-                m = re.search(r"-V:(\d+\.\d+)", ln)
-                if m:
-                    _add(m.group(1))
+                toks = ln.split()
+                if not toks or not toks[0].startswith("-V:"):
+                    continue
+                ver = toks[0][3:]
+                if not re.match(r"^\d+\.\d+", ver):
+                    continue
+                rest = toks[1:]
+                if rest and rest[0] == "*":
+                    rest = rest[1:]
+                path = " ".join(rest).strip()
+                if _runnable(path):
+                    _add(ver)
     except Exception:
         pass
-    # 2) 注册表：HKCU / HKLM 的 Software\Python\PythonCore\<ver>
+    # 2) 注册表：HKCU / HKLM 的 Software\Python\PythonCore\<ver>，读 InstallPath 校验 exe
     try:
         import winreg
         for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
@@ -1871,8 +1927,16 @@ def detect_system_pythons():
                         except OSError:
                             break
                         m = re.match(r"^(\d+\.\d+)", sub)
-                        if m:
-                            _add(m.group(1))
+                        if not m:
+                            continue
+                        ver = m.group(1)
+                        try:
+                            with winreg.OpenKey(hive, r"Software\Python\PythonCore\%s\InstallPath" % sub) as sk:
+                                p, _ = winreg.QueryValueEx(sk, "")
+                                if _runnable(os.path.join(p, "python.exe")):
+                                    _add(ver)
+                        except OSError:
+                            pass
             except OSError:
                 pass
     except Exception:
@@ -1885,11 +1949,11 @@ def detect_system_pythons():
                 m = re.match(r"^Python(\d)(\d+)$", name)
                 if m:
                     py = os.path.join(base, name, "python.exe")
-                    if os.path.isfile(py):
+                    if _runnable(py):
                         _add(f"{m.group(1)}.{m.group(2)}")
         for c in (r"C:\Python312\python.exe",
                   r"C:\Program Files\Python312\python.exe"):
-            if os.path.isfile(c):
+            if _runnable(c):
                 _add("3.12")
     except Exception:
         pass
@@ -2984,6 +3048,14 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         qwen3, vae = _ensure_anima_components(logf)
         cmd += [f"--qwen3={qwen3}", f"--vae={vae}",
                 "--qwen_image_vae_2d", "--vae_chunk_size=64"]
+        # 8~12G 显存：把 DiT 层搬到内存省显存（Anima 不支持 fp8，只能用 blocks_to_swap），
+        # 否则 1024px 下 2B DiT + Qwen3 + 优化器超出 8G 显存 → 系统换页 → 每步 100+ 秒。
+        # 文本编码器始终冻结 → 缓存其输出，省掉每步的前向计算。
+        if vram_gb is None or vram_gb < 12:
+            cmd += ["--blocks_to_swap=16"]
+        elif vram_gb < 16:
+            cmd += ["--blocks_to_swap=8"]
+        cmd.append("--cache_text_encoder_outputs")
     cmd += [
         f"--optimizer_type={optimizer_type}", "--lr_scheduler=cosine", "--lr_warmup_steps=120",
         f"--max_train_epochs={epochs}",
@@ -3262,6 +3334,17 @@ DOWNLOAD_MODELS = {
             "note": "2023 年的原版通用底模，动漫效果一般，不推荐动漫 LoRA 首选。",
         },
     ],
+    "anima": [
+        {
+            "key": "anima_base", "rec": True,
+            "name": "Anima DiT（anima-base-v1.0）",
+            "file": "anima-base-v1.0.safetensors",
+            "size": "约 4.0 GB",
+            "url": "https://hf-mirror.com/circlestone-labs/Anima/resolve/main/split_files/diffusion_models/anima-base-v1.0.safetensors",
+            "fallback": "https://hf-mirror.com/circlestone-labs/Anima/resolve/main/split_files/diffusion_models/anima-base-v1.0.safetensors",
+            "note": "Anima DiT 底模（约 4GB）。Qwen3-0.6B 文本编码器和 Qwen-Image VAE 会在首次训练时自动下载（国内镜像），无需手动准备。",
+        },
+    ],
 }
 
 
@@ -3508,19 +3591,29 @@ def find_flux_components(base_model):
     return clip_l, t5xxl, ae
 
 
-def _hf_download(repo, local_dir, logf, allow_patterns=None):
-    """用 huggingface_hub 走 hf-mirror 下载仓库到 local_dir。"""
-    import os as _os
-    from huggingface_hub import snapshot_download
-    old = _os.environ.get("HF_ENDPOINT")
-    _os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-    try:
-        snapshot_download(repo, local_dir=local_dir, allow_patterns=allow_patterns)
-    finally:
-        if old is None:
-            _os.environ.pop("HF_ENDPOINT", None)
-        else:
-            _os.environ["HF_ENDPOINT"] = old
+def _hf_download(repo, local_dir, logf=print, allow_patterns=None):
+    """用 kohya venv 的 huggingface_hub 走 hf-mirror 下载仓库到 local_dir。
+
+    GUI 进程（含打包版）不带 huggingface_hub 依赖，这里改用训练环境的
+    venv python 执行 snapshot_download（该环境必然有 huggingface_hub），
+    顺带支持进度日志与手动停止。
+    """
+    vpy = venv_python()
+    if not os.path.isfile(vpy):
+        raise RuntimeError("Kohya 尚未安装，无法下载模型组件，请先安装训练内核。")
+    os.makedirs(local_dir, exist_ok=True)
+    code = (
+        "import os\n"
+        "os.environ['HF_ENDPOINT']='https://hf-mirror.com'\n"
+        "from huggingface_hub import snapshot_download\n"
+        "snapshot_download(%s, local_dir=%s%s)\n"
+        % (repr(repo), repr(local_dir),
+           (", allow_patterns=%s" % repr(list(allow_patterns)) if allow_patterns else ""))
+    )
+    logf(f"[下载] 开始下载模型组件：{repo} → {local_dir}（走 hf-mirror，可随时停止）")
+    rc = run_stream([vpy, "-c", code], logf=logf)
+    if rc != 0:
+        raise RuntimeError(f"模型组件下载失败（退出码 {rc}）：{repo}")
 
 
 def _ensure_anima_components(logf=print):
@@ -4310,7 +4403,7 @@ class App:
             path = payload
             self._set_base_model(path)
             bt = detect_base_type(path)
-            if bt in ("sd15", "sdxl"):
+            if bt in BASE_TYPE_KEYS:
                 self._set_base_type(bt)
                 self._log(f"[底模] 已选择 {os.path.basename(path)}（{BASE_TYPE_LABELS[bt]}）")
             else:
@@ -4319,7 +4412,7 @@ class App:
 
     def _set_base_type(self, bt):
         """设置底模类型并应用预设（不触发下拉事件）。"""
-        if bt not in ("sd15", "sdxl"):
+        if bt not in BASE_TYPE_KEYS:
             return
         self.base_type = bt
         self._apply_presets()
@@ -4657,7 +4750,7 @@ class App:
     def _detect_and_apply(self, path):
         """同步识别并应用底模类型（返回识别结果）。"""
         bt = detect_base_type(path)
-        if bt in ("sd15", "sdxl"):
+        if bt in BASE_TYPE_KEYS:
             self._set_base_type(bt)
             self._log(f"[底模] 自动识别为 {BASE_TYPE_LABELS[bt]}：{os.path.basename(path)}")
         else:
@@ -4666,7 +4759,7 @@ class App:
 
     def _handle_base_detected(self, path, bt):
         self._refresh_status()
-        if bt in ("sd15", "sdxl"):
+        if bt in BASE_TYPE_KEYS:
             self._set_base_type(bt)
             self._log(f"[底模] 自动识别为 {BASE_TYPE_LABELS[bt]}：{os.path.basename(path)}")
         else:

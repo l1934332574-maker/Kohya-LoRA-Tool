@@ -87,6 +87,26 @@ def test_at_image_models():
                 raise AssertionError("AT_IMAGE_MODELS[%s] 缺 %s" % (mode, k))
 
 
+def test_download_models():
+    core = test_import_core()
+    # FLUX 四件套
+    for k in ("dit", "clip_l", "t5xxl", "ae"):
+        if k not in core.FLUX_MODEL_LINKS:
+            raise AssertionError("FLUX_MODEL_LINKS 缺 %s" % k)
+        v = core.FLUX_MODEL_LINKS[k]
+        if len(v) != 3 or not str(v[2]).startswith("http"):
+            raise AssertionError("FLUX_MODEL_LINKS[%s] 格式错误" % k)
+    if not callable(core.flux_missing_models):
+        raise AssertionError("flux_missing_models 缺失")
+    # Anima DiT 底模可应用内下载
+    anima = core.get_download_models("anima")
+    if not anima or not str(anima[0].get("url", "")).startswith("http"):
+        raise AssertionError("DOWNLOAD_MODELS 缺 anima 应用内下载")
+    # Krea2 文件齐全（含可选 turbo）
+    if len(core.KREA2_MODEL_LINKS) < 4:
+        raise AssertionError("KREA2_MODEL_LINKS 不完整")
+
+
 def test_yaml():
     import tempfile
     import yaml
@@ -117,6 +137,7 @@ def main():
     check("导入 + 配置完整性（6 模式）", test_config_completeness)
     check("AI 图像模型配置", test_at_image_models)
     check("yaml 生成可解析", test_yaml)
+    check("下载模型配置（FLUX/Anima/Krea2）", test_download_models)
     print("-" * 40)
     if FAILED:
         print("✘ 失败 %d 项: %s" % (len(FAILED), "、".join(FAILED)))

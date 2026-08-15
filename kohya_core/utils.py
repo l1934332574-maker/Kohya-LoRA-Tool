@@ -13,6 +13,12 @@ import time
 import urllib.request
 
 from kohya_core.configs import PY_MIN, PY_MAX
+from kohya_core.paths import get_kohya_dir
+
+# 手动停止 / 进程管理的全局状态（迁移到本包时一并保留，供 run_stream / stop_active_process / reset_stop 使用）
+_STOP_EVENT = threading.Event()
+_ACTIVE_LOCK = threading.Lock()
+_ACTIVE_PROC = None
 
 # 显式导出全部名字（含下划线开头），供 `from kohya_core.utils import *` 使用。
 __all__ = [
