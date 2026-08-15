@@ -1935,7 +1935,7 @@ class App:
                 f"发现新版本 {ver}（当前 v{core.APP_VERSION}）\n\n"
                 f"{(info.get('notes') or '').strip()[:180]}\n\n"
                 "是否下载并安装？\n（约 445MB，支持断点续传，装完自动重启）"):
-            self._start_update(info["setup_url"], ver)
+            self._start_update(info["setup_url"], ver, info.get("setup_url_cn"))
 
     def _auto_check_update(self):
         """启动后台静默检查：有新版本才提示。"""
@@ -1966,15 +1966,17 @@ class App:
                 f"发现新版本 {ver}（当前 v{core.APP_VERSION}）\n\n"
                 f"{(info.get('notes') or '').strip()[:180]}\n\n"
                 "是否下载并安装？\n（约 445MB，支持断点续传，装完自动重启）"):
-            self._start_update(info["setup_url"], ver)
+            self._start_update(info["setup_url"], ver, info.get("setup_url_cn"))
 
-    def _start_update(self, url, ver):
+    def _start_update(self, url, ver, url_cn=""):
         if getattr(self, "_updating", False):
             return
         try:
             os.makedirs(core.data_sub("cache", "update"), exist_ok=True)
         except Exception:
             pass
+        # 国内镜像优先（如果有），GitHub 兜底
+        use = (url_cn or "").strip() or url
         dest = os.path.join(core.data_sub("cache", "update"),
                             "KohyaLoraTool_Setup_%s.exe" % ver.replace("v", ""))
         self._updating = True
@@ -1983,7 +1985,7 @@ class App:
         def work():
             ok = False
             try:
-                ok = core._download_with_resume(url, dest, self._log)
+                ok = core._download_with_resume(use, dest, self._log)
             except Exception as e:
                 self._log(f"[更新] 下载异常：{e}")
             try:

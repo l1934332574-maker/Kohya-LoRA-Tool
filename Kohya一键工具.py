@@ -3362,6 +3362,7 @@ def check_update(timeout=15):
             return {
                 "version": tag,
                 "setup_url": (data.get("setup_url") or "").strip(),
+                "setup_url_cn": (data.get("setup_url_cn") or "").strip(),
                 "notes": (data.get("notes") or "").strip()[:400],
                 "newer": bool(cur and lat and lat > cur),
             }
@@ -3388,6 +3389,7 @@ def check_update(timeout=15):
         return {
             "version": tag,
             "setup_url": setup_url,
+            "setup_url_cn": "",
             "notes": (rel.get("body") or "").strip()[:400],
             "newer": bool(cur and lat and lat > cur),
         }
