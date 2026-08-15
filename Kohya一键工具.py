@@ -3323,6 +3323,7 @@ def system_status(force=False):
 
 
 GITHUB_REPO = "l1934332574-maker/Kohya-LoRA-Tool"
+MODELSCOPE_MIRROR = "FGtiancai/Kohya-LoRA-Tool"  # 魔搭国内镜像（Setup.exe + update.json）
 
 
 def parse_version(v):
@@ -3345,10 +3346,12 @@ def check_update(timeout=15):
       {'version','setup_url','notes','newer'}
     """
     import json
-    # 1) + 2) 静态 update.json（发布新版本时同步更新仓库根目录的 update.json）
+    # 1) + 2) + 3) 静态 update.json（发布新版本时同步更新）
+    # 魔搭优先：国内快、无 CDN 缓存；再 raw.githubusercontent（即时）；jsDelivr 兜底（国内快但有缓存延迟）
     for u in (
-        "https://cdn.jsdelivr.net/gh/%s@main/update.json" % GITHUB_REPO,
+        "https://modelscope.cn/models/%s/resolve/master/update.json" % MODELSCOPE_MIRROR,
         "https://raw.githubusercontent.com/%s/main/update.json" % GITHUB_REPO,
+        "https://cdn.jsdelivr.net/gh/%s@main/update.json" % GITHUB_REPO,
     ):
         try:
             req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
