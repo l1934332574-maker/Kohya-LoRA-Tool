@@ -3333,14 +3333,42 @@ def parse_version(v):
     return None
 
 
-def check_update(timeout=20):
-    """检查 GitHub Releases 最新版。返回 dict 或 None（网络/限流失败返回 None）。
+def check_update(timeout=15):
+    """检查最新版本（多源，国内友好优先，避免 GitHub API 限流导致"无法连接"）。
 
-    返回 {'version':'v0.8.3','setup_url':'...','notes':'...','newer':bool}
-    newer = 远端版本是否高于当前 APP_VERSION。
+    顺序：
+      1) jsDelivr CDN 读取仓库 update.json（国内快、无限流；可能有 CDN 缓存延迟）
+      2) raw.githubusercontent 读取 update.json（兜底）
+      3) GitHub Releases API（最准，但未登录限流 60 次/小时/IP）
+
+    返回 dict 或 None（全部失败返回 None）：
+      {'version','setup_url','notes','newer'}
     """
+    import json
+    # 1) + 2) 静态 update.json（发布新版本时同步更新仓库根目录的 update.json）
+    for u in (
+        "https://cdn.jsdelivr.net/gh/%s@main/update.json" % GITHUB_REPO,
+        "https://raw.githubusercontent.com/%s/main/update.json" % GITHUB_REPO,
+    ):
+        try:
+            req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
+            r = urllib.request.urlopen(req, timeout=timeout)
+            data = json.loads(r.read().decode("utf-8", "replace"))
+            tag = (data.get("version") or "").strip()
+            if not re.match(r"^v?\d+\.\d+\.\d+", tag):
+                continue
+            cur = parse_version(APP_VERSION)
+            lat = parse_version(tag)
+            return {
+                "version": tag,
+                "setup_url": (data.get("setup_url") or "").strip(),
+                "notes": (data.get("notes") or "").strip()[:400],
+                "newer": bool(cur and lat and lat > cur),
+            }
+        except Exception:
+            continue
+    # 3) 兜底：GitHub Releases API
     try:
-        import json
         url = "https://api.github.com/repos/%s/releases/latest" % GITHUB_REPO
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0", "Accept": "application/vnd.github+json"})

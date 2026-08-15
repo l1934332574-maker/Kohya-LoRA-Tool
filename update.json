@@ -1,0 +1,5 @@
+{
+  "version": "v0.9.0",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.0/Setup.exe",
+  "notes": "v0.9.0：应用内自动更新 + 多项修复（安装第二/三引擎误用 ComfyUI 精简 python、画风 WD14 打标、torch 预下载续传等）"
+}
