@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Kohya-SS LoRA 一键工具（Windows 桌面应用，画风 / 人物角色 双模式）
@@ -2730,7 +2730,11 @@ def write_params_report(mode, params, output_name, extra=None, out_dir=None):
 
 
 def write_usage_template(mode, params, output_name, out_dir=None):
-    """训练完成后生成 txt 使用模板（画风=画风提示词；人物=带 trigger/全局提示词示例）。"""
+    """训练完成后生成 txt 使用模板（画风=画风提示词；人物=带 trigger/全局提示词示例）。
+
+    模板里的「你的训练标签示例」会读取当前项目训练集里真实写入的 caption，
+    每个用户的模板对应各自实际的标签，而不是固定示例。
+    """
     out_dir = out_dir or data_sub("output")
     path = os.path.join(out_dir, output_name + "_使用模板.txt")
     base = params.get("base_type", "sd15")
@@ -2740,6 +2744,23 @@ def write_usage_template(mode, params, output_name, out_dir=None):
         "lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, "
         "fewer digits, cropped, worst quality, low quality, jpeg artifacts, signature, "
         "watermark, username, blurry, bad quality")
+
+    def _sample_caption():
+        """读取当前项目训练集里第一张真实 caption（用于模板示例）。"""
+        try:
+            d = dataset_train_dir(mode, params.get("project"))
+            if os.path.isdir(d):
+                for fn in sorted(os.listdir(d)):
+                    if fn.lower().endswith(".txt"):
+                        c = io.open(os.path.join(d, fn), encoding="utf-8").read().strip()
+                        if c:
+                            return c
+        except Exception:
+            pass
+        return None
+
+    cap = _sample_caption()
+
     if mode == "character":
         triggers = split_triggers(params.get("trigger"))
         trig_line = ", ".join(triggers) if triggers else "<你的触发词>"
@@ -2753,29 +2774,35 @@ def write_usage_template(mode, params, output_name, out_dir=None):
             f"训练分辨率：{reso}px\n\n"
             "使用建议：\n"
             f"1. 正向提示词以触发词开头：{pos_example}\n"
-            "2. 推荐 LoRA 权重 0.6 ~ 0.9（按底模微调）。\n"
+            + (f"   你的训练标签示例：{cap}\n" if cap else "")
+            + "2. 推荐 LoRA 权重 0.6 ~ 0.9（按底模微调）。\n"
             f"3. 负面提示词建议：{neg}\n"
             "4. 想强调角色时提高权重，想自然融入时用 0.6 左右。\n"
         )
     else:
         _trig2 = ", ".join(split_triggers(params.get("trigger")))
         if _trig2:
-            pos_example = ((gpos + ", ") if gpos else "") + _trig2 + ", 1girl, <动作/场景描述>"
+            example = cap if cap else (
+                _trig2 + ", anime cel-shading, clean thin black outlines, flat color, "
+                "simple soft cel shading, tv anime screenshot, limited color palette")
             text = (
                 "【画风 LoRA 使用模板】\n"
                 f"模型文件：{output_name}.safetensors\n"
-                f"Trigger 触发词：{_trig2}（画图时输入这个词即可激活画风）\n"
+                f"Trigger 触发词：{_trig2}\n"
                 f"训练分辨率：{reso}px\n\n"
                 "使用建议：\n"
                 "1. 推荐 LoRA 权重 0.5 ~ 0.7。\n"
-                f"2. 正向提示词以触发词开头：{pos_example}\n"
-                f"3. 负面提示词建议：{neg}\n"
-                "4. 想弱化风格时把权重降到 0.4。\n"
+                "2. 正向提示词以触发词开头，并**带上训练时的画风标签**一起输入：\n"
+                f"   你的训练标签示例：{example}\n"
+                f"   出图时直接复制这段标签 + 你想画的内容，例如：{example}, 1girl, <动作/场景>\n"
+                "3. ⚠ 单独输入一个触发词召唤效果较弱（画风信息分散在标签里），建议「触发词 + 画风标签」一起用。\n"
+                f"4. 负面提示词建议：{neg}\n"
+                "5. 想弱化风格时把权重降到 0.4。\n"
             )
         else:
-            pos_example = ((gpos + ", ") if gpos else "") + (
-                "anime cel-shading, clean thin black outlines, flat color, simple soft cel shading, "
-                "tv anime screenshot, limited color palette, 1girl, cherry blossoms")
+            example = cap if cap else (
+                "anime cel-shading, clean thin black outlines, flat color, "
+                "simple soft cel shading, tv anime screenshot, limited color palette")
             text = (
                 "【画风 LoRA 使用模板】\n"
                 f"模型文件：{output_name}.safetensors\n"
@@ -2783,7 +2810,9 @@ def write_usage_template(mode, params, output_name, out_dir=None):
                 f"训练分辨率：{reso}px\n\n"
                 "使用建议：\n"
                 "1. 推荐 LoRA 权重 0.5 ~ 0.7。\n"
-                f"2. 正向提示词示例：{pos_example}\n"
+                "2. 正向提示词直接写训练时的画风标签：\n"
+                f"   你的训练标签示例：{example}\n"
+                f"   出图示例：{example}, 1girl, cherry blossoms\n"
                 "3. 不要输入角色名/trigger 词（这个 LoRA 没有也不应该有）。\n"
                 f"4. 负面提示词建议：{neg}\n"
                 "5. 想弱化风格时把权重降到 0.4。\n"

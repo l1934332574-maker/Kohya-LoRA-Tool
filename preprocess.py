@@ -583,7 +583,7 @@ def main():
     parser.add_argument("--wm-h", type=float, default=0.12, help="水印区域高度占比（默认 0.12）")
     parser.add_argument("--wm-force", action="store_true",
                         help="强制修复水印区域（即使未检测到水印也执行）")
-    parser.add_argument("--caption", default=DEFAULT_CAPTION, help="统一 caption 文本（画风模式）")
+    parser.add_argument("--caption", default="", help="统一 caption 文本（画风模式；留空则自动 WD14 打标并过滤人物标签）")
     parser.add_argument("--no-caption", action="store_true", help="不生成 caption 文件")
     parser.add_argument("--overwrite", action="store_true", help="覆盖已存在的输出图片")
     parser.add_argument("--no-upscale", action="store_true", help="小图不放大（只缩小）")
@@ -832,7 +832,7 @@ def main():
             else:
                 print("[INFO] 图片标签已齐全，跳过 WD14 打标。")
         else:
-            _fill_missing_captions(output_dir, DEFAULT_CHARACTER_CAPTION)
+            _fill_missing_captions(output_dir, DEFAULT_CAPTION)
             if not tagger:
                 print("[WARN] 未找到 kohya 官方 WD14 打标脚本，缺少标签的图片使用了兜底 caption。")
         # 还原原图自带 txt（过滤人物标签）
