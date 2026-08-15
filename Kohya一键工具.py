@@ -526,6 +526,62 @@ def _release_kohya_install_lock(lock_f):
         pass
 
 
+def _preinstall_torch(vpy, kdir, logf=print):
+    """预下载并安装 PyTorch 大轮子（torch/torchvision/xformers）。
+
+    kohya 官方 setup 用 pip 直接下载 torch（约 3.3GB），无断点续传，
+    网络一抖就卡死（setup_common.py 一直停在 Downloading torch...）。
+    这里先用 curl 断点续传把轮子下到本地缓存，再 pip 装进 venv；
+    之后官方 setup 的 pip 检测到 torch==2.7.0+cu128 已满足就会跳过下载。
+    返回 True=成功；失败抛 RuntimeError。
+    """
+    tag = None
+    try:
+        r = subprocess.run([vpy, "-c", "import sys;print('cp%d%d'%sys.version_info[:2])"],
+                           capture_output=True, text=True, timeout=60)
+        tag = (r.stdout or "").strip()
+    except Exception:
+        tag = None
+    if tag not in ("cp310", "cp311", "cp312"):
+        raise RuntimeError("暂不支持该 Python 版本的 PyTorch 预装: %s" % (tag or "未知"))
+    base = "https://mirrors.aliyun.com/pytorch-wheels/cu128"
+    wheels = [
+        ("torch-2.7.0%%2Bcu128-%s-%s-win_amd64.whl" % (tag, tag), 2_000_000_000),
+        ("torchvision-0.22.0%%2Bcu128-%s-%s-win_amd64.whl" % (tag, tag), 5_000_000),
+        ("xformers-0.0.30-%s-%s-win_amd64.whl" % (tag, tag), 50_000_000),
+    ]
+    cache = data_sub("cache", "pytorch_wheels")
+    paths = []
+    for name, minsize in wheels:
+        dest = os.path.join(cache, name)
+        if os.path.isfile(dest) and os.path.getsize(dest) >= minsize:
+            logf("[Kohya] 已存在缓存轮子，跳过下载: %s" % name)
+        else:
+            logf("[Kohya] 下载 %s（断点续传，可随时停止/重试）…" % name)
+            if not _download_with_resume(base + "/" + name, dest, logf):
+                raise RuntimeError("下载失败，可重试（会从断点续传）: %s" % name)
+            if not (os.path.isfile(dest) and os.path.getsize(dest) >= minsize):
+                raise RuntimeError("下载不完整: %s" % name)
+        paths.append(dest)
+    logf("[Kohya] 本地安装 PyTorch 轮子（torch/torchvision/xformers，依赖走清华镜像）…")
+    env = build_env()
+    env.setdefault("PIP_RETRIES", "10")
+    env.setdefault("PIP_TIMEOUT", "120")
+    _px = system_proxy()
+    if _px:
+        env.setdefault("HTTP_PROXY", _px)
+        env.setdefault("HTTPS_PROXY", _px)
+    cmd = [vpy, "-m", "pip", "install", "--no-cache-dir", "--retries", "10", "--timeout", "120"] + paths
+    if run_stream(cmd, cwd=kdir, env=env, logf=logf) != 0:
+        raise RuntimeError("本地安装 PyTorch 轮子失败，请查看上方日志")
+    r = subprocess.run([vpy, "-c", "import torch;print(torch.__version__);print(torch.cuda.is_available())"],
+                       capture_output=True, text=True, timeout=180)
+    logf("[Kohya] 验证：" + ((r.stdout or "").strip().replace("\n", " | ")))
+    if r.returncode != 0:
+        raise RuntimeError("torch 安装后导入失败")
+    return True
+
+
 def install_kohya(logf=print):
     git = find_git()
     py, pyver = find_python()
@@ -634,6 +690,17 @@ def install_kohya(logf=print):
         logf("[Kohya] 升级 pip / setuptools / wheel …")
         if run_stream([vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q"], cwd=kdir, logf=logf) != 0:
             raise RuntimeError("pip 升级失败（可能是网络或安装目录被占用），请重试")
+        if not torch_ok:
+            # 3.3GB 的 torch 大轮子用 pip 直连下载容易卡死（无续传）：
+            # 先 curl 断点续传预下载并装进 venv，官方 setup 检测到已装就会跳过。
+            logf("[Kohya] 预下载 PyTorch 大轮子（torch ~3.3GB，curl 断点续传，避免安装卡死）…")
+            try:
+                _preinstall_torch(vpy, kdir, logf)
+                torch_ok = _dep_ok("import torch; print(torch.__version__)")
+                if torch_ok:
+                    logf("[Kohya] PyTorch 预装成功，官方安装脚本将跳过 torch 下载。")
+            except Exception as e:
+                logf(f"[Kohya] PyTorch 预下载失败（{e}），改由官方安装脚本处理（可能较慢，需多次重试）。")
         logf("[Kohya] 安装全部依赖（官方无人值守模式，约 10-30 分钟）…")
         env = build_env([os.path.dirname(git)])
         env.setdefault("PIP_EXTRA_INDEX_URL", "https://mirrors.aliyun.com/pytorch-wheels/cu128")
