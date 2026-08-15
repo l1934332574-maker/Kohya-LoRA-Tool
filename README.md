@@ -43,6 +43,8 @@
 | `Setup.exe` | 安装包版（默认装到「文档\KohyaLoraTool」），**内置 WD14 打标模型**，双击安装即用 |
 | `KohyaLoraTool_*_portable.zip` | 便携版，解压即用 |
 
+> 🇨🇳 **国内镜像（Gitee 代码仓库）**：https://gitee.com/FGtiancai/Kohya-LoRA-Tool
+>
 > 程序**不内置 SD 基础底模**（体积太大）：首次使用按软件内引导下载底模，或把 `.safetensors` 放进 `models/base/` 自动识别。
 > 首次使用需在软件内点「② 安装训练内核」安装 kohya + torch（离线安装包 + 国内镜像，约 10~30 分钟；之后升级不会重装）。
 
