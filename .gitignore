@@ -34,3 +34,4 @@ dist/
 
 # 发布脚本的令牌配置（含私密令牌，不入库）
 release_secrets.json
+release.py
