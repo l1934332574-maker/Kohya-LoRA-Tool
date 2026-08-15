@@ -31,3 +31,6 @@ dist/
 # Windows 快捷方式（本机生成，不提交）
 *.lnk
 点这个安装.lnk
+
+# 发布脚本的令牌配置（含私密令牌，不入库）
+release_secrets.json
