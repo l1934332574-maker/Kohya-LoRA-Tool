@@ -169,22 +169,47 @@ def _py_version(p):
         pass
     return None, None
 
+def _py_has_venv(p):
+    """校验该 python 能创建虚拟环境（有 venv/ensurepip）。
+
+    排除 ComfyUI 等便携版自带的精简嵌入式 python（能跑、版本正常，
+    但没有 venv 模块，拿去 `-m venv` 会报 No module named venv）。
+    """
+    try:
+        r = subprocess.run([p, "-c", "import venv, ensurepip"],
+                           capture_output=True, text=True, timeout=30)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def find_python():
     cands = []
     p = shutil.which("python")
     if p:
         cands.append(p)
+    # 标准安装路径全扫一遍（3.10~3.12）：PATH 里即使只有 ComfyUI 等精简 python，
+    # 也能找到真正可建 venv 的 Python。
     for c in (
         os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Python\Python310\python.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Python\Python311\python.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Python\Python312\python.exe"),
         r"C:\Python310\python.exe",
+        r"C:\Python311\python.exe",
+        r"C:\Python312\python.exe",
         r"C:\Program Files\Python310\python.exe",
+        r"C:\Program Files\Python311\python.exe",
+        r"C:\Program Files\Python312\python.exe",
     ):
         if os.path.isfile(c):
             cands.append(c)
     for c in cands:
         s, parts = _py_version(c)
-        if s and PY_MIN <= parts < PY_MAX:
-            return c, s
+        if not (s and PY_MIN <= parts < PY_MAX):
+            continue
+        if not _py_has_venv(c):
+            continue
+        return c, s
     return None, None
 
 def venv_python(kdir=None):

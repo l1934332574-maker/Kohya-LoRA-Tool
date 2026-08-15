@@ -26,6 +26,10 @@
   （无断点续传，网络一抖就卡在 `Downloading torch-...whl`）。现在装 kohya 前先用 curl 断点续传
   预下载 torch/torchvision/xformers 轮子（阿里 pytorch 镜像）并 pip 装进 venv，官方 setup 检测到
   torch 已装即跳过下载；中断可续传、可重试。
+- **安装第二/三引擎误用 ComfyUI 精简 Python（No module named venv）**：`find_python()` 之前只查
+  版本号、不校验能否建虚拟环境，会把 ComfyUI 便携版自带的嵌入式 python（无 venv 模块）当正经
+  Python 用，导致 `-m venv` 建环境失败。现在会跳过不能 `import venv` 的精简 python，并补充扫描
+  LOCALAPPDATA / Program Files 下 3.10~3.12 标准安装路径。
 - **使用模板读取真实训练标签**：训练完成生成的使用模板会读取当前项目训练集里实际写入的 caption
   填入「你的训练标签示例」（每个用户对应各自真实标签），并提示画风 LoRA 建议「触发词 + 画风标签」
   一起输入、单独一个触发词召唤效果较弱。
