@@ -4040,6 +4040,31 @@ def _hf_download(repo, local_dir, logf=print, allow_patterns=None):
         raise RuntimeError(f"模型组件下载失败（退出码 {rc}）：{repo}")
 
 
+def _anima_find_qwen3(base):
+    """在 anima 目录找 Qwen3 文本编码器，返回可用路径或 None。
+
+    支持两种手动放置方式：
+      1) 完整模型目录（含 config.json）→ 返回目录路径
+      2) 单个 .safetensors 权重文件 → 返回文件路径
+         （sd-scripts 会自动用内置 configs/qwen3_06b/ 的 config/tokenizer 加载）
+    """
+    qwen3_dir = os.path.join(base, "Qwen3-0.6B")
+    if os.path.isdir(qwen3_dir):
+        if os.path.isfile(os.path.join(qwen3_dir, "config.json")):
+            return qwen3_dir
+        # 目录里只有 safetensors 权重（无 config.json）：取第一个（sd-scripts 单文件模式）
+        for root, _dirs, files in os.walk(qwen3_dir):
+            for f in sorted(files):
+                if f.lower().endswith(".safetensors"):
+                    return os.path.join(root, f)
+    # anima 根目录下直接放的单文件
+    if os.path.isdir(base):
+        for f in sorted(os.listdir(base)):
+            if f.lower().endswith(".safetensors") and f.lower().startswith("qwen"):
+                return os.path.join(base, f)
+    return None
+
+
 def _ensure_anima_components(logf=print):
     """确保 Anima 的 Qwen3-0.6B 文本编码器和 Qwen-Image VAE 就位。
 
@@ -4047,15 +4072,24 @@ def _ensure_anima_components(logf=print):
     """
     base = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "KohyaLoraTool", "anima")
     os.makedirs(base, exist_ok=True)
-    qwen3_dir = os.path.join(base, "Qwen3-0.6B")
-    if not (os.path.isdir(qwen3_dir) and os.path.isfile(os.path.join(qwen3_dir, "config.json"))):
+    # Qwen3 就绪判定：①完整目录（含 config.json）②单个 safetensors 权重（sd-scripts 单文件模式）
+    qwen3_path = _anima_find_qwen3(base)
+    if qwen3_path is None:
+        qwen3_dir = os.path.join(base, "Qwen3-0.6B")
         logf("[Anima] 首次使用需要下载 Qwen3-0.6B 文本编码器（约 1.2GB，走 hf-mirror）…")
         try:
             _hf_download("Qwen/Qwen3-0.6B", qwen3_dir, logf)
+            qwen3_path = _anima_find_qwen3(base)
         except Exception as e:
-            raise RuntimeError(f"Qwen3-0.6B 自动下载失败：{e}\n可手动下载后放到：{qwen3_dir}")
-        if not (os.path.isdir(qwen3_dir) and os.path.isfile(os.path.join(qwen3_dir, "config.json"))):
-            raise RuntimeError(f"Qwen3-0.6B 下载不完整，请检查：{qwen3_dir}")
+            raise RuntimeError(
+                f"Qwen3-0.6B 自动下载失败：{e}\n\n"
+                "可手动下载，两种方式任选：\n"
+                f"1) 完整模型文件夹（含 config.json + 权重 + tokenizer），解压后放到：\n   {os.path.join(base, 'Qwen3-0.6B')}\n"
+                "2) 只下一个 Qwen3-0.6B 的 .safetensors 权重文件（如 model.safetensors），\n"
+                f"   放到 {os.path.join(base, 'Qwen3-0.6B')} 文件夹里即可（程序会自动用内置配置加载）\n\n"
+                "下载地址（国内镜像）：https://hf-mirror.com/Qwen/Qwen3-0.6B")
+        if qwen3_path is None:
+            raise RuntimeError(f"Qwen3-0.6B 仍未就绪，请检查：{os.path.join(base, 'Qwen3-0.6B')}")
     vae_dir = os.path.join(base, "Anima_vae")
     vae_file = None
     if os.path.isdir(vae_dir):
@@ -4082,9 +4116,9 @@ def _ensure_anima_components(logf=print):
                     break
     if not vae_file:
         raise RuntimeError(f"未找到 Qwen-Image VAE 文件，请手动下载后放到：{vae_dir}")
-    logf(f"[Anima] Qwen3: {qwen3_dir}")
+    logf(f"[Anima] Qwen3: {qwen3_path}")
     logf(f"[Anima] VAE: {vae_file}")
-    return qwen3_dir, vae_file
+    return qwen3_path, vae_file
 
 
 class App:
