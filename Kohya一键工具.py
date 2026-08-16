@@ -826,27 +826,31 @@ def install_musubi_engine(logf=print):
         # 4) pip 镜像（清华 pypi + 阿里 pytorch 额外源，与 kohya 一致）
         subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
                         "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
-        subprocess.run([vpy, "-m", "pip", "config", "set", "global.extra-index-url",
-                        "https://mirrors.aliyun.com/pytorch-wheels/cu128"], capture_output=True, timeout=60)
         logf("[第二引擎] 升级 pip / setuptools / wheel …")
         if run_stream([vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q"],
                       cwd=kdir, logf=logf) != 0:
             raise RuntimeError("pip 升级失败，请重试")
-        # 5) torch cu128：先 curl 断点续传预下载大轮子，避免 pip 直连 IncompleteRead 卡死
-        logf("[第二引擎] 预下载 PyTorch cu128 大轮子（torch ~3.3GB，断点续传）…")
-        try:
-            _preinstall_torch(vpy, kdir, logf, torch_ver="2.7.1", tv_ver="0.22.0",
-                              cu="cu128", label="第二引擎")
-            logf("[第二引擎] PyTorch 预装成功，官方 pip 将跳过下载。")
-        except Exception as e:
-            logf(f"[第二引擎] PyTorch 预下载失败（{e}），改由 pip 直接安装（可能需多次重试/挂代理）。")
-        logf("[第二引擎] 安装 PyTorch cu128（约 2.5GB，与 kohya 同源，首次可能较慢）…")
+        # 5) torch cu128：阿里镜像 curl 断点续传预下载大轮子 → 本地安装
+        #    （阿里 pytorch-wheels 是文件仓库，curl 直链可下；pip 不能把它当 index 解析，
+        #      所以预下载+本地装是主路径，重试 3 次断点续传；彻底失败才回退官方 index）
         env = build_env([os.path.dirname(git)])
-        if run_stream(
-            [vpy, "-m", "pip", "install", "torch==2.7.1+cu128", "torchvision==0.22.0+cu128",
-             "--extra-index-url", "https://download.pytorch.org/whl/cu128"],
-            cwd=kdir, env=env, logf=logf) != 0:
-            raise RuntimeError("torch cu128 安装失败，请检查网络/代理后重试")
+        _torch_ok = False
+        for _try in range(3):
+            try:
+                _preinstall_torch(vpy, kdir, logf, torch_ver="2.7.1", tv_ver="0.22.0",
+                                  cu="cu128", label="第二引擎")
+                logf("[第二引擎] PyTorch 预装成功（阿里镜像 + 本地安装）。")
+                _torch_ok = True
+                break
+            except Exception as e:
+                logf(f"[第二引擎] PyTorch 预下载失败（第{_try + 1}/3 次）：{e}（断点续传，可重试）")
+        if not _torch_ok:
+            logf("[第二引擎] 阿里镜像预下载多次失败，改用 pip 官方 index 直装（国内需代理，或稍后重试）…")
+            if run_stream(
+                [vpy, "-m", "pip", "install", "torch==2.7.1+cu128", "torchvision==0.22.0+cu128",
+                 "--extra-index-url", "https://download.pytorch.org/whl/cu128"],
+                cwd=kdir, env=env, logf=logf) != 0:
+                raise RuntimeError("torch cu128 安装失败，请检查网络/代理后重试")
         # 6) musubi-tuner（editable，带全套钉死依赖）
         logf("[第二引擎] 安装 musubi-tuner（Krea2/视频训练内核）…")
         if run_stream([vpy, "-m", "pip", "install", "-e", mt_dir], cwd=kdir, env=env, logf=logf) != 0:
@@ -1526,20 +1530,24 @@ def install_ai_toolkit_engine(logf=print):
                       cwd=kdir, logf=logf) != 0:
             raise RuntimeError("pip 升级失败，请重试")
         env = build_env([os.path.dirname(git)])
-        # torch cu130：先 curl 断点续传预下载大轮子，避免 pip 直连 IncompleteRead 卡死
-        logf("[第三引擎] 预下载 PyTorch cu130 大轮子（torch ~1.9GB，断点续传）…")
-        try:
-            _preinstall_torch(vpy, kdir, logf, torch_ver="2.13.0", tv_ver="0.28.0",
-                              ta_ver="2.11.0", cu="cu130", label="第三引擎")
-            logf("[第三引擎] PyTorch 预装成功，官方 pip 将跳过下载。")
-        except Exception as e:
-            logf(f"[第三引擎] PyTorch 预下载失败（{e}），改由 pip 直接安装（可能需多次重试/挂代理）。")
-        logf("[第三引擎] 安装 PyTorch cu130（约 3GB，需较新 NVIDIA 驱动；首次可能较慢）…")
-        if run_stream(
-            [vpy, "-m", "pip", "install", "torch==2.13.0", "torchvision==0.28.0", "torchaudio==2.11.0",
-             "--index-url", "https://download.pytorch.org/whl/cu130"],
-            cwd=kdir, env=env, logf=logf) != 0:
-            raise RuntimeError("torch cu130 安装失败，请检查网络/代理/驱动后重试")
+        # torch cu130：阿里镜像 curl 断点续传预下载大轮子 → 本地安装（重试 3 次，彻底失败回退官方 index）
+        _torch_ok = False
+        for _try in range(3):
+            try:
+                _preinstall_torch(vpy, kdir, logf, torch_ver="2.13.0", tv_ver="0.28.0",
+                                  ta_ver="2.11.0", cu="cu130", label="第三引擎")
+                logf("[第三引擎] PyTorch 预装成功（阿里镜像 + 本地安装）。")
+                _torch_ok = True
+                break
+            except Exception as e:
+                logf(f"[第三引擎] PyTorch 预下载失败（第{_try + 1}/3 次）：{e}（断点续传，可重试）")
+        if not _torch_ok:
+            logf("[第三引擎] 阿里镜像预下载多次失败，改用 pip 官方 index 直装（国内需代理，或稍后重试）…")
+            if run_stream(
+                [vpy, "-m", "pip", "install", "torch==2.13.0+cu130", "torchvision==0.28.0+cu130", "torchaudio==2.11.0+cu130",
+                 "--index-url", "https://download.pytorch.org/whl/cu130"],
+                cwd=kdir, env=env, logf=logf) != 0:
+                raise RuntimeError("torch cu130 安装失败，请检查网络/代理/驱动后重试")
         # ai-toolkit 依赖
         logf("[第三引擎] 安装 ai-toolkit 依赖（较大，国内镜像 + 重试）…")
         if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",

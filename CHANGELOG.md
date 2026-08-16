@@ -20,6 +20,7 @@
 ### 修复
 - **环境装好/导入后界面仍显示「未安装」（30 秒检测缓存）**：安装或导入完成后立即清空环境检测缓存并刷新，不再出现装好了还显示未装。
 - **第三引擎检测支持自定义目录**：ai_toolkit_engine_status / 引导状态 / 训练（H3 视频、Qwen-Image、Z-Image）统一使用「用户导入目录优先、标准位置兜底」的路径解析。
+- **第二/三引擎安装 torch 失败（ResolutionImpossible / No matching distribution）**：阿里 pytorch-wheels 是文件仓库（curl 可直链下载），但 pip 不能把它当 index 解析；之前回退/配置把阿里当 pip 源 + 混用官方 download.pytorch.org，国内网络下 pip 解析 torch 失败。现在：① 预下载走阿里 curl 断点续传（重试 3 次）→ 本地 wheel 安装（主路径，国内快）；② 彻底失败才回退官方 index（提示挂代理）；③ 移除无效的阿里 extra-index 配置。
 - **Anima 训练 Qwen3-0.6B 自动下载失败后，手动放置模型不被识别**：之前只认完整目录里的 config.json，用户手动放单个 .safetensors 权重（或完整文件夹）都不被识别，仍强制走自动下载。现在支持两种手动放置（完整文件夹 或 单个 .safetensors 权重，sd-scripts 会自动用内置 config/tokenizer 加载），并给出明确的下载地址与放置路径提示。
 
 ---
