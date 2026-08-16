@@ -12,7 +12,7 @@
 
 # 更新日志（Changelog）
 
-## 待发布
+## v0.9.2（2026-08-16）
 
 ### 新增
 - **FLUX.2 图像 LoRA 训练模式**：基于第二引擎 musubi-tuner（官方已支持 FLUX.2 训练）。训练用 **FLUX.2 klein base 4B**（DiT 约 7.2GB + Qwen3 4B 文本编码器约 7.5GB + FLUX.2 VAE 约 320MB，共约 16GB），应用内一键下载（国内 hf-mirror 镜像、断点续传、下完自动识别）。**8G 显存可跑**（自动开 fp8 + blocks_to_swap 省显存），推荐 12G+。含 FLUX.2 与 FLUX.1 的底模自动区分识别、新手引导（①②③④）、使用模板。
