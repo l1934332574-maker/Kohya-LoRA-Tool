@@ -1,6 +1,6 @@
 {
-  "version": "v0.9.2",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.2/Setup.exe",
+  "version": "v0.9.3",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.3/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.9.2：新增 FLUX.2 训练模式；自动更新多源修复；更新下载进度显示"
+  "notes": "v0.9.3：修复第二/三引擎 torch 安装失败；第三引擎支持导入已装环境；Anima Qwen3 手动放置识别"
 }
