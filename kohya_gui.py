@@ -708,6 +708,11 @@ class App:
                                             border_color=ACC, text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
                                             command=self.cmd_install_at)
         self.btn_at_install.pack(side="left", padx=(4, 4))
+        self.btn_at_import = ctk.CTkButton(self.h3_row, text="📂 导入已装环境", width=116, height=30,
+                                           fg_color=CARD2, hover_color="#343a46", border_width=1, border_color=BORDER,
+                                           text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
+                                           command=self.cmd_import_at_env)
+        self.btn_at_import.pack(side="left", padx=(4, 4))
         self.btn_h3_captions = ctk.CTkButton(self.h3_row, text="一键生成占位字幕", width=120, height=30,
                                              fg_color=CARD2, hover_color="#343a46", border_width=1, border_color=BORDER,
                                              text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
@@ -739,6 +744,11 @@ class App:
                                                border_color=BORDER, text_color=TXT, corner_radius=6,
                                                font=ui_font(FONT_BODY), command=self.cmd_at_model_help)
         self.btn_at_model_help.pack(side="left", padx=(4, 4))
+        self.btn_at_import2 = ctk.CTkButton(self.at_row, text="📂 导入已装环境", width=116, height=30,
+                                            fg_color=CARD2, hover_color="#343a46", border_width=1, border_color=BORDER,
+                                            text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
+                                            command=self.cmd_import_at_env)
+        self.btn_at_import2.pack(side="left", padx=(4, 4))
 
         # AMD 兼容模式（实验性）：仅 AMD 显卡显示
         self.amd_bar = ctk.CTkFrame(top, fg_color="transparent")
@@ -1549,6 +1559,7 @@ class App:
     def _install_musubi_worker(self):
         try:
             core.install_musubi_engine(self._log)
+            core.clear_status_cache()
             self.q.put(("STATUS",))
         except Exception as e:
             self._log(f"[ERROR] 第二引擎安装失败：{e}")
@@ -1580,6 +1591,7 @@ class App:
         core.reset_stop()
         try:
             core.install_kohya(self._log)
+            core.clear_status_cache()
             self._log("[OK] Kohya-SS 安装完成")
         except core.StopRequested:
             self._log("[停止] 安装已手动停止（已解压/已装的部分会保留，可重跑继续）")
@@ -2459,6 +2471,34 @@ class App:
         except Exception as e:
             messagebox.showerror(core.APP_NAME, f"打开失败：{e}")
 
+    def cmd_import_at_env(self):
+        """导入已装好的第三引擎（AI Toolkit）环境：选择源码目录或根目录，软件直接复用，不用重新部署。"""
+        cur = core.at_custom_dir() or ""
+        if cur and not messagebox.askyesno(core.APP_NAME,
+                f"当前已导入自定义环境：\n{cur}\n\n是否清除并重新选择？"):
+            return
+        d = filedialog.askdirectory(
+            title="选择已装好的 AI Toolkit 文件夹（含 run.py 的源码目录，或含 ai-toolkit 子目录的根目录）",
+            initialdir=cur or os.path.expanduser("~"))
+        if not d:
+            return
+        _d = dict(core._load_app_settings())
+        _d["at_dir"] = d
+        core._save_app_settings(_d)
+        core.clear_status_cache()
+        ok, detail, _vp = core.ai_toolkit_engine_status()
+        if ok:
+            self._log(f"[第三引擎] 已导入自定义环境并检测可用：{d}")
+            messagebox.showinfo(core.APP_NAME,
+                                f"✅ 已检测到装好的第三引擎环境可用：\n{d}\n\n无需重新部署，可直接训练。")
+        else:
+            self._log(f"[第三引擎] 已记录自定义目录，但环境不完整：{detail}")
+            messagebox.showwarning(core.APP_NAME,
+                                   f"已记录目录：{d}\n但未检测到完整环境（{detail}）。\n\n"
+                                   "请确认该目录里有：\n· ai-toolkit 源码（含 run.py）\n· venv（ai_toolkit_venv 或 venv，含 python.exe）\n\n"
+                                   "也可以点「📂 导入已装环境」重新选择，或点「⚙ 安装第三引擎」走标准安装。")
+        self.q.put(("STATUS",))
+
     def cmd_install_at(self):
         """安装第三训练引擎（AI Toolkit · MiniMax H3 视频 LoRA）。"""
         if self.busy:
@@ -2475,6 +2515,7 @@ class App:
     def _install_at_worker(self):
         try:
             core.install_ai_toolkit_engine(self._log)
+            core.clear_status_cache()
             self.q.put(("STATUS",))
         except Exception as e:
             self._log(f"[ERROR] 第三引擎安装失败：{e}")

@@ -1355,22 +1355,80 @@ def flux_missing_models():
     return missing
 
 
-def _at_marker_ok():
-    """第三引擎快速标记检查（秒级）：ai_toolkit_venv + ai-toolkit 源码 + run.py。"""
+def _load_app_settings():
+    """读取用户设置（settings.json，放数据目录随软件保留）。"""
+    try:
+        with open(os.path.join(data_dir(), "settings.json"), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_app_settings(d):
+    """保存用户设置（settings.json）。"""
+    try:
+        with open(os.path.join(data_dir(), "settings.json"), "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def at_custom_dir():
+    """用户导入的第三引擎（AI Toolkit）自定义目录（含 ai-toolkit 源码或 run.py 所在目录）。"""
+    return (_load_app_settings().get("at_dir") or "").strip()
+
+
+def _at_dirs():
+    """返回第三引擎实际目录 (venv_py, at_src_dir)。
+
+    优先用户导入的自定义目录（可能指向 ai-toolkit 源码目录本身，或含 ai-toolkit 子目录的根目录）；
+    否则用标准位置 kdir/ai_toolkit_venv + kdir/ai-toolkit。
+    """
+    custom = at_custom_dir()
     kdir = get_kohya_dir()
-    vpy = os.path.join(kdir, "ai_toolkit_venv", "Scripts", "python.exe")
+    if custom:
+        cand = os.path.abspath(custom)
+        if os.path.isfile(os.path.join(cand, "run.py")):
+            src = cand
+        elif os.path.isfile(os.path.join(cand, "ai-toolkit", "run.py")):
+            src = os.path.join(cand, "ai-toolkit")
+        else:
+            src = cand
+        vp = None
+        for base in (src, os.path.dirname(src), cand, os.path.dirname(cand)):
+            for v in ("ai_toolkit_venv", "venv"):
+                p = os.path.join(base, v, "Scripts", "python.exe")
+                if os.path.isfile(p):
+                    vp = p
+                    break
+            if vp:
+                break
+        if vp and os.path.isfile(os.path.join(src, "run.py")):
+            return vp, src
+    return (os.path.join(kdir, "ai_toolkit_venv", "Scripts", "python.exe"),
+            os.path.join(kdir, "ai-toolkit"))
+
+
+def clear_status_cache():
+    """清空环境检测缓存（安装/导入完成后调用，让界面立即反映最新状态）。"""
+    _SYSTEM_STATUS_CACHE["t"] = 0.0
+    _SYSTEM_STATUS_CACHE["data"] = None
+
+
+def _at_marker_ok():
+    """第三引擎快速标记检查（秒级）：venv + ai-toolkit 源码 + run.py（支持用户导入的自定义目录）。"""
+    vpy, at_dir = _at_dirs()
     if not os.path.isfile(vpy):
         return False
-    return os.path.isfile(os.path.join(kdir, "ai-toolkit", "run.py"))
+    return os.path.isfile(os.path.join(at_dir, "run.py"))
 
 
 def ai_toolkit_engine_status():
-    """第三训练引擎（AI Toolkit）状态：返回 (ok, detail, venv_python)。"""
-    kdir = get_kohya_dir()
-    vpy = os.path.join(kdir, "ai_toolkit_venv", "Scripts", "python.exe")
-    at_dir = os.path.join(kdir, "ai-toolkit")
+    """第三训练引擎（AI Toolkit）状态：返回 (ok, detail, venv_python)。支持用户导入的自定义目录。"""
+    vpy, at_dir = _at_dirs()
     if not os.path.isfile(vpy):
-        return False, "未安装（ai_toolkit_venv 不存在）", vpy
+        return False, "未安装（未检测到 venv）", vpy
     if not os.path.isfile(os.path.join(at_dir, "run.py")):
         return False, "ai-toolkit 源码缺失", vpy
     try:
@@ -1409,12 +1467,26 @@ def install_ai_toolkit_engine(logf=print):
     except Exception:
         pass
     kdir = get_kohya_dir()
+    # 用户已导入自定义环境且可用：直接复用，不重复部署
+    if at_custom_dir():
+        _vp, _ad = _at_dirs()
+        if os.path.isfile(_vp) and os.path.isfile(os.path.join(_ad, "run.py")):
+            try:
+                r = subprocess.run(
+                    [_vp, "-c", "import torch; from toolkit.config_modules import ModelConfig; print('ok')"],
+                    capture_output=True, text=True, timeout=120, cwd=_ad)
+                if r.returncode == 0:
+                    logf(f"[第三引擎] 检测到已导入的自定义环境可用，跳过安装：{_ad}")
+                    return _vp
+            except Exception:
+                pass
+        logf(f"[第三引擎] 已导入自定义目录但环境不完整，将安装到标准位置：{kdir}")
     logf(f"[第三引擎] 安装目录: {kdir}")
     lock_f = _acquire_kohya_install_lock(kdir, logf)
     if lock_f is None:
         raise RuntimeError("检测到另一个安装任务正在运行，请先等待完成后再试。")
     try:
-        at_dir = os.path.join(kdir, "ai-toolkit")
+        at_dir = _at_dirs()[1]
         if not os.path.isfile(os.path.join(at_dir, "run.py")):
             # 目录存在但源码不完整（clone 中断残留等），清理后重新克隆，避免 git clone 到非空目录失败
             if os.path.isdir(at_dir):
@@ -1739,7 +1811,7 @@ def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from
     if not ok:
         raise RuntimeError("第三训练引擎未安装，请点顶部「⚙ 安装第三引擎」安装。\n" + detail)
     kdir = get_kohya_dir()
-    at_dir = os.path.join(kdir, "ai-toolkit")
+    at_dir = _at_dirs()[1]
     if not os.path.isfile(os.path.join(at_dir, "run.py")):
         raise RuntimeError("ai-toolkit 源码缺失，请重装第三引擎")
     missing = h3_missing_models()
@@ -1942,7 +2014,7 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     if not ok:
         raise RuntimeError("第三训练引擎未安装，请点顶部「⚙ 安装第三引擎」安装。\n" + detail)
     kdir = get_kohya_dir()
-    at_dir = os.path.join(kdir, "ai-toolkit")
+    at_dir = _at_dirs()[1]
     if not os.path.isfile(os.path.join(at_dir, "run.py")):
         raise RuntimeError("ai-toolkit 源码缺失，请重装第三引擎")
     train_dir = dataset_train_dir(mode, params.get("project"))
