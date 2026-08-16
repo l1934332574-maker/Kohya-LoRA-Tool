@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Kohya-LoRA 一键训练工具 · 新版 CustomTkinter UI（kohya_gui.py）
 业务逻辑全部复用 Kohya一键工具.py，本文件只负责界面。
 入口：python kohya_gui.py
@@ -355,6 +355,8 @@ class App:
                 self._handle_update_check(item[1])
             elif kind == "AUTO_UPDATE":
                 self._handle_auto_update(item[1])
+            elif kind == "UPDATE_PROGRESS":
+                self._handle_update_progress(item[1], item[2] if len(item) > 2 else None)
             elif kind == "UPDATE_DONE":
                 self._handle_update_done(item[1], item[2], item[3] if len(item) > 3 else None)
 
@@ -1981,11 +1983,29 @@ class App:
                             "KohyaLoraTool_Setup_%s.exe" % ver.replace("v", ""))
         self._updating = True
         self._set_busy(True)
-        self._log(f"[更新] 开始下载 {ver}（约 445MB，断点续传，可随时停止）…")
+        self._upd_ver = ver
+        self._log(f"[更新] 开始下载 {ver}（约 445MB，断点续传，完成自动重启）…")
+        self._log(f"[更新] 下载源：{'国内魔搭镜像' if (url_cn or '').strip() else 'GitHub 兜底'}")
         def work():
             ok = False
+            last_th = [0]
+            def _prog(size, total):
+                # 进度反馈：total 已知时每 10% 一行；未知时每 20MB 一行（避免刷屏）
+                try:
+                    if total:
+                        pct = int(size * 100.0 / total)
+                        if pct // 10 > last_th[0]:
+                            last_th[0] = pct // 10
+                            self.q.put(("UPDATE_PROGRESS", size, total))
+                    else:
+                        mb = size / 1048576
+                        if mb >= last_th[0] + 20:
+                            last_th[0] = int(mb)
+                            self.q.put(("UPDATE_PROGRESS", size, None))
+                except Exception:
+                    pass
             try:
-                ok = core._download_with_resume(use, dest, self._log)
+                ok = core._download_with_resume(use, dest, self._log, progress_cb=_prog)
             except Exception as e:
                 self._log(f"[更新] 下载异常：{e}")
             try:
@@ -1993,6 +2013,19 @@ class App:
             except Exception:
                 pass
         threading.Thread(target=work, daemon=True).start()
+
+    def _handle_update_progress(self, size, total):
+        """更新包下载进度显示（不刷屏）。"""
+        try:
+            ver = getattr(self, "_upd_ver", "")
+            if total:
+                mb = size / 1048576
+                tmb = total / 1048576
+                self._log(f"[更新] 正在下载 {ver}：{mb:.1f}MB / {tmb:.1f}MB（{int(size * 100.0 / total)}%）…")
+            else:
+                self._log(f"[更新] 正在下载 {ver}：已下载 {size / 1048576:.1f}MB …")
+        except Exception:
+            pass
 
     def _handle_update_done(self, ok, dest, ver):
         self._updating = False

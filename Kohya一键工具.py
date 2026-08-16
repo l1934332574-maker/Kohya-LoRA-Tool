@@ -2246,38 +2246,80 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
     return True
 
 
-def _download_with_resume(url, dest, logf=print):
+def _http_total_size(url, timeout=20):
+    """尽力获取下载文件总大小（字节）；失败返回 None（不影响下载）。"""
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            cl = r.headers.get("Content-Length")
+            if cl:
+                return int(cl)
+    except Exception:
+        pass
+    return None
+
+
+def _download_with_resume(url, dest, logf=print, progress_cb=None):
     """用 curl 断点续传下载大文件（repo.radeon.com 网络不稳时关键，断了可续传）。
 
     返回 True=成功。优先 curl（Windows 自带，支持 -C - 续传 + 重试）；否则 urllib 分段下载。
+    progress_cb(size_bytes, total_bytes_or_None) 可选：下载期间周期性回调已下载大小，
+    供界面显示进度（curl 是 -sS 静默模式，不回调的话界面上完全看不到进度）。
     """
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     curl = shutil.which("curl")
-    if curl and os.path.isfile(curl):
-        cmd = [curl, "-sS", "-L", "-C", "-", "--retry", "10", "--retry-delay", "5", "--retry-all-errors",
-               "--connect-timeout", "60", "--max-time", "10800", "-o", dest, url]
-        _px = system_proxy()
-        if _px:
-            cmd = [curl, "-sS", "-L", "-C", "-", "--retry", "10", "--retry-delay", "5", "--retry-all-errors",
-                   "--connect-timeout", "60", "--max-time", "10800", "--proxy", _px, "-o", dest, url]
-        return run_stream(cmd, env=build_env(), logf=logf) == 0
-    # urllib 兜底：Range 断点续传
-    import urllib.request
-    tmp = dest + ".part"
-    exist = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
+    total = _http_total_size(url)
+    stop_mon = threading.Event()
+    if progress_cb is not None:
+        def _monitor():
+            last = -1
+            while not stop_mon.is_set():
+                try:
+                    size = os.path.getsize(dest) if os.path.isfile(dest) else 0
+                except Exception:
+                    size = 0
+                if size != last:
+                    last = size
+                    try:
+                        progress_cb(size, total)
+                    except Exception:
+                        pass
+                stop_mon.wait(1)
+        threading.Thread(target=_monitor, daemon=True).start()
     try:
-        req = urllib.request.Request(url, headers={"Range": "bytes=%d-" % exist} if exist else {})
-        with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "ab") as f:
-            while True:
-                chunk = r.read(1 << 20)
-                if not chunk:
-                    break
-                f.write(chunk)
-        os.replace(tmp, dest)
-        return True
-    except Exception as e:
-        logf(f"[下载] 中断（{e}），已保留 {tmp}，重试时自动续传")
-        return False
+        if curl and os.path.isfile(curl):
+            cmd = [curl, "-sS", "-L", "-C", "-", "--retry", "5", "--retry-delay", "5", "--retry-all-errors",
+                   "--connect-timeout", "20", "--max-time", "10800", "-o", dest, url]
+            _px = system_proxy()
+            if _px:
+                cmd = [curl, "-sS", "-L", "-C", "-", "--retry", "5", "--retry-delay", "5", "--retry-all-errors",
+                       "--connect-timeout", "20", "--max-time", "10800", "--proxy", _px, "-o", dest, url]
+            return run_stream(cmd, env=build_env(), logf=logf) == 0
+        # urllib 兜底：Range 断点续传
+        import urllib.request
+        tmp = dest + ".part"
+        exist = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
+        try:
+            req = urllib.request.Request(url, headers={"Range": "bytes=%d-" % exist} if exist else {})
+            with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "ab") as f:
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    if progress_cb is not None:
+                        try:
+                            progress_cb(exist + os.path.getsize(tmp), total)
+                        except Exception:
+                            pass
+            os.replace(tmp, dest)
+            return True
+        except Exception as e:
+            logf(f"[下载] 中断（{e}），已保留 {tmp}，重试时自动续传")
+            return False
+    finally:
+        stop_mon.set()
 
 
 def run_pip_in_venv(venv_dir, args, logf=print):
