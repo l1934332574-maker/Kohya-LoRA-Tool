@@ -526,14 +526,14 @@ def _release_kohya_install_lock(lock_f):
         pass
 
 
-def _preinstall_torch(vpy, kdir, logf=print):
-    """预下载并安装 PyTorch 大轮子（torch/torchvision/xformers）。
+def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
+                      xf_ver=None, ta_ver=None, cu="cu128", label="Kohya"):
+    """预下载并安装 PyTorch 大轮子（torch/torchvision[/xformers][/torchaudio]）。
 
-    kohya 官方 setup 用 pip 直接下载 torch（约 3.3GB），无断点续传，
-    网络一抖就卡死（setup_common.py 一直停在 Downloading torch...）。
-    这里先用 curl 断点续传把轮子下到本地缓存，再 pip 装进 venv；
-    之后官方 setup 的 pip 检测到 torch==2.7.0+cu128 已满足就会跳过下载。
-    返回 True=成功；失败抛 RuntimeError。
+    官方 pip 直连下载大轮子（2~3GB）无断点续传，国内网络一断就 IncompleteRead/卡死
+    （kohya / musubi / ai-toolkit 三个引擎都踩过）。这里先用 curl 断点续传从
+    阿里 pytorch 镜像下到本地缓存，再 pip 装进 venv；之后官方 pip 检测到版本已满足就跳过下载。
+    返回 True=成功；失败抛 RuntimeError（调用方回退到 pip 直连）。
     """
     tag = None
     try:
@@ -544,26 +544,29 @@ def _preinstall_torch(vpy, kdir, logf=print):
         tag = None
     if tag not in ("cp310", "cp311", "cp312"):
         raise RuntimeError("暂不支持该 Python 版本的 PyTorch 预装: %s" % (tag or "未知"))
-    base = "https://mirrors.aliyun.com/pytorch-wheels/cu128"
+    base = "https://mirrors.aliyun.com/pytorch-wheels/%s" % cu
     wheels = [
-        ("torch-2.7.0%%2Bcu128-%s-%s-win_amd64.whl" % (tag, tag), 2_000_000_000),
-        ("torchvision-0.22.0%%2Bcu128-%s-%s-win_amd64.whl" % (tag, tag), 5_000_000),
-        ("xformers-0.0.30-%s-%s-win_amd64.whl" % (tag, tag), 50_000_000),
+        ("torch-%s%%2B%s-%s-%s-win_amd64.whl" % (torch_ver, cu, tag, tag), 1_000_000_000),
+        ("torchvision-%s%%2B%s-%s-%s-win_amd64.whl" % (tv_ver, cu, tag, tag), 5_000_000),
     ]
+    if xf_ver:
+        wheels.append(("xformers-%s-%s-%s-win_amd64.whl" % (xf_ver, tag, tag), 50_000_000))
+    if ta_ver:
+        wheels.append(("torchaudio-%s%%2B%s-%s-%s-win_amd64.whl" % (ta_ver, cu, tag, tag), 1_000_000))
     cache = data_sub("cache", "pytorch_wheels")
     paths = []
     for name, minsize in wheels:
         dest = os.path.join(cache, name)
         if os.path.isfile(dest) and os.path.getsize(dest) >= minsize:
-            logf("[Kohya] 已存在缓存轮子，跳过下载: %s" % name)
+            logf("[%s] 已存在缓存轮子，跳过下载: %s" % (label, name))
         else:
-            logf("[Kohya] 下载 %s（断点续传，可随时停止/重试）…" % name)
+            logf("[%s] 下载 %s（断点续传，可随时停止/重试）…" % (label, name))
             if not _download_with_resume(base + "/" + name, dest, logf):
                 raise RuntimeError("下载失败，可重试（会从断点续传）: %s" % name)
             if not (os.path.isfile(dest) and os.path.getsize(dest) >= minsize):
                 raise RuntimeError("下载不完整: %s" % name)
         paths.append(dest)
-    logf("[Kohya] 本地安装 PyTorch 轮子（torch/torchvision/xformers，依赖走清华镜像）…")
+    logf("[%s] 本地安装 PyTorch 轮子（依赖走清华镜像）…" % label)
     env = build_env()
     env.setdefault("PIP_RETRIES", "10")
     env.setdefault("PIP_TIMEOUT", "120")
@@ -576,7 +579,7 @@ def _preinstall_torch(vpy, kdir, logf=print):
         raise RuntimeError("本地安装 PyTorch 轮子失败，请查看上方日志")
     r = subprocess.run([vpy, "-c", "import torch;print(torch.__version__);print(torch.cuda.is_available())"],
                        capture_output=True, text=True, timeout=180)
-    logf("[Kohya] 验证：" + ((r.stdout or "").strip().replace("\n", " | ")))
+    logf("[%s] 验证：" % label + ((r.stdout or "").strip().replace("\n", " | ")))
     if r.returncode != 0:
         raise RuntimeError("torch 安装后导入失败")
     return True
@@ -695,7 +698,7 @@ def install_kohya(logf=print):
             # 先 curl 断点续传预下载并装进 venv，官方 setup 检测到已装就会跳过。
             logf("[Kohya] 预下载 PyTorch 大轮子（torch ~3.3GB，curl 断点续传，避免安装卡死）…")
             try:
-                _preinstall_torch(vpy, kdir, logf)
+                _preinstall_torch(vpy, kdir, logf, xf_ver="0.0.30", label="Kohya")
                 torch_ok = _dep_ok("import torch; print(torch.__version__)")
                 if torch_ok:
                     logf("[Kohya] PyTorch 预装成功，官方安装脚本将跳过 torch 下载。")
@@ -829,7 +832,14 @@ def install_musubi_engine(logf=print):
         if run_stream([vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q"],
                       cwd=kdir, logf=logf) != 0:
             raise RuntimeError("pip 升级失败，请重试")
-        # 5) torch cu128（与 kohya 同源；首次可能较慢/需网络）
+        # 5) torch cu128：先 curl 断点续传预下载大轮子，避免 pip 直连 IncompleteRead 卡死
+        logf("[第二引擎] 预下载 PyTorch cu128 大轮子（torch ~3.3GB，断点续传）…")
+        try:
+            _preinstall_torch(vpy, kdir, logf, torch_ver="2.7.1", tv_ver="0.22.0",
+                              cu="cu128", label="第二引擎")
+            logf("[第二引擎] PyTorch 预装成功，官方 pip 将跳过下载。")
+        except Exception as e:
+            logf(f"[第二引擎] PyTorch 预下载失败（{e}），改由 pip 直接安装（可能需多次重试/挂代理）。")
         logf("[第二引擎] 安装 PyTorch cu128（约 2.5GB，与 kohya 同源，首次可能较慢）…")
         env = build_env([os.path.dirname(git)])
         if run_stream(
@@ -1270,7 +1280,14 @@ def install_ai_toolkit_engine(logf=print):
                       cwd=kdir, logf=logf) != 0:
             raise RuntimeError("pip 升级失败，请重试")
         env = build_env([os.path.dirname(git)])
-        # torch cu130（AI Toolkit 官方要求；需较新 NVIDIA 驱动 ≥570）
+        # torch cu130：先 curl 断点续传预下载大轮子，避免 pip 直连 IncompleteRead 卡死
+        logf("[第三引擎] 预下载 PyTorch cu130 大轮子（torch ~1.9GB，断点续传）…")
+        try:
+            _preinstall_torch(vpy, kdir, logf, torch_ver="2.13.0", tv_ver="0.28.0",
+                              ta_ver="2.11.0", cu="cu130", label="第三引擎")
+            logf("[第三引擎] PyTorch 预装成功，官方 pip 将跳过下载。")
+        except Exception as e:
+            logf(f"[第三引擎] PyTorch 预下载失败（{e}），改由 pip 直接安装（可能需多次重试/挂代理）。")
         logf("[第三引擎] 安装 PyTorch cu130（约 3GB，需较新 NVIDIA 驱动；首次可能较慢）…")
         if run_stream(
             [vpy, "-m", "pip", "install", "torch==2.13.0", "torchvision==0.28.0", "torchaudio==2.11.0",

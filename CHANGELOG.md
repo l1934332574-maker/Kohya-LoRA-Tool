@@ -12,6 +12,16 @@
 
 # 更新日志（Changelog）
 
+## 待发布（第二/三引擎 torch 下载修复）
+
+### 修复
+- **第二引擎（Krea2）/ 第三引擎（H3·Qwen·Z-Image）安装卡在下载 PyTorch（IncompleteRead/卡死）**：
+  三个引擎装 torch 都是 pip 直连下载 2~3GB 大轮子（无断点续传），国内网络一断就失败。
+  现在统一改为先 **curl 断点续传**从阿里 pytorch 镜像预下载轮子（torch/torchvision[/xformers][/torchaudio]）
+  再本地 pip 安装，官方 pip 检测到已装即跳过；kohya / musubi（cu128）/ ai-toolkit（cu130）全覆盖。
+
+---
+
 ## v0.9.0（2026-08-15）
 
 ### 新增
