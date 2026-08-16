@@ -3352,19 +3352,36 @@ def parse_version(v):
 
 
 def check_update(timeout=15):
-    """检查最新版本（多源，国内友好优先，避免 GitHub API 限流导致"无法连接"）。
+    """检查最新版本（多源取最高版本，避免单个 CDN 缓存滞后误判"已是最新"）。
 
-    顺序：
-      1) jsDelivr CDN 读取仓库 update.json（国内快、无限流；可能有 CDN 缓存延迟）
-      2) raw.githubusercontent 读取 update.json（兜底）
-      3) GitHub Releases API（最准，但未登录限流 60 次/小时/IP）
+    源（全部拉取，取版本号最高的结果）：
+      1) 魔搭 update.json（国内快）
+      2) raw.githubusercontent update.json（即时）
+      3) jsDelivr CDN update.json（国内快，可能有缓存延迟）
+      4) GitHub Releases API（最准，但未登录限流 60 次/小时/IP）
 
     返回 dict 或 None（全部失败返回 None）：
-      {'version','setup_url','notes','newer'}
+      {'version','setup_url','setup_url_cn','notes','newer'}
     """
     import json
-    # 1) + 2) + 3) 静态 update.json（发布新版本时同步更新）
-    # 魔搭优先：国内快、无 CDN 缓存；再 raw.githubusercontent（即时）；jsDelivr 兜底（国内快但有缓存延迟）
+    cur = parse_version(APP_VERSION)
+
+    def _pick(best, item):
+        # 保留版本号更高的；同版本优先保留 setup_url_cn 更完整（国内直链）的
+        if item is None:
+            return best
+        if best is None:
+            return item
+        lv = parse_version(item["version"]) or (0, 0, 0)
+        bv = parse_version(best["version"]) or (0, 0, 0)
+        if lv > bv:
+            return item
+        if lv == bv and item.get("setup_url_cn") and not best.get("setup_url_cn"):
+            return item
+        return best
+
+    best = None
+    # 1)~3) 静态 update.json：全部尝试，取最高版本，而不是"第一个能解析就拍板"
     for u in (
         "https://modelscope.cn/models/%s/resolve/master/update.json" % MODELSCOPE_MIRROR,
         "https://raw.githubusercontent.com/%s/main/update.json" % GITHUB_REPO,
@@ -3375,20 +3392,19 @@ def check_update(timeout=15):
             r = urllib.request.urlopen(req, timeout=timeout)
             data = json.loads(r.read().decode("utf-8", "replace"))
             tag = (data.get("version") or "").strip()
-            if not re.match(r"^v?\d+\.\d+\.\d+", tag):
+            if not parse_version(tag):
                 continue
-            cur = parse_version(APP_VERSION)
-            lat = parse_version(tag)
-            return {
+            item = {
                 "version": tag,
                 "setup_url": (data.get("setup_url") or "").strip(),
                 "setup_url_cn": (data.get("setup_url_cn") or "").strip(),
                 "notes": (data.get("notes") or "").strip()[:400],
-                "newer": bool(cur and lat and lat > cur),
+                "newer": bool(cur and parse_version(tag) > cur),
             }
+            best = _pick(best, item)
         except Exception:
             continue
-    # 3) 兜底：GitHub Releases API
+    # 4) 兜底：GitHub Releases API（版本更高才采纳）
     try:
         url = "https://api.github.com/repos/%s/releases/latest" % GITHUB_REPO
         req = urllib.request.Request(url, headers={
@@ -3396,25 +3412,22 @@ def check_update(timeout=15):
         r = urllib.request.urlopen(req, timeout=timeout)
         rel = json.loads(r.read().decode("utf-8", "replace"))
         tag = (rel.get("tag_name") or "").strip()
-        if not re.match(r"^v?\d+\.\d+\.\d+", tag):
-            return None
         setup_url = None
         for a in rel.get("assets", []) or []:
             if (a.get("name") or "").lower() == "setup.exe":
                 setup_url = a.get("browser_download_url") or a.get("url")
-        if not setup_url:
-            return None
-        cur = parse_version(APP_VERSION)
-        lat = parse_version(tag)
-        return {
-            "version": tag,
-            "setup_url": setup_url,
-            "setup_url_cn": "",
-            "notes": (rel.get("body") or "").strip()[:400],
-            "newer": bool(cur and lat and lat > cur),
-        }
+        if parse_version(tag) and setup_url:
+            item = {
+                "version": tag,
+                "setup_url": setup_url,
+                "setup_url_cn": "",
+                "notes": (rel.get("body") or "").strip()[:400],
+                "newer": bool(cur and parse_version(tag) > cur),
+            }
+            best = _pick(best, item)
     except Exception:
-        return None
+        pass
+    return best
 
 
 # ---------- 桌面 UI ----------
