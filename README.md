@@ -2,18 +2,19 @@
 
 > Windows 平台、小白向的本地 LoRA 训练桌面工具。基于 [kohya-ss](https://github.com/bmaltais/kohya_ss) / [sd-scripts](https://github.com/kohya-ss/sd-scripts)（Apache-2.0）二次封装，项目本体 **MIT 开源**。
 
-在 Windows 上一键安装环境并训练 LoRA，无需手动配置 Python / CUDA / PyTorch。内置 **画风 / 人物** 两种训练模式，支持 **SD1.5 / SDXL / FLUX.1 / Anima** 四种基础架构。
+在 Windows 上一键安装环境并训练 LoRA，无需手动配置 Python / CUDA / PyTorch。内置 **画风 / 人物** 等多种训练模式，支持 **SD1.5 / SDXL / FLUX.1 / FLUX.2 / Anima** 等基础架构。
 
 > ⚠️ **免责提示：禁止训练版权画师作品、受版权保护的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
-## ✨ 功能亮点（v0.9.0）
+## ✨ 功能亮点（v0.9.3）
 
 ### 🎨 训练模式与架构
 - **双模式**：🎨 画风 LoRA（自动过滤强人物五官标签）/ 👤 人物角色 LoRA（完整保留标签 + trigger 触发词 + 可选正则数据集）
-- **四架构**：SD1.5 / SDXL / FLUX.1 / Anima，自动识别底模类型并适配分辨率与参数
-- **🖼 Krea 2 图像 LoRA**（第二引擎，实验性）：独立 musubi-tuner 环境，12.9B 模型，预设 rank32/1024px
-- **🎬 视频 LoRA（MiniMax H3）**（第三引擎，实验性）：33.1B 全模态视频模型 T2V LoRA；视频数据集自动抽帧 + Qwen2.5-VL 自动打标；推荐 24G NVIDIA 显存
-- **🖼 Qwen-Image / Z-Image LoRA**（实验性）：20B / 8B 轻量模型，首次训练自动下载（国内镜像）
+- **多架构自动识别**：SD1.5 / SDXL / FLUX.1 / FLUX.2 / Anima，自动识别底模类型并适配分辨率与参数
+- **🖼 FLUX.2 图像 LoRA**（第二引擎）：2026 最新架构（4B DiT + Qwen3 文本编码器），8G 显存可跑（自动开 fp8 + blocks_to_swap 省显存），模型应用内下载（约 16GB，国内镜像）
+- **🖼 Krea 2 图像 LoRA**（第二引擎）：12.9B 模型，独立 musubi-tuner 环境，预设 rank32/1024px
+- **🎬 视频 LoRA（MiniMax H3）**（第三引擎）：33.1B 全模态视频模型 T2V LoRA；视频数据集自动抽帧 + Qwen2.5-VL 自动打标；推荐 24G NVIDIA 显存
+- **🖼 Qwen-Image / Z-Image LoRA**（第三引擎）：20B / 8B 轻量模型，首次训练自动下载（国内镜像）
 
 ### 🗂 数据与预处理
 - **数据集按项目隔离**：每个项目独立数据集目录，互不混用；支持秋叶式 `repeats_名称` 子目录结构
@@ -29,8 +30,10 @@
 - **训练分辨率可调**：高级参数面板可改（512/768/1024），16G 显存跑 Krea 2 / SDXL 可降到 768/512 防爆显存
 
 ### 📦 模型与更新
-- **应用内下载全覆盖**：SD1.5 / SDXL / Anima 底模 + FLUX 四件套 + Krea2 + H3 全部支持应用内下载（国内镜像、断点续传、下完自动识别）
-- **应用内自动更新**：启动自动检查新版本（国内 CDN 检查 + 断点续传下载 + 静默覆盖安装），发现新版一键升级，无需手动换包
+- **应用内下载全覆盖**：SD1.5 / SDXL / Anima 底模 + FLUX 四件套 + FLUX.2 + Krea2 + H3 全部支持应用内下载（国内镜像、断点续传、下完自动识别）
+- **应用内自动更新**：启动自动检查新版本（魔搭 / raw / jsDelivr / GitHub 四源取最高版本），断点续传下载 + 实时进度 + 静默覆盖安装，发现新版一键升级
+- **三引擎 PyTorch 安装稳定**：阿里镜像断点续传预下载 + 本地安装（自动重试 3 次），不再卡死在官方源下载 / ResolutionImpossible
+- **第三引擎支持「导入已装环境」**：手动装好 AI Toolkit 一键导入复用，无需重新部署；装完立即刷新检测
 - **kohya 环境重定向** 到 `%APPDATA%\KohyaLoraTool`：升级覆盖安装不重装环境
 - **AMD 兼容模式（实验性）**：一键开关 + 环境检查/安装引导（ROCm / ZLUDA）
 
