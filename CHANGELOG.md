@@ -12,7 +12,7 @@
 
 # 更新日志（Changelog）
 
-## 待发布（第二/三引擎 torch 下载修复）
+## v0.9.1（2026-08-16）
 
 ### 修复
 - **第二引擎（Krea2）/ 第三引擎（H3·Qwen·Z-Image）安装卡在下载 PyTorch（IncompleteRead/卡死）**：
