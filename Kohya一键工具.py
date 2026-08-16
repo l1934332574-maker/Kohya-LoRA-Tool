@@ -924,6 +924,47 @@ def krea2_missing_models():
     return missing
 
 
+# ---------- FLUX.2 图像 LoRA 训练（第二引擎 musubi-tuner） ----------
+FLUX2_MODEL_VERSION = "klein-4b"     # musubi --model_version（klein-4b：4B 蒸馏/基础版）
+FLUX2_RESOLUTION = 1024
+FLUX2_MAX_STEPS = 6000               # FLUX.2 自动约束最大总步数（防过拟合）
+
+# FLUX.2 klein 4B 模型文件（放 models/flux2/，不内置；Comfy-Org 非门禁 repack，国内镜像直链）
+FLUX2_MODEL_LINKS = {
+    "dit": ("flux-2-klein-base-4b.safetensors", "FLUX.2 klein 4B DiT 底模（base 版，约 7.2GB，训练必需）",
+            "https://hf-mirror.com/Comfy-Org/flux2-klein-4B/resolve/main/split_files/diffusion_models/flux-2-klein-base-4b.safetensors"),
+    "te": ("qwen_3_4b.safetensors", "Qwen3 4B 文本编码器（约 7.5GB，训练必需）",
+           "https://hf-mirror.com/Comfy-Org/flux2-klein-4B/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors"),
+    "vae": ("flux2-vae.safetensors", "FLUX.2 klein VAE（约 320MB，训练必需）",
+            "https://hf-mirror.com/Comfy-Org/flux2-klein-4B/resolve/main/split_files/vae/flux2-vae.safetensors"),
+}
+
+
+def flux2_models_dir():
+    return os.path.join(KIT_DIR, "models", "flux2")
+
+
+def flux2_model_files():
+    """扫描 models/flux2，返回 {dit,te,vae} 路径或 None。"""
+    d = flux2_models_dir()
+    out = {}
+    for key, (fname, _desc, _url) in FLUX2_MODEL_LINKS.items():
+        p = os.path.join(d, fname)
+        if os.path.isfile(p):
+            out[key] = p
+    return out
+
+
+def flux2_missing_models():
+    """返回缺失的 FLUX.2 模型说明列表（含国内镜像直链）。"""
+    files = flux2_model_files()
+    missing = []
+    for key, (fname, desc, url) in FLUX2_MODEL_LINKS.items():
+        if not files.get(key):
+            missing.append(f"· {desc}\n  文件: {fname}\n  下载: {url}")
+    return missing
+
+
 def write_musubi_dataset_config(image_dir, cache_dir, config_path, resolution=1024,
                                 num_repeats=1, keep_tokens=1, caption_extension=".txt"):
     """musubi-tuner 数据集配置（与 kohya 不同：image_directory / cache_directory）。
@@ -1082,6 +1123,139 @@ def _write_krea2_template(mode, params, output_name, out_dir=None):
         f.write(text)
     return path
 
+
+
+def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from=None, progress=None):
+    """FLUX.2 klein 图像 LoRA 训练（第二引擎 musubi-tuner）。
+
+    流程：校验 musubi 环境 → 校验模型文件 → 写 musubi 数据集配置 → 缓存 latents/文本编码器 → 训练。
+    模型需放入 models/flux2/（国内镜像下载，见 flux2_missing_models）。
+    """
+    params = params or {}
+    ok, detail, mvpy = musubi_engine_status()
+    if not ok:
+        raise RuntimeError("第二训练引擎未安装，请先在左侧点「②' 第二引擎(可选)」安装。\n" + detail)
+    kdir = get_kohya_dir()
+    mt_dir = os.path.join(kdir, "musubi-tuner")
+    accel = os.path.join(os.path.dirname(mvpy), "accelerate.exe")
+    if not os.path.isfile(accel):
+        raise RuntimeError("musubi-venv 缺少 accelerate，请重装第二引擎")
+    files = flux2_model_files()
+    missing = flux2_missing_models()
+    if missing:
+        raise RuntimeError(
+            "FLUX.2 训练缺少模型文件，请下载放入 models/flux2/ 文件夹：\n\n" + "\n".join(missing) +
+            "\n\n（在软件里点「打开 FLUX.2 模型文件夹」，用应用内下载或浏览器打开上面的国内镜像直链下载后放进去）")
+    train_dir = dataset_train_dir(mode, params.get("project"))
+    if count_images(train_dir) == 0:
+        raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
+    # 数据集配置 + 独立缓存目录
+    proj = _sanitize_dirname(params.get("project")) or "flux2"
+    cfg_path = os.path.join(KIT_DIR, "configs", "flux2_dataset_config.toml")
+    cache_dir = os.path.join(data_dir(), "dataset", proj, "flux2_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    resolution = int(params.get("resolution") or FLUX2_RESOLUTION)
+    write_musubi_dataset_config(train_dir, cache_dir, cfg_path, resolution=resolution,
+                                num_repeats=int(params.get("repeats", 2)), keep_tokens=1)
+    logf(f"[FLUX.2] 数据集: {train_dir}（{resolution}px, repeats={params.get('repeats', 2)}）")
+    # 预缓存 latents
+    logf("[FLUX.2] 缓存 latents …")
+    if run_stream([mvpy, os.path.join(mt_dir, "flux_2_cache_latents.py"),
+                   "--dataset_config", cfg_path, "--vae", files["vae"],
+                   "--model_version", FLUX2_MODEL_VERSION, "--num_workers", "1"],
+                  cwd=mt_dir, logf=logf) != 0:
+        raise RuntimeError("latents 缓存失败，请查看上方日志")
+    # 预缓存文本编码器输出
+    logf("[FLUX.2] 缓存文本编码器输出 …")
+    if run_stream([mvpy, os.path.join(mt_dir, "flux_2_cache_text_encoder_outputs.py"),
+                   "--dataset_config", cfg_path, "--text_encoder", files["te"],
+                   "--batch_size", "1", "--num_workers", "1", "--model_version", FLUX2_MODEL_VERSION],
+                  cwd=mt_dir, logf=logf) != 0:
+        raise RuntimeError("文本编码器缓存失败，请查看上方日志")
+    # 训练参数
+    rank = int(params.get("rank", 32))
+    alpha = int(params.get("alpha", 32))
+    lr = params.get("unet_lr", 1e-4)
+    epochs = int(params.get("max_epochs", 16))
+    gc_on = decide_gradient_checkpointing(params.get("gc", "自动"), vram_gb)
+    # 显存适配：fp8（DiT+文本编码器）+ blocks_to_swap（klein-4b 上限 13）
+    fp8 = vram_gb is None or vram_gb < 24
+    swap = 0
+    if vram_gb is None or vram_gb < 12:
+        swap = 10
+    elif vram_gb < 16:
+        swap = 6
+    elif vram_gb < 24:
+        swap = 2
+    swap = min(swap, 13)
+    # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
+    per_epoch = int(params.get("repeats", 2)) * count_images(train_dir)
+    if per_epoch * epochs > FLUX2_MAX_STEPS:
+        new_epochs = max(1, int(FLUX2_MAX_STEPS / max(1, per_epoch)))
+        logf(f"[FLUX.2] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
+        epochs = new_epochs
+    if progress is not None:
+        try:
+            progress.set_total(per_epoch * epochs)
+        except Exception:
+            pass
+    out_dir = data_sub("output", proj)
+    output_name = "flux2_lora"
+    cmd = [
+        accel, "launch", "--num_cpu_threads_per_process", "1", "--mixed_precision", "bf16",
+        os.path.join(mt_dir, "flux_2_train_network.py"),
+        "--model_version", FLUX2_MODEL_VERSION,
+        "--dit", files["dit"], "--vae", files["vae"], "--text_encoder", files["te"],
+        "--dataset_config", cfg_path,
+        "--sdpa", "--mixed_precision", "bf16",
+        "--timestep_sampling", "flux2_shift", "--weighting_scheme", "none",
+        "--optimizer_type", "adamw8bit", "--learning_rate", str(lr),
+        "--max_data_loader_n_workers", "1",
+        "--network_module", "networks.lora_flux_2", "--network_dim", str(rank), "--network_alpha", str(alpha),
+        "--max_train_epochs", str(epochs), "--save_every_n_epochs", "1", "--seed", "42",
+        "--output_dir", out_dir, "--output_name", output_name,
+    ]
+    if fp8:
+        cmd += ["--fp8_base", "--fp8_scaled", "--fp8_text_encoder"]
+    if swap > 0:
+        cmd += ["--blocks_to_swap", str(swap)]
+    if gc_on:
+        cmd += ["--gradient_checkpointing"]
+    logf(f"[FLUX.2] 底模: {files['dit']}")
+    logf(f"[FLUX.2] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 2)}")
+    logf(f"[FLUX.2] fp8={'开' if fp8 else '关'} | blocks_to_swap={swap} | 梯度检查点={'开' if gc_on else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
+    rc = run_stream(cmd, cwd=mt_dir, logf=logf)
+    if rc != 0:
+        raise RuntimeError(f"FLUX.2 训练结束，退出码 {rc}，请查看上方日志")
+    model_path = os.path.join(out_dir, output_name + ".safetensors")
+    logf(f"[FLUX.2] 完成！模型: {model_path}")
+    try:
+        _write_flux2_template(mode, params, output_name, out_dir=out_dir)
+        write_params_report(mode, params, output_name, out_dir=out_dir)
+    except Exception as e:
+        logf(f"[FLUX.2] 生成模板/报告失败（忽略）: {e}")
+    return model_path
+
+
+def _write_flux2_template(mode, params, output_name, out_dir=None):
+    """FLUX.2 LoRA 使用模板。"""
+    out_dir = out_dir or data_sub("output")
+    path = os.path.join(out_dir, output_name + "_使用模板.txt")
+    trig = ", ".join(split_triggers(params.get("trigger"))) if params.get("trigger") else "<你的触发词>"
+    text = (
+        "【FLUX.2 图像 LoRA 使用模板】\n"
+        f"模型文件：{output_name}.safetensors\n"
+        f"Trigger 触发词：{trig}\n"
+        "适用底模：FLUX.2 klein 系列（训练用 base 4B，出图可配 klein 4B/Turbo）\n"
+        "训练分辨率：1024px\n\n"
+        "使用建议：\n"
+        f"1. 正向提示词以触发词开头：{trig}, <描述>\n"
+        "2. 推荐 LoRA 权重 0.6 ~ 0.9\n"
+        "3. 该 LoRA 只能用于 FLUX.2 系列底模（不支持 SD/SDXL/FLUX.1）。\n"
+    )
+    with open(path, "w", encoding="utf-8-sig") as f:
+        f.write(text)
+    return path
 
 
 # ---------- 第三训练引擎（AI Toolkit：MiniMax H3 视频 LoRA） ----------
@@ -3766,6 +3940,10 @@ def _ckpt_keys(path):
 
 def _classify_base_keys(keys):
     joined = "\n".join(keys or [])
+    # FLUX.2：4B DiT（double/single stream modulation 是 FLUX.2 特有，须在 FLUX.1 判断之前）
+    if ("double_stream_modulation_img." in joined or "double_stream_modulation_txt." in joined
+            or "single_stream_modulation." in joined):
+        return "flux2"
     # FLUX：DiT（single/double transformer blocks + guidance embed）
     if ("single_transformer_blocks." in joined or "double_blocks." in joined
             or "guidance_embed." in joined or "model.diffusion_model.single_blocks." in joined):

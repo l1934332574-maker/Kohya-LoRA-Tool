@@ -669,6 +669,26 @@ class App:
                                              text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
                                              command=self._show_krea2_guide)
         self.btn_krea2_guide.pack(side="left", padx=(6, 4))
+        # FLUX.2 模型状态（仅 FLUX.2 模式显示，独立一行占满宽度）
+        self.flux2_row = ctk.CTkFrame(top, fg_color="transparent")
+        self.flux2_model_var = tk.StringVar(value="")
+        ctk.CTkLabel(self.flux2_row, textvariable=self.flux2_model_var, font=ui_font(FONT_BODY), text_color=ACC).pack(side="left")
+        self.btn_flux2_models = ctk.CTkButton(self.flux2_row, text="📂 打开 FLUX.2 模型文件夹", width=170, height=30,
+                                              fg_color=CARD2, hover_color="#343a46", border_width=1, border_color=BORDER,
+                                              text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
+                                              command=self.cmd_open_flux2_models)
+        self.btn_flux2_models.pack(side="left", padx=(10, 4))
+        self.btn_flux2_dl = ctk.CTkButton(self.flux2_row, text="⬇ 下载 FLUX.2 模型", width=122, height=30,
+                                          fg_color=ACC, hover_color=ACC_H, corner_radius=6,
+                                          text_color="#ffffff", font=ui_font(FONT_BODY),
+                                          command=self.cmd_dl_flux2_models)
+        self.btn_flux2_dl.pack(side="left", padx=(4, 4))
+        ctk.CTkLabel(self.flux2_row, text="base 4B 训练 → LoRA 可用于 klein 出图", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(8, 0))
+        self.btn_flux2_guide = ctk.CTkButton(self.flux2_row, text="📖 使用引导", width=92, height=30,
+                                             fg_color="transparent", hover_color="#252a36", border_width=1, border_color=ACC,
+                                             text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
+                                             command=self._show_flux2_guide)
+        self.btn_flux2_guide.pack(side="left", padx=(6, 4))
         # MiniMax H3 模型状态（仅视频模式显示，独立一行占满宽度）
         self.h3_row = ctk.CTkFrame(top, fg_color="transparent")
         self.h3_model_var = tk.StringVar(value="")
@@ -911,6 +931,8 @@ class App:
                 return bool(core.system_status().get("at_ok"))
             if check == "krea2_models":
                 return not core.krea2_missing_models()
+            if check == "flux2_models":
+                return not core.flux2_missing_models()
             if check == "h3_models":
                 return not core.h3_missing_models()
             if check == "at_model":
@@ -1629,6 +1651,8 @@ class App:
                 _hint = core.TRIGGER_HINT_AT
             elif self.mode == "krea2":
                 _hint = core.TRIGGER_HINT_KREA2
+            elif self.mode == "flux2":
+                _hint = core.TRIGGER_HINT_FLUX2
             elif self.mode == "character":
                 _hint = core.TRIGGER_HINT_CHARACTER
             else:
@@ -1640,8 +1664,8 @@ class App:
         try:
             _tef = getattr(self, "_adv_frames", {}).get("te_lr")
             if _tef is not None:
-                if self.mode in ("krea2", "video", "qwen_image", "zimage"):
-                    _tef.grid_remove()   # Krea2/视频/AI图像：文本编码器不训练，该参数无效
+                if self.mode in ("krea2", "flux2", "video", "qwen_image", "zimage"):
+                    _tef.grid_remove()   # Krea2/FLUX.2/视频/AI图像：文本编码器不训练，该参数无效
                 else:
                     try:
                         _tef.grid()
@@ -1650,7 +1674,7 @@ class App:
         except Exception:
             pass
         try:
-            _hide_base = self.mode in ("krea2", "video", "qwen_image", "zimage")
+            _hide_base = self.mode in ("krea2", "flux2", "video", "qwen_image", "zimage")
             for w in (self.base_label, self.base_combo, self.btn_pick_base, self.btn_refresh_base, self.btn_download_base):
                 try:
                     if _hide_base:
@@ -1671,6 +1695,17 @@ class App:
                 else:
                     try:
                         self.krea2_row.pack_forget()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                if self.mode == "flux2":
+                    self._refresh_flux2_status()
+                    self.flux2_row.pack(fill="x", pady=(8, 0))
+                else:
+                    try:
+                        self.flux2_row.pack_forget()
                     except Exception:
                         pass
             except Exception:
@@ -2226,7 +2261,7 @@ class App:
             "te_lr": float(_getv("te_lr", "1.5e-4")),
             "repeats": int(float(_getv("repeats", "5"))),
             "max_epochs": int(float(_getv("max_epochs", "8"))),
-            "resolution": int(float(_getv("resolution", "1024" if self.mode == "krea2" else str(core.RESOLUTIONS.get(self.base_type, 512))))),
+            "resolution": int(float(_getv("resolution", "1024" if self.mode in ("krea2", "flux2") else str(core.RESOLUTIONS.get(self.base_type, 512))))),
             "video_steps": int(float(_getv("video_steps", "2000"))),
             "train_text_encoder": not self.unet_only_var.get(),
             "style_caption": getattr(self, "style_caption_var", tk.StringVar()).get().strip(),
@@ -2276,6 +2311,79 @@ class App:
         except Exception as e:
             self._log(f"[ERROR] 打开标签编辑器失败：{e}")
             traceback.print_exc()
+
+    def cmd_open_flux2_models(self):
+        d = core.flux2_models_dir()
+        try:
+            os.makedirs(d, exist_ok=True)
+            os.startfile(d)
+        except Exception as e:
+            messagebox.showerror(core.APP_NAME, f"打开失败：{e}")
+
+    def _show_flux2_guide(self):
+        """FLUX.2 图像 LoRA 训练 · 详细逐步引导（小白版）。"""
+        w = ctk.CTkToplevel(self.root)
+        w.title("FLUX.2 图像 LoRA · 使用引导")
+        w.geometry("780x800")
+        w.transient(self.root)
+        txt = ctk.CTkTextbox(w, fg_color="#16181e", text_color="#c6ccd8", corner_radius=8,
+                             border_width=1, border_color=BORDER, font=ui_font(FONT_BODY), wrap="word")
+        txt.pack(fill="both", expand=True, padx=18, pady=18)
+        f2 = core.FLUX2_MODEL_LINKS
+        guide = (
+            "📖 FLUX.2 图像 LoRA 训练 · 详细引导（小白版）\n\n"
+            "▍原理一句话\n"
+            "FLUX.2 klein 是 2026 最新架构（4B DiT + Qwen3 文本编码器）。用 15~30 张图就能训出「你的角色/风格」LoRA。\n"
+            "训练用 base 4B 底模，训完的 LoRA 可用于 FLUX.2 klein 系列出图。\n\n"
+            "▍第 1 步：安装第二引擎\n"
+            "· 左侧点「②' 第二引擎(可选)」→「去安装」\n"
+            "· 自动创建独立环境（完全不影响现有画风/人物训练）\n"
+            "· 下载 PyTorch 约 2.5GB，10~30 分钟（国内镜像，断了自动续传）\n"
+            "· 装完绿点变「已装」\n\n"
+            "▍第 2 步：下载 FLUX.2 模型（3 个文件，放进 models/flux2/，共约 16GB）\n"
+            f"1) {f2['dit'][0]} —— {f2['dit'][1]}\n"
+            f"   国内镜像：{f2['dit'][2]}\n"
+            f"2) {f2['te'][0]} —— {f2['te'][1]}\n"
+            f"   国内镜像：{f2['te'][2]}\n"
+            f"3) {f2['vae'][0]} —— {f2['vae'][1]}\n"
+            f"   国内镜像：{f2['vae'][2]}\n"
+            "· 点「⬇ 下载 FLUX.2 模型」应用内下载（断点续传、下完自动识别），或点「📂 打开 FLUX.2 模型文件夹」手动放文件\n"
+            "· 顶部状态变成「FLUX.2 模型：齐全 ✓」即可\n\n"
+            "▍第 3 步：打开项目，切到 FLUX.2 模式\n"
+            "· 顶部训练模式选「🖼 FLUX.2 图像LoRA」\n"
+            "· 自动填好推荐参数（rank32 / alpha32 / lr 1e-4 / epochs16）\n\n"
+            "▍第 4 步：准备数据 + 一键训练\n"
+            "· 选 15~30 张同一人物/风格的图片文件夹，点「④ 数据预处理」\n"
+            "· 填一个唯一的英文触发词（如 my_f2_01）\n"
+            "· 点下方「一键开始训练」：自动缓存 latents → 缓存文本编码器 → 训练\n"
+            "· 8G 显存自动开 fp8 + blocks_to_swap 省显存（较慢），推荐 12G+\n\n"
+            "▍出图\n"
+            "训练完成后模型在 output 文件夹，配 FLUX.2 klein 底模 + LoRA（权重 0.6~0.9）使用。\n"
+        )
+        txt.insert("1.0", guide)
+        txt.configure(state="disabled")
+
+    def cmd_dl_flux2_models(self):
+        """FLUX.2 模型下载对话框：DiT+文本编码器+VAE，应用内下载（断点续传）。"""
+        self._build_links_dialog(
+            "下载 FLUX.2 模型",
+            "FLUX.2 训练需要以下文件（共约 16GB，应用内下载带断点续传、断了接着下）：",
+            core.FLUX2_MODEL_LINKS, core.flux2_model_files(),
+            "📂 打开 FLUX.2 模型文件夹", self.cmd_open_flux2_models, self.cmd_dl_flux2_models,
+            self._start_flux2_dl, "保存到 models/flux2/，下完自动识别（顶部状态变「齐全 ✓」）。")
+
+    def _start_flux2_dl(self, key):
+        self._start_model_file_dl(key, core.FLUX2_MODEL_LINKS, core.flux2_models_dir(), "flux2", "FLUX.2 模型")
+
+    def _refresh_flux2_status(self):
+        """FLUX.2 模型状态（顶部状态行）。"""
+        try:
+            _files = core.flux2_model_files()
+            _short = {"dit": "DiT", "te": "文本编码器", "vae": "VAE"}
+            _miss = "、".join(_short[k] for k in ("dit", "te", "vae") if not _files.get(k))
+            self.flux2_model_var.set(("FLUX.2 模型：缺 " + _miss + "（点⬇应用内下载）") if _miss else "FLUX.2 模型：齐全 ✓")
+        except Exception:
+            pass
 
     def cmd_open_krea2_models(self):
         d = core.krea2_models_dir()
@@ -2654,6 +2762,9 @@ class App:
                                  vram_gb=vram, resume_from=resume, progress=self._train_mon)
             elif params.get("mode") == "krea2":
                 core.train_krea2(self._log, mode="krea2", params=params,
+                                 vram_gb=vram, resume_from=resume, progress=self._train_mon)
+            elif params.get("mode") == "flux2":
+                core.train_flux2(self._log, mode="flux2", params=params,
                                  vram_gb=vram, resume_from=resume, progress=self._train_mon)
             else:
                 core.train(self._log, base_model=params["base_model"], mode=params["mode"],
@@ -3415,6 +3526,10 @@ class App:
                 self._log(f"[Krea2] 下载完成：{dest}")
                 self._refresh_krea2_status()
                 messagebox.showinfo(core.APP_NAME, f"Krea2 模型下载完成：\n{os.path.basename(dest)}\n\n已自动识别（状态已刷新）。")
+            elif kind == "flux2":
+                self._log(f"[FLUX.2] 下载完成：{dest}")
+                self._refresh_flux2_status()
+                messagebox.showinfo(core.APP_NAME, f"FLUX.2 模型下载完成：\n{os.path.basename(dest)}\n\n已自动识别（状态已刷新）。")
             else:
                 self._log(f"[底模] 下载完成：{dest}")
                 self._scan_base_models()
