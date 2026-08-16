@@ -17,6 +17,11 @@ import traceback
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
+# Windows 控制台默认 GBK，打印 ✔/✘/中文会 UnicodeEncodeError，统一转 UTF-8
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 FAILED = []
 
@@ -105,6 +110,15 @@ def test_download_models():
     # Krea2 文件齐全（含可选 turbo）
     if len(core.KREA2_MODEL_LINKS) < 4:
         raise AssertionError("KREA2_MODEL_LINKS 不完整")
+    # FLUX.2 三件套（DiT / Qwen3 文本编码器 / VAE）
+    for k in ("dit", "te", "vae"):
+        if k not in core.FLUX2_MODEL_LINKS:
+            raise AssertionError("FLUX2_MODEL_LINKS 缺 %s" % k)
+        v = core.FLUX2_MODEL_LINKS[k]
+        if len(v) != 3 or not str(v[2]).startswith("http"):
+            raise AssertionError("FLUX2_MODEL_LINKS[%s] 格式错误" % k)
+    if not callable(core.flux2_missing_models):
+        raise AssertionError("flux2_missing_models 缺失")
 
 
 def test_yaml():
@@ -134,7 +148,7 @@ def test_yaml():
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
-    check("导入 + 配置完整性（6 模式）", test_config_completeness)
+    check("导入 + 配置完整性（全部模式）", test_config_completeness)
     check("AI 图像模型配置", test_at_image_models)
     check("yaml 生成可解析", test_yaml)
     check("下载模型配置（FLUX/Anima/Krea2）", test_download_models)
