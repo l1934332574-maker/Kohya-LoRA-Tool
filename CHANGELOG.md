@@ -1,16 +1,21 @@
 ﻿# 更新日志（Changelog）
 
-# 更新日志（Changelog）
+## v0.9.4（2026-08-17）
 
-# 更新日志（Changelog）
+### 修复
+- **训练监控把数据集缓存进度误当成训练步数（"假 20/20 100%"卡住错觉）**：latents / 文本编码器缓存阶段的 tqdm 是批次进度，不再计入训练步数；缓存阶段单独显示「正在缓存数据集…」，训练真正开始后才显示步数/loss/速度。
+- **kohya venv 用 Python 3.10/3.11 建出、与内置 cp312 依赖错配导致 numpy/torch 装不上（训练退化成 CPU 版 torch → accelerator device: cpu 卡死）**：
+  - 建 venv 优先用 Python 3.12（一键安装脚本与程序内），并校验 venv 实际版本，非 3.12 给出明确提示；
+  - find_python 改为 3.12 优先（不再让 PATH 里任意版本的 python 抢跑建出错误版本 venv）；
+  - 内置离线 wheel 安装前按 venv Python 版本过滤，避免 cp312 wheel 装进 3.10/3.11 报 not supported；
+  - NVIDIA 卡上「已安装」判定要求 torch.cuda 可用，CPU 版 torch 不再被当成装好而跳过重装 cu128；
+  - AMD 版 PyTorch wheel URL 的 Python 标签映射修正（3.10→cp310，不再错配 cp312）。
+- **训练环境状态检测对第二/三引擎 venv python.exe 存在性硬校验**：musubi-venv / ai_toolkit_venv 的 python.exe 必须真实存在才算已安装，残缺 venv 不再显示为已安装。
 
-# 更新日志（Changelog）
+- **Qwen3-0.6B / Anima VAE 手动放置不生效（"放到指定文件夹也没用"）**：兼容新旧安装目录（老版 %APPDATA%\\Kohya_ss 与新版 %APPDATA%\\KohyaLoraTool\\anima 都扫描），用户按旧提示把模型放到 Kohya_ss\\Qwen3-0.6B 也能被识别，不再强制走自动下载。
+- **模型下载时报 python312.dll conflicts（venv 是 3.10/3.11 却混入 3.12 编译的扩展）**：下载前预检 huggingface_hub，版本错配时直接给出明确修复指引（用 Python 3.12 重建 venv / 手动放置模型），不再让用户面对晦涩的 dll 冲突报错。
 
-# 更新日志（Changelog）
-
-# 更新日志（Changelog）
-
-# 更新日志（Changelog）
+---
 
 ## v0.9.3（2026-08-17）
 

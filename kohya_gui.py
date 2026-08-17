@@ -472,8 +472,15 @@ class App:
             return
         try:
             snap = mon.snapshot()
+            phase = snap.get("phase") or "idle"
             total = snap.get("total") or 0
             step = snap.get("step") or 0
+            if phase == "cache":
+                # 数据集缓存阶段：缓存 tqdm 是批次进度，不是训练步数，单独提示
+                self.mon_progress.set(0.0)
+                self.mon_step_var.set("正在缓存数据集…（非训练进度）")
+                self.mon_eta_var.set("预计剩余: --")
+                return
             pct = (step / total) if total else 0.0
             self.mon_progress.set(min(max(pct, 0.0), 1.0))
             self.mon_step_var.set(f"步数 {step} / {total}（{pct*100:.0f}%）")
@@ -2975,14 +2982,18 @@ class App:
         vram = ginfo.get("vram_gb")
         env_dir = self.train_env_var.get().strip() or "（默认 kohya 环境）"
 
-        # 检测系统 Python，动态生成 wheel URL（cp311 / cp312）
+        # 检测系统 Python，动态生成 wheel URL（cp310 / cp311 / cp312）
         sys_vers = core.detect_system_pythons()
-        py_ver = "3.12" if "3.12" in sys_vers else ("3.11" if "3.11" in sys_vers else None)
-        cp = "cp311" if py_ver == "3.11" else "cp312"
+        py_ver = ("3.12" if "3.12" in sys_vers else
+                  "3.11" if "3.11" in sys_vers else
+                  "3.10" if "3.10" in sys_vers else None)
+        cp = {"3.10": "cp310", "3.11": "cp311"}.get(py_ver, "cp312")
         if sys_vers:
             py_line = "检测到系统 Python：" + "、".join(sys_vers)
             if py_ver is None:
                 py_line += "（⚠ AMD 官方仅支持 3.11/3.12，请安装 Python 3.12）"
+            elif py_ver == "3.10":
+                py_line += "（⚠ AMD 官方仅验证 3.11/3.12，3.10 的 wheel 可能不存在，建议安装 Python 3.12）"
             elif py_ver == "3.11":
                 py_line += "（官方验证版为 3.12，3.11 的 wheel 见发布目录确认）"
         else:

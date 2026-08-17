@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """通用工具函数（渐进式拆分，从 Kohya一键工具.py 迁出）。
 原文件通过 `from kohya_core.utils import *` 使用。
 """
@@ -184,25 +184,31 @@ def _py_has_venv(p):
 
 
 def find_python():
+    """找一个能创建虚拟环境的 Python，优先 3.12（与内置 cp312 wheel 匹配），
+    其次 3.11 / 3.10；PATH 里的 python 放最后（可能是精简版/版本不可控）。
+
+    之前 PATH python 排最前：若用户 PATH 里是 3.10（或 ComfyUI 精简版），
+    建出来的 venv 是 3.10，而内置离线 wheel 是 cp312，导致 numpy/torch 装不上
+    （训练只有 CPU 版 torch → 'accelerator device: cpu' 卡死）。"""
     cands = []
-    p = shutil.which("python")
-    if p:
-        cands.append(p)
-    # 标准安装路径全扫一遍（3.10~3.12）：PATH 里即使只有 ComfyUI 等精简 python，
-    # 也能找到真正可建 venv 的 Python。
+    # 标准安装路径全扫一遍（3.12 优先）：PATH 里即使只有 ComfyUI 等精简 python，
+    # 也能找到真正可建 venv 的 Python；且 3.12 与内置离线 wheel（cp312）匹配。
     for c in (
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Python\Python310\python.exe"),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Python\Python311\python.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Python\Python312\python.exe"),
-        r"C:\Python310\python.exe",
-        r"C:\Python311\python.exe",
         r"C:\Python312\python.exe",
-        r"C:\Program Files\Python310\python.exe",
-        r"C:\Program Files\Python311\python.exe",
         r"C:\Program Files\Python312\python.exe",
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Python\Python311\python.exe"),
+        r"C:\Python311\python.exe",
+        r"C:\Program Files\Python311\python.exe",
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Python\Python310\python.exe"),
+        r"C:\Python310\python.exe",
+        r"C:\Program Files\Python310\python.exe",
     ):
         if os.path.isfile(c):
             cands.append(c)
+    p = shutil.which("python")
+    if p:
+        cands.append(p)
     for c in cands:
         s, parts = _py_version(c)
         if not (s and PY_MIN <= parts < PY_MAX):

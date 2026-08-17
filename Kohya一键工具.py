@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.3"
+APP_VERSION = "0.9.4"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -99,6 +99,20 @@ class TrainMonitor:
     """训练实时监控：从 kohya 训练日志里解析 步数/loss/lr/速度/预计剩余时间。
     线程安全（内部用锁）；GUI 主线程通过 snapshot() 轮询刷新面板。"""
 
+    # 数据集缓存阶段的日志标志：此阶段输出的 tqdm 是缓存进度（批次），不是训练步数，
+    # 不能当成训练进度显示（否则会出现"假 20/20 100%"卡住错觉）。
+    _CACHE_MARKERS = (
+        "caching latents", "caching latent", "caching text encoder",
+        "caching vae", "cache latents", "cache text encoder", "cache vae",
+    )
+    # 缓存结束标志：出现后认为进入训练阶段（后续 tqdm 是训练步数）
+    _CACHE_END_MARKERS = (
+        "latents cached", "latent cached", "cached latents", "text encoder outputs cached",
+        "latent cache done", "caching done", "cache done",
+        "latents are cached", "latent are cached", "text encoder outputs are cached",
+        "caching finished", "finished caching",
+    )
+
     def __init__(self):
         self._lock = threading.Lock()
         self.reset()
@@ -118,6 +132,8 @@ class TrainMonitor:
         self.speed = 0.0            # 步/秒
         self.eta = None             # 预计剩余秒数
         self.running = False
+        self.phase = "idle"         # idle / cache / train（train 才更新训练步数）
+        self.phase_label = None     # 阶段提示文案（如"正在缓存数据集…"）
         self._last_step = 0
         self._last_time = None
 
@@ -145,18 +161,39 @@ class TrainMonitor:
     def on_line(self, line):
         """解析一行训练日志（兼容 kohya 两种格式：'steps: N ... loss: x lr: y' 与 tqdm 'N/M [..] loss=..'）。
 
-        注意：tqdm 格式（N/M [）优先，因为它带真实总步数。
-        格式1（steps: N）要排除 kohya 启动时打印的
-        'total optimization steps: 2916' / 'gradient accumulation steps: N' 等，
-        否则会把"总步数"误当成"当前步数"，导致监控进度条瞬间拉满/跳变。
+        阶段判定：
+        - 检测到"缓存 latents / 缓存文本编码器"等日志时进入 cache 阶段，此阶段所有 tqdm
+          都视为缓存进度，不更新训练步数（避免把缓存进度误当成训练进度，出现"假 20/20"）。
+        - 出现训练标志（steps: / epoch:）或缓存结束标志，或 tqdm 总数与已设置的总步数一致时，
+          进入 train 阶段，正常解析步数/loss。
         """
         try:
             s = str(line)
+            low = s.lower()
+            # run_stream 打印的命令行回显（"$ ..."）不参与阶段判定
+            if low.startswith("$ "):
+                return False
+            # 缓存阶段检测
+            if any(m in low for m in self._CACHE_MARKERS):
+                with self._lock:
+                    if self.phase != "train":
+                        self.phase = "cache"
+                        self.phase_label = "正在缓存数据集…"
+                return True
+            # 缓存结束 → 训练阶段
+            if any(m in low for m in self._CACHE_END_MARKERS):
+                with self._lock:
+                    if self.phase != "train":
+                        self.phase = "train"
+                        self.phase_label = None
+                return True
             step = None
             total = None
+            is_tqdm = False
             # 格式2（优先）：tqdm 进度条 N/M [  或 N/M [..] it/s
             m = re.search(r"(\d+)\s*/\s*(\d+)\s*\[", s)
             if m:
+                is_tqdm = True
                 step = int(m.group(1))
                 total = int(m.group(2))
             else:
@@ -165,27 +202,42 @@ class TrainMonitor:
                     m = re.search(r"steps:\s*(\d+)(?!%)", s)
                     if m:
                         step = int(m.group(1))
+            # 训练开始标志：独立的 steps: / epoch: 日志 → 进入训练阶段
+            if (not is_tqdm) and (step is not None or re.search(r"\bepoch\s*:", s, re.I)):
+                with self._lock:
+                    if self.phase != "train":
+                        self.phase = "train"
+                        self.phase_label = None
             if step is None:
                 return False
-            # loss：兼容 'loss:' 与 'loss='；同样 lr
-            ml = re.search(r"loss[=:]\s*([0-9.eE+-]+)", s)
-            loss = float(ml.group(1)) if ml else None
-            mr = re.search(r"lr[=:]\s*([0-9.eE+-]+)", s)
-            lr = float(mr.group(1)) if mr else None
-            # 速度：tqdm 的 'x.xx it/s' 或 'x.xx s/it'
-            speed = None
-            ms = re.search(r"([0-9.]+)\s*it/s", s)
-            if ms:
-                speed = float(ms.group(1))
-            else:
-                ms = re.search(r"([0-9.]+)\s*s/it", s)
-                if ms and float(ms.group(1)) > 0:
-                    speed = 1.0 / float(ms.group(1))
-            now = time.time()
             with self._lock:
+                # 缓存阶段：tqdm 是缓存进度，不更新训练步数
+                if self.phase != "train":
+                    # 兜底：tqdm 总数与已设置的总步数一致 → 视为训练 tqdm
+                    #（覆盖"短训练全程只有 tqdm、没有 steps: 日志"的场景，如 sd-scripts <200 步）
+                    if is_tqdm and total and total > 0 and self.total and total == self.total:
+                        self.phase = "train"
+                        self.phase_label = None
+                    else:
+                        return True
                 self.step = step
                 if total and total > 0:
                     self.total = total
+                # loss：兼容 'loss:' 与 'loss='；同样 lr
+                ml = re.search(r"loss[=:]\s*([0-9.eE+-]+)", s)
+                loss = float(ml.group(1)) if ml else None
+                mr = re.search(r"lr[=:]\s*([0-9.eE+-]+)", s)
+                lr = float(mr.group(1)) if mr else None
+                # 速度：tqdm 的 'x.xx it/s' 或 'x.xx s/it'
+                speed = None
+                ms = re.search(r"([0-9.]+)\s*it/s", s)
+                if ms:
+                    speed = float(ms.group(1))
+                else:
+                    ms = re.search(r"([0-9.]+)\s*s/it", s)
+                    if ms and float(ms.group(1)) > 0:
+                        speed = 1.0 / float(ms.group(1))
+                now = time.time()
                 if loss is not None:
                     self.loss_prev = self.loss
                     self.loss = loss
@@ -222,32 +274,12 @@ class TrainMonitor:
                 "loss_history": list(self.loss_history),
                 "lr": self.lr, "speed": self.speed, "eta": self.eta,
                 "running": self.running,
+                "phase": self.phase, "phase_label": self.phase_label,
             }
 
     def finish(self):
         with self._lock:
             self.running = False
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ---------- 环境检测 / 安装 ----------
-
-
-
-
-
 
 
 def _winget_install(pkg_id, logf):
@@ -645,7 +677,17 @@ def install_kohya(logf=print):
             logf("[Kohya] 创建 Python 虚拟环境…")
             if run_stream([py, "-m", "venv", "venv"], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
                 raise RuntimeError("创建 venv 失败")
-        # 已安装验证：torch + Pillow + numpy + sd-scripts 齐全才算装好，
+        # venv Python 版本校验：软件内置离线 wheel 是 cp312（Python 3.12），
+        # 若 venv 是 3.10/3.11，内置 wheel 装不上会报 not supported，
+        # torch 也会退化成 CPU 版 → 训练只有 'accelerator device: cpu'。
+        try:
+            _venv_ver = venv_python_version(os.path.join(kdir, "venv"))
+        except Exception:
+            _venv_ver = None
+        if _venv_ver and not _venv_ver.startswith("3.12"):
+            logf(f"[Kohya] ⚠ venv 是 Python {_venv_ver}，而软件内置依赖为 3.12（cp312）。"
+                 f"若非 3.12，numpy/torch 内置 wheel 会装不上，建议安装 Python 3.12 后重建 venv。")
+        # 已安装验证：torch（NVIDIA 卡需 CUDA 可用）+ Pillow + numpy + sd-scripts 齐全才算装好，
         # 否则可能被中断的安装坑到（例如有 torch 但缺 Pillow，预处理会失败）。
         def _dep_ok(code):
             try:
@@ -653,7 +695,16 @@ def install_kohya(logf=print):
                                       timeout=120).returncode == 0
             except Exception:
                 return False
-        torch_ok = _dep_ok("import torch; print(torch.__version__)")
+        try:
+            _gpu_vendor = detect_gpu_vendor()
+        except Exception:
+            _gpu_vendor = None
+        # CPU 版 torch（Torch not compiled with CUDA enabled）会让训练全程 CPU：
+        # NVIDIA 卡上"已安装"判定要求 CUDA 可用，CPU 版不算装好，触发重装 cu128。
+        if _gpu_vendor == "amd":
+            torch_ok = _dep_ok("import torch; print(torch.__version__)")
+        else:
+            torch_ok = _dep_ok("import torch; assert torch.cuda.is_available()")
         deps_ok = _dep_ok("import PIL, numpy")
         if torch_ok and deps_ok and os.path.isdir(os.path.join(kdir, "sd-scripts")):
             logf("[Kohya] 检测到已安装环境（torch + Pillow/numpy 可用），跳过重复安装。")
@@ -665,7 +716,7 @@ def install_kohya(logf=print):
             logf("[Kohya] 检测到已装 torch 但缺 Pillow/numpy（可能之前安装被中断），正在快速补装…")
             _env2 = build_env()
             _ok2 = False
-            _wheels2 = _bundled_pip_wheels()
+            _wheels2 = _wheels_for_python(_bundled_pip_wheels(), vpy)
             if _wheels2:
                 logf("[Kohya] 使用内置离线 wheel 安装 Pillow/numpy…")
                 if run_stream([vpy, "-m", "pip", "install", "--no-input", "--no-index"] + _wheels2,
@@ -720,6 +771,9 @@ def install_kohya(logf=print):
             torchv = lines[0] if lines else "?"
             cuda = lines[1] if len(lines) > 1 else "?"
             logf(f"[Kohya] 验证：torch {torchv} | CUDA 可用: {cuda}")
+            if _gpu_vendor != "amd" and cuda != "True":
+                logf("[Kohya] ⚠ torch 未启用 CUDA（可能是 CPU 版）。训练会全程 CPU 且极慢，"
+                     "请重跑【一键安装】确保装 cu128 版 PyTorch，或检查 NVIDIA 驱动。")
         except Exception as e:
             logf(f"[Kohya] 验证 torch 失败: {e}")
         return kdir
@@ -2111,7 +2165,7 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         _env = build_env()
         _ok = False
         # 优先用内置离线 wheel（彻底绕开网络不稳）
-        _wheels = _bundled_pip_wheels()
+        _wheels = _wheels_for_python(_bundled_pip_wheels(), vpy)
         if _wheels:
             logf("[预处理] 使用内置离线 wheel 安装 Pillow/numpy…")
             if run_stream([vpy, "-m", "pip", "install", "--no-input", "--no-index"] + _wheels,
@@ -2391,9 +2445,12 @@ def venv_python_version(venv_dir):
 
 
 def _amd_torch_wheels(venv_dir):
-    """按训练环境 Python 版本生成 AMD 版 PyTorch wheel URL（cp311/cp312）。"""
+    """按训练环境 Python 版本生成 AMD 版 PyTorch wheel URL（cp310/cp311/cp312）。
+
+    注意：之前 3.10 会错配成 cp312，导致 AMD 环境 torch 装不上。"""
     ver = venv_python_version(venv_dir) or "3.12"
-    cp = "cp311" if ver.startswith("3.11") else "cp312"
+    cp = {"3.10": "cp310", "3.11": "cp311", "3.12": "cp312"}.get(
+        ".".join(ver.split(".")[:2]), "cp312")
     return [
         f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/torch-{AMD_TORCH_VERSION}%2Brocm{AMD_ROC_VERSION}-{cp}-{cp}-win_amd64.whl",
         f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/torchaudio-{AMD_TORCH_VERSION}%2Brocm{AMD_ROC_VERSION}-{cp}-{cp}-win_amd64.whl",
@@ -2410,6 +2467,37 @@ def _bundled_pip_wheels():
             if f.lower().endswith((".whl", ".tar.gz")):
                 wheels.append(os.path.join(d, f))
     return wheels
+
+
+def _wheels_for_python(wheels, vpy):
+    """按 venv Python 版本过滤内置 wheel：cpXXX 标签不匹配的跳过，
+    避免"3.10 venv 装 cp312 wheel 报 not supported"（numpy/torch 装不上 → 训练只有 CPU 版 torch）。
+
+    纯 Python wheel（py3-none-any）与 sdist（.tar.gz）保留；无法判断标签的保留（pip 会自行拒绝）。"""
+    if not wheels:
+        return wheels
+    ver = None
+    try:
+        r = subprocess.run([vpy, "-c", "import sys;print('%d%d'%sys.version_info[:2])"],
+                           capture_output=True, text=True, timeout=60)
+        ver = (r.stdout or "").strip()
+    except Exception:
+        ver = None
+    if not ver:
+        return wheels
+    out = []
+    for w in wheels:
+        name = os.path.basename(str(w)).lower()
+        if name.endswith(".tar.gz") or "-py3-none-any" in name or "-py2.py3-none-any" in name:
+            out.append(w)
+            continue
+        # wheel 文件名带 cpXXX 标签：必须与 venv 一致，否则 pip 会拒绝
+        if re.search(r"-cp\d+[0-9]-", name):
+            if ("-cp%s-" % ver) in name.replace("+", "-"):
+                out.append(w)
+        else:
+            out.append(w)
+    return out
 
 
 def _wheel_valid(path):
@@ -2470,7 +2558,11 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
     subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
                     "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
     env = build_env()
-    wheels = _bundled_pip_wheels()
+    _all_wheels = _bundled_pip_wheels()
+    wheels = _wheels_for_python(_all_wheels, vpy)
+    if _all_wheels and not wheels:
+        logf("[环境] 内置离线 wheel 与 venv Python 版本不匹配（venv 非 3.12），改用镜像安装对应版本…")
+
     if wheels:
         if run_stream([vpy, "-m", "pip", "install", "--no-input", "--no-index"] + wheels,
                       cwd=kdir, env=env, logf=logf) == 0:
@@ -4106,6 +4198,23 @@ def _hf_download(repo, local_dir, logf=print, allow_patterns=None):
     if not os.path.isfile(vpy):
         raise RuntimeError("Kohya 尚未安装，无法下载模型组件，请先安装训练内核。")
     os.makedirs(local_dir, exist_ok=True)
+    # 预检 huggingface_hub：venv Python 与依赖版本错配（如 3.10 venv 混入 cp312 扩展）时
+    # import 会崩（python312.dll conflicts），这里给出明确提示而不是晦涩的 ImportError。
+    try:
+        _r = subprocess.run([vpy, "-c", "import huggingface_hub; print('ok')"],
+                            capture_output=True, text=True, timeout=120)
+        _hf_ok = _r.returncode == 0
+        _hf_err = ((_r.stderr or _r.stdout or "").strip().splitlines() or ["未知错误"])[-1]
+    except Exception as e:
+        _hf_ok, _hf_err = False, str(e)
+    if not _hf_ok:
+        raise RuntimeError(
+            "venv 的 huggingface_hub 无法运行（常见：venv 是 Python 3.10/3.11，却混入了 3.12 编译的扩展，"
+            "import 报 python312.dll conflicts）。\n"
+            "解决办法（任选）：\n"
+            "1) 删除 kohya 的 venv 文件夹，用 Python 3.12 重跑【一键安装】（推荐）；\n"
+            "2) 或按下方提示手动放置模型文件，避免走自动下载。\n"
+            f"详细信息：{_hf_err}")
     code = (
         "import os\n"
         "os.environ['HF_ENDPOINT']='https://hf-mirror.com'\n"
@@ -4118,6 +4227,29 @@ def _hf_download(repo, local_dir, logf=print, allow_patterns=None):
     rc = run_stream([vpy, "-c", code], logf=logf)
     if rc != 0:
         raise RuntimeError(f"模型组件下载失败（退出码 {rc}）：{repo}")
+
+
+def _anima_bases():
+    """Anima 组件可能存在的根目录（兼容新旧安装目录）。
+
+    老版本安装目录是 %APPDATA%\\Kohya_ss（提示让用户放 Kohya_ss\\Qwen3-0.6B），
+    新版本是 %APPDATA%\\KohyaLoraTool\\anima。都扫一遍，避免"放到指定文件夹也没用"。
+    """
+    ap = os.environ.get("APPDATA", os.path.expanduser("~"))
+    return [
+        os.path.join(ap, "KohyaLoraTool", "anima"),
+        os.path.join(ap, "Kohya_ss"),
+        os.path.join(ap, "Kohya_ss", "kohya_ss"),
+    ]
+
+
+def _anima_find_qwen3_any():
+    """遍历所有可能目录找 Qwen3，返回 (路径, 所在 base)。"""
+    for base in _anima_bases():
+        p = _anima_find_qwen3(base)
+        if p:
+            return p, base
+    return None, None
 
 
 def _anima_find_qwen3(base):
@@ -4150,16 +4282,18 @@ def _ensure_anima_components(logf=print):
 
     返回 (qwen3 路径, vae 路径)；缺失时自动从 hf-mirror 下载。
     """
-    base = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "KohyaLoraTool", "anima")
+    bases = _anima_bases()
+    base = bases[0]
     os.makedirs(base, exist_ok=True)
     # Qwen3 就绪判定：①完整目录（含 config.json）②单个 safetensors 权重（sd-scripts 单文件模式）
-    qwen3_path = _anima_find_qwen3(base)
+    # 兼容新旧安装目录（KohyaLoraTool\\anima 与老版 Kohya_ss），用户按提示手动放置也能识别。
+    qwen3_path, qwen3_base = _anima_find_qwen3_any()
     if qwen3_path is None:
         qwen3_dir = os.path.join(base, "Qwen3-0.6B")
         logf("[Anima] 首次使用需要下载 Qwen3-0.6B 文本编码器（约 1.2GB，走 hf-mirror）…")
         try:
             _hf_download("Qwen/Qwen3-0.6B", qwen3_dir, logf)
-            qwen3_path = _anima_find_qwen3(base)
+            qwen3_path, qwen3_base = _anima_find_qwen3_any()
         except Exception as e:
             raise RuntimeError(
                 f"Qwen3-0.6B 自动下载失败：{e}\n\n"
@@ -4172,14 +4306,19 @@ def _ensure_anima_components(logf=print):
             raise RuntimeError(f"Qwen3-0.6B 仍未就绪，请检查：{os.path.join(base, 'Qwen3-0.6B')}")
     vae_dir = os.path.join(base, "Anima_vae")
     vae_file = None
-    if os.path.isdir(vae_dir):
-        for root, _dirs, files in os.walk(vae_dir):
-            for f in files:
-                if f.lower().endswith((".safetensors", ".pth")):
-                    vae_file = os.path.join(root, f)
+    # 兼容新旧目录：先扫标准位置，再扫旧版 Kohya_ss 目录
+    for _b in bases:
+        _vd = os.path.join(_b, "Anima_vae")
+        if os.path.isdir(_vd):
+            for root, _dirs, files in os.walk(_vd):
+                for f in files:
+                    if f.lower().endswith((".safetensors", ".pth")):
+                        vae_file = os.path.join(root, f)
+                        break
+                if vae_file:
                     break
-            if vae_file:
-                break
+        if vae_file:
+            break
     if not vae_file:
         logf("[Anima] 首次使用需要下载 Qwen-Image VAE（走 hf-mirror）…")
         try:

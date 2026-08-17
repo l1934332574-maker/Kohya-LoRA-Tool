@@ -119,18 +119,28 @@ if not exist "%KOHYA_DIR%\sd-scripts\sdxl_train_network.py" (
 )
 
 rem ================= 创建虚拟环境 =================
+rem 优先用 Python 3.12（与内置离线 wheel cp312 匹配）；3.10/3.11 建的 venv 装不上 cp312 依赖
+rem 会导致 numpy/torch 报 not supported、训练退化成 CPU 版（accelerator device: cpu）。
 if not exist "%KOHYA_DIR%\venv" (
-    echo [第 3 步] 正在创建 Python 虚拟环境…
+    echo [第 3 步] 正在创建 Python 虚拟环境（优先 Python 3.12）…
     pushd "%KOHYA_DIR%"
-    python -m venv venv
+    py -3.12 -m venv venv 2>nul
+    if errorlevel 1 python -m venv venv
     popd
-    if errorlevel 1 (
+    if not exist "%KOHYA_DIR%\venv\Scripts\python.exe" (
         echo [错误] 创建虚拟环境失败。
         pause
         exit /b 1
     )
 ) else (
     echo [第 3 步] 虚拟环境已存在，跳过。
+)
+"%KOHYA_DIR%\venv\Scripts\python.exe" -c "import sys;print('[信息] venv Python 版本:','%d.%d'%sys.version_info[:2])"
+rem 若非 3.12，后续内置 cp312 wheel 可能装不上，提示用户装 3.12 重建
+"%KOHYA_DIR%\venv\Scripts\python.exe" -c "import sys;sys.exit(0 if sys.version_info[:2]==(3,12) else 1)" >nul 2>nul
+if errorlevel 1 (
+    echo [警告] venv 不是 Python 3.12，内置依赖为 3.12 版本，可能安装失败。
+    echo        建议安装 Python 3.12 后删除 %KOHYA_DIR%\venv 再重跑本脚本。
 )
 
 rem 已安装则跳过（重复运行秒过）
