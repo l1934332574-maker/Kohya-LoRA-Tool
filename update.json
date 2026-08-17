@@ -1,6 +1,6 @@
 {
-  "version": "v0.9.4",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.4/Setup.exe",
+  "version": "v0.9.5",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.5/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.9.4：修复训练监控假进度（缓存当步数）；venv 强制 3.12 避免依赖错配；CPU 版 torch 不再放行；Qwen3/VAE 手动放置兼容新旧目录；huggingface_hub 版本错配明确提示"
+  "notes": "v0.9.5：修复第二/三引擎 torch 本地轮子文件名含 URL 编码加号导致安装失败（Invalid wheel filename），并兼容旧缓存改名复用；Anima VAE 改用国内直链下载"
 }

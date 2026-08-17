@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.4"
+APP_VERSION = "0.9.5"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -588,15 +588,26 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
     cache = data_sub("cache", "pytorch_wheels")
     paths = []
     for name, minsize in wheels:
-        dest = os.path.join(cache, name)
+        # 本地文件名必须是合法 wheel 名：%2B 是 URL 编码的 '+'，pip 本地安装按文件名解析版本，
+        # 含 %2B 会报 "Invalid wheel filename (invalid version)"。下载 URL 保持 %2B，本地名解码成 +。
+        local_name = name.replace("%2B", "+")
+        dest = os.path.join(cache, local_name)
+        # 兼容旧版本残留的 %2B 文件名缓存（完整则改名复用，避免重新下载 3GB）
+        legacy = os.path.join(cache, name)
+        if (not os.path.isfile(dest)) and os.path.isfile(legacy) and os.path.getsize(legacy) >= minsize:
+            try:
+                os.replace(legacy, dest)
+                logf("[%s] 已把旧 %2B 文件名缓存改名为合法名: %s" % (label, local_name))
+            except Exception:
+                pass
         if os.path.isfile(dest) and os.path.getsize(dest) >= minsize:
-            logf("[%s] 已存在缓存轮子，跳过下载: %s" % (label, name))
+            logf("[%s] 已存在缓存轮子，跳过下载: %s" % (label, local_name))
         else:
-            logf("[%s] 下载 %s（断点续传，可随时停止/重试）…" % (label, name))
+            logf("[%s] 下载 %s（断点续传，可随时停止/重试）…" % (label, local_name))
             if not _download_with_resume(base + "/" + name, dest, logf):
-                raise RuntimeError("下载失败，可重试（会从断点续传）: %s" % name)
+                raise RuntimeError("下载失败，可重试（会从断点续传）: %s" % local_name)
             if not (os.path.isfile(dest) and os.path.getsize(dest) >= minsize):
-                raise RuntimeError("下载不完整: %s" % name)
+                raise RuntimeError("下载不完整: %s" % local_name)
         paths.append(dest)
     logf("[%s] 本地安装 PyTorch 轮子（依赖走清华镜像）…" % label)
     env = build_env()
@@ -4320,9 +4331,17 @@ def _ensure_anima_components(logf=print):
         if vae_file:
             break
     if not vae_file:
-        logf("[Anima] 首次使用需要下载 Qwen-Image VAE（走 hf-mirror）…")
+        # 用国内直链直接下载（与 Krea2/FLUX2 模型下载一致），不依赖 huggingface_hub 的
+        # snapshot_download（snapshot_download 对 allow_patterns 匹配/repo 结构敏感，易失败）
+        logf("[Anima] 首次使用需要下载 Qwen-Image VAE（约 0.3GB，国内直链）…")
+        vae_url = "https://hf-mirror.com/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors"
+        vae_dest = os.path.join(vae_dir, "qwen_image_vae.safetensors")
         try:
-            _hf_download("circlestone-labs/Anima", vae_dir, logf, allow_patterns=["split_files/vae/*"])
+            os.makedirs(vae_dir, exist_ok=True)
+            if not (os.path.isfile(vae_dest) and os.path.getsize(vae_dest) > 1024 * 1024):
+                if not _download_with_resume(vae_url, vae_dest, logf):
+                    raise RuntimeError("下载中断，请重试（断点续传）")
+            vae_file = vae_dest
         except Exception as e:
             raise RuntimeError(f"Qwen-Image VAE 自动下载失败：{e}")
         if os.path.isdir(vae_dir):

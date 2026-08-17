@@ -1,5 +1,12 @@
 ﻿# 更新日志（Changelog）
 
+## v0.9.5（待发布）
+
+### 修复
+- **第二/三引擎安装 torch 本地轮子报 Invalid wheel filename (invalid version)（很多用户装不上第二引擎）**：预下载的 torch/torchvision/torchaudio 轮子文件名里 %2B 是 URL 编码的 +，之前下载到本地后文件名没解码，pip 本地安装按文件名解析版本失败。现在下载 URL 保持编码、本地文件名解码成 +（如 	orch-2.7.1+cu128-...whl），并自动把旧版本残留的 %2B 缓存改名复用，不用重新下载 3GB。
+
+---
+
 ## v0.9.4（2026-08-17）
 
 ### 修复
