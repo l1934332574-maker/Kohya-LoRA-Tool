@@ -1,7 +1,8 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """路径与项目管理（渐进式拆分，从 Kohya一键工具.py 迁出）。"""
 import os
 import re
+import sys
 import json
 import datetime
 
@@ -9,6 +10,7 @@ from kohya_core import KIT_DIR, KOHYA_DIR_FILE
 
 __all__ = [
     "get_kohya_dir", "base_models_dir", "data_dir", "data_sub", "_sanitize_dirname",
+    "_settings_path", "save_data_setting",
     "dataset_train_dir", "projects_dir", "_project_path", "list_projects",
     "load_project", "save_project", "delete_project", "default_project_name",
 ]
@@ -47,12 +49,80 @@ def base_models_dir():
     """默认基础底模存放目录（项目内 models/base，软件不内置底模）。"""
     return os.path.join(KIT_DIR, "models", "base")
 
-def data_dir():
-    """运行期可写数据目录：重定向到 %APPDATA%\\KohyaLoraTool，避开安装目录权限问题。
+def _settings_path():
+    """设置文件固定存 %APPDATA%\\KohyaLoraTool（小文件，不随数据目录移动），
+    避免 data_dir 依赖设置、设置又依赖 data_dir 的循环。"""
+    ap = os.environ.get("APPDATA", os.path.expanduser("~"))
+    d = os.path.join(ap, "KohyaLoraTool")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(d, "settings.json")
 
-    output / dataset / logs / tokenizers 等会写入的数据全部放这里；
-    models/base、configs 保留在程序安装目录（只读资源）。
+
+def _read_data_setting():
+    """读用户设置里指定的数据目录（未设置/不存在返回空）。"""
+    try:
+        with open(_settings_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        v = (d.get("data_dir") or "").strip()
+        return v if v and os.path.isdir(v) else ""
+    except Exception:
+        return ""
+
+
+def save_data_setting(dir):
+    """保存用户指定的数据目录（保留已有设置项）。返回是否成功。"""
+    try:
+        d = {}
+        try:
+            with open(_settings_path(), "r", encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            d = {}
+        d["data_dir"] = (dir or "").strip()
+        with open(_settings_path(), "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def _follow_install_dir():
+    """跟随安装位置：安装目录同级放 KohyaLoraTool_data（升级/重装不删）。
+    仅打包运行启用；源码开发环境保持 APPDATA 稳定。无写权限（如 Program Files）返回 None。"""
+    if not getattr(sys, "frozen", False):
+        return None
+    try:
+        parent = os.path.dirname(os.path.abspath(KIT_DIR))
+        cand = os.path.join(parent, "KohyaLoraTool_data")
+        os.makedirs(cand, exist_ok=True)
+        t = os.path.join(cand, ".write_test")
+        with open(t, "w") as f:
+            f.write("1")
+        os.remove(t)
+        return cand
+    except Exception:
+        return None
+
+
+def data_dir():
+    """运行期可写数据目录。
+
+    优先级：
+    1) 用户设置的数据目录（settings.json 的 data_dir，任意盘）
+    2) 跟随安装位置：打包版默认 <安装目录同级>/KohyaLoraTool_data（装 D 盘数据就在 D 盘）
+    3) %APPDATA%\\KohyaLoraTool（兜底，现状）
+
+    output / dataset / logs / tokenizers / cache / anima / kohya_ss 等全部跟随此目录。
     """
+    v = _read_data_setting()
+    if v:
+        return v
+    v = _follow_install_dir()
+    if v:
+        return v
     return os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "KohyaLoraTool")
 
 def data_sub(*parts):

@@ -1,6 +1,6 @@
 {
-  "version": "v0.9.6",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.6/Setup.exe",
+  "version": "v0.9.7",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.7/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.9.6：修复 WD14 打标失败导致漏标签（坏图隔离+解释器自动选择+library 路径+失败兜底）；一键安装不再因 Python 版本不符粗暴退出（自动用 py 3.12/内置安装）"
+  "notes": "v0.9.7：Qwen-Image/Z-Image 新增画风/人物训练类型切换；数据目录可迁移到安装盘（跟随安装位置+手动设置+一键迁移，解决 C 盘占用）"
 }

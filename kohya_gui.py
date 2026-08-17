@@ -260,6 +260,8 @@ class App:
         self.param_vars = {}
         self.raw_dir_var = tk.StringVar()
         self.trigger_var = tk.StringVar()
+        # Qwen-Image / Z-Image 的画风/人物子模式（AT_SUB_LABELS 见类级常量）
+        self.at_sub_var = tk.StringVar(value="人物（保留全部标签）")
         self.reg_var = tk.StringVar()
         self.global_pos_var = tk.StringVar()
         self.global_neg_var = tk.StringVar()
@@ -834,6 +836,12 @@ class App:
                                              font=ui_font(FONT_BODY), command=self.cmd_new_project)
         self.btn_new_project.pack(side="right")
         self._home_widgets.append(self.btn_new_project)
+        self.btn_data_dir = ctk.CTkButton(head, text="💾 数据目录", width=104, height=32,
+                                            fg_color="transparent", hover_color="#252a36",
+                                            border_width=1, border_color=BORDER, text_color=SUB,
+                                            corner_radius=6, font=ui_font(FONT_BODY), command=self.cmd_data_dir)
+        self.btn_data_dir.pack(side="right", padx=(0, 6))
+        self._home_widgets.append(self.btn_data_dir)
         self.btn_check_update = ctk.CTkButton(head, text="🔄 检查更新", width=104, height=32,
                                               fg_color="transparent", hover_color="#252a36",
                                               border_width=1, border_color=BORDER, text_color=SUB,
@@ -1324,6 +1332,7 @@ class App:
             "template": template,
             "mode": params.get("mode", self.mode),
             "base_type": params.get("base_type", self.base_type),
+            "at_sub_mode": params.get("at_sub_mode") or "character",
             "base_model": params.get("base_model") or "",
             "raw_dir": params.get("raw_dir") or "",
             "trigger": params.get("trigger") or "",
@@ -1361,6 +1370,11 @@ class App:
                     self.base_combo.set(core.BASE_TYPE_LABELS[bt])
                 except Exception:
                     pass
+            try:
+                _sub = data.get("at_sub_mode") or "character"
+                self.at_sub_var.set(core.AT_SUB_LABELS.get(_sub, core.AT_SUB_LABELS["character"]))
+            except Exception:
+                pass
             self.trigger_var.set(data.get("trigger") or "")
             self.reg_var.set(data.get("reg_dir") or "")
             self.raw_dir_var.set(data.get("raw_dir") or "")
@@ -1451,6 +1465,20 @@ class App:
         self.trig_card = card2
         self.trig_card_title = ctk.CTkLabel(card2, text="② 设置触发词（人物模式）", font=ui_font(FONT_TITLE), text_color=TITLE_C)
         self.trig_card_title.pack(anchor="w", padx=22, pady=(14, 8))
+        # Qwen-Image / Z-Image 专属：画风/人物 训练类型切换（默认隐藏，仅这两个模式显示）
+        self.at_sub_row = ctk.CTkFrame(card2, fg_color="transparent")
+        ctk.CTkLabel(self.at_sub_row, text="训练类型", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
+        self.at_sub_combo = ctk.CTkComboBox(
+            self.at_sub_row, values=[core.AT_SUB_LABELS["character"], core.AT_SUB_LABELS["style"]],
+            width=230, height=30, variable=self.at_sub_var, state="readonly",
+            fg_color=CARD2, border_color=BORDER, text_color=TXT,
+            button_color="#3a4150", button_hover_color="#454d5e",
+            dropdown_fg_color=CARD, dropdown_text_color=TXT, dropdown_hover_color="#2b303a",
+            font=ui_font(FONT_BODY), command=lambda _e: self._on_at_sub_change())
+        self.at_sub_combo.pack(side="left", padx=(12, 0))
+        self.at_sub_hint = ctk.CTkLabel(self.at_sub_row, text="人物=保留全部标签；画风=自动过滤人物五官/角色标签", font=ui_font(FONT_HINT), text_color=HINT)
+        self.at_sub_hint.pack(side="left", padx=(12, 0))
+        self.at_sub_row.pack_forget()
         r2 = ctk.CTkFrame(card2, fg_color="transparent"); r2.pack(fill="x", padx=22, pady=(0, 4))
         ctk.CTkLabel(r2, text="Trigger 触发词", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
         self.trigger_entry = ctk.CTkEntry(r2, width=200, height=30, textvariable=self.trigger_var,
@@ -1648,6 +1676,26 @@ class App:
             self._applying_preset = False
         self._refresh_preset_summary()
 
+    def _at_sub_label(self):
+        """Qwen-Image / Z-Image 子模式：返回 'style' 或 'character'。"""
+        try:
+            _m = {v: k for k, v in core.AT_SUB_LABELS.items()}
+            return _m.get(self.at_sub_var.get(), "character")
+        except Exception:
+            return "character"
+
+    def _on_at_sub_change(self):
+        """Qwen-Image / Z-Image 的画风/人物切换：刷新提示与自动保存。"""
+        try:
+            self._update_mode_ui()
+        except Exception:
+            pass
+        try:
+            self._render_guide()
+        except Exception:
+            pass
+        self._schedule_autosave()
+
     def _on_mode_change(self):
         self.mode = self._current_mode()
         self._apply_presets()
@@ -1663,11 +1711,20 @@ class App:
             self.home_title.configure(text=core.MODE_LABELS.get(self.mode, self.mode) + " 训练")
         except Exception:
             pass
+        # Qwen-Image / Z-Image：显示「画风/人物」训练类型切换；其他模式隐藏
+        try:
+            _is_at = self.mode in ("qwen_image", "zimage")
+            if _is_at:
+                self.at_sub_row.pack(fill="x", padx=22, pady=(0, 6))
+            else:
+                self.at_sub_row.pack_forget()
+        except Exception:
+            pass
         try:
             if self.mode == "video":
                 _hint = core.TRIGGER_HINT_VIDEO
             elif self.mode in ("qwen_image", "zimage"):
-                _hint = core.TRIGGER_HINT_AT
+                _hint = core.TRIGGER_HINT_STYLE if self._at_sub_label() == "style" else core.TRIGGER_HINT_AT
             elif self.mode == "krea2":
                 _hint = core.TRIGGER_HINT_KREA2
             elif self.mode == "flux2":
@@ -1784,6 +1841,10 @@ class App:
                 self.card1_title.configure(text="① 准备视频数据")
                 self.card1_hint.configure(text="3~10 段 3~10 秒的同角色/同风格 mp4，每段配同名 .txt 字幕；H3 训练需 24G 显存")
                 self.trig_card_title.configure(text="② 设置触发词（视频模式）")
+            elif self.mode in ("qwen_image", "zimage"):
+                self.card1_title.configure(text="① 准备图片数据")
+                self.card1_hint.configure(text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好")
+                self.trig_card_title.configure(text="② 设置触发词（" + ("画风模式，一个词即可激活画风" if self._at_sub_label() == "style" else "人物模式") + "）")
             elif self.mode == "style":
                 self.card1_title.configure(text="① 准备图片数据")
                 self.card1_hint.configure(text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好")
@@ -1955,6 +2016,74 @@ class App:
 
     def cmd_readme(self):
         self._show_help_window()
+
+    def cmd_data_dir(self):
+        """数据 / 引擎目录管理：查看占用，迁移到其他盘（解决 C 盘占用）。"""
+        try:
+            if getattr(self, "_data_dir_win", None) and self._data_dir_win.winfo_exists():
+                self._data_dir_win.lift()
+                return
+        except Exception:
+            pass
+        w = ctk.CTkToplevel(self.root)
+        w.title("数据 / 引擎目录")
+        w.geometry("640x420")
+        w.transient(self.root)
+        try:
+            from tkinter import filedialog
+            cur = core.data_dir()
+            size_mb = core.data_dir_size() / 1048576.0
+            cur_var = tk.StringVar(value=cur)
+            size_var = tk.StringVar(value="%.0f MB" % size_mb)
+            ctk.CTkLabel(w, text="📁 数据 / 引擎目录", font=ui_font(FONT_TITLE), text_color=TITLE_C).pack(anchor="w", padx=18, pady=(16, 6))
+            ctk.CTkLabel(w, text="训练引擎、数据集、模型缓存等都在这里。默认在 C 盘 AppData；装在其他盘时可迁移到安装盘，释放 C 盘空间。",
+                         font=ui_font(FONT_HINT), text_color=HINT, wraplength=580, justify="left").pack(anchor="w", padx=18, pady=(0, 8))
+            ctk.CTkLabel(w, text="当前目录", font=ui_font(FONT_BODY), text_color=SUB).pack(anchor="w", padx=18)
+            ctk.CTkEntry(w, width=580, height=30, textvariable=cur_var, state="readonly").pack(padx=18, pady=(2, 4))
+            ctk.CTkLabel(w, text="占用大小", font=ui_font(FONT_BODY), text_color=SUB).pack(anchor="w", padx=18)
+            ctk.CTkLabel(w, textvariable=size_var, font=ui_font(FONT_BODY), text_color=TXT).pack(anchor="w", padx=18, pady=(2, 10))
+
+            def _do_migrate(target):
+                if not messagebox.askyesno(
+                        core.APP_NAME,
+                        "将把数据目录迁移到：\\n" + target + "\\n\\n"
+                        "过程先复制、校验后删除旧目录（视数据量约几分钟）。\\n"
+                        "迁移完成后请完全退出并重新打开软件。是否继续？"):
+                    return
+                def work():
+                    self._log(f"[迁移] 开始迁移数据目录到 {target} …")
+                    ok, msg = core.migrate_data_dir(target, logf=self._log)
+                    if ok:
+                        self._log("[迁移] " + msg)
+                        messagebox.showinfo(core.APP_NAME, "迁移完成！请完全退出并重新打开软件。")
+                    else:
+                        self._log("[迁移] 失败：" + msg)
+                        messagebox.showerror(core.APP_NAME, "迁移失败：\\n" + msg)
+                    try:
+                        w.destroy()
+                    except Exception:
+                        pass
+                threading.Thread(target=work, daemon=True).start()
+
+            def _pick_and_migrate():
+                d = filedialog.askdirectory(title="选择新的数据目录（建议选安装盘，如 D:\\KohyaLoraTool_data）")
+                if d:
+                    _do_migrate(d)
+
+            def _follow_install():
+                _do_migrate(os.path.join(os.path.dirname(os.path.abspath(core.KIT_DIR)), "KohyaLoraTool_data"))
+
+            btn_row = ctk.CTkFrame(w, fg_color="transparent"); btn_row.pack(fill="x", padx=18, pady=(8, 4))
+            ctk.CTkButton(btn_row, text="选择目录并迁移…", width=150, height=34, fg_color=ACC, hover_color=ACC_H,
+                          corner_radius=6, font=ui_font(FONT_BODY), command=_pick_and_migrate).pack(side="left")
+            ctk.CTkButton(btn_row, text="跟随安装位置（自动）", width=170, height=34, fg_color="transparent",
+                          hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
+                          corner_radius=6, font=ui_font(FONT_BODY), command=_follow_install).pack(side="left", padx=(10, 0))
+            ctk.CTkLabel(w, text="提示：迁移后 C 盘 AppData 里的旧数据会被清理；若中途失败会保留源目录，可重试。",
+                         font=ui_font(FONT_HINT), text_color=HINT, wraplength=580).pack(anchor="w", padx=18, pady=(10, 0))
+            self._data_dir_win = w
+        except Exception as e:
+            messagebox.showerror(core.APP_NAME, "打开数据目录设置失败：" + str(e))
 
     def cmd_check_update(self):
         """检查更新（手动按钮）。"""
@@ -2270,6 +2399,7 @@ class App:
         return {
             "mode": self.mode,
             "base_type": self.base_type,
+            "at_sub_mode": self._at_sub_label(),
             "trigger": self.trigger_var.get().strip(),
             "reg_dir": self.reg_var.get().strip() or None,
             "raw_dir": self.raw_dir_var.get().strip(),
@@ -2752,7 +2882,10 @@ class App:
                 stats = {"ok": len(videos), "skipped_existing": 0}
                 self.q.put(("AUTO_CONFIRM", params, stats, len(videos)))
                 return
-            pp_mode = "character" if params.get("mode") in ("krea2", "qwen_image", "zimage") else params["mode"]
+            if params.get("mode") in ("krea2", "qwen_image", "zimage"):
+                pp_mode = params.get("at_sub_mode") or "character"
+            else:
+                pp_mode = params["mode"]
             core.preprocess(
                 self._log, input_dir=params["raw_dir"],
                 size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") == "krea2" else core.RESOLUTIONS.get(params["base_type"], 512))),
@@ -2761,7 +2894,8 @@ class App:
                 dedup=True, wd14=True, square_crop=True,
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None, project=self.current_project,
-                style_caption=params.get("style_caption") or "")
+                style_caption=params.get("style_caption") or "",
+                dataset_mode="character" if params.get("mode") in ("krea2", "qwen_image", "zimage") else None)
             self._log("[OK] 预处理完成")
         except core.StopRequested:
             self._log("[停止] 预处理已手动停止")
@@ -2846,7 +2980,9 @@ class App:
             if not params["base_model"]:
                 messagebox.showwarning(core.APP_NAME, "请先选择底模（步骤③）。")
                 return
-        if self.mode == "character" and not params["trigger"]:
+        _need_trigger = (self.mode == "character") or \
+            (self.mode in ("qwen_image", "zimage") and self._at_sub_label() == "character")
+        if _need_trigger and not params["trigger"]:
             messagebox.showwarning(core.APP_NAME, "人物模式建议填写 Trigger 触发词（步骤②）。")
             return
         self._start_worker(lambda: self._one_click_worker(params), "一键开始训练")
@@ -2860,7 +2996,10 @@ class App:
                     os.remove(report)
             except Exception:
                 pass
-            pp_mode = "character" if params.get("mode") == "krea2" else params["mode"]
+            if params.get("mode") in ("krea2", "qwen_image", "zimage"):
+                pp_mode = params.get("at_sub_mode") or "character"
+            else:
+                pp_mode = params["mode"]
             core.preprocess(
                 self._log, input_dir=params["raw_dir"],
                 size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") == "krea2" else core.RESOLUTIONS.get(params["base_type"], 512))),
@@ -2869,7 +3008,8 @@ class App:
                 dedup=True, wd14=True, square_crop=True,
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None, project=self.current_project,
-                style_caption=params.get("style_caption") or "")
+                style_caption=params.get("style_caption") or "",
+                dataset_mode="character" if params.get("mode") in ("krea2", "qwen_image", "zimage") else None)
             stats = {}
             if os.path.isfile(report):
                 try:
@@ -3344,6 +3484,7 @@ class App:
             msg = (
                 "即将开始 " + (_info.get("label", "") if _info else "") + " 训练，请确认以下参数：\n\n"
                 f"模式        : {core.MODE_LABELS.get(params['mode'], params['mode'])}\n"
+                f"训练类型    : {"画风（过滤人物标签）" if params.get('at_sub_mode') == 'style' else "人物（保留全部标签）"}\n"
                 f"模型        : {_info.get('model_id', '？') if _info else '？'}\n"
                 f"rank / alpha: {params['rank']} / {params['alpha']}\n"
                 f"学习率      : {params['unet_lr']}\n"

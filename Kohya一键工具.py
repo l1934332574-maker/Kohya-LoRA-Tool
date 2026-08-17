@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.6"
+APP_VERSION = "0.9.7"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1425,22 +1425,122 @@ def flux_missing_models():
 
 
 def _load_app_settings():
-    """读取用户设置（settings.json，放数据目录随软件保留）。"""
+    """读取用户设置（settings.json 固定放 %APPDATA%\\KohyaLoraTool，不随数据目录移动）。"""
     try:
-        with open(os.path.join(data_dir(), "settings.json"), "r", encoding="utf-8") as f:
+        with open(_settings_path(), "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
 
 
 def _save_app_settings(d):
-    """保存用户设置（settings.json）。"""
+    """保存用户设置（settings.json 固定放 %APPDATA%\\KohyaLoraTool）。"""
     try:
-        with open(os.path.join(data_dir(), "settings.json"), "w", encoding="utf-8") as f:
+        with open(_settings_path(), "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=2)
         return True
     except Exception:
         return False
+
+
+def data_dir_size():
+    """当前数据目录总大小（字节）。"""
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(data_dir()):
+            for f in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, f))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return total
+
+
+def _copy_data_tree(src, dst, logf=print):
+    """递归复制数据目录（跳过 src 根目录的 settings.json），返回 (文件数, 字节数)。"""
+    n = 0
+    total = 0
+    os.makedirs(dst, exist_ok=True)
+    for root, _dirs, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        tgt = dst if rel == "." else os.path.join(dst, rel)
+        os.makedirs(tgt, exist_ok=True)
+        for f in files:
+            if f == "settings.json" and os.path.abspath(root) == os.path.abspath(src):
+                continue
+            sp = os.path.join(root, f)
+            dp = os.path.join(tgt, f)
+            try:
+                sz = os.path.getsize(sp)
+                shutil.copy2(sp, dp)
+                n += 1
+                total += sz
+            except Exception as e:
+                logf(f"[迁移] 复制失败（跳过）: {sp} ({e})")
+    return n, total
+
+
+def migrate_data_dir(target, logf=print):
+    """把当前数据目录整体迁移到 target（新盘/新位置）。
+
+    流程：算大小 → 校验目标盘空间 → 复制 → 校验文件数 → 删源 → 写设置 → 清 kohya_dir.txt。
+    大目录跨盘耗时，建议在后台线程调用。返回 (ok, msg)。
+    """
+    src = os.path.abspath(data_dir())
+    target = os.path.abspath(target or "")
+    if not target:
+        return False, "未选择目标目录"
+    if src.lower() == target.lower():
+        return True, "目标目录与当前数据目录相同"
+    size = data_dir_size()
+    logf(f"[迁移] 当前数据目录: {src}（约 {size / 1048576:.0f} MB）")
+    logf(f"[迁移] 目标目录: {target}")
+    # 目标盘剩余空间校验
+    try:
+        _base = target if os.path.isdir(target) else (os.path.dirname(target) or ".")
+        free = shutil.disk_usage(_base).free
+    except Exception:
+        free = None
+    if free is not None and free < size:
+        return False, f"目标盘剩余空间不足：需要约 {size / 1048576:.0f} MB，剩余 {free / 1048576:.0f} MB"
+    # 复制（先复制后删源，中断也不丢数据）
+    os.makedirs(target, exist_ok=True)
+    try:
+        n, copied = _copy_data_tree(src, target, logf)
+    except Exception as e:
+        return False, f"复制失败：{e}"
+    logf(f"[迁移] 已复制 {n} 个文件（{copied / 1048576:.0f} MB）→ {target}")
+    # 校验（settings.json 固定不迁移，需排除后再比）
+    def _cnt(path):
+        n = 0
+        for root, _dirs, files in os.walk(path):
+            for f in files:
+                if f == "settings.json" and os.path.abspath(root) == os.path.abspath(path):
+                    continue
+                n += 1
+        return n
+    src_n = _cnt(src)
+    tgt_n = _cnt(target)
+    if tgt_n < src_n:
+        return False, f"复制校验不完整（源 {src_n} 文件，目标 {tgt_n}），已保留源目录，请检查后重试"
+    # 删源
+    try:
+        shutil.rmtree(src, ignore_errors=True)
+        logf(f"[迁移] 已清理旧数据目录: {src}")
+    except Exception as e:
+        logf(f"[迁移] 旧目录清理失败（可手动删除）: {e}")
+    # 写设置 + 清 kohya_dir.txt（让 get_kohya_dir 走新 data_dir/kohya_ss）
+    if not save_data_setting(target):
+        return False, "迁移完成但设置保存失败，请手动在「设置」里指定数据目录"
+    try:
+        if os.path.isfile(KOHYA_DIR_FILE):
+            os.remove(KOHYA_DIR_FILE)
+    except Exception:
+        pass
+    logf(f"[迁移] 完成！数据目录已切换为: {target}")
+    return True, "迁移完成"
 
 
 def at_custom_dir():
@@ -2157,7 +2257,12 @@ def _write_at_image_template(mode, params, output_name, out_dir=None):
 def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
                reg_dir=None, repeats=5, dedup=False, wd14=True,
                square_crop=False, min_size=0, blur_threshold=0.0, report=None,
-               keep_tokens=None, project=None, style_caption=""):
+               keep_tokens=None, project=None, style_caption="", dataset_mode=None):
+    """dataset_mode：数据存储目录用的模式（默认跟随 mode）。
+
+    Qwen-Image/Z-Image/Krea2 数据统一放 train_character 目录（与训练读取一致），
+    即使画风子模式 mode=style 也传 dataset_mode="character"，避免预处理/训练目录不一致。
+    """
     vpy = venv_python()
     if not os.path.isfile(vpy):
         raise RuntimeError("Kohya 尚未安装，请先点击【一键安装】")
@@ -2193,7 +2298,7 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         if not _ok:
             raise RuntimeError("自动补装 Pillow/numpy 失败（网络不稳或镜像不可达），请检查网络后重试，或重跑【② 安装训练内核】")
         logf("[预处理] Pillow/numpy 补装完成")
-    out = dataset_train_dir(mode, project)
+    out = dataset_train_dir(dataset_mode or mode, project)
     os.environ["TRIGGER_WORD"] = trigger or ""
     os.environ["MODE"] = mode
     os.makedirs(out, exist_ok=True)

@@ -16,6 +16,12 @@ MODE_LABELS = {
 }
 MODE_KEYS = ["style", "character", "krea2", "flux2", "video", "qwen_image", "zimage"]
 
+# Qwen-Image / Z-Image 的画风/人物子模式（训练类型切换）
+AT_SUB_LABELS = {
+    "character": "人物（保留全部标签）",
+    "style": "画风（过滤人物标签）",
+}
+
 # 架构注册表（对标秋叶：SD1.5 / SDXL / FLUX.1 / Anima）
 # family: sd=U-Net 架构；flux=DiT；anima=DiT+Qwen3
 # tokenizers: [(model_id, kind)] kind='clip'=CLIPTokenizer, 'auto'=AutoTokenizer
