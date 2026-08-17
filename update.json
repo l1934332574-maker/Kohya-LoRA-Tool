@@ -1,6 +1,6 @@
 {
-  "version": "v0.9.8",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.8/Setup.exe",
+  "version": "v0.9.9",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.9/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.9.8：修复第二引擎 PyTorch 版本配对错误（torch 2.7.1 正确搭配 torchvision 0.22.1）；已装错误组合自动识别并修复，国内镜像/断点续传保留"
+  "notes": "v0.9.9：修复第二引擎 PyTorch 版本配对错误（torch 2.7.1 正确搭配 torchvision 0.22.1）+ 已装错误组合自动修复；内置 Python 优先装 3.12 并给出明确失败提示；训练环境损坏（No Python at）自动重建"
 }

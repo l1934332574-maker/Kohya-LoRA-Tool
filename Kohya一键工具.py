@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.8"
+APP_VERSION = "0.9.9"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -352,6 +352,64 @@ def install_git(logf=print):
     return g
 
 
+def _bundled_python_installer():
+    """内置 Python 安装包：优先 3.12（与内置 cp312 wheel 匹配、安装器更新更稳），
+    其次 3.11 / 3.10（版本从高到低）。"""
+    folder = os.path.join(KIT_DIR, "installers", "python")
+    if not os.path.isdir(folder):
+        return None
+    pat = re.compile(r"^python-(\d+)\.(\d+)\.(\d+)-amd64\.exe$")
+    names = [f for f in os.listdir(folder) if pat.match(f)]
+    if not names:
+        return None
+    names.sort(key=lambda n: tuple(int(x) for x in pat.match(n).groups()), reverse=True)
+    return os.path.join(folder, names[0])
+
+
+def _detect_installed_python():
+    """安装后综合检测：先 find_python（常规路径 + PATH），再扫用户级安装目录。
+    返回 (py, ver) 或 (None, None)。"""
+    py, ver = find_python()
+    if py:
+        return py, ver
+    try:
+        base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python")
+        if os.path.isdir(base):
+            for name in sorted(os.listdir(base), reverse=True):
+                m = re.match(r"^Python(\d)(\d+)$", name)
+                if not m:
+                    continue
+                c = os.path.join(base, name, "python.exe")
+                s, parts = _py_version(c)
+                if not (s and PY_MIN <= parts < PY_MAX):
+                    continue
+                if not _py_has_venv(c):
+                    continue
+                return c, s
+    except Exception:
+        pass
+    return None, None
+
+
+def _localappdata_python_summary():
+    """诊断用：列出用户级安装目录里已检测到的 Python（版本号 + python.exe 是否缺失）。"""
+    try:
+        base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python")
+        if not os.path.isdir(base):
+            return ""
+        vers = []
+        for name in os.listdir(base):
+            m = re.match(r"^Python(\d)(\d+)$", name)
+            if not m:
+                continue
+            c = os.path.join(base, name, "python.exe")
+            s, _ = _py_version(c) if os.path.isfile(c) else (None, None)
+            vers.append("%s (%s)" % (name, s or "python.exe 缺失"))
+        return "、".join(vers)
+    except Exception:
+        return ""
+
+
 def install_python(logf=print):
     py, ver = find_python()
     if py and ver:
@@ -362,19 +420,31 @@ def install_python(logf=print):
         if parts and PY_MIN <= parts < PY_MAX:
             logf(f"[环境] 已找到 Python {ver}: {py}")
             return py, ver
-    # 优先使用内置安装包（离线，无需联网/代理）
-    exe = _bundled_path("python")
+    # 优先使用内置安装包（离线，无需联网/代理）：3.12 优先，其次 3.11 / 3.10
+    exe = _bundled_python_installer()
     if exe:
         logf(f"[Python] 使用内置安装包: {exe}")
-        subprocess.run(
+        r = subprocess.run(
             [exe, "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_launcher=1",
              "Include_test=0", "Include_doc=0", "Include_tcltk=1", "Include_pip=1"],
-            timeout=1800,
+            capture_output=True, text=True, timeout=1800,
         )
-        py, ver = find_python()
+        py, ver = _detect_installed_python()
         if py:
+            logf(f"[Python] 安装成功：Python {ver}（{py}）")
             return py, ver
-        raise RuntimeError("内置 Python 安装后仍未找到，请手动安装 https://www.python.org/downloads/")
+        if r.returncode != 0:
+            raise RuntimeError(
+                "内置 Python 安装程序异常退出（退出码 %s），安装未完成。\n"
+                "请关闭其他安装程序后重试，或手动安装 https://www.python.org/downloads/" % r.returncode)
+        found = _localappdata_python_summary()
+        if found:
+            raise RuntimeError(
+                "内置 Python 安装程序已退出，但软件暂未识别到可用的 Python（检测到：%s）。\n"
+                "请重启软件后再点「环境准备」；仍不行请手动安装 https://www.python.org/downloads/" % found)
+        raise RuntimeError(
+            "内置 Python 安装程序已退出，但未在常规位置找到 Python（可能被安全软件拦截）。\n"
+            "请手动安装 https://www.python.org/downloads/ 后再点「环境准备」")
     # 兜底：winget / 官方安装包（需联网）
     logf("[环境] 未找到兼容 Python（需 3.10.9 ~ 3.12.x），开始自动安装 Python 3.10 …")
     if _winget_install("Python.Python.3.10", logf):
@@ -687,6 +757,22 @@ def install_kohya(logf=print):
             else:
                 logf("[Kohya] 未找到内置 sd-scripts，稍后由 kohya 安装脚本联网拉取子模块（需网络）")
         vpy = venv_python(kdir)
+        if os.path.isfile(vpy):
+            _vok, _vdetail = _venv_python_ok(vpy)
+            if not _vok:
+                # venv 损坏（base Python 缺失，常见于数据目录迁移/换用户/原 Python 被卸载）：
+                # 自动把旧 venv 改名保留，用当前 Python 重建，随后正常安装流程重装依赖。
+                logf(f"[Kohya] ⚠ 检测到 venv 已损坏：{_vdetail}")
+                logf("[Kohya] 常见原因：数据目录迁移到新盘/更换系统用户后，venv 指向的 Python 已不存在。")
+                logf("[Kohya] 正在自动重建 venv（旧 venv 重命名保留，需重新安装依赖）…")
+                _bak = os.path.join(kdir, "venv_broken_%s" % time.strftime("%Y%m%d_%H%M%S"))
+                if os.path.exists(_bak):
+                    _bak += "_1"
+                try:
+                    os.rename(os.path.join(kdir, "venv"), _bak)
+                    logf(f"[Kohya] 旧 venv 已保留到: {os.path.basename(_bak)}")
+                except Exception as _e:
+                    raise RuntimeError("旧 venv 重命名失败（%s），请手动删除/移动 %s 后重试" % (_e, os.path.join(kdir, "venv")))
         if not os.path.isfile(vpy):
             logf("[Kohya] 创建 Python 虚拟环境…")
             if run_stream([py, "-m", "venv", "venv"], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
@@ -2354,6 +2440,12 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
     vpy = venv_python()
     if not os.path.isfile(vpy):
         raise RuntimeError("Kohya 尚未安装，请先点击【一键安装】")
+    _vok, _vdetail = _venv_python_ok(vpy)
+    if not _vok:
+        raise RuntimeError(
+            "Kohya 训练环境已损坏（%s）。\n"
+            "常见原因：数据目录迁移到新盘/更换系统用户后，venv 指向的 Python 已不存在。\n"
+            "请先重跑【② 安装训练内核】自动重建环境。" % _vdetail)
     if not input_dir or not os.path.isdir(input_dir):
         raise RuntimeError("请选择图片文件夹")
     # 预处理依赖自检：kohya venv 必须能 import Pillow/numpy（部分中断安装会缺，导致预处理永远失败）。
@@ -2635,6 +2727,28 @@ AMD_ROC_WHEELS = [
 AMD_TRAIN_DEPS = "transformers==4.54.1 diffusers==0.32.1 accelerate safetensors omegaconf numpy pillow av opencv-python einops sentencepiece toml voluptuous imagesize rich ftfy"
 
 
+def _venv_python_ok(vpy):
+    """检测 venv 的 python.exe 能否正常启动（base 解释器是否还在）。
+
+    Windows venv 跨盘复制 / 更换系统用户 / 原 Python 被卸载后，
+    pyvenv.cfg 里 home 指向的 base Python 可能不存在，
+    venv 的 python.exe 启动会直接报 "No Python at ..."，此时 venv 已损坏，
+    任何依赖检查/安装都会失败。返回 (ok, detail)。"""
+    if not vpy or not os.path.isfile(vpy):
+        return False, "venv 的 python.exe 不存在"
+    try:
+        r = subprocess.run([vpy, "-c", "import sys;print('%d.%d'%sys.version_info[:2])"],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and re.match(r"^\d+\.\d+", (r.stdout or "").strip()):
+            return True, (r.stdout or "").strip()
+        err = ((r.stderr or "") + (r.stdout or "")).strip()
+        if "No Python" in err:
+            return False, "venv 指向的 Python 已不存在（No Python at ...），venv 已损坏"
+        return False, (err or "venv python 启动失败")[:160]
+    except Exception as e:
+        return False, str(e)[:160]
+
+
 def venv_python_version(venv_dir):
     """读取 venv 的 Python 版本，返回 '3.12' 或 None。"""
     try:
@@ -2727,6 +2841,14 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
     toml/voluptuous/safetensors/diffusers/accelerate/omegaconf（sd-scripts 训练）。
     返回 True=就绪；False=补装失败（网络问题）。
     """
+    # venv 健康检查：venv 指向的 base Python 不存在时（迁移/换用户/卸载），
+    # 一切依赖检查与安装都会失败，直接给出明确指引，而不是误导性的"网络不稳"。
+    _vok, _vdetail = _venv_python_ok(vpy)
+    if not _vok:
+        raise RuntimeError(
+            "训练环境已损坏（%s）。\n"
+            "常见原因：数据目录迁移到新盘/更换系统用户后，venv 指向的 Python 已不存在。\n"
+            "请重跑【② 安装训练内核】自动重建环境（旧 venv 会保留并重新安装依赖）。" % _vdetail)
     # 用 find_spec 只查包是否存在（不 import，秒级；import transformers 太重会拖慢每次训练启动）
     # sd-scripts 训练需要的依赖（不含 NVIDIA 专属的 bitsandbytes/tensorflow/onnxruntime-gpu）
     # 只检查「模块加载时必需」的核心依赖；lion-pytorch/schedulefree/prodigy 等可选优化器
