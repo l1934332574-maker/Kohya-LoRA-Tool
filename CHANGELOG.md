@@ -1,6 +1,17 @@
 ﻿# 更新日志（Changelog）
 
-## v0.9.7（待发布）
+## v0.9.8（2026-08-17）
+
+### 修复
+- **第二引擎（musubi-tuner）安装失败根因：PyTorch/torchvision 版本配对错误**：
+  - 之前写死 torch 2.7.1+cu128 + torchvision 0.22.0+cu128（torch 2.7.1 应配 torchvision 0.22.1，而 0.22.0 要求 torch 2.7.0），pip 会因依赖冲突报 ResolutionImpossible / IncompleteRead，很多用户第二引擎装不上；现已全部改为 torch 2.7.1+cu128 + torchvision 0.22.1+cu128（阿里镜像预下载主路径与 pip 官方源回退路径同步修正）。
+  - 新增第二引擎 torch/torchvision 配对校验：已装错误组合（2.7.1+0.22.0）不再被误判为“已安装”，会自动识别并强制重装修复。
+  - 安装前/安装后都会校验 torch + torchvision + CUDA 12.8 + GPU 可用，全部达标才算安装成功。
+  - 保留国内镜像断点续传预下载 + 本地 wheel 安装，v0.9.5 的 %2B 文件名解码修复不受影响。
+
+---
+
+## v0.9.7（2026-08-17）
 
 ### 新增
 - **Qwen-Image / Z-Image 新增「画风 / 人物」训练类型切换**：这两个模式原来固定按人物处理，现在可选画风（统一 caption + 自动过滤人物五官/角色标签）或人物（保留全部标签 + WD14 打标 + trigger），切换自动保存到项目。

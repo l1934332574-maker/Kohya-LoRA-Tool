@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.7"
+APP_VERSION = "0.9.8"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -559,7 +559,7 @@ def _release_kohya_install_lock(lock_f):
 
 
 def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
-                      xf_ver=None, ta_ver=None, cu="cu128", label="Kohya"):
+                      xf_ver=None, ta_ver=None, cu="cu128", label="Kohya", force=False):
     """预下载并安装 PyTorch 大轮子（torch/torchvision[/xformers][/torchaudio]）。
 
     官方 pip 直连下载大轮子（2~3GB）无断点续传，国内网络一断就 IncompleteRead/卡死
@@ -617,10 +617,13 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
     if _px:
         env.setdefault("HTTP_PROXY", _px)
         env.setdefault("HTTPS_PROXY", _px)
-    cmd = [vpy, "-m", "pip", "install", "--no-cache-dir", "--retries", "10", "--timeout", "120"] + paths
+    cmd = [vpy, "-m", "pip", "install", "--no-cache-dir", "--retries", "10", "--timeout", "120"]
+    if force:
+        cmd.append("--force-reinstall")
+    cmd += paths
     if run_stream(cmd, cwd=kdir, env=env, logf=logf) != 0:
         raise RuntimeError("本地安装 PyTorch 轮子失败，请查看上方日志")
-    r = subprocess.run([vpy, "-c", "import torch;print(torch.__version__);print(torch.cuda.is_available())"],
+    r = subprocess.run([vpy, "-c", "import torch, torchvision;print(torch.__version__);print(torch.cuda.is_available())"],
                        capture_output=True, text=True, timeout=180)
     logf("[%s] 验证：" % label + ((r.stdout or "").strip().replace("\n", " | ")))
     if r.returncode != 0:
@@ -815,6 +818,72 @@ def _musubi_marker_ok():
         return False
 
 
+# 第二引擎固定 PyTorch 配对：torch 2.7.1+cu128 ↔ torchvision 0.22.1+cu128
+MUSUBI_TORCH_VERSION = "2.7.1"
+MUSUBI_TORCHVISION_VERSION = "0.22.1"
+MUSUBI_CUDA_VERSION = "12.8"
+
+
+def _parse_musubi_torch_pair(text, gpu_vendor="nvidia"):
+    """解析第二引擎版本检查输出，返回 (ok, detail)。纯函数，便于测试。"""
+    info = {}
+    for line in (text or "").strip().splitlines():
+        if "=" in line:
+            k, _, val = line.partition("=")
+            info[k.strip()] = val.strip()
+    torch_v = info.get("TORCH", "")
+    tv_v = info.get("TV", "")
+    cuda = info.get("CUDA", "")
+    avail = info.get("AVAIL", "False")
+    if not torch_v:
+        return False, "未检测到 torch（musubi-venv 内 torch 未安装）"
+    if not tv_v:
+        return False, "未检测到 torchvision（torch %s 缺少配套 torchvision）" % torch_v
+    if torch_v != MUSUBI_TORCH_VERSION:
+        return False, "torch 版本不符：%s（本工具第二引擎要求 %s+cu128）" % (torch_v, MUSUBI_TORCH_VERSION)
+    if tv_v != MUSUBI_TORCHVISION_VERSION:
+        return False, ("torch/torchvision 版本不匹配：torch %s 配 torchvision %s；"
+                       "应为 torch %s + torchvision %s（torch 2.7.1 配 0.22.0 会依赖冲突装不上）"
+                       % (torch_v, tv_v, MUSUBI_TORCH_VERSION, MUSUBI_TORCHVISION_VERSION))
+    if cuda != MUSUBI_CUDA_VERSION:
+        return False, "torch 非 cu128 构建（CUDA %s），第二引擎要求 cu128（CUDA %s）" % (cuda or "无", MUSUBI_CUDA_VERSION)
+    if gpu_vendor != "amd" and avail != "True":
+        return False, "torch 未启用 CUDA（疑似 CPU 版 torch），第二引擎无法训练"
+    return True, "torch %s+cu128 + torchvision %s+cu128" % (torch_v, tv_v)
+
+
+def _musubi_torch_pair_check(vpy):
+    """校验 musubi-venv 中 torch/torchvision 是否为本工具要求的配对组合。
+
+    torch 2.7.x 必须搭配 torchvision 0.22.x 同小版本：2.7.0→0.22.0、2.7.1→0.22.1。
+    旧版本曾写错成 torch 2.7.1 + torchvision 0.22.0（依赖冲突/装不上），
+    这里按版本号严格校验，不匹配的旧环境会被识别为“需要修复”。
+    返回 (ok, detail)。
+    """
+    code = (
+        "import importlib.metadata as md\n"
+        "import torch, torchvision\n"
+        "def _v(n):\n"
+        "    try:\n"
+        "        return (md.version(n) or '').split('+')[0]\n"
+        "    except Exception:\n"
+        "        return ''\n"
+        "print('TORCH=' + _v('torch'))\n"
+        "print('TV=' + _v('torchvision'))\n"
+        "print('CUDA=' + str(getattr(torch.version, 'cuda', '') or ''))\n"
+        "print('AVAIL=' + str(torch.cuda.is_available()))\n"
+    )
+    try:
+        r = subprocess.run([vpy, "-c", code], capture_output=True, text=True, timeout=180)
+    except Exception as e:
+        return False, "torch 版本检查失败：%s" % e
+    try:
+        vendor = detect_gpu_vendor()
+    except Exception:
+        vendor = "nvidia"
+    return _parse_musubi_torch_pair(r.stdout, gpu_vendor=vendor)
+
+
 def musubi_engine_status():
     """第二训练引擎（musubi-tuner）状态：返回 (ok, detail, venv_python)。
 
@@ -828,6 +897,12 @@ def musubi_engine_status():
         return False, "未安装（musubi-venv 不存在）", vpy
     if not src_ok:
         return False, "musubi-tuner 源码缺失", vpy
+    try:
+        pair_ok, pair_detail = _musubi_torch_pair_check(vpy)
+    except Exception as e:
+        pair_ok, pair_detail = False, "torch 版本检查失败：%s" % e
+    if not pair_ok:
+        return False, pair_detail, vpy
     try:
         r = subprocess.run(
             [vpy, "-c", "import torch; import musubi_tuner; from musubi_tuner.krea2_train_network import main; print('ok')"],
@@ -877,17 +952,26 @@ def install_musubi_engine(logf=print):
             logf("[第二引擎] 创建独立虚拟环境 musubi-venv（不影响 kohya venv）…")
             if run_stream([py, "-m", "venv", mv], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
                 raise RuntimeError("创建 musubi-venv 失败")
-        # 3) 已装验证：torch + musubi_tuner 可用 => 跳过
+        # 3) 已装验证：torch/torchvision 配对正确 + musubi_tuner 可用 => 跳过
         try:
-            r = subprocess.run(
-                [vpy, "-c", "import torch; import musubi_tuner; from musubi_tuner.krea2_train_network import main"],
-                capture_output=True, text=True, timeout=180)
-            torch_ok = r.returncode == 0
-        except Exception:
-            torch_ok = False
-        if torch_ok:
-            logf("[第二引擎] 检测到已安装（torch + musubi_tuner 可用），跳过重复安装。")
+            pair_ok, pair_detail = _musubi_torch_pair_check(vpy)
+        except Exception as e:
+            pair_ok, pair_detail = False, "torch 版本检查失败：%s" % e
+        musubi_ok = pair_ok
+        if musubi_ok:
+            try:
+                r = subprocess.run(
+                    [vpy, "-c", "import torch; import musubi_tuner; from musubi_tuner.krea2_train_network import main"],
+                    capture_output=True, text=True, timeout=180)
+                musubi_ok = r.returncode == 0
+            except Exception:
+                musubi_ok = False
+        if musubi_ok:
+            logf("[第二引擎] 检测到已安装（torch 2.7.1 + torchvision 0.22.1 + musubi_tuner 可用），跳过重复安装。")
             return vpy
+        if not pair_ok:
+            logf(f"[第二引擎] {pair_detail}；将自动重装 torch {MUSUBI_TORCH_VERSION}+cu128 + "
+                 f"torchvision {MUSUBI_TORCHVISION_VERSION}+cu128 …")
         # 4) pip 镜像（清华 pypi + 阿里 pytorch 额外源，与 kohya 一致）
         subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
                         "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
@@ -902,8 +986,8 @@ def install_musubi_engine(logf=print):
         _torch_ok = False
         for _try in range(3):
             try:
-                _preinstall_torch(vpy, kdir, logf, torch_ver="2.7.1", tv_ver="0.22.0",
-                                  cu="cu128", label="第二引擎")
+                _preinstall_torch(vpy, kdir, logf, torch_ver="2.7.1", tv_ver="0.22.1",
+                                  cu="cu128", label="第二引擎", force=True)
                 logf("[第二引擎] PyTorch 预装成功（阿里镜像 + 本地安装）。")
                 _torch_ok = True
                 break
@@ -912,7 +996,7 @@ def install_musubi_engine(logf=print):
         if not _torch_ok:
             logf("[第二引擎] 阿里镜像预下载多次失败，改用 pip 官方 index 直装（国内需代理，或稍后重试）…")
             if run_stream(
-                [vpy, "-m", "pip", "install", "torch==2.7.1+cu128", "torchvision==0.22.0+cu128",
+                [vpy, "-m", "pip", "install", "torch==2.7.1+cu128", "torchvision==0.22.1+cu128",
                  "--extra-index-url", "https://download.pytorch.org/whl/cu128"],
                 cwd=kdir, env=env, logf=logf) != 0:
                 raise RuntimeError("torch cu128 安装失败，请检查网络/代理后重试")
@@ -929,6 +1013,10 @@ def install_musubi_engine(logf=print):
             logf(f"[第二引擎] 验证：torch {out[0] if out else '?'} | CUDA 可用: {out[1] if len(out) > 1 else '?'}")
             if r.returncode != 0:
                 raise RuntimeError("第二引擎验证失败：" + (r.stderr or "")[-200:])
+            pair_ok, pair_detail = _musubi_torch_pair_check(vpy)
+            if not pair_ok:
+                raise RuntimeError("第二引擎验证失败：" + pair_detail)
+            logf(f"[第二引擎] {pair_detail}，配对校验通过。")
         except Exception as e:
             logf(f"[第二引擎] 验证失败: {e}")
             raise
