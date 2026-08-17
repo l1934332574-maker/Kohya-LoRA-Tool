@@ -1,6 +1,18 @@
 ﻿# 更新日志（Changelog）
 
-## v0.9.5（待发布）
+## v0.9.6（待发布）
+
+### 修复
+- **WD14 打标失败导致"图有标签无"（画风模式漏标签）**：整合 2026-08-17 现场修复：
+  - 画风模式 WD14 失败时立即补兜底 caption，并新增最终兜底段（处理后仍缺失/空标签一律补写，绝不漏标签）；
+  - 打标解释器自动选择：当前环境缺 torch/onnxruntime 时自动改用带 torch 的 venv（venv_amd / musubi-venv / ai_toolkit_venv），并自动补装 onnxruntime/onnx；
+  - library 模块路径修复：自动把 sd-scripts 根目录加进 PYTHONPATH 并作为工作目录，解决 import library 失败；
+  - 坏图隔离：打标前校验输出图片，损坏/截断的自动移到 <输出目录>_corrupt，不再一张坏图中断整批打标。
+- **一键安装脚本因 PATH 里的旧/新 Python 版本不符而粗暴退出（"建议删除本机旧 Python"）**：现在自动依次尝试 PATH python → py -3.12 → py -3.10 → 内置 Python 3.12 静默安装，全程无需手动删 Python，并用选定的解释器创建 venv。
+
+---
+
+## v0.9.5（2026-08-17）
 
 ### 修复
 - **第二/三引擎安装 torch 本地轮子报 Invalid wheel filename (invalid version)（很多用户装不上第二引擎）**：预下载的 torch/torchvision/torchaudio 轮子文件名里 %2B 是 URL 编码的 +，之前下载到本地后文件名没解码，pip 本地安装按文件名解析版本失败。现在下载 URL 保持编码、本地文件名解码成 +（如 	orch-2.7.1+cu128-...whl），并自动把旧版本残留的 %2B 缓存改名复用，不用重新下载 3GB。

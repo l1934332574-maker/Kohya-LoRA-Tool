@@ -41,33 +41,33 @@ if errorlevel 1 (
 )
 
 rem ================= Python =================
+rem 找一个可用的 Python 3.10.9~3.12.x（不因 PATH 里的旧/新 python 而粗暴退出）：
+rem   1) PATH 里的 python（版本符合才用）
+rem   2) py launcher 的 3.12（与内置 cp312 wheel 匹配，优先）
+rem   3) py launcher 的 3.10
+rem   4) 内置安装包静默装 3.12
 set "PY_INSTALLER="
 for %%F in ("%KIT_DIR%installers\python\python-*.exe") do set "PY_INSTALLER=%%~fF"
-
-python --version >nul 2>nul
-if errorlevel 1 (
-    if not defined PY_INSTALLER (
-        echo [错误] 没有找到 Python，且项目里没有内置 Python 安装包。
-        echo        请手动安装 Python 3.10.x：https://www.python.org/downloads/
-        pause
-        exit /b 1
-    )
-    echo [第 1 步] 正在用内置安装包安装 Python 3.10.11（静默安装）…
-    "%PY_INSTALLER%" /quiet InstallAllUsers=0 PrependPath=1 Include_launcher=1 Include_test=0 Include_doc=0 Include_tcltk=1 Include_pip=1
-    if errorlevel 1 (
-        echo [错误] 内置 Python 安装失败，请手动安装 Python 3.10.x。
-        pause
-        exit /b 1
-    )
-)
+set "PY_BIN=python"
 python -c "import sys; sys.exit(0 if (3,10,9) <= sys.version_info[:3] < (3,13,0) else 1)" >nul 2>nul
-if errorlevel 1 (
-    echo [错误] Python 版本必须在 3.10.9 到 3.12.x 之间。
-    python --version
-    echo        建议删除本机旧 Python 后重跑本脚本（会使用内置 3.10.11 安装包）。
-    pause
-    exit /b 1
+if not errorlevel 1 goto :python_ok
+py -3.12 -c "import sys; sys.exit(0 if (3,10,9) <= sys.version_info[:3] < (3,13,0) else 1)" >nul 2>nul
+if not errorlevel 1 ( set "PY_BIN=py -3.12" & goto :python_ok )
+py -3.10 -c "import sys; sys.exit(0 if (3,10,9) <= sys.version_info[:3] < (3,13,0) else 1)" >nul 2>nul
+if not errorlevel 1 ( set "PY_BIN=py -3.10" & goto :python_ok )
+if defined PY_INSTALLER (
+    echo [第 1 步] 未找到可用的 Python 3.10.9~3.12.x，正在用内置安装包静默安装 Python 3.12…
+    "%PY_INSTALLER%" /quiet InstallAllUsers=0 PrependPath=1 Include_launcher=1 Include_test=0 Include_doc=0 Include_tcltk=1 Include_pip=1
+    py -3.12 -c "import sys; sys.exit(0 if (3,10,9) <= sys.version_info[:3] < (3,13,0) else 1)" >nul 2>nul
+    if not errorlevel 1 ( set "PY_BIN=py -3.12" & goto :python_ok )
 )
+echo [错误] 未找到 3.10.9~3.12.x 的 Python。
+python --version
+echo        请安装 Python 3.12 后重跑本脚本：https://www.python.org/downloads/
+pause
+exit /b 1
+:python_ok
+echo [第 1 步] 使用 Python：%PY_BIN%
 
 rem ================= 选择 kohya_ss 安装位置（不支持空格/中文路径） =================
 set "KOHYA_DIR=%KIT_DIR%kohya_ss"
@@ -122,9 +122,9 @@ rem ================= 创建虚拟环境 =================
 rem 优先用 Python 3.12（与内置离线 wheel cp312 匹配）；3.10/3.11 建的 venv 装不上 cp312 依赖
 rem 会导致 numpy/torch 报 not supported、训练退化成 CPU 版（accelerator device: cpu）。
 if not exist "%KOHYA_DIR%\venv" (
-    echo [第 3 步] 正在创建 Python 虚拟环境（优先 Python 3.12）…
+    echo [第 3 步] 正在创建 Python 虚拟环境（%PY_BIN%）…
     pushd "%KOHYA_DIR%"
-    py -3.12 -m venv venv 2>nul
+    %PY_BIN% -m venv venv 2>nul
     if errorlevel 1 python -m venv venv
     popd
     if not exist "%KOHYA_DIR%\venv\Scripts\python.exe" (

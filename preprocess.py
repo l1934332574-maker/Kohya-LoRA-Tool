@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
 import traceback
 import subprocess
@@ -257,16 +258,29 @@ def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.
 
     返回是否成功。失败时由调用方做兜底处理，不会中断整体预处理。
     模型优先用内置 wd14_tagger_model（开箱即用，不联网）；缺失时才自动下载一次。
+
+    增强（整合 2026-08-17 现场修复）：
+    - 解释器自动选择：当前解释器缺 torch/onnxruntime 时自动改用带 torch 的 venv 并补装 onnx；
+    - library 路径修复：把 sd-scripts 根目录加进 PYTHONPATH 并作为工作目录；
+    - 坏图隔离：打标前校验输出图片，损坏的移走，避免一张坏图中断整批打标。
     """
     script = script or find_wd14_tagger()
     if not script:
         logf("[WD14] 未找到 kohya 官方打标脚本，跳过自动打标")
         return False
+    # 打标环境准备：当前解释器缺 torch/onnxruntime 时自动选带 torch 的 venv 并补装
+    py, sd_root = _prepare_wd14_env(logf)
+    if not py:
+        logf("[WD14] 没有可用的打标解释器（缺 torch/onnxruntime），跳过自动打标")
+        return False
+    # 隔离损坏图片：避免一张坏图导致整批打标中断
+    _quarantine_corrupt_images(output_dir, logf)
     model_dir, ready = _wd14_model_dir()
     logf(f"[WD14] 使用官方打标脚本: {script}")
+    logf(f"[WD14] 打标解释器: {py}")
     logf(f"[WD14] 打标模型目录: {model_dir}" + ("（内置，已就绪）" if ready else "（未就绪，将自动下载）"))
     cmd = [
-        sys.executable, script, output_dir,
+        py, script, output_dir,
         "--onnx", "--repo_id", WD14_REPO_ID,
         "--model_dir", model_dir,
         "--batch_size", str(batch_size), "--thresh", str(thresh),
@@ -280,8 +294,14 @@ def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.
     if _px:
         env.setdefault("HTTP_PROXY", _px)
         env.setdefault("HTTPS_PROXY", _px)
+    # library 模块路径：sd-scripts 根目录进 PYTHONPATH，并作为工作目录
+    cwd = None
+    if sd_root:
+        old_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = sd_root + ((";" + old_pp) if old_pp else "")
+        cwd = sd_root
     try:
-        rc = _run_cmd(cmd, env=env, logf=logf)
+        rc = _run_cmd(cmd, cwd=cwd, env=env, logf=logf)
         if rc == 0:
             logf("[WD14] 自动打标完成（GPU）")
             return True
@@ -290,7 +310,7 @@ def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.
         if env.get("CUDA_VISIBLE_DEVICES") != "":
             logf("[WD14] GPU 打标失败，正在回退 CPU 重试一次（会慢一些）…")
             env["CUDA_VISIBLE_DEVICES"] = ""
-            rc2 = _run_cmd(cmd, env=env, logf=logf)
+            rc2 = _run_cmd(cmd, cwd=cwd, env=env, logf=logf)
             if rc2 == 0:
                 logf("[WD14] 自动打标完成（CPU 回退）")
                 return True
@@ -301,7 +321,7 @@ def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.
             if env.get("CUDA_VISIBLE_DEVICES") != "":
                 logf("[WD14] 正在回退 CPU 重试一次…")
                 env["CUDA_VISIBLE_DEVICES"] = ""
-                rc3 = _run_cmd(cmd, env=env, logf=logf)
+                rc3 = _run_cmd(cmd, cwd=cwd, env=env, logf=logf)
                 if rc3 == 0:
                     logf("[WD14] 自动打标完成（CPU 回退）")
                     return True
@@ -324,6 +344,126 @@ def _fill_missing_captions(output_dir, fallback, logf=print):
             n += 1
     if n:
         logf(f"[INFO] 为 {n} 张没有标签的图片补写了兜底 caption（未找到 WD14 打标结果）")
+
+
+def _sd_scripts_root(script=None):
+    """由 WD14 打标脚本路径推导 sd-scripts 根目录（library 包所在处）。
+
+    官方脚本在 <sd-scripts>/finetune/tag_images_by_wd14_tagger.py，
+    运行时会 import library.dataset，需要把 sd-scripts 根目录加进模块搜索路径。
+    """
+    p = script or find_wd14_tagger()
+    if not p:
+        return None
+    cand = os.path.dirname(os.path.dirname(os.path.abspath(p)))
+    return cand if os.path.isdir(os.path.join(cand, "library")) else None
+
+
+def _quarantine_corrupt_images(output_dir, logf=print):
+    """打标前校验输出图片完整性：损坏/截断的移到 <输出目录>_corrupt。
+
+    避免一张坏图导致整批 WD14 打标中断；下次预处理会从原图自动重新生成。
+    """
+    moved = 0
+    corrupt_dir = output_dir.rstrip("\\/") + "_corrupt"
+    for f in sorted(os.listdir(output_dir)):
+        if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
+            continue
+        p = os.path.join(output_dir, f)
+        try:
+            with load_image(p):
+                pass
+        except Exception:
+            try:
+                os.makedirs(corrupt_dir, exist_ok=True)
+                shutil.move(p, os.path.join(corrupt_dir, f))
+                t = os.path.join(output_dir, os.path.splitext(f)[0] + ".txt")
+                if os.path.isfile(t):
+                    shutil.move(t, os.path.join(corrupt_dir, os.path.basename(t)))
+                moved += 1
+                logf(f"[WD14] 隔离损坏图片: {f}")
+            except Exception:
+                pass
+    if moved:
+        logf(f"[WD14] 已隔离 {moved} 张损坏图片到 {corrupt_dir}（下次预处理会从原图重新生成）")
+    return moved
+
+
+def _has_wd14_deps(py):
+    """检查解释器能否 import torch + onnxruntime（WD14 打标必需）。"""
+    code = ("import sys, importlib.util;" +
+            "sys.exit(0 if (importlib.util.find_spec('torch') and importlib.util.find_spec('onnxruntime')) else 1)")
+    try:
+        r = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=120)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _has_torch(py):
+    """检查解释器能否 import torch。"""
+    try:
+        r = subprocess.run([py, "-c", "import sys, importlib.util;" +
+                            "sys.exit(0 if importlib.util.find_spec('torch') else 1)"],
+                           capture_output=True, text=True, timeout=120)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _ensure_onnx(py, logf=print):
+    """解释器缺 onnxruntime/onnx 时自动补装（清华源）。返回是否就绪。"""
+    if _has_wd14_deps(py):
+        return True
+    try:
+        r = subprocess.run([py, "-m", "pip", "install", "--no-input", "--retries", "10",
+                            "--timeout", "120", "--index-url",
+                            "https://pypi.tuna.tsinghua.edu.cn/simple",
+                            "onnxruntime", "onnx"],
+                           capture_output=True, text=True, timeout=600)
+        if r.returncode == 0 and _has_wd14_deps(py):
+            logf(f"[WD14] 已自动补装 onnxruntime/onnx（{py}）")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _prepare_wd14_env(logf=print):
+    """准备 WD14 打标解释器环境。返回 (python 路径, sd_scripts_root 或 None)。
+
+    策略：
+    1. 当前解释器有 torch+onnxruntime → 直接用；
+    2. 有 torch 但缺 onnxruntime → 自动补装；
+    3. 当前解释器缺 torch → 探测其他引擎 venv（venv_amd / musubi-venv / ai_toolkit_venv），
+       找到带 torch 的并补装 onnxruntime；
+    4. 都不可用 → 返回 (None, None)。
+    """
+    cur = sys.executable
+    if _has_torch(cur):
+        if _ensure_onnx(cur, logf):
+            return cur, _sd_scripts_root()
+    cands = []
+    here = os.path.dirname(os.path.abspath(__file__))
+    for base in (here, os.path.dirname(here)):
+        for sub in ("venv_amd", "musubi-venv", "ai_toolkit_venv", "venv"):
+            p = os.path.join(base, sub, "Scripts", "python.exe")
+            if os.path.isfile(p) and os.path.abspath(p) != os.path.abspath(cur):
+                cands.append(p)
+    ap = os.environ.get("APPDATA", "")
+    if ap:
+        for sub in (r"KohyaLoraTool\venv_amd",
+                    r"KohyaLoraTool\kohya_ss\musubi-venv",
+                    r"KohyaLoraTool\kohya_ss\ai_toolkit_venv"):
+            p = os.path.join(ap, sub, "Scripts", "python.exe")
+            if os.path.isfile(p) and os.path.abspath(p) != os.path.abspath(cur):
+                cands.append(p)
+    for p in cands:
+        if _has_torch(p):
+            logf(f"[WD14] 当前解释器缺 torch，改用 {p} 打标")
+            if _ensure_onnx(p, logf):
+                return p, _sd_scripts_root()
+    return None, None
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif", ".jfif", ".jpe", ".avif"}
@@ -828,7 +968,9 @@ def main():
                        and not os.path.isfile(os.path.join(output_dir, os.path.splitext(f)[0] + ".txt"))]
         if use_wd14:
             if imgs_no_txt:
-                run_wd14_tagger(output_dir)
+                wd14_ok = run_wd14_tagger(output_dir)
+                if not wd14_ok:
+                    _fill_missing_captions(output_dir, DEFAULT_CAPTION)
             else:
                 print("[INFO] 图片标签已齐全，跳过 WD14 打标。")
         else:
@@ -870,6 +1012,31 @@ def main():
                     fh.write(insert_trigger(cur, trigger))
                 n_trig += 1
         print(f"[INFO] 已把画风专属触发词「{trigger}」插入 {n_trig} 张图片的标签第一行")
+
+    # ---- 最终兜底：确保每张图都有非空标签（任何环节失败都不漏标签） ----
+    if not args.no_caption and (ok + skipped):
+        fb = DEFAULT_CAPTION if mode == "style" else DEFAULT_CHARACTER_CAPTION
+        n_fill = 0
+        for f in sorted(os.listdir(output_dir)):
+            if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
+                continue
+            t = os.path.join(output_dir, os.path.splitext(f)[0] + ".txt")
+            need = False
+            if not os.path.isfile(t):
+                need = True
+            else:
+                try:
+                    with open(t, "r", encoding="utf-8") as fh:
+                        if not fh.read().strip():
+                            need = True
+                except Exception:
+                    need = True
+            if need:
+                with open(t, "w", encoding="utf-8") as fh:
+                    fh.write(fb)
+                n_fill += 1
+        if n_fill:
+            print(f"[INFO] 最终兜底：为 {n_fill} 张缺失/空标签的图片补写了 caption")
 
     print()
     print("=" * 60)
