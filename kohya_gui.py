@@ -28,7 +28,7 @@ except Exception:
 
 def _family_chain():
     s = platform.system()
-    if s == "Windows": return ("Segoe UI", "Microsoft YaHei")
+    if s == "Windows": return ("Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI")
     if s == "Darwin":  return ("San Francisco", "PingFang SC")
     if s == "Linux":   return ("Noto Sans", "Noto Sans SC")
     return ("Arial",)
@@ -46,11 +46,11 @@ def ui_font(ft):
         pass
     return (family, ft[-2], ft[-1])
 
-FONT_TITLE = (*FONT_CHAIN, 14, "normal")
-FONT_BODY  = (*FONT_CHAIN, 12, "normal")
-FONT_HINT  = (*FONT_CHAIN, 10, "normal")
-FONT_BADGE = (*FONT_CHAIN, 10, "normal")
-FONT_LOG   = ("Consolas", "Microsoft YaHei", 11, "normal")
+FONT_TITLE = (*FONT_CHAIN, 16, "normal")
+FONT_BODY  = (*FONT_CHAIN, 13, "normal")
+FONT_HINT  = (*FONT_CHAIN, 11, "normal")
+FONT_BADGE = (*FONT_CHAIN, 11, "normal")
+FONT_LOG   = ("Consolas", "Microsoft YaHei", 12, "normal")
 
 THEMES = {
     "dark": {
@@ -142,7 +142,7 @@ class Tooltip:
             self.tip.attributes("-topmost", True)
             lbl = tk.Label(self.tip, text=self.text, justify="left", bg="#2f343d",
                            fg="#e2e5ec", relief="solid", borderwidth=1, wraplength=self.wrap,
-                           font=("Microsoft YaHei UI", 9), padx=8, pady=6)
+                           font=("Microsoft YaHei UI", 10), padx=9, pady=6)
             lbl.pack()
         except Exception:
             self.tip = None
@@ -454,7 +454,7 @@ class App:
             ctk.CTkLabel(self.mon_row2, textvariable=v, font=ui_font(FONT_HINT), text_color=SUB).pack(side="left", padx=(0, 16))
         self.mon_canvas = tk.Canvas(self.mon, height=70, bg="#14161c", highlightthickness=0)
         self.mon_canvas.pack(fill="x", padx=26, pady=(0, 10))
-        self.mon_canvas.create_text(10, 10, text="等待训练数据…", anchor="nw", fill="#7c8290", font=("Microsoft YaHei", 9))
+        self.mon_canvas.create_text(10, 10, text="等待训练数据…", anchor="nw", fill="#7c8290", font=("Microsoft YaHei", 10))
         self._mon_visible = False
 
     def _show_monitor(self, v):
@@ -529,7 +529,7 @@ class App:
             h = max(c.winfo_height(), 10)
             if len(hist) < 2:
                 c.create_text(10, 10, text="等待训练数据…（loss 曲线）", anchor="nw",
-                              fill="#7c8290", font=("Microsoft YaHei", 9))
+                              fill="#7c8290", font=("Microsoft YaHei", 10))
                 return
             data = hist[-50:]
             mn, mx = min(data), max(data)
@@ -546,7 +546,7 @@ class App:
             flat = [p for pt in pts for p in pt]
             c.create_line(flat, fill="#7AA2F7", width=2, smooth=True)
             c.create_text(w - pad, 4, text=f"loss 最近{len(data)}步 ↓", anchor="ne",
-                          fill="#9aa0ad", font=("Microsoft YaHei", 8))
+                          fill="#9aa0ad", font=("Microsoft YaHei", 9))
         except Exception:
             pass
 
@@ -566,7 +566,7 @@ class App:
     # ============ 总布局：左侧新手引导 + 右侧（顶部条 + 可滚动主区 + 底部日志） ============
     def _build_ui(self):
         # ---------- 左侧：新手引导（环境/安装/选底模/选图片/一键） ----------
-        self.sidebar = ctk.CTkFrame(self.root, fg_color=SIDEBG, width=230, corner_radius=0)
+        self.sidebar = ctk.CTkFrame(self.root, fg_color=SIDEBG, width=252, corner_radius=0)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
         logo = ctk.CTkFrame(self.sidebar, fg_color="transparent")
@@ -1041,11 +1041,11 @@ class App:
             dot = ctk.CTkFrame(row, width=10, height=10, corner_radius=5, fg_color="#4a3636")
             dot.pack(side="left", padx=(2, 8), pady=9)
             ctk.CTkLabel(row, text=step["label"], font=ui_font(FONT_BODY), text_color=TXT,
-                         width=100, anchor="w").pack(side="left")
+                         width=88, anchor="w").pack(side="left")
             var = tk.StringVar(value="·")
             ctk.CTkLabel(row, textvariable=var, font=ui_font(FONT_HINT), text_color=HINT,
                          width=18, anchor="w").pack(side="left")
-            btn = ctk.CTkButton(row, text=step["btn"], width=62, height=28, fg_color=CARD2,
+            btn = ctk.CTkButton(row, text=step["btn"], width=68, height=32, fg_color=CARD2,
                                 hover_color="#343a46", border_width=1, border_color=BORDER,
                                 text_color=TXT, corner_radius=6, font=ui_font(FONT_HINT),
                                 command=getattr(self, step["act"], lambda: None))

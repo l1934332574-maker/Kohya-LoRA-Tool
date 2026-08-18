@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.10"
+APP_VERSION = "0.9.11"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -670,13 +670,19 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
                 logf("[%s] 已把旧 %2B 文件名缓存改名为合法名: %s" % (label, local_name))
             except Exception:
                 pass
-        if os.path.isfile(dest) and os.path.getsize(dest) >= minsize:
+        if os.path.isfile(dest) and os.path.getsize(dest) >= minsize and _wheel_valid(dest):
             logf("[%s] 已存在缓存轮子，跳过下载: %s" % (label, local_name))
         else:
+            if os.path.isfile(dest):
+                logf("[%s] 缓存轮子不完整或损坏，重新下载: %s" % (label, local_name))
+                try:
+                    os.remove(dest)
+                except Exception:
+                    pass
             logf("[%s] 下载 %s（断点续传，可随时停止/重试）…" % (label, local_name))
             if not _download_with_resume(base + "/" + name, dest, logf):
                 raise RuntimeError("下载失败，可重试（会从断点续传）: %s" % local_name)
-            if not (os.path.isfile(dest) and os.path.getsize(dest) >= minsize):
+            if not (os.path.isfile(dest) and os.path.getsize(dest) >= minsize and _wheel_valid(dest)):
                 raise RuntimeError("下载不完整: %s" % local_name)
         paths.append(dest)
     logf("[%s] 本地安装 PyTorch 轮子（依赖走清华镜像）…" % label)
@@ -2970,16 +2976,28 @@ def _wheels_for_python(wheels, vpy):
 
 
 def _wheel_valid(path):
-    """粗校验下载的 wheel/压缩包完整性（防止断点残留的残片被当成可用）。"""
+    """校验下载的 wheel/压缩包完整性（防止断点残留或下载损坏的残片被当成可用）。
+
+    之前只用 zipfile.is_zipfile() 查文件头魔数，会放行“头部完好但内部损坏”的文件
+    （AMD 用户反馈：rocm_sdk_devel 下载损坏，大小与官方不一致，pip 装时报
+    BadZipFile）。这里升级为全量校验：zip 遍历所有条目做 CRC 校验（testzip），
+    tar.gz 读取中央目录，损坏即判 False，触发重新下载。"""
     try:
         low = path.lower()
         if low.endswith((".whl", ".zip")):
             import zipfile
-            return zipfile.is_zipfile(path)
+            if not zipfile.is_zipfile(path):
+                return False
+            with zipfile.ZipFile(path) as z:
+                if z.testzip() is not None:
+                    return False
+            return True
         if low.endswith((".tar.gz", ".tgz")):
             import tarfile
-            with tarfile.open(path, "r:gz"):
-                return True
+            with tarfile.open(path, "r:gz") as t:
+                # 读取中央目录：文件损坏（截断/追加垃圾字节）会在此抛错
+                t.getmembers()
+            return True
         return os.path.getsize(path) > 0
     except Exception:
         return False
@@ -3057,14 +3075,28 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
             "prodigy-plus-schedule-free", "prodigyopt", "einops", "opencv-python", "sentencepiece",
             "scipy", "protobuf"]   # scipy 太旧(<1.13)与 numpy2 冲突会崩 transformers；protobuf 为 tokenizer 加载必需
     ok = False
-    for _idx in ("https://pypi.tuna.tsinghua.edu.cn/simple", "https://mirrors.aliyun.com/pypi/simple/"):
-        if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
-                       "--index-url", _idx] + pkgs, cwd=kdir, env=env, logf=logf) == 0:
-            ok = True
+    for _round in range(2):
+        for _idx in ("https://pypi.tuna.tsinghua.edu.cn/simple", "https://mirrors.aliyun.com/pypi/simple/"):
+            if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                           "--index-url", _idx] + pkgs, cwd=kdir, env=env, logf=logf) == 0:
+                ok = True
+                break
+            logf("[环境] 当前镜像下载失败，切换备用镜像重试…")
+        if ok:
             break
-        logf("[环境] 当前镜像下载失败，切换备用镜像重试…")
+        logf("[环境] 补装失败（多为网络波动/下载中断），自动重试第 %d 轮…" % (_round + 2))
     if not ok:
-        return False
+        # 区分“真缺模块”和“只是版本升级失败”：核心模块齐全时，网络失败
+        # 不再一刀切卡死训练（用户A 反馈：scipy 1.11 需升级，下载 IncompleteRead 中断，
+        # 挂不挂梯子都过不去，训练被拦死）。降级为警告继续，让用户有机会尝试。
+        if _venv_imports_ok(vpy, ("PIL", "numpy", "transformers", "huggingface_hub", "toml",
+                                  "voluptuous", "safetensors", "diffusers", "accelerate",
+                                  "omegaconf", "imagesize", "rich", "ftfy", "einops", "cv2",
+                                  "sentencepiece", "google.protobuf")):
+            logf("[环境] ⚠ 依赖升级/补装因网络失败，但核心模块已齐全，将尝试继续训练。")
+            logf("[环境] 若训练中报 scipy/numpy 相关错误，请网络稳定后重跑【② 安装训练内核】。")
+        else:
+            return False
     # torch/torchvision 配对补装：安装中断常见“有 torch 没 torchvision”，
     # 缺 torchvision 会在训练 import 时直接报 ModuleNotFoundError（用户 A 反馈）。
     # torchvision 是 CUDA 大轮子，不走 pypi 镜像，按 torch 版本走 _preinstall_torch。
