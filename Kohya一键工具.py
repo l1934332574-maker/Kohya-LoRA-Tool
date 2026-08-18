@@ -29,6 +29,7 @@ import traceback
 import tempfile
 import webbrowser
 import urllib.request
+import ctypes
 
 # ---------- 全局隐藏子进程窗口 ----------
 # GUI 程序没有控制台窗口，直接 subprocess 启动的子进程（git/python/nvidia-smi/powershell 等）
@@ -36,10 +37,61 @@ import urllib.request
 # 让任何子进程都后台静默运行，不再弹窗。（subprocess.run/call 内部都走 Popen，自动生效）
 if os.name == "nt":
     _orig_popen = subprocess.Popen
+    _popen_dll_lock = threading.RLock()
+
+    def _clean_child_env(env=None):
+        """为外部 Python/Git/pip 清除打包程序注入的 Python/DLL 路径。
+
+        PyInstaller onedir 会把 exe 目录加入 DLL/PATH 搜索路径。若直接从 GUI
+        启动用户的 venv Python，外部解释器可能误加载应用自带的 python312.dll、
+        libcrypto 等文件，随后出现 ``Module use of python312.dll conflicts`` 或
+        ``DLL load failed``。所有子进程都应使用一份净化后的独立环境。
+        """
+        child_env = dict(os.environ if env is None else env)
+        for key in ("PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP"):
+            child_env.pop(key, None)
+        blocked = set()
+        _meipass = getattr(sys, "_MEIPASS", None)
+        if _meipass:
+            blocked.add(os.path.normcase(os.path.abspath(_meipass)))
+        if getattr(sys, "frozen", False):
+            blocked.add(os.path.normcase(os.path.abspath(os.path.dirname(sys.executable))))
+        if blocked:
+            clean_path = []
+            for part in child_env.get("PATH", "").split(os.pathsep):
+                raw = part.strip().strip('"')
+                if raw and os.path.normcase(os.path.abspath(raw)) in blocked:
+                    continue
+                clean_path.append(part)
+            child_env["PATH"] = os.pathsep.join(clean_path)
+        return child_env
+
+    def _get_dll_directory():
+        """读取当前进程 SetDllDirectory 值；未设置时返回 None。"""
+        try:
+            kernel32 = ctypes.windll.kernel32
+            size = kernel32.GetDllDirectoryW(0, None)
+            if not size:
+                return None
+            buf = ctypes.create_unicode_buffer(size + 1)
+            if kernel32.GetDllDirectoryW(len(buf), buf):
+                return buf.value or None
+        except Exception:
+            pass
+        return None
 
     def _popen_no_window(*args, **kwargs):
         kwargs.setdefault("creationflags", 0x08000000)  # CREATE_NO_WINDOW
-        return _orig_popen(*args, **kwargs)
+        kwargs["env"] = _clean_child_env(kwargs.get("env"))
+        # PyInstaller 官方建议：启动外部程序前在 Windows 清除其设置的 DLL
+        # 搜索目录，CreateProcess 返回后再恢复，避免污染 venv Python。
+        with _popen_dll_lock:
+            previous = _get_dll_directory()
+            try:
+                ctypes.windll.kernel32.SetDllDirectoryW(None)
+                return _orig_popen(*args, **kwargs)
+            finally:
+                ctypes.windll.kernel32.SetDllDirectoryW(previous)
 
     subprocess.Popen = _popen_no_window
 
@@ -57,7 +109,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.11"
+APP_VERSION = "0.9.12"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -485,10 +537,11 @@ def ensure_prereqs(logf=print):
 
 
 
-def _git_proxy_reachable():
+def _git_proxy_reachable(git=None):
     """检查 git 全局代理是否可用。本地代理(127.0.0.1)端口未监听视为不可用。"""
     try:
-        r = subprocess.run(["git", "config", "--global", "--get", "http.proxy"],
+        git_exe = git or find_git() or "git"
+        r = subprocess.run([git_exe, "config", "--global", "--get", "http.proxy"],
                            capture_output=True, text=True, timeout=15)
         proxy = (r.stdout or "").strip()
         if not proxy:
@@ -508,11 +561,16 @@ def _git_proxy_reachable():
 
 def _git_clone(git, url, dest, logf):
     """克隆仓库；若 git 全局代理不可用则绕过代理直连。"""
-    env = build_env([os.path.dirname(git)])
-    cmd = ["git", "clone", "--depth", "1", url, dest]
-    if not _git_proxy_reachable():
+    git_exe = git or find_git() or "git"
+    env = build_env([os.path.dirname(git_exe)])
+    # 使用绝对 git.exe，避免 PATH 中存在同名程序或打包环境找错 Git。
+    # 注意 -c 是 git 的全局参数，必须放在 clone 子命令前；不能再拼一个 "git"，
+    # 否则会形成 `git -c ... git clone` 并报 "git is not a git command"。
+    cmd = [git_exe]
+    if not _git_proxy_reachable(git_exe):
         logf("[Git] 检测到 git 代理不可用，本次克隆绕过代理直连…")
-        cmd = ["git", "-c", "http.proxy=", "-c", "https.proxy="] + cmd
+        cmd += ["-c", "http.proxy=", "-c", "https.proxy="]
+    cmd += ["clone", "--depth", "1", url, dest]
     return run_stream(cmd, env=env, logf=logf)
 
 
@@ -824,6 +882,9 @@ def install_kohya(logf=print):
             torch_ok = _dep_ok("import torch; print(torch.__version__)")
         else:
             torch_ok = _dep_ok("import torch; assert torch.cuda.is_available()")
+        if not torch_ok and _dep_ok("import torch; print(torch.__version__)"):
+            # torch 能导入但 CUDA 不可用：明确记录为 CPU/驱动问题，后续会重装 cu128。
+            logf("[Kohya] 已检测到 torch，但 CUDA 不可用，将重新安装 CUDA 版 PyTorch…")
         deps_ok = _dep_ok("import PIL, numpy")
         if torch_ok and deps_ok and os.path.isdir(os.path.join(kdir, "sd-scripts")):
             logf("[Kohya] 检测到已安装环境（torch + Pillow/numpy 可用），跳过重复安装。")
@@ -887,18 +948,28 @@ def install_kohya(logf=print):
             f.write(kdir)
         try:
             r = subprocess.run(
-                [vpy, "-c", "import torch;print(torch.__version__);print(torch.cuda.is_available())"],
+                [vpy, "-c", "import torch;print(torch.__version__);print(torch.version.cuda or '');print(torch.cuda.is_available())"],
                 capture_output=True, text=True, timeout=180,
             )
             lines = (r.stdout or "").strip().splitlines()
             torchv = lines[0] if lines else "?"
-            cuda = lines[1] if len(lines) > 1 else "?"
-            logf(f"[Kohya] 验证：torch {torchv} | CUDA 可用: {cuda}")
+            cudav = lines[1] if len(lines) > 1 else "?"
+            cuda = lines[2] if len(lines) > 2 else "?"
+            logf(f"[Kohya] 验证：torch {torchv} | CUDA 构建: {cudav or '无'} | CUDA 可用: {cuda}")
+            if r.returncode != 0:
+                detail = ((r.stderr or "") + (r.stdout or "")).strip()
+                logf(f"[Kohya] ✖ torch 导入失败（不是 CPU 版，而是环境/依赖未能加载）：{detail[-800:] or '未知错误'}")
+                raise RuntimeError(
+                    "Kohya 安装后 torch 验证失败，未完成安装。请重跑【② 安装训练内核】；"
+                    "如果仍失败，请把本行上方的 torch 导入错误发来。"
+                )
             if _gpu_vendor != "amd" and cuda != "True":
                 logf("[Kohya] ⚠ torch 未启用 CUDA（可能是 CPU 版）。训练会全程 CPU 且极慢，"
                      "请重跑【一键安装】确保装 cu128 版 PyTorch，或检查 NVIDIA 驱动。")
+        except RuntimeError:
+            raise
         except Exception as e:
-            logf(f"[Kohya] 验证 torch 失败: {e}")
+            raise RuntimeError(f"Kohya 安装后 torch 验证失败：{e}。请重跑【② 安装训练内核】")
         return kdir
     finally:
         _release_kohya_install_lock(lock_f)
