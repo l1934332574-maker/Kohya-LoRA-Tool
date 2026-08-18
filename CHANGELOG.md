@@ -1,5 +1,30 @@
 ﻿# 更新日志（Changelog）
 
+## v0.9.10（2026-08-18）
+
+### 修复
+- **训练环境健康检查全面加强（针对“有 Python 却跑不了”的三类根因）**：
+  - 新增 venv 深度检测：校验 pyvenv.cfg 指向的 Python 是否还在，并实际导入 socket/ssl/ctypes/sqlite3；
+  - 自动识别“跨版本 DLL 混用”（No Python at ... / python312.dll conflicts / DLL load failed），命中即判定环境损坏，安装内核时自动把旧 venv 改名保留并用当前 Python 重建；
+  - 训练 / 预处理 / 模型下载遇到损坏环境时给出明确原因和重跑②指引，不再误导为“网络不稳”。
+- **缺 pip 自动修复（第二引擎 “No module named pip” 安装卡死）**：
+  - 主引擎与第二引擎安装前都会检查 pip，缺失时先用 ensurepip 自愈；
+  - 自愈失败自动重建虚拟环境（旧环境保留为 venv_broken_时间戳 / musubi-venv_broken_时间戳）。
+- **主引擎强制校验 torch + torchvision（训练报 ModuleNotFoundError: No module named 'torchvision'）**：
+  - 训练前完整性检查新增 torch / torchvision；
+  - 缺 torchvision 时按已装 torch 版本自动配对补装（如 torch 2.7.1 → torchvision 0.22.1，走阿里镜像断点续传）；
+  - 补装失败给出明确指引重跑②，不再等到训练脚本启动才崩。
+- **pip 升级失败诊断与备用源**：
+  - pip 升级主源（清华）失败自动切换阿里镜像重试；
+  - 失败提示区分“网络 / 镜像故障”和“No module named pip 需重建”。
+- **国内镜像强制生效（分词器缓存 / 训练 / 模型组件下载）**：
+  - HF_ENDPOINT 由 setdefault 改为强制覆盖 huggingface.co（用户系统已有官方站环境变量时不再直连超时）；
+  - 分词器预缓存、Qwen3 等模型组件下载统一走 hf-mirror。
+- **外部 Python 子进程环境净化**：
+  - 启动训练 / 下载 / 安装子进程时清除 PYTHONHOME / PYTHONPATH / PYTHONSTARTUP，并从 PATH 移除 PyInstaller 解包目录，避免错误版本 DLL 被塞进 venv 子进程。
+
+---
+
 ## v0.9.9（2026-08-18）
 
 ### 修复

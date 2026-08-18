@@ -73,6 +73,17 @@ def reset_stop():
 def build_env(extra_dirs=()):
     env = dict(os.environ)
     paths = list(extra_dirs) + [env.get("PATH", "")]
+    # 清除会污染外部 Python 子进程的变量：打包版 / PATH 上其他 Python 可能
+    # 通过 PYTHONHOME/PYTHONPATH 把错误的 DLL、模块塞进 venv 子进程
+    # （典型现象：venv 是 Python 3.10，却报 "Module use of python312.dll conflicts"）。
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONSTARTUP", None)
+    # 移除 PyInstaller 解包目录：它的 python312.dll 等 DLL 不应出现在外部
+    # Python 子进程的 PATH 搜索里，避免跨 Python 版本 DLL 冲突。
+    _meipass = getattr(sys, "_MEIPASS", None)
+    if _meipass:
+        paths = [p for p in paths if p and os.path.normcase(p) != os.path.normcase(_meipass)]
     env["PATH"] = ";".join(p for p in paths if p)
     # 网络不稳时 pip 容易 IncompleteRead 中断：全局加大重试次数与超时
     env.setdefault("PIP_RETRIES", "10")

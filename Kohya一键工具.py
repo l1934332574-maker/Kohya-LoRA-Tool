@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.9"
+APP_VERSION = "0.9.10"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -773,6 +773,19 @@ def install_kohya(logf=print):
                     logf(f"[Kohya] 旧 venv 已保留到: {os.path.basename(_bak)}")
                 except Exception as _e:
                     raise RuntimeError("旧 venv 重命名失败（%s），请手动删除/移动 %s 后重试" % (_e, os.path.join(kdir, "venv")))
+            else:
+                # venv 健康但缺 pip（创建中断/ensurepip 缺失/被杀软清理）：
+                # 先 ensurepip 自愈；自愈失败则与损坏 venv 一样改名保留，走下方重建。
+                if not _ensure_venv_pip(vpy, os.path.join(kdir, "venv"), logf, label="Kohya"):
+                    logf("[Kohya] ⚠ venv 缺 pip 且自愈失败，自动重建（旧 venv 保留）…")
+                    _bak = os.path.join(kdir, "venv_broken_%s" % time.strftime("%Y%m%d_%H%M%S"))
+                    if os.path.exists(_bak):
+                        _bak += "_1"
+                    try:
+                        os.rename(os.path.join(kdir, "venv"), _bak)
+                        logf(f"[Kohya] 旧 venv 已保留到: {os.path.basename(_bak)}")
+                    except Exception as _e:
+                        raise RuntimeError("旧 venv 重命名失败（%s），请手动删除/移动 %s 后重试" % (_e, os.path.join(kdir, "venv")))
         if not os.path.isfile(vpy):
             logf("[Kohya] 创建 Python 虚拟环境…")
             if run_stream([py, "-m", "venv", "venv"], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
@@ -842,8 +855,12 @@ def install_kohya(logf=print):
         subprocess.run([vpy, "-m", "pip", "config", "set", "global.extra-index-url",
                         "https://mirrors.aliyun.com/pytorch-wheels/cu128"], capture_output=True, timeout=60)
         logf("[Kohya] 升级 pip / setuptools / wheel …")
-        if run_stream([vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q"], cwd=kdir, logf=logf) != 0:
-            raise RuntimeError("pip 升级失败（可能是网络或安装目录被占用），请重试")
+        if not _upgrade_pip(vpy, kdir, logf, label="Kohya"):
+            raise RuntimeError(
+                "pip 升级失败：清华/阿里镜像均不可达（常见：网络/防火墙/镜像临时故障）。\n"
+                "请检查网络后重试；若手动验证，可运行：\n"
+                f"  {vpy} -m pip install --upgrade pip setuptools wheel\n"
+                "若提示 No module named pip，请直接重跑【② 安装训练内核】自动重建环境。")
         if not torch_ok:
             # 3.3GB 的 torch 大轮子用 pip 直连下载容易卡死（无续传）：
             # 先 curl 断点续传预下载并装进 venv，官方 setup 检测到已装就会跳过。
@@ -1038,6 +1055,34 @@ def install_musubi_engine(logf=print):
             logf("[第二引擎] 创建独立虚拟环境 musubi-venv（不影响 kohya venv）…")
             if run_stream([py, "-m", "venv", mv], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
                 raise RuntimeError("创建 musubi-venv 失败")
+            if not _ensure_venv_pip(vpy, mv, logf, label="第二引擎"):
+                raise RuntimeError("musubi-venv 创建后无 pip，请检查 Python 安装是否完整")
+        else:
+            # venv 已存在：先做健康检查（base Python 缺失 / DLL 跨版本混用），
+            # 再确保 pip 可用（创建中断/ensurepip 缺失/被杀软清理都可能导致无 pip）。
+            _vok, _vdetail = _venv_python_ok(vpy)
+            _need_rebuild = False
+            if not _vok:
+                logf(f"[第二引擎] ⚠ 检测到 musubi-venv 已损坏：{_vdetail}")
+                logf("[第二引擎] 常见原因：数据目录迁移到新盘/更换系统用户/混入其他版本 Python 的依赖。")
+                _need_rebuild = True
+            elif not _ensure_venv_pip(vpy, mv, logf, label="第二引擎"):
+                logf("[第二引擎] ⚠ musubi-venv 缺 pip 且自愈失败，自动重建（旧 venv 保留）…")
+                _need_rebuild = True
+            if _need_rebuild:
+                _bak = os.path.join(kdir, "musubi-venv_broken_%s" % time.strftime("%Y%m%d_%H%M%S"))
+                if os.path.exists(_bak):
+                    _bak += "_1"
+                try:
+                    os.rename(mv, _bak)
+                    logf(f"[第二引擎] 旧 venv 已保留到: {os.path.basename(_bak)}")
+                except Exception as _e:
+                    raise RuntimeError("旧 musubi-venv 重命名失败（%s），请手动删除/移动 %s 后重试" % (_e, mv))
+                logf("[第二引擎] 用当前 Python 重建 musubi-venv…")
+                if run_stream([py, "-m", "venv", mv], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
+                    raise RuntimeError("重建 musubi-venv 失败")
+                if not _ensure_venv_pip(vpy, mv, logf, label="第二引擎"):
+                    raise RuntimeError("musubi-venv 重建后仍无 pip，请检查 Python 安装是否完整")
         # 3) 已装验证：torch/torchvision 配对正确 + musubi_tuner 可用 => 跳过
         try:
             pair_ok, pair_detail = _musubi_torch_pair_check(vpy)
@@ -1062,9 +1107,10 @@ def install_musubi_engine(logf=print):
         subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
                         "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
         logf("[第二引擎] 升级 pip / setuptools / wheel …")
-        if run_stream([vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q"],
-                      cwd=kdir, logf=logf) != 0:
-            raise RuntimeError("pip 升级失败，请重试")
+        if not _upgrade_pip(vpy, kdir, logf, label="第二引擎"):
+            raise RuntimeError(
+                "第二引擎 pip 升级失败：清华/阿里镜像均不可达（常见：网络/防火墙/镜像临时故障）。\n"
+                "请检查网络后重试；若提示 No module named pip，工具已在上一步自动 ensurepip 自愈或重建。")
         # 5) torch cu128：阿里镜像 curl 断点续传预下载大轮子 → 本地安装
         #    （阿里 pytorch-wheels 是文件仓库，curl 直链可下；pip 不能把它当 index 解析，
         #      所以预下载+本地装是主路径，重试 3 次断点续传；彻底失败才回退官方 index）
@@ -2728,25 +2774,130 @@ AMD_TRAIN_DEPS = "transformers==4.54.1 diffusers==0.32.1 accelerate safetensors 
 
 
 def _venv_python_ok(vpy):
-    """检测 venv 的 python.exe 能否正常启动（base 解释器是否还在）。
+    """检测 venv 是否“重度损坏”（base 解释器缺失 / 标准库 DLL 跨版本混用）。
 
-    Windows venv 跨盘复制 / 更换系统用户 / 原 Python 被卸载后，
-    pyvenv.cfg 里 home 指向的 base Python 可能不存在，
-    venv 的 python.exe 启动会直接报 "No Python at ..."，此时 venv 已损坏，
-    任何依赖检查/安装都会失败。返回 (ok, detail)。"""
+    Windows venv 跨盘复制 / 更换系统用户 / 原 Python 被卸载 / 混入其他版本
+    Python 的依赖后：
+    - pyvenv.cfg 里 home 指向的 base Python 不存在 → 启动即报 "No Python at ..."；
+    - venv 是 3.10 却混入 3.12 编译的扩展 → import socket/ssl 报
+      "Module use of python312.dll conflicts with this version of Python"。
+    这些都属于重度损坏，任何依赖检查/安装都会失败，返回 (False, detail)。
+    注意：缺 pip 属于轻度问题（ensurepip 可自愈），不在这里判死，
+    由 _ensure_venv_pip 单独处理。返回 (ok, detail)。"""
     if not vpy or not os.path.isfile(vpy):
         return False, "venv 的 python.exe 不存在"
+    # 1) base 解释器是否还在（pyvenv.cfg 的 home 指向的 python.exe）
     try:
-        r = subprocess.run([vpy, "-c", "import sys;print('%d.%d'%sys.version_info[:2])"],
-                           capture_output=True, text=True, timeout=30)
-        if r.returncode == 0 and re.match(r"^\d+\.\d+", (r.stdout or "").strip()):
-            return True, (r.stdout or "").strip()
-        err = ((r.stderr or "") + (r.stdout or "")).strip()
-        if "No Python" in err:
-            return False, "venv 指向的 Python 已不存在（No Python at ...），venv 已损坏"
-        return False, (err or "venv python 启动失败")[:160]
+        cfg = os.path.join(os.path.dirname(os.path.dirname(vpy)), "pyvenv.cfg")
+        if os.path.isfile(cfg):
+            home = None
+            try:
+                with open(cfg, encoding="utf-8", errors="replace") as _f:
+                    for _line in _f:
+                        if _line.lower().startswith("home"):
+                            home = _line.split("=", 1)[1].strip()
+                            break
+            except Exception:
+                home = None
+            if home and not os.path.isfile(os.path.join(home, "python.exe")):
+                return False, "venv 指向的 Python 已不存在（No Python at ...），venv 已损坏"
+    except Exception:
+        pass
+    # 2) 解释器 + 标准库实际可运行：DLL 跨版本混用会在 socket/ssl 导入时暴露
+    code = ("import sys;"
+            "import socket, ssl, ctypes, sqlite3;"
+            "print('%d.%d'%sys.version_info[:2])")
+    try:
+        r = subprocess.run([vpy, "-c", code], capture_output=True, text=True, timeout=60)
     except Exception as e:
         return False, str(e)[:160]
+    if r.returncode == 0 and re.match(r"^\d+\.\d+", (r.stdout or "").strip()):
+        return True, (r.stdout or "").strip()
+    err = ((r.stderr or "") + (r.stdout or "")).strip()
+    if "No Python" in err:
+        return False, "venv 指向的 Python 已不存在（No Python at ...），venv 已损坏"
+    if "python312.dll" in err or "conflicts with this version of Python" in err or "DLL load failed" in err:
+        return False, "venv 内 Python 与已装扩展版本不一致（跨版本 DLL 冲突），venv 已损坏"
+    return False, (err or "venv python 启动失败")[:160]
+
+
+def _ensure_venv_pip(vpy, venv_dir, logf=print, label="环境"):
+    """确保 venv 里有可用的 pip：缺失时用 ensurepip 自愈。
+
+    常见场景：venv 创建被中断 / 创建它的 Python 缺 ensurepip（如 ComfyUI 嵌入式
+    python）/ 杀软清理了 pip，导致 `python -m pip` 报 "No module named pip"
+    （用户 C 反馈：第二引擎安装卡死在 pip 升级）。
+    返回 True=pip 可用；False=自愈失败（调用方应重建 venv）。
+    """
+    if not vpy or not os.path.isfile(vpy):
+        return False
+    try:
+        r = subprocess.run([vpy, "-m", "pip", "--version"], capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            return True
+    except Exception:
+        pass
+    logf(f"[{label}] 检测到 venv 缺少 pip（No module named pip），尝试 ensurepip 自愈…")
+    try:
+        r = subprocess.run([vpy, "-m", "ensurepip", "--upgrade"], capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            logf(f"[{label}] ensurepip 自愈失败：{((r.stderr or r.stdout or '未知错误').strip())[-200:]}")
+            return False
+        r = subprocess.run([vpy, "-m", "pip", "--version"], capture_output=True, text=True, timeout=60)
+        return r.returncode == 0
+    except Exception as e:
+        logf(f"[{label}] ensurepip 自愈异常：{e}")
+        return False
+
+
+def _upgrade_pip(vpy, cwd, logf=print, label="环境"):
+    """升级 pip / setuptools / wheel；主源失败自动切换阿里备用源重试。
+
+    用户反馈过 pip 升级报 “Could not find a version that satisfies the requirement
+    wheel (from versions: none)”——这是当前 pip 源（默认清华）不可达或返回空，
+    不是目录占用。这里主源失败后自动切阿里源再试一次，并返回是否成功。"""
+    if not vpy or not os.path.isfile(vpy):
+        return False
+    if run_stream([vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q"],
+                  cwd=cwd, logf=logf) == 0:
+        return True
+    logf(f"[{label}] pip 升级失败，切换备用镜像（阿里）重试…")
+    return run_stream([vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q",
+                       "--index-url", "https://mirrors.aliyun.com/pypi/simple/",
+                       "--retries", "10", "--timeout", "120"],
+                      cwd=cwd, logf=logf) == 0
+
+
+def _venv_torch_version(vpy):
+    """读取 venv 内 torch 版本（如 2.7.1），未安装返回 None。"""
+    try:
+        r = subprocess.run(
+            [vpy, "-c", "import importlib.metadata as md;print((md.version('torch') or '').split('+')[0])"],
+            capture_output=True, text=True, timeout=60)
+        return (r.stdout or "").strip() or None
+    except Exception:
+        return None
+
+
+def _torch_torchvision_pair(torch_v):
+    """torch x.y.z ↔ torchvision 0.(y+15).z（2.7.0→0.22.0、2.7.1→0.22.1、2.6.0→0.21.0）。"""
+    try:
+        p = (torch_v or "").split("+")[0].split(".")
+        if len(p) >= 3 and p[0] == "2":
+            return ".".join(p[:3]), "0.%d.%s" % (int(p[1]) + 15, p[2])
+    except Exception:
+        pass
+    return "2.7.1", "0.22.1"
+
+
+def _venv_imports_ok(vpy, mods):
+    """用 find_spec 快速检查 venv 里模块是否都在（不 import，秒级）。"""
+    try:
+        code = ("import importlib.util;import sys;"
+                "sys.exit(0 if all(importlib.util.find_spec(x) is not None for x in %r) else 1)" % list(mods))
+        return subprocess.run([vpy, "-c", code], capture_output=True, text=True, timeout=60).returncode == 0
+    except Exception:
+        return False
 
 
 def venv_python_version(venv_dir):
@@ -2853,7 +3004,7 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
     # sd-scripts 训练需要的依赖（不含 NVIDIA 专属的 bitsandbytes/tensorflow/onnxruntime-gpu）
     # 只检查「模块加载时必需」的核心依赖；lion-pytorch/schedulefree/prodigy 等可选优化器
     # 不查（工具只用 AdamW/AdamW8bit，装全量时顺带补上即可）
-    code = ("import importlib.util;m=['PIL','numpy','transformers','huggingface_hub','toml',"
+    code = ("import importlib.util;m=['PIL','numpy','torch','torchvision','transformers','huggingface_hub','toml',"
             "'voluptuous','safetensors','diffusers','accelerate','omegaconf','imagesize','rich',"
             "'ftfy','einops','cv2','sentencepiece','google.protobuf'];"
             "import sys;sys.exit(0 if all(importlib.util.find_spec(x) is not None for x in m) else 1)")
@@ -2914,6 +3065,23 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
         logf("[环境] 当前镜像下载失败，切换备用镜像重试…")
     if not ok:
         return False
+    # torch/torchvision 配对补装：安装中断常见“有 torch 没 torchvision”，
+    # 缺 torchvision 会在训练 import 时直接报 ModuleNotFoundError（用户 A 反馈）。
+    # torchvision 是 CUDA 大轮子，不走 pypi 镜像，按 torch 版本走 _preinstall_torch。
+    if not _venv_imports_ok(vpy, ("torch", "torchvision")):
+        if detect_gpu_vendor() == "amd":
+            raise RuntimeError("AMD 训练环境缺少 torchvision，请重跑 AMD 环境引导重新安装 ROCm torchvision")
+        _tv = _venv_torch_version(vpy)
+        if not _tv:
+            raise RuntimeError("训练环境缺少 PyTorch，请重跑【② 安装训练内核】自动安装 cu128 版 PyTorch")
+        _tvv, _tvv2 = _torch_torchvision_pair(_tv)
+        logf(f"[环境] 检测到 torch {_tvv} 缺少配套 torchvision，自动补装 torchvision {_tvv2}+cu128 …")
+        try:
+            _preinstall_torch(vpy, kdir, logf, torch_ver=_tvv, tv_ver=_tvv2, label="Kohya", force=False)
+        except Exception as e:
+            raise RuntimeError("自动补装 torchvision 失败：%s\n请重跑【② 安装训练内核】" % e)
+        if not _venv_imports_ok(vpy, ("torch", "torchvision")):
+            raise RuntimeError("torchvision 补装后仍不可用，请重跑【② 安装训练内核】")
     logf("[环境] 训练环境运行时依赖补装完成")
     return True
 
@@ -3657,8 +3825,14 @@ def _ensure_tokenizer_cached(cache_dir, model_id, logf=print, kind="clip", vpy=N
             "os.makedirs(%r, exist_ok=True);"
             "t.save_pretrained(%r);"
             "print('tok_ok')") % (model_id, target, target)
+    # 强制走国内镜像：缓存失败通常就是直连 huggingface.co 超时（用户 A 反馈），
+    # 不能依赖父进程是否设置了 HF_ENDPOINT。
+    _tok_env = build_env()
+    _hf0 = _tok_env.get("HF_ENDPOINT", "")
+    if not _hf0 or "huggingface.co" in _hf0:
+        _tok_env["HF_ENDPOINT"] = "https://hf-mirror.com"
     try:
-        r = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=900)
+        r = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=900, env=_tok_env)
         if r.returncode == 0 and "tok_ok" in (r.stdout or ""):
             logf(f"[训练] 已预缓存分词器 {model_id}")
             return True
@@ -3937,7 +4111,11 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         env.setdefault("HTTP_PROXY", _px)
         env.setdefault("HTTPS_PROXY", _px)
     # 国内镜像：transformers/huggingface_hub 走 hf-mirror，避免直连 huggingface.co 超时
-    env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    # 用覆盖而不是 setdefault：用户系统若已有 HF_ENDPOINT=https://huggingface.co，
+    # setdefault 不会生效，训练时仍直连官方站超时（用户 A 反馈）。
+    _hf0 = env.get("HF_ENDPOINT", "")
+    if not _hf0 or "huggingface.co" in _hf0:
+        env["HF_ENDPOINT"] = "https://hf-mirror.com"
     if amd_mode:
         _gname = (detect_gpu_name() or "")
         if re.search(r"RX\s*6\d{3}", _gname, re.I):   # RX 6000 系（RDNA2）需 GFX 版本覆盖
@@ -4525,10 +4703,16 @@ def _hf_download(repo, local_dir, logf=print, allow_patterns=None):
         raise RuntimeError("Kohya 尚未安装，无法下载模型组件，请先安装训练内核。")
     os.makedirs(local_dir, exist_ok=True)
     # 预检 huggingface_hub：venv Python 与依赖版本错配（如 3.10 venv 混入 cp312 扩展）时
-    # import 会崩（python312.dll conflicts），这里给出明确提示而不是晦涩的 ImportError。
+    # import 会崩（python312.dll conflicts），这里给出明确提示而不是晦涩的 ImportError；
+    # 同时清掉父进程可能带进来的 PYTHONHOME/PYTHONPATH，避免把错误 DLL 塞给子进程。
+    _env = build_env()
+    _hf0 = _env.get("HF_ENDPOINT", "")
+    if not _hf0 or "huggingface.co" in _hf0:
+        _env["HF_ENDPOINT"] = "https://hf-mirror.com"
     try:
-        _r = subprocess.run([vpy, "-c", "import huggingface_hub; print('ok')"],
-                            capture_output=True, text=True, timeout=120)
+        _r = subprocess.run(
+            [vpy, "-c", "import socket, ssl; from huggingface_hub import snapshot_download; print('ok')"],
+            capture_output=True, text=True, timeout=120, env=_env)
         _hf_ok = _r.returncode == 0
         _hf_err = ((_r.stderr or _r.stdout or "").strip().splitlines() or ["未知错误"])[-1]
     except Exception as e:
@@ -4538,7 +4722,7 @@ def _hf_download(repo, local_dir, logf=print, allow_patterns=None):
             "venv 的 huggingface_hub 无法运行（常见：venv 是 Python 3.10/3.11，却混入了 3.12 编译的扩展，"
             "import 报 python312.dll conflicts）。\n"
             "解决办法（任选）：\n"
-            "1) 删除 kohya 的 venv 文件夹，用 Python 3.12 重跑【一键安装】（推荐）；\n"
+            "1) 直接重跑【② 安装训练内核】：新版会自动检测这种损坏 venv 并重建（旧 venv 保留）（推荐）；\n"
             "2) 或按下方提示手动放置模型文件，避免走自动下载。\n"
             f"详细信息：{_hf_err}")
     code = (
@@ -4550,7 +4734,7 @@ def _hf_download(repo, local_dir, logf=print, allow_patterns=None):
            (", allow_patterns=%s" % repr(list(allow_patterns)) if allow_patterns else ""))
     )
     logf(f"[下载] 开始下载模型组件：{repo} → {local_dir}（走 hf-mirror，可随时停止）")
-    rc = run_stream([vpy, "-c", code], logf=logf)
+    rc = run_stream([vpy, "-c", code], env=build_env(), logf=logf)
     if rc != 0:
         raise RuntimeError(f"模型组件下载失败（退出码 {rc}）：{repo}")
 
