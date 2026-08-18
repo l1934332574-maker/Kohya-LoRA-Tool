@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Kohya-SS LoRA 数据集预处理脚本（Windows / 通用）
@@ -289,11 +289,11 @@ def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.
     if not ready:
         cmd.append("--force_download")
     env = dict(os.environ)
-    env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-    _px = _system_proxy()
-    if _px:
-        env.setdefault("HTTP_PROXY", _px)
-        env.setdefault("HTTPS_PROXY", _px)
+    env["HF_ENDPOINT"] = "https://hf-mirror.com"
+    for _k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        env.pop(_k, None)
+    env["NO_PROXY"] = "*"
+    env["no_proxy"] = "*"
     # library 模块路径：sd-scripts 根目录进 PYTHONPATH，并作为工作目录
     cwd = None
     if sd_root:
@@ -416,10 +416,15 @@ def _ensure_onnx(py, logf=print):
     if _has_wd14_deps(py):
         return True
     try:
+        _env = dict(os.environ)
+        for _k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            _env.pop(_k, None)
+        _env["NO_PROXY"] = "*"
         r = subprocess.run([py, "-m", "pip", "install", "--no-input", "--retries", "10",
                             "--timeout", "120", "--index-url",
                             "https://pypi.tuna.tsinghua.edu.cn/simple",
-                            "onnxruntime", "onnx"],
+                            "--extra-index-url", "https://mirrors.aliyun.com/pypi/simple/",
+                            "onnxruntime", "onnx"], env=_env,
                            capture_output=True, text=True, timeout=600)
         if r.returncode == 0 and _has_wd14_deps(py):
             logf(f"[WD14] 已自动补装 onnxruntime/onnx（{py}）")

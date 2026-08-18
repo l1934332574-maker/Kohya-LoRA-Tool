@@ -80,9 +80,38 @@ if os.name == "nt":
             pass
         return None
 
+    def _external_python_safe_cwd(popen_args, current_cwd=None):
+        """打包版启动外部 Python 且调用方未指定 cwd 时，返回安全工作目录。
+
+        Python 3.10/3.11 的 ``python -c`` 会把当前工作目录放进 sys.path。
+        若 GUI 快捷方式的“起始位置”是应用目录，它会优先导入应用自带的
+        ``_ctypes.pyd``（cp312），即使 PATH/SetDllDirectory 已清理，仍会报
+        ``Module use of python312.dll conflicts``。因此把外部 Python 的默认 cwd
+        固定到它自己的 Scripts/解释器目录；明确传入 cwd 的训练脚本保持不变。
+        """
+        if current_cwd is not None or not getattr(sys, "frozen", False):
+            return current_cwd
+        try:
+            cmd = popen_args[0] if popen_args else None
+            exe = cmd[0] if isinstance(cmd, (list, tuple)) and cmd else cmd
+            if not isinstance(exe, str) or not os.path.isabs(exe):
+                return current_cwd
+            base = os.path.basename(exe).lower()
+            parent = os.path.basename(os.path.dirname(exe)).lower()
+            is_python = base in ("python.exe", "pythonw.exe")
+            is_venv_launcher = parent == "scripts" and base.endswith(".exe")
+            if is_python or is_venv_launcher:
+                safe = os.path.dirname(exe)
+                if os.path.isdir(safe):
+                    return safe
+        except Exception:
+            pass
+        return current_cwd
+
     def _popen_no_window(*args, **kwargs):
         kwargs.setdefault("creationflags", 0x08000000)  # CREATE_NO_WINDOW
         kwargs["env"] = _clean_child_env(kwargs.get("env"))
+        kwargs["cwd"] = _external_python_safe_cwd(args, kwargs.get("cwd"))
         # PyInstaller 官方建议：启动外部程序前在 Windows 清除其设置的 DLL
         # 搜索目录，CreateProcess 返回后再恢复，避免污染 venv Python。
         with _popen_dll_lock:
@@ -109,7 +138,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.12"
+APP_VERSION = "0.9.13"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -690,10 +719,9 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
                       xf_ver=None, ta_ver=None, cu="cu128", label="Kohya", force=False):
     """预下载并安装 PyTorch 大轮子（torch/torchvision[/xformers][/torchaudio]）。
 
-    官方 pip 直连下载大轮子（2~3GB）无断点续传，国内网络一断就 IncompleteRead/卡死
-    （kohya / musubi / ai-toolkit 三个引擎都踩过）。这里先用 curl 断点续传从
-    阿里 pytorch 镜像下到本地缓存，再 pip 装进 venv；之后官方 pip 检测到版本已满足就跳过下载。
-    返回 True=成功；失败抛 RuntimeError（调用方回退到 pip 直连）。
+    pip 直接下载大轮子（2~3GB）无断点续传，国内网络一断就 IncompleteRead/卡死。
+    这里从阿里云/上海交大双国内镜像断点续传到数据目录缓存，再从本地装进 venv。
+    返回 True=成功；失败抛 RuntimeError，由调用方向用户提示稍后重试，不回退海外源。
     """
     tag = None
     try:
@@ -704,7 +732,7 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
         tag = None
     if tag not in ("cp310", "cp311", "cp312"):
         raise RuntimeError("暂不支持该 Python 版本的 PyTorch 预装: %s" % (tag or "未知"))
-    base = "https://mirrors.aliyun.com/pytorch-wheels/%s" % cu
+    bases = ["https://mirrors.aliyun.com/pytorch-wheels/%s" % cu, "https://mirror.sjtu.edu.cn/pytorch-wheels/%s" % cu]
     wheels = [
         ("torch-%s%%2B%s-%s-%s-win_amd64.whl" % (torch_ver, cu, tag, tag), 1_000_000_000),
         ("torchvision-%s%%2B%s-%s-%s-win_amd64.whl" % (tv_ver, cu, tag, tag), 5_000_000),
@@ -737,20 +765,27 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
                     os.remove(dest)
                 except Exception:
                     pass
-            logf("[%s] 下载 %s（断点续传，可随时停止/重试）…" % (label, local_name))
-            if not _download_with_resume(base + "/" + name, dest, logf):
-                raise RuntimeError("下载失败，可重试（会从断点续传）: %s" % local_name)
-            if not (os.path.isfile(dest) and os.path.getsize(dest) >= minsize and _wheel_valid(dest)):
-                raise RuntimeError("下载不完整: %s" % local_name)
+            downloaded = False
+            for source_idx, base in enumerate(bases, 1):
+                source_name = "阿里云" if "aliyun" in base else "上海交大"
+                logf("[%s] 从%s下载 %s（国内直连，断点续传）…" % (label, source_name, local_name))
+                if _download_with_resume(base + "/" + name, dest, logf, direct=True):
+                    if os.path.isfile(dest) and os.path.getsize(dest) >= minsize and _wheel_valid(dest):
+                        downloaded = True
+                        break
+                    try: os.remove(dest)
+                    except Exception: pass
+                if source_idx < len(bases):
+                    logf("[%s] 当前国内镜像失败，自动切换备用镜像…" % label)
+            if not downloaded:
+                raise RuntimeError("国内双镜像下载失败: %s" % local_name)
         paths.append(dest)
     logf("[%s] 本地安装 PyTorch 轮子（依赖走清华镜像）…" % label)
-    env = build_env()
+    env = build_direct_env()
+    env["PIP_INDEX_URL"] = "https://pypi.tuna.tsinghua.edu.cn/simple"
+    env.pop("PIP_EXTRA_INDEX_URL", None)
     env.setdefault("PIP_RETRIES", "10")
     env.setdefault("PIP_TIMEOUT", "120")
-    _px = system_proxy()
-    if _px:
-        env.setdefault("HTTP_PROXY", _px)
-        env.setdefault("HTTPS_PROXY", _px)
     cmd = [vpy, "-m", "pip", "install", "--no-cache-dir", "--retries", "10", "--timeout", "120"]
     if force:
         cmd.append("--force-reinstall")
@@ -766,10 +801,10 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
 
 
 def install_kohya(logf=print):
-    git = find_git()
     py, pyver = find_python()
-    if not git or not py:
-        raise RuntimeError("请先点击【环境准备】安装 Git / Python")
+    # 第三引擎源码改为魔搭/国内加速 ZIP 按需下载，不再依赖 Git；只要求 Python。
+    if not py:
+        raise RuntimeError("请先点击【环境准备】安装 Python")
     kdir = get_kohya_dir()
     logf(f"[Kohya] 安装目录: {kdir}")
     # 跨进程锁：防止重复点击/双开导致两个安装同时写同一个 venv（WinError 32 文件占用）
@@ -916,11 +951,12 @@ def install_kohya(logf=print):
             with open(KOHYA_DIR_FILE, "w", encoding="utf-8") as f:
                 f.write(kdir)
             return kdir
-        logf("[Kohya] 设置 pip 镜像源（清华 pypi + 阿里 pytorch cu128，无需代理）…")
+        logf("[Kohya] 设置 pip 镜像源（清华/阿里 PyPI 双国内源，无需代理）…")
         subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
                         "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
-        subprocess.run([vpy, "-m", "pip", "config", "set", "global.extra-index-url",
-                        "https://mirrors.aliyun.com/pytorch-wheels/cu128"], capture_output=True, timeout=60)
+        # 旧版本可能把已失效的 PyTorch 专用源写进全局配置；PyTorch 现在由本地 wheel 安装。
+        subprocess.run([vpy, "-m", "pip", "config", "unset", "global.extra-index-url"],
+                       capture_output=True, timeout=60)
         logf("[Kohya] 升级 pip / setuptools / wheel …")
         if not _upgrade_pip(vpy, kdir, logf, label="Kohya"):
             raise RuntimeError(
@@ -939,9 +975,20 @@ def install_kohya(logf=print):
                     logf("[Kohya] PyTorch 预装成功，官方安装脚本将跳过 torch 下载。")
             except Exception as e:
                 logf(f"[Kohya] PyTorch 预下载失败（{e}），改由官方安装脚本处理（可能较慢，需多次重试）。")
+        _req_pt = os.path.join(kdir, "requirements_pytorch_windows.txt")
+        if os.path.isfile(_req_pt):
+            try:
+                _req_lines = open(_req_pt, encoding="utf-8", errors="replace").read().splitlines()
+                _req_lines = [_ln for _ln in _req_lines if "download.pytorch.org" not in _ln.lower()
+                              and not _ln.strip().lower().startswith(("torch==", "torchvision==", "xformers"))]
+                open(_req_pt, "w", encoding="utf-8").write("\n".join(_req_lines) + "\n")
+                logf("[Kohya] 已屏蔽官方 PyTorch 下载源，剩余依赖仅走国内 PyPI 镜像。")
+            except Exception as _e:
+                logf(f"[Kohya] 清理官方 PyTorch 源失败（继续使用已预装 Torch）：{_e}")
         logf("[Kohya] 安装全部依赖（官方无人值守模式，约 10-30 分钟）…")
-        env = build_env([os.path.dirname(git)])
-        env.setdefault("PIP_EXTRA_INDEX_URL", "https://mirrors.aliyun.com/pytorch-wheels/cu128")
+        env = build_direct_env([os.path.dirname(git)])
+        env["PIP_INDEX_URL"] = "https://pypi.tuna.tsinghua.edu.cn/simple"
+        env.pop("PIP_EXTRA_INDEX_URL", None)
         if run_stream([vpy, "setup\\setup_windows.py", "--headless"], cwd=kdir, env=env, logf=logf) != 0:
             raise RuntimeError("依赖安装失败，请向上滚动查看 pip 报错")
         with open(KOHYA_DIR_FILE, "w", encoding="utf-8") as f:
@@ -1180,7 +1227,7 @@ def install_musubi_engine(logf=print):
         if not pair_ok:
             logf(f"[第二引擎] {pair_detail}；将自动重装 torch {MUSUBI_TORCH_VERSION}+cu128 + "
                  f"torchvision {MUSUBI_TORCHVISION_VERSION}+cu128 …")
-        # 4) pip 镜像（清华 pypi + 阿里 pytorch 额外源，与 kohya 一致）
+        # 4) 普通依赖使用清华/阿里国内 PyPI；PyTorch 由下方双镜像 wheel 安装。
         subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
                         "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
         logf("[第二引擎] 升级 pip / setuptools / wheel …")
@@ -1188,27 +1235,20 @@ def install_musubi_engine(logf=print):
             raise RuntimeError(
                 "第二引擎 pip 升级失败：清华/阿里镜像均不可达（常见：网络/防火墙/镜像临时故障）。\n"
                 "请检查网络后重试；若提示 No module named pip，工具已在上一步自动 ensurepip 自愈或重建。")
-        # 5) torch cu128：阿里镜像 curl 断点续传预下载大轮子 → 本地安装
-        #    （阿里 pytorch-wheels 是文件仓库，curl 直链可下；pip 不能把它当 index 解析，
-        #      所以预下载+本地装是主路径，重试 3 次断点续传；彻底失败才回退官方 index）
-        env = build_env([os.path.dirname(git)])
+        # 5) torch cu128：阿里云/上海交大双国内镜像断点续传 → 本地安装。
+        env = build_direct_env([os.path.dirname(git)])
         _torch_ok = False
         for _try in range(3):
             try:
                 _preinstall_torch(vpy, kdir, logf, torch_ver="2.7.1", tv_ver="0.22.1",
                                   cu="cu128", label="第二引擎", force=True)
-                logf("[第二引擎] PyTorch 预装成功（阿里镜像 + 本地安装）。")
+                logf("[第二引擎] PyTorch 预装成功（阿里云/上海交大双国内镜像 + 本地安装）。")
                 _torch_ok = True
                 break
             except Exception as e:
                 logf(f"[第二引擎] PyTorch 预下载失败（第{_try + 1}/3 次）：{e}（断点续传，可重试）")
         if not _torch_ok:
-            logf("[第二引擎] 阿里镜像预下载多次失败，改用 pip 官方 index 直装（国内需代理，或稍后重试）…")
-            if run_stream(
-                [vpy, "-m", "pip", "install", "torch==2.7.1+cu128", "torchvision==0.22.1+cu128",
-                 "--extra-index-url", "https://download.pytorch.org/whl/cu128"],
-                cwd=kdir, env=env, logf=logf) != 0:
-                raise RuntimeError("torch cu128 安装失败，请检查网络/代理后重试")
+            raise RuntimeError("torch cu128 国内双镜像下载失败。无需开代理，请稍后重试；缓存支持断点续传。")
         # 6) musubi-tuner（editable，带全套钉死依赖）
         logf("[第二引擎] 安装 musubi-tuner（Krea2/视频训练内核）…")
         if run_stream([vpy, "-m", "pip", "install", "-e", mt_dir], cwd=kdir, env=env, logf=logf) != 0:
@@ -1902,10 +1942,133 @@ def ai_toolkit_engine_status():
             [vpy, "-c", "import torch; from toolkit.config_modules import ModelConfig; print('ok')"],
             capture_output=True, text=True, timeout=120, cwd=at_dir)
         if r.returncode == 0:
-            return True, "已就绪（MiniMax H3 视频）", vpy
+            return True, "已就绪（第三引擎 AI Toolkit）", vpy
         return False, "环境异常（import 失败）", vpy
     except Exception:
         return False, "环境异常", vpy
+
+
+ENGINE_SOURCE_URLS = {
+    "ai-toolkit": [
+        "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/engine_sources/ai-toolkit-main.zip",
+        "https://ghfast.top/https://github.com/ostris/ai-toolkit/archive/refs/heads/main.zip",
+        "https://gh-proxy.com/https://github.com/ostris/ai-toolkit/archive/refs/heads/main.zip",
+    ],
+    "diffusers": [
+        "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/engine_sources/diffusers-c9438378.zip",
+        "https://ghfast.top/https://github.com/huggingface/diffusers/archive/c943837899b16cbae2f619b8dd4f7bb6f07dd81a.zip",
+        "https://gh-proxy.com/https://github.com/huggingface/diffusers/archive/c943837899b16cbae2f619b8dd4f7bb6f07dd81a.zip",
+    ],
+}
+
+
+def _engine_source_cache_dir():
+    """第三引擎源码缓存目录（数据目录，不进入安装包）。"""
+    return data_sub("cache", "engine_sources")
+
+
+def _valid_zip(path, required_files=()):
+    """校验源码 ZIP 完整且包含关键文件，避免把中断下载当成源码使用。"""
+    try:
+        import zipfile
+        if not os.path.isfile(path) or os.path.getsize(path) < 1024:
+            return False
+        with zipfile.ZipFile(path) as z:
+            if z.testzip() is not None:
+                return False
+            names = {n.replace("\\", "/").rstrip("/") for n in z.namelist()}
+            for wanted in required_files:
+                if not any(n == wanted or n.endswith("/" + wanted) for n in names):
+                    return False
+        return True
+    except Exception:
+        return False
+
+
+def _download_engine_source(kind, logf=print):
+    """按国内优先顺序获取第三引擎源码 ZIP，缓存到用户数据目录。"""
+    names = {"ai-toolkit": "ai-toolkit-main.zip", "diffusers": "diffusers-c9438378.zip"}
+    required = {"ai-toolkit": ("run.py", "requirements.txt"), "diffusers": ("pyproject.toml",)}
+    dest = os.path.join(_engine_source_cache_dir(), names[kind])
+    if _valid_zip(dest, required[kind]):
+        logf(f"[第三引擎] 已复用源码缓存：{names[kind]}")
+        return dest
+    for old in (dest, dest + ".part"):
+        try:
+            if os.path.isfile(old):
+                os.remove(old)
+        except Exception:
+            pass
+    urls = ENGINE_SOURCE_URLS[kind]
+    for idx, url in enumerate(urls, 1):
+        label = "魔搭" if "modelscope.cn" in url else ("ghfast 国内加速" if "ghfast.top" in url else "gh-proxy 国内加速")
+        logf(f"[第三引擎] 下载 {names[kind]}（{label}，第{idx}/{len(urls)}个来源，国内直连）…")
+        if _download_with_resume(url, dest, logf, direct=True) and _valid_zip(dest, required[kind]):
+            logf(f"[第三引擎] {names[kind]} 下载完成并校验通过。")
+            return dest
+        for old in (dest, dest + ".part"):
+            try:
+                if os.path.isfile(old):
+                    os.remove(old)
+            except Exception:
+                pass
+        logf("[第三引擎] 当前源码来源不可用，自动切换备用来源…")
+    raise RuntimeError(f"{names[kind]} 国内来源均下载失败，无需开代理，请稍后重试。")
+
+
+def _install_engine_source(zip_path, dest, marker, logf=print):
+    """将缓存 ZIP 解压到标准源码目录；不把源码写入安装包。"""
+    if os.path.isfile(os.path.join(dest, marker)):
+        return
+    if os.path.isdir(dest):
+        logf(f"[第三引擎] 源码目录不完整，正在清理后重新部署：{dest}")
+        shutil.rmtree(dest, ignore_errors=True)
+    os.makedirs(dest, exist_ok=True)
+    _extract_zip(zip_path, dest)
+    if not os.path.isfile(os.path.join(dest, marker)):
+        raise RuntimeError(f"源码解压不完整，缺少 {marker}：{dest}")
+    logf(f"[第三引擎] 源码已按需部署到：{dest}")
+
+
+def _write_engine_requirements(at_dir, dest):
+    """展开 requirements.txt，移除 GitHub 版 diffusers，生成可走国内 PyPI 的临时清单。"""
+    seen = set()
+    output = []
+
+    def visit(path):
+        path = os.path.abspath(path)
+        if path in seen or not os.path.isfile(path):
+            return
+        seen.add(path)
+        for raw in open(path, encoding="utf-8", errors="replace"):
+            line = raw.strip()
+            low = line.lower()
+            if not line or line.startswith("#"):
+                continue
+            if low.startswith("-r ") or low.startswith("--requirement "):
+                ref = line.split(None, 1)[1].strip().strip('"')
+                visit(os.path.join(os.path.dirname(path), ref))
+                continue
+            if "github.com/huggingface/diffusers" in low or low.startswith("git+https://") and "diffusers" in low:
+                continue
+            output.append(line)
+
+    visit(os.path.join(at_dir, "requirements.txt"))
+    if not output:
+        raise RuntimeError("ai-toolkit requirements.txt 为空或源码不完整")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write("\n".join(output) + "\n")
+    return dest
+
+
+def _install_local_diffusers(vpy, diffusers_dir, cwd, env, logf=print):
+    """安装固定版本 Diffusers 本地源码，避免 pip 访问 GitHub。"""
+    logf("[第三引擎] 安装固定版 Diffusers 本地源码（不访问 GitHub）…")
+    rc = run_stream([vpy, "-m", "pip", "install", "--no-input", "--no-deps", diffusers_dir],
+                    cwd=cwd, env=env, logf=logf)
+    if rc != 0:
+        raise RuntimeError("固定版 Diffusers 本地安装失败")
 
 
 def install_ai_toolkit_engine(logf=print):
@@ -1954,19 +2117,17 @@ def install_ai_toolkit_engine(logf=print):
     try:
         at_dir = _at_dirs()[1]
         if not os.path.isfile(os.path.join(at_dir, "run.py")):
-            # 目录存在但源码不完整（clone 中断残留等），清理后重新克隆，避免 git clone 到非空目录失败
+            # 目录存在但源码不完整（下载/解压中断残留等），清理后从国内缓存重新部署。
             if os.path.isdir(at_dir):
-                logf("[第三引擎] ai-toolkit 目录不完整（缺 run.py），正在清理后重新克隆…")
+                logf("[第三引擎] ai-toolkit 目录不完整（缺 run.py），正在清理后重新部署…")
                 try:
                     shutil.rmtree(at_dir, ignore_errors=True)
                 except Exception:
                     pass
-            logf("[第三引擎] git clone ai-toolkit（Ostris，H3 视频训练内核）…")
-            os.makedirs(at_dir, exist_ok=True)
-            if _git_clone(git, "https://github.com/ostris/ai-toolkit.git", at_dir, logf) != 0:
-                raise RuntimeError("git clone ai-toolkit 失败，请检查网络/代理后重试")
+            _ai_zip = _download_engine_source("ai-toolkit", logf)
+            _install_engine_source(_ai_zip, at_dir, "run.py", logf)
         else:
-            logf("[第三引擎] ai-toolkit 源码已存在，跳过克隆")
+            logf("[第三引擎] ai-toolkit 源码已存在，跳过下载/解压")
         av = os.path.join(kdir, "ai_toolkit_venv")
         vpy = os.path.join(av, "Scripts", "python.exe")
         if not os.path.isfile(vpy):
@@ -1984,37 +2145,39 @@ def install_ai_toolkit_engine(logf=print):
         if torch_ok:
             logf("[第三引擎] 检测到已安装（torch + ai-toolkit 可用），跳过重复安装。")
             return vpy
-        # pip 镜像
-        subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
-                        "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
-        logf("[第三引擎] 升级 pip / setuptools / wheel …")
-        if run_stream([vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q"],
-                      cwd=kdir, logf=logf) != 0:
-            raise RuntimeError("pip 升级失败，请重试")
-        env = build_env([os.path.dirname(git)])
-        # torch cu130：阿里镜像 curl 断点续传预下载大轮子 → 本地安装（重试 3 次，彻底失败回退官方 index）
+        # 嵌入式/中断创建的 venv 可能没有 pip，先尝试 ensurepip 自愈。
+        if not _ensure_venv_pip(vpy, logf, label="第三引擎"):
+            raise RuntimeError("第三引擎 venv 缺少 pip，且 ensurepip 自愈失败，请重试安装")
+        logf("[第三引擎] 升级 pip / setuptools / wheel（清华/阿里双国内源）…")
+        if not _upgrade_pip(vpy, kdir, logf, label="第三引擎"):
+            raise RuntimeError("pip 升级失败：清华/阿里镜像均不可达，无需代理，请稍后重试")
+        env = build_direct_env()
+        # torch cu130：双国内镜像断点续传预下载大轮子 → 本地安装
         _torch_ok = False
         for _try in range(3):
             try:
                 _preinstall_torch(vpy, kdir, logf, torch_ver="2.13.0", tv_ver="0.28.0",
                                   ta_ver="2.11.0", cu="cu130", label="第三引擎")
-                logf("[第三引擎] PyTorch 预装成功（阿里镜像 + 本地安装）。")
+                logf("[第三引擎] PyTorch 预装成功（阿里云/上海交大双国内镜像 + 本地安装）。")
                 _torch_ok = True
                 break
             except Exception as e:
                 logf(f"[第三引擎] PyTorch 预下载失败（第{_try + 1}/3 次）：{e}（断点续传，可重试）")
         if not _torch_ok:
-            logf("[第三引擎] 阿里镜像预下载多次失败，改用 pip 官方 index 直装（国内需代理，或稍后重试）…")
-            if run_stream(
-                [vpy, "-m", "pip", "install", "torch==2.13.0+cu130", "torchvision==0.28.0+cu130", "torchaudio==2.11.0+cu130",
-                 "--index-url", "https://download.pytorch.org/whl/cu130"],
-                cwd=kdir, env=env, logf=logf) != 0:
-                raise RuntimeError("torch cu130 安装失败，请检查网络/代理/驱动后重试")
-        # ai-toolkit 依赖
-        logf("[第三引擎] 安装 ai-toolkit 依赖（较大，国内镜像 + 重试）…")
+            raise RuntimeError("torch cu130 国内双镜像下载失败。无需开代理，请稍后重试；缓存支持断点续传。")
+        # ai-toolkit 依赖：固定 Diffusers 从国内按需缓存安装，requirements 中不再含 git+https。
+        _diff_zip = _download_engine_source("diffusers", logf)
+        _diff_dir = os.path.join(_engine_source_cache_dir(), "diffusers-c9438378")
+        _install_engine_source(_diff_zip, _diff_dir, "pyproject.toml", logf)
+        _install_local_diffusers(vpy, _diff_dir, at_dir, env, logf)
+        _req_tmp = os.path.join(_engine_source_cache_dir(), "ai-toolkit-requirements-domestic.txt")
+        _write_engine_requirements(at_dir, _req_tmp)
+        logf("[第三引擎] 安装 ai-toolkit 依赖（清华/阿里国内 PyPI，不访问 GitHub）…")
         if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
-                       "-r", os.path.join(at_dir, "requirements.txt")], cwd=at_dir, env=env, logf=logf) != 0:
-            raise RuntimeError("ai-toolkit 依赖安装失败")
+                       "--index-url", "https://pypi.tuna.tsinghua.edu.cn/simple",
+                       "--extra-index-url", "https://mirrors.aliyun.com/pypi/simple/",
+                       "-r", _req_tmp], cwd=at_dir, env=env, logf=logf) != 0:
+            raise RuntimeError("ai-toolkit 依赖安装失败（国内 PyPI 镜像均不可达或依赖冲突）")
         # 验证
         try:
             r = subprocess.run(
@@ -2106,12 +2269,8 @@ def run_video_caption(logf=print, video_dir="", trigger="", frames=6, overwrite=
         raise RuntimeError("缺少 video_caption.py（打包异常），请重新安装")
     # 确保 kohya venv 依赖可用（transformers 等）
     _ensure_kohya_deps(vpy, get_kohya_dir(), logf)
-    env = build_env()
-    env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-    _px = system_proxy()
-    if _px:
-        env.setdefault("HTTP_PROXY", _px)
-        env.setdefault("HTTPS_PROXY", _px)
+    env = build_direct_env()
+    env["HF_ENDPOINT"] = "https://hf-mirror.com"
     cmd = [vpy, script, "--video_dir", video_dir, "--frames", str(frames)]
     if trigger:
         cmd += ["--trigger", trigger]
@@ -2312,12 +2471,8 @@ def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from
     logf(f"[视频] H3 模型: {os.path.basename(_files.get('dit') or '？')}")
     logf(f"[视频] LoRA 参数: dim={params.get('rank',32)}, alpha={params.get('alpha',32)}, lr={params.get('unet_lr','2e-4')}, steps={steps}")
     logf(f"[视频] 显存 {vram_gb if vram_gb else '?'}GB（推荐 24GB+）| bf16 + 梯度检查点 + 文本嵌入缓存")
-    env = build_env()
-    env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-    _px = system_proxy()
-    if _px:
-        env.setdefault("HTTP_PROXY", _px)
-        env.setdefault("HTTPS_PROXY", _px)
+    env = build_direct_env()
+    env["HF_ENDPOINT"] = "https://hf-mirror.com"
     if progress is not None:
         try:
             progress.set_total(steps)
@@ -2501,12 +2656,8 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     logf(f"[{info['label']}] 数据集: {train_dir}（{count_images(train_dir)} 张）")
     logf(f"[{info['label']}] 模型: {info['model_id']}（首次训练自动下载 {info['size']}，国内镜像）")
     logf(f"[{info['label']}] LoRA: dim={params.get('rank',16)}, alpha={params.get('alpha',16)}, lr={params.get('unet_lr','1e-4')}, steps={steps}")
-    env = build_env()
-    env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-    _px = system_proxy()
-    if _px:
-        env.setdefault("HTTP_PROXY", _px)
-        env.setdefault("HTTPS_PROXY", _px)
+    env = build_direct_env()
+    env["HF_ENDPOINT"] = "https://hf-mirror.com"
     if progress is not None:
         try:
             progress.set_total(steps)
@@ -2935,14 +3086,16 @@ def _upgrade_pip(vpy, cwd, logf=print, label="环境"):
     不是目录占用。这里主源失败后自动切阿里源再试一次，并返回是否成功。"""
     if not vpy or not os.path.isfile(vpy):
         return False
-    if run_stream([vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q"],
-                  cwd=cwd, logf=logf) == 0:
-        return True
-    logf(f"[{label}] pip 升级失败，切换备用镜像（阿里）重试…")
-    return run_stream([vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q",
-                       "--index-url", "https://mirrors.aliyun.com/pypi/simple/",
-                       "--retries", "10", "--timeout", "120"],
-                      cwd=cwd, logf=logf) == 0
+    common = [vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q",
+              "--retries", "10", "--timeout", "120"]
+    for idx, source in enumerate(("https://pypi.tuna.tsinghua.edu.cn/simple",
+                                  "https://mirrors.aliyun.com/pypi/simple/"), 1):
+        if idx > 1:
+            logf(f"[{label}] 清华镜像失败，切换备用镜像（阿里）重试…")
+        if run_stream(common + ["--index-url", source], cwd=cwd,
+                      env=build_direct_env(), logf=logf) == 0:
+            return True
+    return False
 
 
 def _venv_torch_version(vpy):
@@ -3123,7 +3276,9 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
     logf("[环境] 训练环境需要补装/校正依赖（PIL/numpy/transformers/huggingface_hub/toml 等），正在处理…")
     subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
                     "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
-    env = build_env()
+    env = build_direct_env()
+    env["PIP_INDEX_URL"] = "https://pypi.tuna.tsinghua.edu.cn/simple"
+    env.pop("PIP_EXTRA_INDEX_URL", None)
     _all_wheels = _bundled_pip_wheels()
     wheels = _wheels_for_python(_all_wheels, vpy)
     if _all_wheels and not wheels:
@@ -3189,12 +3344,13 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
     return True
 
 
-def _http_total_size(url, timeout=20):
+def _http_total_size(url, timeout=20, direct=False):
     """尽力获取下载文件总大小（字节）；失败返回 None（不影响下载）。"""
     try:
         import urllib.request
         req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({})) if direct else urllib.request.build_opener()
+        with opener.open(req, timeout=timeout) as r:
             cl = r.headers.get("Content-Length")
             if cl:
                 return int(cl)
@@ -3203,7 +3359,7 @@ def _http_total_size(url, timeout=20):
     return None
 
 
-def _download_with_resume(url, dest, logf=print, progress_cb=None):
+def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False):
     """用 curl 断点续传下载大文件（repo.radeon.com 网络不稳时关键，断了可续传）。
 
     返回 True=成功。优先 curl（Windows 自带，支持 -C - 续传 + 重试）；否则 urllib 分段下载。
@@ -3212,7 +3368,7 @@ def _download_with_resume(url, dest, logf=print, progress_cb=None):
     """
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     curl = shutil.which("curl")
-    total = _http_total_size(url)
+    total = _http_total_size(url, direct=direct)
     stop_mon = threading.Event()
     if progress_cb is not None:
         def _monitor():
@@ -3234,18 +3390,20 @@ def _download_with_resume(url, dest, logf=print, progress_cb=None):
         if curl and os.path.isfile(curl):
             cmd = [curl, "-sS", "-L", "-C", "-", "--retry", "5", "--retry-delay", "5", "--retry-all-errors",
                    "--connect-timeout", "20", "--max-time", "10800", "-o", dest, url]
-            _px = system_proxy()
-            if _px:
-                cmd = [curl, "-sS", "-L", "-C", "-", "--retry", "5", "--retry-delay", "5", "--retry-all-errors",
-                       "--connect-timeout", "20", "--max-time", "10800", "--proxy", _px, "-o", dest, url]
-            return run_stream(cmd, env=build_env(), logf=logf) == 0
+            if not direct:
+                _px = system_proxy()
+                if _px:
+                    cmd = [curl, "-sS", "-L", "-C", "-", "--retry", "5", "--retry-delay", "5", "--retry-all-errors",
+                           "--connect-timeout", "20", "--max-time", "10800", "--proxy", _px, "-o", dest, url]
+            return run_stream(cmd, env=(build_direct_env() if direct else build_env()), logf=logf) == 0
         # urllib 兜底：Range 断点续传
         import urllib.request
         tmp = dest + ".part"
         exist = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
         try:
             req = urllib.request.Request(url, headers={"Range": "bytes=%d-" % exist} if exist else {})
-            with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "ab") as f:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({})) if direct else urllib.request.build_opener()
+            with opener.open(req, timeout=120) as r, open(tmp, "ab") as f:
                 while True:
                     chunk = r.read(1 << 20)
                     if not chunk:
@@ -3271,13 +3429,9 @@ def run_pip_in_venv(venv_dir, args, logf=print):
     if not os.path.isfile(py):
         raise RuntimeError(f"训练环境无效，找不到 {py}，请先创建训练环境。")
     cmd = [py, "-m", "pip", "install", "--no-cache-dir", "--retries", "10", "--timeout", "120"] + args
-    env = build_env()
+    env = build_direct_env()
     env.setdefault("PIP_NO_INPUT", "1")
-    # 网络被掐断时走系统代理（朋友机器实测直连 pip 镜像被稳定掐断）
-    _px = system_proxy()
-    if _px:
-        env.setdefault("HTTP_PROXY", _px)
-        env.setdefault("HTTPS_PROXY", _px)
+    env.setdefault("PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple")
     return run_stream(cmd, env=env, logf=logf)
 
 
@@ -3930,7 +4084,7 @@ def _ensure_tokenizer_cached(cache_dir, model_id, logf=print, kind="clip", vpy=N
             "print('tok_ok')") % (model_id, target, target)
     # 强制走国内镜像：缓存失败通常就是直连 huggingface.co 超时（用户 A 反馈），
     # 不能依赖父进程是否设置了 HF_ENDPOINT。
-    _tok_env = build_env()
+    _tok_env = build_direct_env()
     _hf0 = _tok_env.get("HF_ENDPOINT", "")
     if not _hf0 or "huggingface.co" in _hf0:
         _tok_env["HF_ENDPOINT"] = "https://hf-mirror.com"
@@ -4208,17 +4362,10 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     if amd_mode:
         logf("[训练] AMD 兼容模式：sdpa + bf16 + AdamW 优化器（实验性，不承诺稳定）")
 
-    env = build_env([os.path.join(kdir, "venv", "Lib", "site-packages", "torch", "lib")])
-    _px = system_proxy()
-    if _px:
-        env.setdefault("HTTP_PROXY", _px)
-        env.setdefault("HTTPS_PROXY", _px)
-    # 国内镜像：transformers/huggingface_hub 走 hf-mirror，避免直连 huggingface.co 超时
-    # 用覆盖而不是 setdefault：用户系统若已有 HF_ENDPOINT=https://huggingface.co，
-    # setdefault 不会生效，训练时仍直连官方站超时（用户 A 反馈）。
-    _hf0 = env.get("HF_ENDPOINT", "")
-    if not _hf0 or "huggingface.co" in _hf0:
-        env["HF_ENDPOINT"] = "https://hf-mirror.com"
+    # 训练中模型/tokenizer 只走 hf-mirror，直接清除历史 Clash/v2ray 代理，
+    # 避免用户不开代理时反而被失效的本地代理端口阻断。
+    env = build_direct_env([os.path.join(kdir, "venv", "Lib", "site-packages", "torch", "lib")])
+    env["HF_ENDPOINT"] = "https://hf-mirror.com"
     if amd_mode:
         _gname = (detect_gpu_name() or "")
         if re.search(r"RX\s*6\d{3}", _gname, re.I):   # RX 6000 系（RDNA2）需 GFX 版本覆盖
@@ -4808,7 +4955,7 @@ def _hf_download(repo, local_dir, logf=print, allow_patterns=None):
     # 预检 huggingface_hub：venv Python 与依赖版本错配（如 3.10 venv 混入 cp312 扩展）时
     # import 会崩（python312.dll conflicts），这里给出明确提示而不是晦涩的 ImportError；
     # 同时清掉父进程可能带进来的 PYTHONHOME/PYTHONPATH，避免把错误 DLL 塞给子进程。
-    _env = build_env()
+    _env = build_direct_env()
     _hf0 = _env.get("HF_ENDPOINT", "")
     if not _hf0 or "huggingface.co" in _hf0:
         _env["HF_ENDPOINT"] = "https://hf-mirror.com"
@@ -4837,7 +4984,7 @@ def _hf_download(repo, local_dir, logf=print, allow_patterns=None):
            (", allow_patterns=%s" % repr(list(allow_patterns)) if allow_patterns else ""))
     )
     logf(f"[下载] 开始下载模型组件：{repo} → {local_dir}（走 hf-mirror，可随时停止）")
-    rc = run_stream([vpy, "-c", code], env=build_env(), logf=logf)
+    rc = run_stream([vpy, "-c", code], env=build_direct_env(), logf=logf)
     if rc != 0:
         raise RuntimeError(f"模型组件下载失败（退出码 {rc}）：{repo}")
 

@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 模型下载模块（应用内下载基础底模）
 
@@ -13,8 +13,18 @@ import os
 import threading
 import time
 import urllib.request
+from urllib.parse import urlparse
 
 BLOCK = 1 << 16  # 64KB 一块
+_DIRECT_HOSTS = ("modelscope.cn", "hf-mirror.com", "mirrors.aliyun.com", "mirror.sjtu.edu.cn", "pypi.tuna.tsinghua.edu.cn")
+
+
+def _opener_for(url):
+    """国内镜像默认直连，避免 Windows 遗留代理端口导致必须开代理。"""
+    host = (urlparse(url).hostname or "").lower()
+    if any(host == h or host.endswith("." + h) for h in _DIRECT_HOSTS):
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener()
 
 
 class DownloadError(Exception):
@@ -25,7 +35,7 @@ def get_remote_size(url, timeout=30):
     """发起一次 Range 请求，读取 Content-Range 拿到总大小。失败返回 None。"""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Range": "bytes=0-0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _opener_for(url).open(req, timeout=timeout) as r:
             cr = r.headers.get("Content-Range") or ""
             if "/" in cr:
                 return int(cr.split("/")[-1].strip())
@@ -80,7 +90,7 @@ class ModelDownloader(threading.Thread):
         if started:
             headers["Range"] = f"bytes={started}-"
         req = urllib.request.Request(self.url, headers=headers)
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with _opener_for(self.url).open(req, timeout=30) as r:
             # 服务端若不支持 Range 会返回 200 全文，此时从头下
             if r.status == 200 and started > 0:
                 started = 0

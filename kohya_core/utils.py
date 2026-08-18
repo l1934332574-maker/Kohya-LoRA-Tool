@@ -11,6 +11,8 @@ import json
 import threading
 import time
 import urllib.request
+import socket
+from urllib.parse import urlparse
 
 from kohya_core.configs import PY_MIN, PY_MAX
 from kohya_core.paths import get_kohya_dir
@@ -23,7 +25,7 @@ _ACTIVE_PROC = None
 # 显式导出全部名字（含下划线开头），供 `from kohya_core.utils import *` 使用。
 __all__ = [
     "StopRequested", "format_eta", "_terminate_tree", "stop_active_process", "reset_stop",
-    "build_env", "run_stream", "_download", "find_git", "_py_version", "find_python",
+    "build_env", "build_direct_env", "clear_proxy_env", "proxy_reachable", "run_stream", "_download", "find_git", "_py_version", "find_python",
     "venv_python", "_yq", "split_triggers", "system_proxy",
 ]
 
@@ -70,6 +72,38 @@ def reset_stop():
     """开始新任务前调用，清除上一次的停止信号。"""
     _STOP_EVENT.clear()
 
+_PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+
+
+def proxy_reachable(proxy):
+    """判断代理地址是否可连接；本机代理端口关闭时返回 False。"""
+    if not proxy:
+        return False
+    try:
+        raw = proxy if "://" in proxy else "http://" + proxy
+        u = urlparse(raw)
+        host, port = u.hostname, u.port
+        if not host or not port:
+            return False
+        if host.lower() in ("127.0.0.1", "localhost", "::1"):
+            family = socket.AF_INET6 if ":" in host else socket.AF_INET
+            with socket.socket(family, socket.SOCK_STREAM) as sock:
+                sock.settimeout(1.5)
+                return sock.connect_ex((host, port)) == 0
+        return True
+    except Exception:
+        return False
+
+
+def clear_proxy_env(env):
+    """清除 requests/pip/curl 代理变量，用于国内镜像直连。"""
+    for key in _PROXY_ENV_KEYS:
+        env.pop(key, None)
+    env["NO_PROXY"] = "*"
+    env["no_proxy"] = "*"
+    return env
+
+
 def build_env(extra_dirs=()):
     env = dict(os.environ)
     # PATH 必须先拆成独立目录再过滤。旧实现把完整 PATH 当成一个元素，
@@ -92,10 +126,21 @@ def build_env(extra_dirs=()):
     paths = [p for p in paths if p and
              os.path.normcase(os.path.abspath(p.strip().strip('"'))) not in blocked]
     env["PATH"] = os.pathsep.join(paths)
+    # 清除已经失效的代理，避免国内镜像被送进已关闭的 Clash/v2ray 端口。
+    for key in _PROXY_ENV_KEYS:
+        value = env.get(key)
+        if value and not proxy_reachable(value):
+            env.pop(key, None)
     # 网络不稳时 pip 容易 IncompleteRead 中断：全局加大重试次数与超时
     env.setdefault("PIP_RETRIES", "10")
     env.setdefault("PIP_TIMEOUT", "120")
     return env
+
+
+def build_direct_env(extra_dirs=()):
+    """构造国内镜像直连环境：不继承系统/历史代理。"""
+    return clear_proxy_env(build_env(extra_dirs))
+
 
 def run_stream(cmd, cwd=None, env=None, logf=print):
     """运行命令并把 stdout/stderr 实时交给 logf。返回退出码。
@@ -261,7 +306,8 @@ def system_proxy():
         finally:
             winreg.CloseKey(k)
         if enable and server:
-            return server if "://" in server else "http://" + server
+            proxy = server if "://" in server else "http://" + server
+            return proxy if proxy_reachable(proxy) else None
     except Exception:
         pass
     return None
