@@ -4,11 +4,29 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.9.14** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.9.15** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
 ---
+
+## 🆕 v0.9.15 更新重点
+
+### 训练稳定性：AdamW8bit 崩溃自动降级
+
+Windows + CUDA 12.8 下 bitsandbytes 可能能 import 但 8-bit CUDA 内核不可用（`libbitsandbytes_cuda128.dll` 缺失 / `compiled without GPU support` / `str2optimizer8bit_blockwise is not defined`），之前会在训练 `optimizer.step()` 阶段崩溃。
+
+- 训练开始前先做一次**真实 8-bit 优化器 step 预检**，通过才用 AdamW8bit。
+- 失败自动降级：**Lion**（显存更低）→ **AdamW**（纯 PyTorch，兼容性最好），不会再在训练中途崩溃。
+- 覆盖全部引擎：第一引擎（SD/SDXL/FLUX/Anima）、第二引擎（Krea2/FLUX.2）、第三引擎（Qwen-Image / Z-Image / MiniMax H3 视频）；第二引擎 musubi-tuner 不支持 Lion 会直接降级 AdamW；AMD 兼容模式固定 AdamW。
+
+### 下载不再“看起来卡死”
+
+PyTorch 大轮子（2~3GB）下载改为：
+
+- 下载到 `.part` 文件断点续传，中断后自动从断点继续，不再删掉重下 3GB。
+- 每 5 秒输出一条下载进度（`下载进度：xxx / xxx MB（xx%）`），用户能实时看到在下载。
+- 新增限速看门狗：120 秒平均低于 20KB/s 自动切换备用国内镜像，避免无限挂起。
 
 ## 🆕 v0.9.14 更新重点
 

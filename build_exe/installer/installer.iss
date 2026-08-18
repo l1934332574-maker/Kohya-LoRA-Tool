@@ -1,10 +1,10 @@
-﻿; ============================================================
+; ============================================================
 ; KohyaLoraTool 安装脚本（Inno Setup 6）
 ; 用法：build_exe\installer\installer.iss 由 build_installer.bat 调用
 ; 默认安装到用户文档目录 {userdocs}\KohyaLoraTool，避开 Program Files 权限问题
 ; ============================================================
 #define MyAppName "KohyaLoraTool"
-#define MyAppVersion "0.9.14"
+#define MyAppVersion "0.9.15"
 #define MyAppExeName "Kohya一键工具.exe"
 #define MyAppDir "..\dist\Kohya一键工具"
 

@@ -138,7 +138,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.14"
+APP_VERSION = "0.9.15"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -743,11 +743,28 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
         wheels.append(("torchaudio-%s%%2B%s-%s-%s-win_amd64.whl" % (ta_ver, cu, tag, tag), 1_000_000))
     cache = data_sub("cache", "pytorch_wheels")
     paths = []
+    _prog_last = {"t": 0.0}
+
+    def _progress_log(size, total):
+        # 下载进度日志（监控线程每秒回调，节流到每 5 秒一条，避免刷屏）。
+        # curl 使用 -sS 静默模式，不输出进度，用户会误以为“卡死”；
+        # 这里周期打印已下载大小/百分比，让安装过程对用户可见。
+        now = time.time()
+        if now - _prog_last["t"] < 5.0:
+            return
+        _prog_last["t"] = now
+        mb = size / 1048576.0
+        if total:
+            logf("[%s] 下载进度：%.0f / %.0f MB（%.0f%%）" % (label, mb, total / 1048576.0, size * 100.0 / total))
+        else:
+            logf("[%s] 下载进度：%.0f MB" % (label, mb))
+
     for name, minsize in wheels:
         # 本地文件名必须是合法 wheel 名：%2B 是 URL 编码的 '+'，pip 本地安装按文件名解析版本，
         # 含 %2B 会报 "Invalid wheel filename (invalid version)"。下载 URL 保持 %2B，本地名解码成 +。
         local_name = name.replace("%2B", "+")
         dest = os.path.join(cache, local_name)
+        part = dest + ".part"
         # 兼容旧版本残留的 %2B 文件名缓存（完整则改名复用，避免重新下载 3GB）
         legacy = os.path.join(cache, name)
         if (not os.path.isfile(dest)) and os.path.isfile(legacy) and os.path.getsize(legacy) >= minsize:
@@ -758,27 +775,40 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
                 pass
         if os.path.isfile(dest) and os.path.getsize(dest) >= minsize and _wheel_valid(dest):
             logf("[%s] 已存在缓存轮子，跳过下载: %s" % (label, local_name))
-        else:
-            if os.path.isfile(dest):
-                logf("[%s] 缓存轮子不完整或损坏，重新下载: %s" % (label, local_name))
+            paths.append(dest)
+            continue
+        if os.path.isfile(dest):
+            # 旧版残留的损坏/不完整成品：改名成 .part 继续续传，避免删掉重下 3GB
+            logf("[%s] 缓存轮子不完整或损坏，转为 .part 断点续传: %s" % (label, local_name))
+            try:
+                os.replace(dest, part)
+            except Exception:
                 try:
                     os.remove(dest)
                 except Exception:
                     pass
-            downloaded = False
-            for source_idx, base in enumerate(bases, 1):
-                source_name = "阿里云" if "aliyun" in base else "上海交大"
-                logf("[%s] 从%s下载 %s（国内直连，断点续传）…" % (label, source_name, local_name))
-                if _download_with_resume(base + "/" + name, dest, logf, direct=True):
-                    if os.path.isfile(dest) and os.path.getsize(dest) >= minsize and _wheel_valid(dest):
+        if os.path.isfile(part) and os.path.getsize(part) > 0:
+            logf("[%s] 存在未完成的 .part（%.0f MB），断点续传: %s" % (
+                label, os.path.getsize(part) / 1048576.0, local_name))
+        downloaded = False
+        for source_idx, base in enumerate(bases, 1):
+            source_name = "阿里云" if "aliyun" in base else "上海交大"
+            logf("[%s] 从%s下载 %s（国内直连，断点续传）…" % (label, source_name, local_name))
+            # 下载到 .part（curl -C - 自动续传），完整校验通过后才改名为正式 wheel
+            if _download_with_resume(base + "/" + name, part, logf, progress_cb=_progress_log, direct=True):
+                if os.path.isfile(part) and os.path.getsize(part) >= minsize and _wheel_valid(part):
+                    try:
+                        os.replace(part, dest)
                         downloaded = True
                         break
-                    try: os.remove(dest)
-                    except Exception: pass
-                if source_idx < len(bases):
-                    logf("[%s] 当前国内镜像失败，自动切换备用镜像…" % label)
-            if not downloaded:
-                raise RuntimeError("国内双镜像下载失败: %s" % local_name)
+                    except Exception as e:
+                        logf("[%s] 下载完成但改名失败（%s），保留 .part 供重试" % (label, e))
+                else:
+                    logf("[%s] 下载完成但校验不通过（大小/完整性），保留 .part 供续传" % label)
+            if source_idx < len(bases):
+                logf("[%s] 当前国内镜像失败，自动切换备用镜像…" % label)
+        if not downloaded:
+            raise RuntimeError("国内双镜像下载失败: %s" % local_name)
         paths.append(dest)
     logf("[%s] 本地安装 PyTorch 轮子（依赖走清华镜像）…" % label)
     env = build_direct_env()
@@ -1495,6 +1525,8 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
             pass
     out_dir = data_sub("output", proj)
     output_name = "krea2_lora"
+    opt_k, _opt_d = resolve_optimizer(mvpy, logf, requested=params.get("optimizer", "auto"), allow_lion=False)
+    logf(f"[Krea2] 优化器: {opt_k}")
     cmd = [
         accel, "launch", "--num_cpu_threads_per_process", "1", "--mixed_precision", "bf16",
         os.path.join(mt_dir, "krea2_train_network.py"),
@@ -1502,7 +1534,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         "--dataset_config", cfg_path,
         "--sdpa", "--mixed_precision", "bf16",
         "--timestep_sampling", "shift", "--weighting_scheme", "none", "--discrete_flow_shift", "2.5",
-        "--optimizer_type", "adamw8bit", "--learning_rate", str(lr), "--gradient_checkpointing",
+        "--optimizer_type", opt_k.lower(), "--learning_rate", str(lr), "--gradient_checkpointing",
         "--max_data_loader_n_workers", "1",
         "--network_module", "networks.lora_krea2", "--network_dim", str(rank), "--network_alpha", str(alpha),
         "--max_train_epochs", str(epochs), "--save_every_n_epochs", "1", "--seed", "42",
@@ -1628,6 +1660,8 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
             pass
     out_dir = data_sub("output", proj)
     output_name = "flux2_lora"
+    opt_k, _opt_d = resolve_optimizer(mvpy, logf, requested=params.get("optimizer", "auto"), allow_lion=False)
+    logf(f"[FLUX.2] 优化器: {opt_k}")
     cmd = [
         accel, "launch", "--num_cpu_threads_per_process", "1", "--mixed_precision", "bf16",
         os.path.join(mt_dir, "flux_2_train_network.py"),
@@ -1636,7 +1670,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         "--dataset_config", cfg_path,
         "--sdpa", "--mixed_precision", "bf16",
         "--timestep_sampling", "flux2_shift", "--weighting_scheme", "none",
-        "--optimizer_type", "adamw8bit", "--learning_rate", str(lr),
+        "--optimizer_type", opt_k.lower(), "--learning_rate", str(lr),
         "--max_data_loader_n_workers", "1",
         "--network_module", "networks.lora_flux_2", "--network_dim", str(rank), "--network_alpha", str(alpha),
         "--max_train_epochs", str(epochs), "--save_every_n_epochs", "1", "--seed", "42",
@@ -2399,7 +2433,7 @@ def _ensure_amd_distributed_compat(vpy, logf=print):
 
 
 
-def write_h3_train_yaml(params, video_dir, out_dir, cfg_path):
+def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=print):
     """生成 AI Toolkit 的 MiniMax H3 训练 yaml（增量、可复用）。返回 yaml 路径。"""
     name = _sanitize_dirname(params.get("project")) or "h3_video_lora"
     rank = int(params.get("rank", 32))
@@ -2409,6 +2443,14 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path):
     steps = max(100, min(H3_MAX_STEPS, steps))
     frames = int(params.get("video_frames", H3_FRAMES))
     trig = params.get("trigger") or ""
+    if vpy:
+        try:
+            _opt_k, _od = resolve_optimizer(vpy, logf, requested=params.get("optimizer", "auto"))
+        except Exception:
+            _opt_k = "AdamW"
+    else:
+        _opt_k = "AdamW"
+    _opt_yaml = _optimizer_yaml_name(_opt_k)
     model_dir = h3_models_dir().replace("\\", "/")
     video_dir = os.path.abspath(video_dir).replace("\\", "/")
     out_dir = os.path.abspath(out_dir).replace("\\", "/")
@@ -2444,7 +2486,7 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path):
         "        gradient_checkpointing: true\n"
         "        noise_scheduler: \"flowmatch\"\n"
         "        timestep_type: 'linear'\n"
-        "        optimizer: \"adamw8bit\"\n"
+        "        optimizer: " + _yq(_opt_yaml) + "\n"
         "        lr: " + repr(lr) + "\n"
         "        dtype: bf16\n"
         "        cache_text_embeddings: true\n"
@@ -2525,7 +2567,7 @@ def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from
     out_dir = data_sub("output", proj)
     os.makedirs(out_dir, exist_ok=True)
     cfg_path = os.path.join(KIT_DIR, "configs", "h3_train.yaml")
-    write_h3_train_yaml(params, video_dir, out_dir, cfg_path)
+    write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=vpy, logf=logf)
     steps = int(params.get("video_steps", H3_DEFAULT_STEPS))
     logf(f"[视频] 数据集: {video_dir}（{len(videos)} 个视频，共约 {total_sec/60:.1f} 分钟，{no_cap} 个缺字幕）")
     _files = h3_model_files()
@@ -2612,7 +2654,7 @@ def at_image_model_ready(mode):
         return False
 
 
-def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path):
+def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, logf=print):
     """生成 AI Toolkit 图像 LoRA 训练 yaml（Qwen-Image / Z-Image 共用）。"""
     name = _sanitize_dirname(params.get("project")) or "at_lora"
     rank = int(params.get("rank", 16))
@@ -2623,6 +2665,14 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path):
     reso = int(params.get("resolution", 1024))
     train_dir = os.path.abspath(train_dir).replace("\\", "/")
     out_dir = os.path.abspath(out_dir).replace("\\", "/")
+    if vpy:
+        try:
+            _opt_k, _od = resolve_optimizer(vpy, logf, requested=params.get("optimizer", "auto"))
+        except Exception:
+            _opt_k = "AdamW"
+    else:
+        _opt_k = "AdamW"
+    _opt_yaml = _optimizer_yaml_name(_opt_k)
     sample_prompt = (trig + ", ") if trig else ""
     text = (
         "job: extension\n"
@@ -2656,7 +2706,7 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path):
         "        gradient_checkpointing: true\n"
         "        noise_scheduler: \"flowmatch\"\n"
         "        timestep_type: 'linear'\n"
-        "        optimizer: \"adamw8bit\"\n"
+        "        optimizer: " + _yq(_opt_yaml) + "\n"
         "        lr: " + repr(lr) + "\n"
         "        optimizer_params:\n"
         "          weight_decay: 1e-4\n"
@@ -2712,7 +2762,7 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     out_dir = data_sub("output", proj)
     os.makedirs(out_dir, exist_ok=True)
     cfg_path = os.path.join(KIT_DIR, "configs", mode + "_train.yaml")
-    write_at_image_yaml(params, info, train_dir, out_dir, cfg_path)
+    write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=vpy, logf=logf)
     steps = int(params.get("video_steps", 2000))
     logf(f"[{info['label']}] 数据集: {train_dir}（{count_images(train_dir)} 张）")
     logf(f"[{info['label']}] 模型: {info['model_id']}（首次训练自动下载 {info['size']}，国内镜像）")
@@ -3464,12 +3514,14 @@ def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False)
     try:
         if curl and os.path.isfile(curl):
             cmd = [curl, "-sS", "-L", "-C", "-", "--retry", "5", "--retry-delay", "5", "--retry-all-errors",
-                   "--connect-timeout", "20", "--max-time", "10800", "-o", dest, url]
+                   "--connect-timeout", "20", "--max-time", "10800", "--speed-limit", "20480", "--speed-time", "120",
+                   "-o", dest, url]
             if not direct:
                 _px = system_proxy()
                 if _px:
                     cmd = [curl, "-sS", "-L", "-C", "-", "--retry", "5", "--retry-delay", "5", "--retry-all-errors",
-                           "--connect-timeout", "20", "--max-time", "10800", "--proxy", _px, "-o", dest, url]
+                           "--connect-timeout", "20", "--max-time", "10800", "--speed-limit", "20480", "--speed-time", "120",
+                           "--proxy", _px, "-o", dest, url]
             return run_stream(cmd, env=(build_direct_env() if direct else build_env()), logf=logf) == 0
         # urllib 兜底：Range 断点续传
         import urllib.request
@@ -4175,6 +4227,110 @@ def _ensure_tokenizer_cached(cache_dir, model_id, logf=print, kind="clip", vpy=N
         return False
 
 
+def _probe_adamw8bit(vpy, logf=print, timeout=180):
+    """在真实 venv 里做一次 bitsandbytes AdamW8bit 优化器 step 预检。
+
+    仅 import 成功不代表 CUDA 8-bit 内核可用（Windows + CUDA 12.8 下 bitsandbytes
+    能 import，但 optimizer.step() 时才报 libbitsandbytes_cuda128.dll 缺失 /
+    compiled without GPU support / str2optimizer8bit_blockwise is not defined）。
+    这里创建真实参数并执行 loss.backward() + optimizer.step()，任何一步失败都判定不可用。
+
+    返回 (ok, detail)。
+    """
+    code = (
+        "import sys\n"
+        "try:\n"
+        "    import torch\n"
+        "    if not torch.cuda.is_available():\n"
+        "        print('NO_CUDA')\n"
+        "        sys.exit(3)\n"
+        "    import bitsandbytes as bnb\n"
+        "    opt_cls = getattr(bnb.optim, 'AdamW8bit', None) or getattr(bnb.optim, 'Adam8bit', None)\n"
+        "    if opt_cls is None:\n"
+        "        print('NO_OPT_CLS')\n"
+        "        sys.exit(4)\n"
+        "    p = torch.nn.Parameter(torch.ones(4, device='cuda'))\n"
+        "    opt = opt_cls([p], lr=1e-4)\n"
+        "    loss = (p * p).sum()\n"
+        "    loss.backward()\n"
+        "    opt.step()\n"
+        "    opt.zero_grad()\n"
+        "    print('OK')\n"
+        "    sys.exit(0)\n"
+        "except Exception:\n"
+        "    import traceback\n"
+        "    print(traceback.format_exc())\n"
+        "    sys.exit(1)\n"
+    )
+    try:
+        r = subprocess.run([vpy, "-c", code], capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        return False, "预检进程异常：%s" % e
+    out = (r.stdout or "") + (r.stderr or "")
+    if r.returncode == 0 and "OK" in out:
+        return True, "bitsandbytes CUDA 8-bit 内核真实 step 成功"
+    if "libbitsandbytes" in out:
+        return False, "未找到 bitsandbytes CUDA DLL（libbitsandbytes_cuda*.dll），8-bit 内核无法加载"
+    if "compiled without GPU support" in out or "CUDA SETUP" in out:
+        return False, "当前 bitsandbytes 未加载 GPU 内核（可能是 CPU 版或 CUDA 版本不匹配）"
+    if "str2optimizer8bit_blockwise" in out:
+        return False, "bitsandbytes 缺少 8-bit 优化器实现（版本过旧或安装损坏）"
+    if "NO_CUDA" in out:
+        return False, "PyTorch 未启用 CUDA（训练无法使用 CUDA 优化器）"
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    return False, (lines[-1] if lines else "未知错误")[-200:]
+
+
+def _lion_available(vpy):
+    """检查 venv 中 lion-pytorch 是否可导入（kohya 的 Lion 优化器依赖）。"""
+    try:
+        r = subprocess.run([vpy, "-c", "import lion_pytorch"],
+                           capture_output=True, text=True, timeout=60)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def resolve_optimizer(vpy, logf=print, requested="auto", amd_mode=False, allow_lion=True):
+    """决定本次训练实际使用的优化器类型。
+
+    requested: auto / adamw8bit / lion / adamw（大小写不敏感）。
+    返回 (optimizer_type, detail)：
+      - optimizer_type 为 kohya/musubi 风格：AdamW8bit / Lion / AdamW；
+      - AI Toolkit yaml 请用 _optimizer_yaml_name() 转换。
+
+    Windows + CUDA 12.8 下 bitsandbytes 可能能 import 但内核不可用，必须先做真实
+    step 预检；失败自动降级，避免训练到 optimizer.step() 阶段才崩溃。
+    """
+    req = str(requested or "auto").strip().lower()
+    if amd_mode:
+        logf("[优化器] AMD 兼容模式：使用 AdamW（不加载 bitsandbytes CUDA DLL）")
+        return "AdamW", "AMD 模式固定 AdamW"
+    if req == "adamw":
+        logf("[优化器] 用户指定 AdamW（纯 PyTorch，不依赖 bitsandbytes）")
+        return "AdamW", "用户指定 AdamW"
+    ok, detail = _probe_adamw8bit(vpy, logf)
+    if ok:
+        logf("[优化器] AdamW8bit 预检通过（真实 step 成功），使用低显存优化器")
+        return "AdamW8bit", detail
+    logf("[优化器] ⚠ AdamW8bit 不可用：%s" % detail)
+    if req == "adamw8bit":
+        logf("[优化器] 已指定 AdamW8bit，但 CUDA 内核不可用，自动降级以避免训练崩溃")
+    if allow_lion and req in ("auto", "lion"):
+        if _lion_available(vpy):
+            logf("[优化器] 已自动降级为 Lion（纯 PyTorch，显存占用低于 AdamW）")
+            return "Lion", "AdamW8bit 不可用，降级为 Lion"
+        if req == "lion":
+            logf("[优化器] Lion 依赖不可用，自动降级为 AdamW")
+    logf("[优化器] 已自动降级为 AdamW（纯 PyTorch，兼容性最好）")
+    return "AdamW", "AdamW8bit 不可用，降级为 AdamW"
+
+
+def _optimizer_yaml_name(optimizer_type):
+    """把 kohya/musubi 风格优化器名转成 AI Toolkit yaml 的小写名称。"""
+    return {"AdamW8bit": "adamw8bit", "Lion": "lion", "AdamW": "adamw"}.get(optimizer_type, "adamw")
+
+
 def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, resume_from=None, progress=None):
     params = params or {}
     amd_mode = bool(params.get("amd_mode", False))
@@ -4305,10 +4461,11 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     gc_on = decide_gradient_checkpointing(params.get("gc", "自动"), vram_gb)
     batch_size = int(params.get("batch_size", 1))
     use_xformers = bool(params.get("use_xformers", False))
-    optimizer_type = "AdamW8bit"
+    optimizer_type, _opt_detail = resolve_optimizer(vpy, logf,
+                                                    requested=params.get("optimizer", "auto"),
+                                                    amd_mode=amd_mode)
     if amd_mode:
         use_xformers = False          # AMD 无 xformers，强制 sdpa
-        optimizer_type = "AdamW"      # AMD 下 bitsandbytes(AdamW8bit) 不可用，改用纯 PyTorch 优化器
     output_name = OUTPUT_NAMES.get(mode, "anime_style_lora")
     # 项目分组输出：output/<项目名>/（没开项目则直接 output/）
     _proj = (params.get("project") or "").strip()

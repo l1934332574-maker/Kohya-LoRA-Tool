@@ -1,5 +1,20 @@
 # 更新日志（Changelog）
 
+## v0.9.15（2026-08-18）
+
+### 修复
+- **Windows + CUDA 12.8 下 AdamW8bit 优化器训练崩溃**：bitsandbytes 在 Windows 下可能能 import 但 CUDA 8-bit 内核不可用（`libbitsandbytes_cuda128.dll` 缺失 / `compiled without GPU support` / `str2optimizer8bit_blockwise is not defined`），之前会在训练 `optimizer.step()` 阶段才崩溃。现在训练开始前会先在真实 venv 里做一次 8-bit 优化器 step 预检（创建真实参数 → `loss.backward()` → `optimizer.step()`），预检通过才用 AdamW8bit；失败自动降级为 Lion（显存更低），再失败降级为纯 PyTorch AdamW。**覆盖全部引擎**：第一引擎（SD/SDXL/FLUX/Anima）、第二引擎（Krea2/FLUX.2）、第三引擎（Qwen-Image/Z-Image/MiniMax H3 视频）。第二引擎 musubi-tuner 不支持 Lion，预检失败时直接降级 AdamW；AMD 兼容模式固定 AdamW。指定 `adamw8bit` 时同样自动降级，不再崩溃。
+- **PyTorch 3.3GB 大轮子下载“看起来卡死”**：curl 静默模式下载 2~3GB torch 时界面上长时间无任何输出，用户误以为卡死。现在：
+  - 下载到 `.part` 文件，断点续传，完整校验通过后才改名为正式 wheel；中断后重试自动从断点继续，不再删掉重下 3GB。
+  - 每 5 秒输出一条进度日志：`[Kohya] 下载进度：xxx / xxx MB（xx%）`。
+  - 新增限速看门狗：120 秒平均下载速度低于 20KB/s 时 curl 直接失败返回，自动切换备用国内镜像，避免无限挂起。
+
+### 测试
+- `engine_install_smoke_test.py` 新增优化器解析（`resolve_optimizer` / `_probe_adamw8bit` / `_optimizer_yaml_name`）单元测试，不真实运行 CUDA（mock 子进程）。
+- 全模式冒烟测试、Python 编译、依赖检查与 Git 差异检查通过。
+
+---
+
 ## v0.9.14（2026-08-18）
 
 ### 修复

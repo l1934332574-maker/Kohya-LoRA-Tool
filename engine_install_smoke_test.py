@@ -273,6 +273,94 @@ def test_third_engine(base: Path):
     print("THIRD_ENGINE_FULL_FLOW_AND_BROKEN_VENV_RECOVERY_OK")
 
 
+def test_optimizer_resolution(base: Path):
+    """resolve_optimizer / _probe_adamw8bit / _optimizer_yaml_name 单元测试（mock 子进程，不真实运行 CUDA）。"""
+    logs = []
+    vpy = str(base / "venv" / "Scripts" / "python.exe")
+
+    def probe_result(out, rc):
+        return subprocess.CompletedProcess([], rc, out, "")
+
+    # 1) 预检通过 -> AdamW8bit
+    with patch.object(core.subprocess, "run", return_value=probe_result("OK\n", 0)):
+        opt, _ = core.resolve_optimizer(vpy, logs.append, requested="auto")
+    assert opt == "AdamW8bit", opt
+
+    # 2) 预检失败（DLL 缺失）+ lion 可用 -> Lion
+    def subrun_fail(cmd, *args, **kwargs):
+        code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
+        if "import lion_pytorch" in code:
+            return probe_result("", 0)
+        if "bitsandbytes" in code:
+            return probe_result("Error: libbitsandbytes_cuda128.dll missing\n", 1)
+        return probe_result("", 0)
+    with patch.object(core.subprocess, "run", side_effect=subrun_fail):
+        opt, _ = core.resolve_optimizer(vpy, logs.append, requested="auto")
+    assert opt == "Lion", opt
+
+    # 3) 预检失败 + lion 不可用 -> AdamW
+    def subrun_no_lion(cmd, *args, **kwargs):
+        code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
+        if "import lion_pytorch" in code:
+            return probe_result("", 1)
+        if "bitsandbytes" in code:
+            return probe_result("str2optimizer8bit_blockwise is not defined\n", 1)
+        return probe_result("", 0)
+    with patch.object(core.subprocess, "run", side_effect=subrun_no_lion):
+        opt, _ = core.resolve_optimizer(vpy, logs.append, requested="auto")
+    assert opt == "AdamW", opt
+
+    # 4) AMD 模式固定 AdamW（不调用子进程）
+    with patch.object(core.subprocess, "run", side_effect=AssertionError("AMD 模式不应调用子进程")):
+        opt, _ = core.resolve_optimizer(vpy, logs.append, requested="auto", amd_mode=True)
+    assert opt == "AdamW", opt
+
+    # 5) 用户明确指定 adamw -> AdamW（不调用子进程）
+    with patch.object(core.subprocess, "run", side_effect=AssertionError("指定 adamw 不应调用子进程")):
+        opt, _ = core.resolve_optimizer(vpy, logs.append, requested="adamw")
+    assert opt == "AdamW", opt
+
+    # 6) 指定 adamw8bit 但不可用 -> 自动降级 AdamW
+    def subrun_no_lion2(cmd, *args, **kwargs):
+        code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
+        if "import lion_pytorch" in code:
+            return probe_result("", 1)
+        if "bitsandbytes" in code:
+            return probe_result("compiled without GPU support\n", 1)
+        return probe_result("", 0)
+    with patch.object(core.subprocess, "run", side_effect=subrun_no_lion2):
+        opt, _ = core.resolve_optimizer(vpy, logs.append, requested="adamw8bit")
+    assert opt == "AdamW", opt
+    assert any("降级" in ln for ln in logs), logs
+
+    # 7) _optimizer_yaml_name 映射
+    assert core._optimizer_yaml_name("AdamW8bit") == "adamw8bit"
+    assert core._optimizer_yaml_name("Lion") == "lion"
+    assert core._optimizer_yaml_name("AdamW") == "adamw"
+    assert core._optimizer_yaml_name("???") == "adamw"
+
+    # 8) _probe_adamw8bit 超时/异常兜底
+    def subrun_timeout(cmd, *args, **kwargs):
+        raise TimeoutError("timeout")
+    with patch.object(core.subprocess, "run", side_effect=subrun_timeout):
+        ok, detail = core._probe_adamw8bit(vpy, logs.append, timeout=1)
+    assert not ok and "预检进程异常" in detail, detail
+
+    # 9) musubi 第二引擎 allow_lion=False：预检失败时即使 lion 可用也直接降级 AdamW
+    def subrun_musubi(cmd, *args, **kwargs):
+        code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
+        if "import lion_pytorch" in code:
+            return probe_result("", 0)  # lion 可用，但 musubi 不支持
+        if "bitsandbytes" in code:
+            return probe_result("Error: libbitsandbytes_cuda128.dll missing\n", 1)
+        return probe_result("", 0)
+    with patch.object(core.subprocess, "run", side_effect=subrun_musubi):
+        opt, _ = core.resolve_optimizer(vpy, logs.append, requested="auto", allow_lion=False)
+    assert opt == "AdamW", opt
+
+    print("OPTIMIZER_RESOLUTION_UNIT_TESTS_OK")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -280,6 +368,7 @@ def main():
         test_second_engine(base)
         test_second_engine_without_git(base)
         test_third_engine(base)
+        test_optimizer_resolution(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 
