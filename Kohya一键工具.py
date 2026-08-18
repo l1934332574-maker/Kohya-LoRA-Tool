@@ -138,7 +138,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.13"
+APP_VERSION = "0.9.14"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -801,10 +801,10 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
 
 
 def install_kohya(logf=print):
+    git = find_git()
     py, pyver = find_python()
-    # 第三引擎源码改为魔搭/国内加速 ZIP 按需下载，不再依赖 Git；只要求 Python。
-    if not py:
-        raise RuntimeError("请先点击【环境准备】安装 Python")
+    if not git or not py:
+        raise RuntimeError("请先点击【环境准备】安装 Git / Python")
     kdir = get_kohya_dir()
     logf(f"[Kohya] 安装目录: {kdir}")
     # 跨进程锁：防止重复点击/双开导致两个安装同时写同一个 venv（WinError 32 文件占用）
@@ -922,7 +922,10 @@ def install_kohya(logf=print):
             logf("[Kohya] 已检测到 torch，但 CUDA 不可用，将重新安装 CUDA 版 PyTorch…")
         deps_ok = _dep_ok("import PIL, numpy")
         if torch_ok and deps_ok and os.path.isdir(os.path.join(kdir, "sd-scripts")):
-            logf("[Kohya] 检测到已安装环境（torch + Pillow/numpy 可用），跳过重复安装。")
+            logf("[Kohya] 检测到基础环境已安装，正在验证完整依赖与 NumPy/SciPy 兼容性…")
+            if not _ensure_kohya_deps(vpy, kdir, logf):
+                raise RuntimeError("已安装环境的依赖校正失败，请检查上方日志后重试")
+            logf("[Kohya] 完整依赖验证通过，跳过重复安装。")
             with open(KOHYA_DIR_FILE, "w", encoding="utf-8") as f:
                 f.write(kdir)
             return kdir
@@ -947,7 +950,9 @@ def install_kohya(logf=print):
                     logf("[Kohya] 当前镜像下载失败，切换备用镜像重试…")
             if not _ok2 or not _dep_ok("import PIL, numpy"):
                 raise RuntimeError("自动补装 Pillow/numpy 失败（网络不稳或镜像不可达），请检查网络后重试")
-            logf("[Kohya] Pillow/numpy 补装完成。")
+            logf("[Kohya] Pillow/numpy 补装完成，继续验证完整训练依赖…")
+            if not _ensure_kohya_deps(vpy, kdir, logf):
+                raise RuntimeError("Pillow/numpy 补装后完整依赖校正失败，请检查上方日志后重试")
             with open(KOHYA_DIR_FILE, "w", encoding="utf-8") as f:
                 f.write(kdir)
             return kdir
@@ -974,7 +979,9 @@ def install_kohya(logf=print):
                 if torch_ok:
                     logf("[Kohya] PyTorch 预装成功，官方安装脚本将跳过 torch 下载。")
             except Exception as e:
-                logf(f"[Kohya] PyTorch 预下载失败（{e}），改由官方安装脚本处理（可能较慢，需多次重试）。")
+                raise RuntimeError(
+                    "PyTorch cu128 国内双镜像下载/安装失败：%s。\n"
+                    "无需开代理，请稍后重试；已下载缓存支持断点续传。" % e)
         _req_pt = os.path.join(kdir, "requirements_pytorch_windows.txt")
         if os.path.isfile(_req_pt):
             try:
@@ -991,6 +998,10 @@ def install_kohya(logf=print):
         env.pop("PIP_EXTRA_INDEX_URL", None)
         if run_stream([vpy, "setup\\setup_windows.py", "--headless"], cwd=kdir, env=env, logf=logf) != 0:
             raise RuntimeError("依赖安装失败，请向上滚动查看 pip 报错")
+        # 官方依赖可能留下旧 SciPy + 新 NumPy 组合；安装完成时立即校正，
+        # 不要等用户第一次训练 Anima 时才暴露 numpy.Inf 导入错误。
+        if not _ensure_kohya_deps(vpy, kdir, logf):
+            raise RuntimeError("Kohya 依赖安装后兼容性校正失败，请检查上方日志后重试")
         with open(KOHYA_DIR_FILE, "w", encoding="utf-8") as f:
             f.write(kdir)
         try:
@@ -1145,13 +1156,15 @@ def install_musubi_engine(logf=print):
     """安装第二训练引擎 musubi-tuner（Krea2 图像 LoRA + 视频 LoRA）。
 
     - 独立 musubi-venv（不碰 kohya venv，避免 transformers 版本冲突）；
-    - 源码用内置离线包，依赖走国内镜像；torch cu128 与 kohya 同源（官方 index，国内暂无稳定 cu128 镜像）；
+    - 源码用内置离线包，依赖走国内镜像；torch cu128 使用阿里云/上海交大双国内镜像；
     - 已安装则跳过（幂等）。返回 musubi-venv 的 python 路径。
     """
+    # 源码包和依赖均可走国内缓存；只有内置源码缺失时的 Git 回退才需要 Git。
+    # 因此第二引擎不能因为 Git 暂时未装/路径失效而阻塞已带源码包的安装。
     git = find_git()
     py, pyver = find_python()
-    if not git or not py:
-        raise RuntimeError("请先点击【环境准备】安装 Git / Python")
+    if not py:
+        raise RuntimeError("请先点击【环境准备】安装 Python")
     kdir = get_kohya_dir()
     logf(f"[第二引擎] 安装目录: {kdir}")
     lock_f = _acquire_kohya_install_lock(kdir, logf)
@@ -1166,6 +1179,8 @@ def install_musubi_engine(logf=print):
                 logf(f"[第二引擎] 解压内置 musubi-tuner 源码: {os.path.basename(zip_src)}")
                 _extract_zip(zip_src, mt_dir)
             else:
+                if not git:
+                    raise RuntimeError("未找到内置 musubi-tuner 源码包，且未检测到 Git；请先点击【环境准备】安装 Git，或补齐安装包内源码缓存")
                 logf("[第二引擎] 未找到内置源码包，改用 git 克隆（需联网）…")
                 os.makedirs(mt_dir, exist_ok=True)
                 if _git_clone(git, "https://github.com/kohya-ss/musubi-tuner.git", mt_dir, logf) != 0:
@@ -1236,7 +1251,7 @@ def install_musubi_engine(logf=print):
                 "第二引擎 pip 升级失败：清华/阿里镜像均不可达（常见：网络/防火墙/镜像临时故障）。\n"
                 "请检查网络后重试；若提示 No module named pip，工具已在上一步自动 ensurepip 自愈或重建。")
         # 5) torch cu128：阿里云/上海交大双国内镜像断点续传 → 本地安装。
-        env = build_direct_env([os.path.dirname(git)])
+        env = build_direct_env([os.path.dirname(git)] if git else [])
         _torch_ok = False
         for _try in range(3):
             try:
@@ -1249,9 +1264,15 @@ def install_musubi_engine(logf=print):
                 logf(f"[第二引擎] PyTorch 预下载失败（第{_try + 1}/3 次）：{e}（断点续传，可重试）")
         if not _torch_ok:
             raise RuntimeError("torch cu128 国内双镜像下载失败。无需开代理，请稍后重试；缓存支持断点续传。")
-        # 6) musubi-tuner（editable，带全套钉死依赖）
-        logf("[第二引擎] 安装 musubi-tuner（Krea2/视频训练内核）…")
-        if run_stream([vpy, "-m", "pip", "install", "-e", mt_dir], cwd=kdir, env=env, logf=logf) != 0:
+        # 6) musubi-tuner（editable，带全套钉死依赖）。额外锁死 Torch 配对，
+        # 防止 bitsandbytes/accelerate 等宽松依赖把已装 2.7.1 自动升级到 2.11/2.13。
+        _constraints = os.path.join(data_sub("cache", "engine_sources"), "musubi-cu128-constraints.txt")
+        os.makedirs(os.path.dirname(_constraints), exist_ok=True)
+        with open(_constraints, "w", encoding="utf-8") as _cf:
+            _cf.write("torch==2.7.1\ntorchvision==0.22.1\n")
+        logf("[第二引擎] 安装 musubi-tuner（Krea2/视频训练内核，锁定 Torch 2.7.1 配对）…")
+        if run_stream([vpy, "-m", "pip", "install", "-c", _constraints, "-e", mt_dir],
+                      cwd=kdir, env=env, logf=logf) != 0:
             raise RuntimeError("musubi-tuner 安装失败")
         # 7) 验证
         try:
@@ -1937,6 +1958,9 @@ def ai_toolkit_engine_status():
         return False, "未安装（未检测到 venv）", vpy
     if not os.path.isfile(os.path.join(at_dir, "run.py")):
         return False, "ai-toolkit 源码缺失", vpy
+    _vok, _vdetail = _venv_python_ok(vpy)
+    if not _vok:
+        return False, "环境异常（%s）" % _vdetail, vpy
     try:
         r = subprocess.run(
             [vpy, "-c", "import torch; from toolkit.config_modules import ModelConfig; print('ok')"],
@@ -2051,9 +2075,15 @@ def _write_engine_requirements(at_dir, dest):
                 continue
             if "github.com/huggingface/diffusers" in low or low.startswith("git+https://") and "diffusers" in low:
                 continue
+            # AI Toolkit 当前 requirements 固定 scipy==1.12.0，但该版本要求
+            # numpy<1.29，与 Python 3.12 下默认解析到的 NumPy 2.x 冲突；由
+            # 安装器统一提供经过验证的 NumPy/SciPy 配对。
+            if re.match(r"^(numpy|scipy)([<>=!~].*)?$", low):
+                continue
             output.append(line)
 
     visit(os.path.join(at_dir, "requirements.txt"))
+    output.extend(("numpy==2.5.2", "scipy==1.18.0"))
     if not output:
         raise RuntimeError("ai-toolkit requirements.txt 为空或源码不完整")
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -2075,13 +2105,12 @@ def install_ai_toolkit_engine(logf=print):
     """安装第三训练引擎 AI Toolkit（MiniMax H3 视频 LoRA）。
 
     - 独立 ai_toolkit_venv（不碰 kohya / musubi venv）；
-    - 源码 git clone（无内置包）；torch cu130 + requirements 走国内镜像；
+    - 源码从魔搭/国内加速 ZIP 按需下载；torch cu130 + requirements 走国内镜像；
     - 已安装则跳过（幂等）。返回 ai_toolkit_venv 的 python 路径。
     """
-    git = find_git()
     py, pyver = find_python()
-    if not git or not py:
-        raise RuntimeError("请先点击【环境准备】安装 Git / Python")
+    if not py:
+        raise RuntimeError("请先点击【环境准备】安装 Python")
     # PyTorch cu130 需要 NVIDIA 驱动 570+：驱动过旧时装完首次初始化 CUDA 可能驱动崩溃（蓝屏）。
     # 提前检测并阻止，引导用户先更新驱动。
     try:
@@ -2134,6 +2163,34 @@ def install_ai_toolkit_engine(logf=print):
             logf("[第三引擎] 创建独立虚拟环境 ai_toolkit_venv（不影响 kohya/musubi）…")
             if run_stream([py, "-m", "venv", av], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
                 raise RuntimeError("创建 ai_toolkit_venv 失败")
+            if not _ensure_venv_pip(vpy, av, logf, label="第三引擎"):
+                raise RuntimeError("ai_toolkit_venv 创建后无 pip，请检查 Python 安装是否完整")
+        else:
+            # 与第一/第二引擎一致：数据目录迁盘、更换系统用户或混入其他 Python
+            # 版本时，先识别 No Python / python312.dll 等损坏，再自动保留旧环境并重建。
+            _vok, _vdetail = _venv_python_ok(vpy)
+            _need_rebuild = False
+            if not _vok:
+                logf(f"[第三引擎] ⚠ 检测到 ai_toolkit_venv 已损坏：{_vdetail}")
+                logf("[第三引擎] 常见原因：数据目录迁移到新盘/更换系统用户/混入其他版本 Python 的依赖。")
+                _need_rebuild = True
+            elif not _ensure_venv_pip(vpy, av, logf, label="第三引擎"):
+                logf("[第三引擎] ⚠ ai_toolkit_venv 缺 pip 且自愈失败，自动重建（旧 venv 保留）…")
+                _need_rebuild = True
+            if _need_rebuild:
+                _bak = os.path.join(kdir, "ai_toolkit_venv_broken_%s" % time.strftime("%Y%m%d_%H%M%S"))
+                if os.path.exists(_bak):
+                    _bak += "_1"
+                try:
+                    os.rename(av, _bak)
+                    logf(f"[第三引擎] 旧 venv 已保留到: {os.path.basename(_bak)}")
+                except Exception as _e:
+                    raise RuntimeError("旧 ai_toolkit_venv 重命名失败（%s），请手动删除/移动 %s 后重试" % (_e, av))
+                logf("[第三引擎] 用当前 Python 重建 ai_toolkit_venv…")
+                if run_stream([py, "-m", "venv", av], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
+                    raise RuntimeError("重建 ai_toolkit_venv 失败")
+                if not _ensure_venv_pip(vpy, av, logf, label="第三引擎"):
+                    raise RuntimeError("ai_toolkit_venv 重建后仍无 pip，请检查 Python 安装是否完整")
         # 已装验证
         try:
             r = subprocess.run(
@@ -2146,7 +2203,7 @@ def install_ai_toolkit_engine(logf=print):
             logf("[第三引擎] 检测到已安装（torch + ai-toolkit 可用），跳过重复安装。")
             return vpy
         # 嵌入式/中断创建的 venv 可能没有 pip，先尝试 ensurepip 自愈。
-        if not _ensure_venv_pip(vpy, logf, label="第三引擎"):
+        if not _ensure_venv_pip(vpy, av, logf, label="第三引擎"):
             raise RuntimeError("第三引擎 venv 缺少 pip，且 ensurepip 自愈失败，请重试安装")
         logf("[第三引擎] 升级 pip / setuptools / wheel（清华/阿里双国内源）…")
         if not _upgrade_pip(vpy, kdir, logf, label="第三引擎"):
@@ -2172,11 +2229,15 @@ def install_ai_toolkit_engine(logf=print):
         _install_local_diffusers(vpy, _diff_dir, at_dir, env, logf)
         _req_tmp = os.path.join(_engine_source_cache_dir(), "ai-toolkit-requirements-domestic.txt")
         _write_engine_requirements(at_dir, _req_tmp)
-        logf("[第三引擎] 安装 ai-toolkit 依赖（清华/阿里国内 PyPI，不访问 GitHub）…")
-        if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+        _constraints = os.path.join(_engine_source_cache_dir(), "ai-toolkit-constraints.txt")
+        with open(_constraints, "w", encoding="utf-8") as _cf:
+            _cf.write("torch==2.13.0\ntorchvision==0.28.0\ntorchaudio==2.11.0\n"
+                      "numpy==2.5.2\nscipy==1.18.0\n")
+        logf("[第三引擎] 安装 ai-toolkit 依赖（清华/阿里国内 PyPI，不访问 GitHub，锁定兼容版本）…")
+        if run_stream([vpy, "-m", "pip", "install", "--upgrade", "--no-input", "--retries", "10", "--timeout", "120",
                        "--index-url", "https://pypi.tuna.tsinghua.edu.cn/simple",
                        "--extra-index-url", "https://mirrors.aliyun.com/pypi/simple/",
-                       "-r", _req_tmp], cwd=at_dir, env=env, logf=logf) != 0:
+                       "-c", _constraints, "-r", _req_tmp], cwd=at_dir, env=env, logf=logf) != 0:
             raise RuntimeError("ai-toolkit 依赖安装失败（国内 PyPI 镜像均不可达或依赖冲突）")
         # 验证
         try:
@@ -3261,14 +3322,15 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
         # 5.x / 0.39 改了 CLIP 文本编码器结构，加载 SD1.5 底模会报 state_dict key 不匹配
         vcode = ("from importlib.metadata import version;import sys;"
                  "t=version('transformers').split('.');d=version('diffusers').split('.');"
-                 "s=version('scipy').split('.');"
-                 "scipy_ok=int(s[0])>1 or (int(s[0])==1 and int(s[1])>=13);"
-                 "sys.exit(0 if t[0]=='4' and d[0]=='0' and d[1]=='32' and scipy_ok else 1)")
+                 "s=version('scipy').split('+')[0];n=version('numpy').split('+')[0];"
+                 "pair_ok=n=='2.1.3' and s=='1.15.3';"
+                 "from scipy.optimize import linear_sum_assignment;"
+                 "sys.exit(0 if t[0]=='4' and d[0]=='0' and d[1]=='32' and pair_ok else 1)")
         try:
             rv = subprocess.run([vpy, "-c", vcode], capture_output=True, text=True, timeout=60)
             need_install = rv.returncode != 0
             if need_install:
-                logf("[环境] transformers/diffusers 版本不兼容 kohya（需要 transformers 4.54 / diffusers 0.32），正在校正版本…")
+                logf("[环境] 检测到 transformers/diffusers 或 NumPy/SciPy 版本不兼容，正在校正版本…")
         except Exception:
             need_install = True
     if not need_install:
@@ -3299,11 +3361,11 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
             "diffusers==0.32.1", "accelerate", "omegaconf", "imagesize", "rich", "ftfy",
             "lion-pytorch", "schedulefree", "pytorch-optimizer",
             "prodigy-plus-schedule-free", "prodigyopt", "einops", "opencv-python", "sentencepiece",
-            "scipy", "protobuf"]   # scipy 太旧(<1.13)与 numpy2 冲突会崩 transformers；protobuf 为 tokenizer 加载必需
+            "numpy==2.1.3", "scipy==1.15.3", "protobuf==5.29.5"]   # 兼容 Python 3.10-3.12、TensorFlow/W&B，避免旧 SciPy 引用 numpy.Inf
     ok = False
     for _round in range(2):
         for _idx in ("https://pypi.tuna.tsinghua.edu.cn/simple", "https://mirrors.aliyun.com/pypi/simple/"):
-            if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+            if run_stream([vpy, "-m", "pip", "install", "--upgrade", "--no-input", "--retries", "10", "--timeout", "120",
                            "--index-url", _idx] + pkgs, cwd=kdir, env=env, logf=logf) == 0:
                 ok = True
                 break
@@ -3323,6 +3385,19 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
             logf("[环境] 若训练中报 scipy/numpy 相关错误，请网络稳定后重跑【② 安装训练内核】。")
         else:
             return False
+    try:
+        _compat = subprocess.run(
+            [vpy, "-c", "import numpy,scipy;from scipy.optimize import linear_sum_assignment;print(numpy.__version__,scipy.__version__)"],
+            capture_output=True, text=True, timeout=90)
+        if _compat.returncode != 0:
+            _detail = ((_compat.stderr or "") + (_compat.stdout or "")).strip()
+            raise RuntimeError("NumPy/SciPy 兼容性校正后仍无法加载：%s" % (_detail[-500:] or "未知错误"))
+        logf("[环境] NumPy/SciPy 兼容验证通过：" + (_compat.stdout or "").strip())
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError("NumPy/SciPy 兼容验证失败：%s" % e)
+
     # torch/torchvision 配对补装：安装中断常见“有 torch 没 torchvision”，
     # 缺 torchvision 会在训练 import 时直接报 ModuleNotFoundError（用户 A 反馈）。
     # torchvision 是 CUDA 大轮子，不走 pypi 镜像，按 torch 版本走 _preinstall_torch。

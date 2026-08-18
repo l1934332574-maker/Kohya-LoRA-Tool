@@ -1,6 +1,6 @@
 {
-  "version": "v0.9.13",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.13/Setup.exe",
+  "version": "v0.9.14",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.14/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.9.13：第三引擎改用魔搭/国内加速源按需下载；三套引擎 PyTorch 统一阿里云+上海交大双国内镜像；修复失效代理和外部 Python DLL 冲突。"
+  "notes": "v0.9.14：修复第一引擎 git 未定义和 Anima NumPy/SciPy 冲突；第二引擎锁定正确 Torch 配对并自愈缺 pip；第三引擎支持损坏 venv 自动重建并修复依赖解析冲突。"
 }

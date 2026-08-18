@@ -1,5 +1,23 @@
 # 更新日志（Changelog）
 
+## v0.9.14（2026-08-18）
+
+### 修复
+- **第一引擎安装报 `name 'git' is not defined`**：恢复 Kohya 安装函数的 Git 检测变量，避免 PyTorch 预装完成后在官方依赖安装阶段直接退出。
+- **Anima / Transformers 导入 `cannot import name 'Inf' from numpy`**：统一校正为 `numpy 2.1.3 + scipy 1.15.3 + protobuf 5.29.5`，兼容 Python 3.10–3.12、TensorFlow/W&B；已有环境重跑安装也会自动自愈。
+- **第二引擎 Torch 被依赖升级或版本配错**：严格锁定 `torch 2.7.1+cu128 + torchvision 0.22.1+cu128`，旧版 `2.7.1 + 0.22.0`、CPU 版或其他版本会被识别并自动重装。
+- **第二引擎缺 pip**：创建及复用 musubi-venv 时都会检查 pip，优先 `ensurepip` 自愈，失败则保留旧 venv 并重建。
+- **第二引擎无意义强制要求 Git**：安装包内已有 musubi-tuner 源码时不再要求 Git；仅源码包缺失、需要克隆回退时才检查 Git。
+- **第三引擎损坏环境无法恢复**：增加与第一/第二引擎一致的 venv 健康检查；迁盘、换用户、`No Python at ...` 或跨版本 DLL 冲突时自动保留旧环境并用当前 Python 重建。
+- **第三引擎 NumPy/SciPy 依赖冲突**：移除 AI Toolkit 原始不兼容配对，锁定 `numpy 2.5.2 + scipy 1.18.0`，并锁定第三引擎 Torch 依赖，防止 pip 回溯或二次升级。
+- **Torch 下载失败后留下半残环境**：国内双镜像预下载失败时立即停止并保留断点缓存，不再继续执行必然失败的后续安装。
+
+### 测试
+- 新增 `engine_install_smoke_test.py`，覆盖三引擎源码部署、venv 创建、pip 自愈、损坏环境重建、Torch 约束和最终验证控制流。
+- 第一引擎已在真实 CUDA 环境验证；全模式冒烟测试、Python 编译、依赖检查与 Git 差异检查通过。
+
+---
+
 ## v0.9.13（2026-08-18）
 
 ### 修复

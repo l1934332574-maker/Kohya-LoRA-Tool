@@ -4,20 +4,21 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.9.13** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.9.14** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
 ---
 
-## 🆕 v0.9.13 更新重点
+## 🆕 v0.9.14 更新重点
 
-### v0.9.13 国内安装与体积优化
+### 三套训练引擎安装稳定性修复
 
-- 第三引擎 AI Toolkit 与固定版 Diffusers 改为首次使用时按需从魔搭/国内加速源下载，不再内置源码，也不再强制访问 GitHub。
-- 第一、第二、第三引擎的 PyTorch 大轮子统一使用阿里云/上海交大双国内镜像断点续传；普通依赖使用清华/阿里 PyPI。
-- 国内镜像下载会自动清理失效的本地代理，用户无需开启代理才能安装。
-- 第三引擎源码只缓存到数据目录，Setup.exe 保持在 500MB 以内。
+- **第一引擎**：修复安装流程中的 `git is not defined`；已有环境重跑安装时会校正 NumPy/SciPy/Protobuf，解决 Anima 导入 `numpy.Inf` 报错。
+- **第二引擎**：严格锁定 `torch 2.7.1+cu128 + torchvision 0.22.1+cu128`，自动识别并修复旧版错误配对或被依赖升级的环境；缺 pip 时自动自愈/重建。
+- **第三引擎**：补齐 venv 健康检查，迁盘、换用户或跨 Python DLL 冲突时会保留旧环境并自动重建；修复 NumPy/SciPy 解析冲突。
+- 三个引擎的大型 PyTorch 轮子继续使用阿里云/上海交大国内镜像断点续传，不需要代理；下载失败会干净停止，不再留下半安装环境。
+- 新增三引擎安装回归测试，覆盖源码解压、venv 创建与损坏恢复、pip 自愈、Torch 版本锁定和最终验证流程。
 
 ### v0.9.12 更新重点
 
@@ -118,7 +119,7 @@
 
 | 文件 | 说明 |
 |---|---|
-| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源和 WD14 打标模型；当前最新版为 v0.9.13 |
+| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源和 WD14 打标模型；当前最新版为 v0.9.14 |
 | `KohyaLoraTool_*_portable.zip` | 便携版，解压后运行；若该版本未上传 ZIP，请使用 `Setup.exe` |
 
 ### 国内镜像
