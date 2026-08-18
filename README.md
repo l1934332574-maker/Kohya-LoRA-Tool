@@ -4,13 +4,20 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.9.7** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.9.12** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
 ---
 
-## 🆕 v0.9.7 更新重点
+## 🆕 v0.9.12 更新重点
+
+### v0.9.12 环境与安装修复
+
+- **修复打包版污染外部 Python venv 的 DLL 问题**：解决 Python 3.10/3.11 Kohya 环境被软件自带 Python 3.12 DLL 误加载，导致 `python312.dll conflicts`、`DLL load failed`、Qwen/T5 分词器预缓存失败以及训练退出码 1。
+- **Torch 验证信息更完整**：安装后显示 Torch 版本、CUDA 构建版本和 CUDA 可用状态；导入失败会输出真实错误，不再出现 `torch ? / CUDA ?` 后仍显示安装成功。
+- **修复失效代理下的 Git 克隆命令**：修正 `git -c ... git clone` 重复拼接 `git` 的问题；主引擎、第二引擎、第三引擎均使用正确的 Git 参数顺序。
+- **v0.9.12 可直接覆盖旧版本**：一般不需要删除已有 venv，也不需要重新下载已经安装的 Torch。
 
 ### Qwen-Image / Z-Image 支持画风与人物训练
 
@@ -100,7 +107,7 @@
 
 | 文件 | 说明 |
 |---|---|
-| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源和 WD14 打标模型 |
+| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源和 WD14 打标模型；当前最新版为 v0.9.12 |
 | `KohyaLoraTool_*_portable.zip` | 便携版，解压后运行；若该版本未上传 ZIP，请使用 `Setup.exe` |
 
 ### 国内镜像
@@ -126,7 +133,7 @@
 
 | 使用情况 | 默认位置 |
 |---|---|
-| v0.9.7 新安装的打包版 | 安装目录同级的 `KohyaLoraTool_data` |
+| v0.9.7 及之后新安装的打包版 | 安装目录同级的 `KohyaLoraTool_data` |
 | 无法写入安装盘时 | `%APPDATA%\KohyaLoraTool` |
 | 老用户升级但尚未迁移 | 继续使用原数据目录，可在主页手动迁移 |
 | 用户手动指定 | 用户选择的任意目录 |
