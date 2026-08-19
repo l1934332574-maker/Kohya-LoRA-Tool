@@ -17,6 +17,7 @@ Kohya-SS LoRA 一键工具（Windows 桌面应用，画风 / 人物角色 双模
 
 import os
 import re
+import glob
 import sys
 import json
 import time
@@ -81,32 +82,45 @@ if os.name == "nt":
         return None
 
     def _external_python_safe_cwd(popen_args, current_cwd=None):
-        """打包版启动外部 Python 且调用方未指定 cwd 时，返回安全工作目录。
+        """启动外部 Python 且调用方未指定 cwd 时，返回安全工作目录。
 
-        Python 3.10/3.11 的 ``python -c`` 会把当前工作目录放进 sys.path。
-        若 GUI 快捷方式的“起始位置”是应用目录，它会优先导入应用自带的
-        ``_ctypes.pyd``（cp312），即使 PATH/SetDllDirectory 已清理，仍会报
-        ``Module use of python312.dll conflicts``。因此把外部 Python 的默认 cwd
-        固定到它自己的 Scripts/解释器目录；明确传入 cwd 的训练脚本保持不变。
+        场景：打包版（PyInstaller onedir）的 exe 目录自带 python312.dll / vcruntime140.dll
+        等。若当前工作目录恰好是该目录（GUI 从工具目录启动，或用户手动 cd 过去），
+        Windows DLL 搜索会优先命中这些打包版 DLL；当它与 venv 基座 Python 的
+        python312.dll 版本不一致时，venv 里 _ctypes 等 C 扩展 import 会崩
+        （AttributeError: class must define a '_type_' attribute → 误报「缺少 numpy」）。
+        因此：当前 cwd 含 python312.dll 时切到系统临时目录；否则用解释器自己的
+        Scripts 目录（干净且存在）。明确传入 cwd 的调用保持不变。
         """
-        if current_cwd is not None or not getattr(sys, "frozen", False):
+        if current_cwd is not None:
             return current_cwd
         try:
             cmd = popen_args[0] if popen_args else None
             exe = cmd[0] if isinstance(cmd, (list, tuple)) and cmd else cmd
             if not isinstance(exe, str) or not os.path.isabs(exe):
-                return current_cwd
+                return None
             base = os.path.basename(exe).lower()
             parent = os.path.basename(os.path.dirname(exe)).lower()
             is_python = base in ("python.exe", "pythonw.exe")
             is_venv_launcher = parent == "scripts" and base.endswith(".exe")
-            if is_python or is_venv_launcher:
-                safe = os.path.dirname(exe)
-                if os.path.isdir(safe):
-                    return safe
+            if not (is_python or is_venv_launcher):
+                return None
+            try:
+                _cwd = os.getcwd()
+                # 打包版应用目录会自带 python3xx.dll（当前构建为 python312.dll），
+                # 命中任意 python3*.dll 即视为可能污染，切到系统临时目录最稳妥
+                if glob.glob(os.path.join(_cwd, "python3*.dll")):
+                    safe = tempfile.gettempdir()
+                    if os.path.isdir(safe):
+                        return safe
+            except Exception:
+                pass
+            safe = os.path.dirname(exe)
+            if os.path.isdir(safe):
+                return safe
         except Exception:
             pass
-        return current_cwd
+        return None
 
     def _popen_no_window(*args, **kwargs):
         kwargs.setdefault("creationflags", 0x08000000)  # CREATE_NO_WINDOW
@@ -138,7 +152,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.16"
+APP_VERSION = "0.9.17"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2829,14 +2843,18 @@ def _write_at_image_template(mode, params, output_name, out_dir=None):
 
 # ---------- 预处理 / UI / 训练 ----------
 
-def _ensure_preprocess_deps(vpy, kdir, logf=print):
+def _ensure_preprocess_deps(vpy, kdir, logf=print, force=False):
     """确保 kohya venv 可 import PIL.Image + numpy（预处理必需）。
 
     缺失时自动补装：内置离线 wheel（按 venv Python 版本过滤）→ 清华 → 阿里，
     装完再真实校验。返回 True=可用；False=补装后仍缺失。
 
+    force=True：跳过快速校验，强制重装一轮（覆盖「-c 校验通过但 preprocess.py
+    实际 import 失败」的误判场景，例如 numpy 半损坏/DLL 冲突）。
     注意用 `from PIL import Image; import numpy` 做校验（与 preprocess.py 实际
     用法一致），只 import 顶层 PIL 包可能漏判半损坏的 Pillow 安装。
+    镜像安装锁 numpy==2.1.3 + pillow==12.3.0，与 kohya 训练环境依赖版本一致，
+    避免补装到不兼容的最新版 numpy 2.5.x（cp310/cp311 也没有 2.5.x 的轮子）。
     """
     def _deps_importable():
         try:
@@ -2846,15 +2864,15 @@ def _ensure_preprocess_deps(vpy, kdir, logf=print):
         except Exception:
             return False
 
-    if _deps_importable():
+    if not force and _deps_importable():
         return True
-    logf("[预处理] kohya venv 缺少 Pillow/numpy（可能之前安装被中断），正在自动补装…")
+    logf("[预处理] kohya venv 的 Pillow/numpy 不可用（或强制重装），正在自动补装…")
     env = build_env()
     for _round in range(2):
         _ok = False
         _wheels = _wheels_for_python(_bundled_pip_wheels(), vpy)
         if _wheels:
-            logf("[预处理] 使用内置离线 wheel 安装 Pillow/numpy…")
+            logf("[预处理] 使用内置离线 wheel 安装 Pillow/numpy（%d 个，离线零联网）…" % len(_wheels))
             if run_stream([vpy, "-m", "pip", "install", "--no-input", "--no-index"] + _wheels,
                           cwd=kdir, env=env, logf=logf) == 0:
                 _ok = True
@@ -2862,7 +2880,8 @@ def _ensure_preprocess_deps(vpy, kdir, logf=print):
             for _idx in ("https://pypi.tuna.tsinghua.edu.cn/simple",
                          "https://mirrors.aliyun.com/pypi/simple/"):
                 if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
-                               "--index-url", _idx, "pillow", "numpy"], cwd=kdir, env=env, logf=logf) == 0:
+                               "--index-url", _idx, "pillow==12.3.0", "numpy==2.1.3"],
+                              cwd=kdir, env=env, logf=logf) == 0:
                     _ok = True
                     break
                 logf("[预处理] 当前镜像下载失败，切换备用镜像重试…")
@@ -2940,11 +2959,12 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         cmd += ["--report", report]
     rc = run_stream(cmd, logf=logf)
     if rc != 0:
-        # 自愈：极少数情况父进程自检通过、但子进程仍缺依赖（半损坏 venv / 环境不一致），
-        # 若确认 venv 缺 Pillow/numpy 就补装并自动重试一次，避免卡在 preprocess.py 的原始报错。
-        if not _ensure_preprocess_deps(vpy, get_kohya_dir(), logf):
-            raise RuntimeError("预处理失败：venv 缺少 Pillow/numpy 且自动补装失败，请查看上方日志")
-        logf("[预处理] 已补装依赖，自动重试预处理…")
+        # 自愈：父进程自检通过、但子进程仍报缺依赖（半损坏 venv / -c 校验与脚本环境不一致），
+        # 这里强制补装一轮（不依赖快速校验，内置 wheel 覆盖 cp310/311/312）并自动重试一次，
+        # 避免卡在 preprocess.py 的原始报错。
+        if not _ensure_preprocess_deps(vpy, get_kohya_dir(), logf, force=True):
+            raise RuntimeError("预处理失败：venv 的 Pillow/numpy 强制补装后仍不可用，请查看上方日志")
+        logf("[预处理] 已补装依赖（强制），自动重试预处理…")
         rc = run_stream(cmd, logf=logf)
     if rc != 0:
         raise RuntimeError("预处理失败，请查看上方日志")
@@ -4219,30 +4239,116 @@ def write_usage_template(mode, params, output_name, out_dir=None):
 def _ensure_tokenizer_cached(cache_dir, model_id, logf=print, kind="clip", vpy=None):
     """预缓存分词器（kohya 期望的平铺目录格式），完整性校验 + 不完整自动重建。
 
-    用训练环境（kohya/AMD venv）的 python 执行下载，避免打包环境无 transformers；
-    缓存目录不完整（缺关键文件）会被清理重建，防止训练时 from_pretrained 崩。
+    优先级：内置离线包（installers/tokenizers，随安装包分发零联网）→ 本地已下载
+    模型目录（Anima 的 Qwen3-0.6B）→ 文件级国内多镜像下载（hf-mirror / 魔搭，短超时、
+    直连绕代理）→ transformers from_pretrained 兜底。缓存目录不完整（缺关键文件）
+    会被清理重建，防止训练时 from_pretrained 崩。
     kind: 'clip'=CLIPTokenizer；其他（t5/qwen3 等）=AutoTokenizer。
     """
     target = os.path.join(cache_dir, model_id.replace("/", "_"))
+    builtin = os.path.join(KIT_DIR, "installers", "tokenizers", model_id.replace("/", "_"))
 
-    def _complete():
+    def _need_clip():
+        return ("vocab.json", "merges.txt", "tokenizer_config.json", "special_tokens_map.json")
+
+    def _complete_dir(d):
         try:
             if kind == "clip":
-                need = ("vocab.json", "merges.txt", "tokenizer_config.json", "special_tokens_map.json")
-            else:
-                need = ("tokenizer_config.json", "tokenizer.json")
-            return all(os.path.isfile(os.path.join(target, n)) for n in need)
+                return all(os.path.isfile(os.path.join(d, n)) for n in _need_clip())
+            # auto：fast tokenizer 需要 tokenizer.json；slow（T5/Qwen sentencepiece）用 spiece.model
+            return (os.path.isfile(os.path.join(d, "tokenizer_config.json"))
+                    and (os.path.isfile(os.path.join(d, "tokenizer.json"))
+                         or os.path.isfile(os.path.join(d, "spiece.model"))))
         except Exception:
             return False
 
-    if _complete():
+    if _complete_dir(target):
         return True
+
+    # 1) 内置离线 tokenizer（随安装包分发，彻底免联网；SD1.5/SDXL/FLUX/Anima 全部内置）
+    if _complete_dir(builtin):
+        try:
+            if os.path.isdir(target):
+                shutil.rmtree(target, ignore_errors=True)
+            shutil.copytree(builtin, target)
+            logf(f"[训练] 已从内置包复制分词器 {model_id}（无需联网）")
+            return True
+        except Exception as e:
+            logf(f"[训练] 内置分词器复制失败（{e}），改用下载…")
+
+    # 2) 本地已下载模型目录（Anima 的 Qwen3-0.6B 完整模型自带 tokenizer）
+    if model_id.startswith("Qwen"):
+        try:
+            _qp, _qb = _anima_find_qwen3_any()
+            if _qp and os.path.isdir(_qp):
+                os.makedirs(target, exist_ok=True)
+                for _f in os.listdir(_qp):
+                    if _f.endswith((".json", ".model", ".txt")):
+                        try:
+                            shutil.copy2(os.path.join(_qp, _f), os.path.join(target, _f))
+                        except Exception:
+                            pass
+                if _complete_dir(target):
+                    logf(f"[训练] 已从本地模型目录复制分词器 {model_id}")
+                    return True
+        except Exception:
+            pass
+
     if os.path.isdir(target):
         try:
             shutil.rmtree(target)
             logf(f"[训练] 分词器缓存不完整，已清理重建 {model_id}")
         except Exception:
             pass
+
+    # 3) 文件级国内多镜像下载（内置/本地缺失时的兜底，短超时 + 直连，避免 hf-mirror 单点超时）
+    _ms_map = {
+        "openai/clip-vit-large-patch14": "AI-ModelScope/clip-vit-large-patch14",
+        "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k": "AI-ModelScope/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+        "google/t5-v1_1-xxl": "AI-ModelScope/t5-v1_1-xxl",
+    }
+    _sources = [("hf-mirror", "https://hf-mirror.com/%s/resolve/main/%%s" % model_id)]
+    if model_id in _ms_map:
+        _sources.append(("魔搭", "https://modelscope.cn/models/%s/resolve/master/%%s" % _ms_map[model_id]))
+    if kind == "clip":
+        _cands = list(_need_clip()) + ["tokenizer.json"]
+    else:
+        _cands = ["tokenizer_config.json", "special_tokens_map.json", "tokenizer.json", "spiece.model"]
+    try:
+        # 直连国内镜像：绕开失效的本地代理（与 build_direct_env 同一策略）
+        _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        _dl = False
+        os.makedirs(target, exist_ok=True)
+        for _f in _cands:
+            if os.path.isfile(os.path.join(target, _f)):
+                continue
+            for _src_name, _url_tpl in _sources:
+                try:
+                    _req = urllib.request.Request(_url_tpl % _f, headers={"User-Agent": "Mozilla/5.0"})
+                    with _opener.open(_req, timeout=30) as _resp:
+                        _data = _resp.read()
+                    if _data:
+                        with open(os.path.join(target, _f), "wb") as _fh:
+                            _fh.write(_data)
+                        logf(f"[训练] 分词器 {model_id} 已从{_src_name}下载 {_f}")
+                        break
+                except Exception:
+                    continue
+            if _complete_dir(target):
+                _dl = True
+                break
+        if _dl:
+            logf(f"[训练] 已预缓存分词器 {model_id}")
+            return True
+    except Exception:
+        pass
+    if os.path.isdir(target):
+        try:
+            shutil.rmtree(target, ignore_errors=True)
+        except Exception:
+            pass
+
+    # 4) 兜底：transformers from_pretrained（走 hf-mirror，覆盖特殊结构模型）
     py = vpy or venv_python()
     if not os.path.isfile(py):
         return False
@@ -4253,21 +4359,19 @@ def _ensure_tokenizer_cached(cache_dir, model_id, logf=print, kind="clip", vpy=N
             "os.makedirs(%r, exist_ok=True);"
             "t.save_pretrained(%r);"
             "print('tok_ok')") % (model_id, target, target)
-    # 强制走国内镜像：缓存失败通常就是直连 huggingface.co 超时（用户 A 反馈），
-    # 不能依赖父进程是否设置了 HF_ENDPOINT。
     _tok_env = build_direct_env()
     _hf0 = _tok_env.get("HF_ENDPOINT", "")
     if not _hf0 or "huggingface.co" in _hf0:
         _tok_env["HF_ENDPOINT"] = "https://hf-mirror.com"
     try:
-        r = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=900, env=_tok_env)
+        r = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=300, env=_tok_env)
         if r.returncode == 0 and "tok_ok" in (r.stdout or ""):
             logf(f"[训练] 已预缓存分词器 {model_id}")
             return True
-        logf(f"[训练] 分词器 {model_id} 预缓存失败（{(r.stderr or '')[-160:]}），将尝试联网加载")
+        logf(f"[训练] 分词器 {model_id} 预缓存失败（{(r.stderr or '')[-160:]}），训练时可能需联网加载")
         return False
     except Exception as e:
-        logf(f"[训练] 分词器 {model_id} 预缓存失败（{e}），将尝试联网加载")
+        logf(f"[训练] 分词器 {model_id} 预缓存失败（{e}），训练时可能需联网加载")
         return False
 
 

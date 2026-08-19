@@ -9,6 +9,7 @@ output/
 logs/
 models/
 tokenizers/
+!installers/tokenizers/
 sdxl_config/
 wd14_tagger_model/
 kohya_dir.txt

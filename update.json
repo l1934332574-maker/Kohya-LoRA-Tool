@@ -1,6 +1,6 @@
 {
-  "version": "v0.9.16",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.16/Setup.exe",
+  "version": "v0.9.17",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.17/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.9.16：① torch 本地安装多镜像自动回退（清华→阿里云→上海交大），修复 filelock \"from versions: none\" 无限失败；② 预处理缺 numpy 自动补装并自动重试一次；③ Lion 优化器降级改为真实 step 预检，失败继续降级 AdamW。"
+  "notes": "v0.9.17：① 预处理「缺少 numpy」彻底修复——外部 Python 子进程自动避开打包版 python312.dll 污染目录，内置 numpy/pillow 三套离线 wheel 零联网补装并自动重试；② 分词器预缓存离线化，SD1.5/SDXL/FLUX/Anima 训练所需分词器内置，不再联网卡死。"
 }

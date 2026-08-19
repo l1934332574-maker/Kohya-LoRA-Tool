@@ -411,6 +411,28 @@ def test_preprocess_deps(base: Path):
         assert core._ensure_preprocess_deps(vpy, kdir, logs.append) is True
     assert any("tuna.tsinghua.edu.cn" in x for c in install_cmd["seen"] for x in c), install_cmd["seen"]
 
+    # 2.5) force=True：即使快速校验通过（-c 可 import），也强制补装一轮
+    force_install = {"n": 0}
+    def subrun_ok_force(cmd, *args, **kwargs):
+        return probe(0)  # 校验总是通过
+    def run_stream_force(cmd, cwd=None, env=None, logf=print, **kwargs):
+        force_install["n"] += 1
+        return 0
+    with patch.object(core.subprocess, "run", side_effect=subrun_ok_force), \
+         patch.object(core, "run_stream", side_effect=run_stream_force), \
+         patch.object(core, "build_env", return_value={}), \
+         patch.object(core, "_bundled_pip_wheels", return_value=[]), \
+         patch.object(core, "_wheels_for_python", return_value=[]):
+        assert core._ensure_preprocess_deps(vpy, kdir, logs.append, force=True) is True
+    assert force_install["n"] >= 1, "force=True 必须执行补装"
+    # 非 force 且校验通过：不补装
+    n0 = force_install["n"]
+    with patch.object(core.subprocess, "run", side_effect=subrun_ok_force), \
+         patch.object(core, "run_stream", side_effect=run_stream_force), \
+         patch.object(core, "build_env", return_value={}):
+        assert core._ensure_preprocess_deps(vpy, kdir, logs.append) is True
+    assert force_install["n"] == n0, "非 force 且校验通过时不应补装"
+
     # 3) 补装也失败（离线+双镜像，两轮重试都失败） -> 返回 False
     def subrun_bad(cmd, *args, **kwargs):
         return probe(1)
@@ -461,7 +483,7 @@ def test_preprocess_auto_retry(base: Path):
     logs2 = []
     calls2 = {"n": 0}
     deps_n = {"n": 0}
-    def ensure_deps(vpy, kdir, logf=print):
+    def ensure_deps(vpy, kdir, logf=print, force=False):
         deps_n["n"] += 1
         return deps_n["n"] == 1  # 开头自检通过；子进程失败后的补装失败
     def run_stream_b(cmd, cwd=None, env=None, logf=print, **kwargs):
@@ -479,7 +501,7 @@ def test_preprocess_auto_retry(base: Path):
             core.preprocess(logs2.append, input_dir=str(in_dir), mode="style")
             raise AssertionError("应抛出预处理失败错误")
         except RuntimeError as e:
-            assert "缺少 Pillow/numpy 且自动补装失败" in str(e), e
+            assert "强制补装后仍不可用" in str(e), e
     assert calls2["n"] == 1, "补装失败时不应重试 preprocess"
     assert deps_n["n"] == 2, deps_n
     print("PREPROCESS_AUTO_RETRY_OK")
@@ -561,6 +583,130 @@ def test_preinstall_torch_mirror_fallback(base: Path):
     print("PREINSTALL_TORCH_MIRROR_FALLBACK_OK")
 
 
+
+class _FakeResp:
+    def __init__(self, data=b"{}"):
+        self._data = data
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+    def read(self):
+        return self._data
+
+
+def test_tokenizer_cache(base: Path):
+    """_ensure_tokenizer_cached：内置离线复制 / 文件级多源下载 / auto 完整性 / transformers 兜底。"""
+    kdir = base / "kit"
+    builtin = kdir / "installers" / "tokenizers"
+    cache = base / "tok_cache"
+    logs = []
+    vpy = str(base / "venv" / "Scripts" / "python.exe")
+    fake_python(Path(vpy))
+    clip_files = ("vocab.json", "merges.txt", "tokenizer_config.json", "special_tokens_map.json")
+
+    # 场景 A：内置包完整 -> 直接复制，零联网
+    a_src = builtin / "openai_clip-vit-large-patch14"
+    a_src.mkdir(parents=True)
+    for f in clip_files:
+        (a_src / f).write_text("{}", encoding="utf-8")
+    with patch.object(core, "KIT_DIR", str(kdir)):
+        ok = core._ensure_tokenizer_cached(str(cache), "openai/clip-vit-large-patch14", logs.append, "clip", vpy)
+    assert ok is True, logs
+    dst = cache / "openai_clip-vit-large-patch14"
+    assert all((dst / f).is_file() for f in clip_files)
+    assert any("无需联网" in ln for ln in logs), logs
+
+    # 场景 B：内置缺失 + 文件级多源下载成功（hf-mirror/魔搭，直连）
+    logs.clear()
+    def fake_opener(*a, **k):
+        return SimpleNamespace(open=lambda url, timeout=30: _FakeResp(b"tok"))
+    with patch.object(core, "KIT_DIR", str(kdir)), \
+         patch.object(core.urllib.request, "build_opener", side_effect=fake_opener):
+        ok = core._ensure_tokenizer_cached(str(cache), "some/other-tokenizer", logs.append, "clip", vpy)
+    assert ok is True, logs
+    dst2 = cache / "some_other-tokenizer"
+    assert all((dst2 / f).is_file() for f in clip_files), logs
+    assert any("下载" in ln for ln in logs), logs
+
+    # 场景 C：auto 类型只有 spiece.model（无 tokenizer.json）也应判定完整（内置 T5）
+    logs.clear()
+    t5 = builtin / "google_t5-v1_1-xxl"
+    t5.mkdir(parents=True)
+    (t5 / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    (t5 / "special_tokens_map.json").write_text("{}", encoding="utf-8")
+    (t5 / "spiece.model").write_bytes(b"sp")
+    with patch.object(core, "KIT_DIR", str(kdir)):
+        ok = core._ensure_tokenizer_cached(str(cache), "google/t5-v1_1-xxl", logs.append, "auto", vpy)
+    assert ok is True, logs
+    t5dst = cache / "google_t5-v1_1-xxl"
+    assert (t5dst / "spiece.model").is_file(), logs
+
+    # 场景 D：内置/下载全失败 -> transformers from_pretrained 兜底
+    logs.clear()
+    def subrun_ok(cmd, *args, **kwargs):
+        code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
+        if "from_pretrained" in code:
+            return result(0, "tok_ok\n")
+        return result(0)
+    def fake_opener_fail(*a, **k):
+        raise OSError("network down")
+    with patch.object(core, "KIT_DIR", str(kdir)), \
+         patch.object(core.urllib.request, "build_opener", side_effect=fake_opener_fail), \
+         patch.object(core.subprocess, "run", side_effect=subrun_ok):
+        ok = core._ensure_tokenizer_cached(str(cache), "nope/missing-tok", logs.append, "auto", vpy)
+    assert ok is True, logs
+    assert any("预缓存分词器" in ln for ln in logs), logs
+
+    print("TOKENIZER_CACHE_UNIT_TESTS_OK")
+
+
+
+def test_external_python_safe_cwd(base: Path):
+    """_external_python_safe_cwd：当前 cwd 含 python312.dll（打包版应用目录）时必须切走，
+    避免 Windows DLL 搜索命中打包版 DLL 导致 venv 的 _ctypes/numpy 崩溃。"""
+    venv_python = r"E:\Lora-Tool\KohyaLoraTool_data\kohya_ss\venv\Scripts\python.exe"
+    argv = [venv_python, "-c", "import numpy"]
+    tmp = str(base / "TEMP")
+    (base / "TEMP").mkdir(parents=True, exist_ok=True)
+
+    # 场景 A：cwd 是打包版应用目录（含 python312.dll）-> 切到系统临时目录
+    dirty = str(base / "KohyaTool")
+    (base / "KohyaTool").mkdir(parents=True, exist_ok=True)
+    def _glob(patt):
+        patt = os.path.normpath(patt)
+        if patt.startswith(os.path.normpath(dirty)):
+            return [os.path.join(os.path.dirname(patt), "python312.dll")]
+        return []
+
+    with patch.object(core.os, "getcwd", return_value=dirty), \
+         patch.object(core.glob, "glob", side_effect=_glob), \
+         patch.object(core.tempfile, "gettempdir", return_value=tmp), \
+         patch.object(core.os.path, "isdir", return_value=True):
+        got = core._external_python_safe_cwd(argv)
+    assert got == tmp, f"A: expect tempdir, got {got!r}"
+
+    # 场景 B：cwd 干净 -> 用解释器自己的 Scripts 目录
+    clean = str(base / "home")
+    (base / "home").mkdir(parents=True, exist_ok=True)
+    with patch.object(core.os, "getcwd", return_value=clean), \
+         patch.object(core.glob, "glob", return_value=[]), \
+         patch.object(core.os.path, "isdir", return_value=True):
+        got = core._external_python_safe_cwd(argv)
+    assert got == os.path.dirname(venv_python), f"B: expect Scripts dir, got {got!r}"
+
+    # 场景 C：调用方显式传 cwd -> 保持不变（训练脚本 cwd 不能被篡改）
+    with patch.object(core.glob, "glob", return_value=[os.path.join(clean, "python312.dll")]):
+        got = core._external_python_safe_cwd(argv, current_cwd=clean)
+    assert got == clean, f"C: expect explicit cwd unchanged, got {got!r}"
+
+    # 场景 D：非 python 可执行（git）-> 不干预
+    got = core._external_python_safe_cwd([r"C:\Program Files\Git\cmd\git.exe", "status"])
+    assert got is None, f"D: expect None for non-python, got {got!r}"
+
+    print("EXTERNAL_PYTHON_SAFE_CWD_UNIT_TESTS_OK")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -571,7 +717,9 @@ def main():
         test_optimizer_resolution(base)
         test_preprocess_deps(base)
         test_preinstall_torch_mirror_fallback(base)
+        test_tokenizer_cache(base)
         test_preprocess_auto_retry(base)
+        test_external_python_safe_cwd(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

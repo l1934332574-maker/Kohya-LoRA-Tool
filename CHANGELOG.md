@@ -1,5 +1,31 @@
 # 更新日志（Changelog）
 
+## v0.9.17（未发布）
+
+### 修复
+- **分词器预缓存失败导致训练联网卡死（用户反馈）**：训练前预缓存分词器（如 openai/clip-vit-large-patch14）只走 hf-mirror.com 单源，部分用户网络连 hf-mirror 也超时（`Connection to hf-mirror.com timed out`），失败后只提示「将尝试联网加载」，训练脚本再走默认 huggingface.co → 必然失败/卡死。现已：
+  - **内置三个常用分词器到安装包**（openai/clip-vit-large-patch14、laion/CLIP-ViT-bigG-14-laion2B-39B-b160k、google/t5-v1_1-xxl，共约 8MB）：SD1.5 / SDXL / FLUX / Anima 训练所需分词器完全离线、零联网，首次使用自动从内置包复制。
+  - **多级兜底**：内置包 → 本地已下载模型目录（Anima 的 Qwen3-0.6B）→ 文件级国内多镜像下载（hf-mirror / 魔搭，30s 短超时、直连绕代理）→ transformers from_pretrained。
+  - **修复 auto 分词器完整性误判**：T5 等 sentencepiece 分词器只有 spiece.model 没有 tokenizer.json，旧检查要求 tokenizer.json 导致每次都判定不完整、反复联网重建；现改为 tokenizer.json 或 spiece.model 任一即可。
+  - 失败提示明确（「训练时可能需联网加载」），不再误导。
+
+- **预处理报「缺少 numpy」真正根因：打包版 python312.dll 污染（用户诊断铁证）**：用户反馈 v0.9.16 后「-c 校验通过、预处理仍报缺少 numpy」，其自测命令从工具目录 `E:\Lora-Tool\KohyaLoraTool` 运行 venv python `import numpy` 直接崩溃（`AttributeError: class must define a '_type_' attribute`），切到其他目录则正常。根因是打包版应用目录自带 `python312.dll`，GUI 从该目录启动后外部 venv Python 继承污染 cwd，Windows DLL 搜索优先命中打包版 DLL，与 venv 基座 Python 3.12 版本不匹配 → `_ctypes` 崩溃 → numpy 无法 import → 误报「缺少 numpy」。现已：
+  - **外部 Python 子进程安全 cwd**：启动外部 Python（预处理 / 分词器预缓存 / pip 补装等）且未显式指定 cwd 时，检测当前目录是否含 `python312.dll`，含则自动切到系统临时目录，从源头避开 DLL 搜索污染；显式传入 cwd 的训练命令保持不变。
+  - 对全部引擎（第一/第二/第三引擎）生效，源码运行（非打包）同样适用。
+
+- **预处理报「缺少 numpy」且自动补装不生效（用户反馈，v0.9.16 补丁后仍复现）**：v0.9.16 已加自动补装+重试，但补装对大多数用户是空转——内置离线 wheel 只有 **cp312**，而工具默认 kohya venv 是 **Python 3.10**（`_wheels_for_python` 过滤后为空 → 只能走镜像，镜像不可达即失败）。现已：
+  - **内置 numpy 2.1.3 + pillow 12.3.0 的 cp310/cp311/cp312 三套离线 wheel**（约 57MB），默认 py3.10 venv 也能零联网补装；numpy 版本与 kohya 训练环境锁定一致（不再补装到不兼容的最新 2.5.x）。
+  - **失败后强制补装**：子进程预处理失败后不再依赖快速校验（`-c` 通过但脚本实际 import 失败会误判），改为 `force=True` 强制补装一轮再重试。
+  - **preprocess.py 报错打印真实 traceback**：`import numpy` 失败时输出具体原因（ModuleNotFoundError / DLL load failed / 版本冲突），便于后续定位根因，不再笼统提示「缺少 numpy」。
+  - **检测工具目录残留假 numpy 文件**（另一类污染，本地已复现并修复）：若工具目录里残留了假的 `numpy.py` / `numpy` 文件夹——脚本运行时 `sys.path[0]` 指向脚本目录，`import numpy` 会优先命中假文件而不是 venv 里的真 numpy。现已在 preprocess.py 里检测并打印「检测到干扰 numpy 导入的文件 + 具体路径」，指导用户删除后重试。
+
+### 测试
+- 新增 `_ensure_tokenizer_cached` 单测：内置离线复制 / 文件级多源下载 / auto（spiece.model）完整性 / transformers 兜底；真实调用三个内置分词器复制均成功。
+- 新增 `_ensure_preprocess_deps` force 模式单测（校验通过也强制补装）；`_wheels_for_python` 对 cp310/311/312 过滤验证；真实空 venv 端到端离线补装 numpy 2.1.3 + pillow 12.3.0 成功。
+- 新增 `_external_python_safe_cwd` 单测（cwd 含 python312.dll → 切临时目录 / cwd 干净 → 用解释器 Scripts 目录 / 显式 cwd 不变 / 非 Python 不干预）；真实打包目录验证含 python312.dll 时返回系统临时目录。
+
+---
+
 ## v0.9.16（2026-08-19）
 
 ### 修复

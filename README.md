@@ -4,11 +4,20 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.9.16** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.9.17** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
 ---
+
+## 🆕 v0.9.17 更新重点
+
+### 预处理「缺少 numpy」彻底修复（DLL 污染根因）
+
+- **根因已定位**：打包版应用目录自带的 `python312.dll` 会污染从该目录启动的 venv Python（Windows DLL 搜索优先命中打包版 DLL，与 venv 基座 Python 版本不匹配 → `_ctypes` 崩溃 → 误报「缺少 numpy」）。已改为外部 Python 子进程自动避开污染目录，全部引擎生效。
+- **内置 numpy 2.1.3 + pillow 12.3.0 三套离线 wheel（cp310/311/312）**：预处理缺依赖时零联网补装，不再依赖网络镜像。
+- **预处理失败自动补装并重试一次**：子进程失败后强制补装一轮再重试，不再卡死在原始报错。
+- **分词器预缓存离线化**：内置 openai/clip-vit-large-patch14、laion/CLIP-ViT-bigG-14、google/t5-v1_1-xxl 三套常用分词器（约 8MB），SD1.5 / SDXL / FLUX / Anima 训练所需分词器完全离线，不再因 hf-mirror 超时而卡死。
 
 ## 🆕 v0.9.16 更新重点
 

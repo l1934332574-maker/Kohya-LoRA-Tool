@@ -754,10 +754,30 @@ def main():
                         help="JSON 报告输出路径（含 ok/重复/模糊/过小/损坏 计数）")
     args = parser.parse_args()
 
+    def _print_import_pollution_hint(mod):
+        # 常见根因：工具目录被残留的 numpy.py / numpy / PIL.py / PIL 文件夹污染。
+        # 脚本运行时 sys.path[0] 指向脚本所在目录，import 会优先命中这些假文件，
+        # 而不是 venv 里的真包，导致「-c 校验通过、脚本却报缺少依赖」的矛盾现象。
+        try:
+            _here = os.path.dirname(os.path.abspath(__file__))
+            _cands = {mod + ".py", mod}
+            for _d in (_here, os.getcwd()):
+                _bad = [os.path.join(_d, _n) for _n in _cands
+                        if os.path.exists(os.path.join(_d, _n))]
+                if _bad:
+                    print("[ERROR] 检测到干扰 %s 导入的文件（残留/误放，会被当成真包加载），请删除后重试：" % mod)
+                    for _b in _bad:
+                        print("        " + _b)
+        except Exception:
+            pass
+
     # ---- 依赖检查 ----
     try:
         from PIL import Image  # noqa: F401
     except Exception:
+        print("[ERROR] import Pillow 失败，真实错误如下（用于定位根因）：")
+        traceback.print_exc()
+        _print_import_pollution_hint("PIL")
         print("[ERROR] 缺少 Pillow。请先运行 01_一键安装_Setup.bat，")
         print("        或用 kohya_ss 的 venv python 运行本脚本：")
         print('        "kohya_ss\\venv\\Scripts\\python.exe" preprocess.py ...')
@@ -765,7 +785,13 @@ def main():
     try:
         import numpy  # noqa: F401
     except Exception:
-        print("[ERROR] 缺少 numpy。请先运行 01_一键安装_Setup.bat 安装依赖。")
+        # 打印真实 traceback：可能是未安装（ModuleNotFoundError）、DLL 冲突（DLL load failed）、
+        # 版本不兼容等；只笼统提示「缺少 numpy」会让用户/开发者无法定位根因。
+        print("[ERROR] import numpy 失败，真实错误如下（用于定位根因）：")
+        traceback.print_exc()
+        _print_import_pollution_hint("numpy")
+        print("[ERROR] 缺少 numpy。请先运行 01_一键安装_Setup.bat 安装依赖，")
+        print("        或重跑【② 安装训练内核】自动重建环境。")
         sys.exit(1)
 
     input_dir = os.path.abspath(args.input)
