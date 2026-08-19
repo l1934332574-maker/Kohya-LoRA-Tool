@@ -274,41 +274,42 @@ def test_third_engine(base: Path):
 
 
 def test_optimizer_resolution(base: Path):
-    """resolve_optimizer / _probe_adamw8bit / _optimizer_yaml_name 单元测试（mock 子进程，不真实运行 CUDA）。"""
+    """resolve_optimizer / _probe_adamw8bit / _probe_lion / _optimizer_yaml_name 单元测试（mock 子进程，不真实运行 CUDA）。"""
     logs = []
     vpy = str(base / "venv" / "Scripts" / "python.exe")
 
     def probe_result(out, rc):
         return subprocess.CompletedProcess([], rc, out, "")
 
-    # 1) 预检通过 -> AdamW8bit
+    # 1) AdamW8bit 预检通过 -> AdamW8bit
     with patch.object(core.subprocess, "run", return_value=probe_result("OK\n", 0)):
         opt, _ = core.resolve_optimizer(vpy, logs.append, requested="auto")
     assert opt == "AdamW8bit", opt
 
-    # 2) 预检失败（DLL 缺失）+ lion 可用 -> Lion
-    def subrun_fail(cmd, *args, **kwargs):
+    # 2) AdamW8bit 预检失败（DLL 缺失）+ Lion 真实 step 预检通过 -> Lion
+    def subrun_lion_ok(cmd, *args, **kwargs):
         code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
         if "import lion_pytorch" in code:
-            return probe_result("", 0)
+            return probe_result("OK\n", 0)  # Lion 真实 step 成功
         if "bitsandbytes" in code:
             return probe_result("Error: libbitsandbytes_cuda128.dll missing\n", 1)
         return probe_result("", 0)
-    with patch.object(core.subprocess, "run", side_effect=subrun_fail):
+    with patch.object(core.subprocess, "run", side_effect=subrun_lion_ok):
         opt, _ = core.resolve_optimizer(vpy, logs.append, requested="auto")
     assert opt == "Lion", opt
 
-    # 3) 预检失败 + lion 不可用 -> AdamW
-    def subrun_no_lion(cmd, *args, **kwargs):
+    # 3) AdamW8bit 预检失败 + Lion 预检失败（真实 step 崩）-> AdamW
+    def subrun_lion_bad(cmd, *args, **kwargs):
         code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
         if "import lion_pytorch" in code:
-            return probe_result("", 1)
+            return probe_result("AttributeError: ... incompatible\n", 1)  # Lion 真实 step 失败
         if "bitsandbytes" in code:
             return probe_result("str2optimizer8bit_blockwise is not defined\n", 1)
         return probe_result("", 0)
-    with patch.object(core.subprocess, "run", side_effect=subrun_no_lion):
+    with patch.object(core.subprocess, "run", side_effect=subrun_lion_bad):
         opt, _ = core.resolve_optimizer(vpy, logs.append, requested="auto")
     assert opt == "AdamW", opt
+    assert any("Lion 预检失败" in ln for ln in logs), logs
 
     # 4) AMD 模式固定 AdamW（不调用子进程）
     with patch.object(core.subprocess, "run", side_effect=AssertionError("AMD 模式不应调用子进程")):
@@ -320,15 +321,8 @@ def test_optimizer_resolution(base: Path):
         opt, _ = core.resolve_optimizer(vpy, logs.append, requested="adamw")
     assert opt == "AdamW", opt
 
-    # 6) 指定 adamw8bit 但不可用 -> 自动降级 AdamW
-    def subrun_no_lion2(cmd, *args, **kwargs):
-        code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
-        if "import lion_pytorch" in code:
-            return probe_result("", 1)
-        if "bitsandbytes" in code:
-            return probe_result("compiled without GPU support\n", 1)
-        return probe_result("", 0)
-    with patch.object(core.subprocess, "run", side_effect=subrun_no_lion2):
+    # 6) 指定 adamw8bit 但不可用 + Lion 不可用 -> 自动降级 AdamW
+    with patch.object(core.subprocess, "run", side_effect=subrun_lion_bad):
         opt, _ = core.resolve_optimizer(vpy, logs.append, requested="adamw8bit")
     assert opt == "AdamW", opt
     assert any("降级" in ln for ln in logs), logs
@@ -346,19 +340,211 @@ def test_optimizer_resolution(base: Path):
         ok, detail = core._probe_adamw8bit(vpy, logs.append, timeout=1)
     assert not ok and "预检进程异常" in detail, detail
 
-    # 9) musubi 第二引擎 allow_lion=False：预检失败时即使 lion 可用也直接降级 AdamW
+    # 9) musubi 第二引擎 allow_lion=False：即使 Lion 预检会通过也直接降级 AdamW，且不调用 Lion 预检
+    lion_called = {"n": 0}
     def subrun_musubi(cmd, *args, **kwargs):
         code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
         if "import lion_pytorch" in code:
-            return probe_result("", 0)  # lion 可用，但 musubi 不支持
+            lion_called["n"] += 1
+            return probe_result("OK\n", 0)
         if "bitsandbytes" in code:
             return probe_result("Error: libbitsandbytes_cuda128.dll missing\n", 1)
         return probe_result("", 0)
     with patch.object(core.subprocess, "run", side_effect=subrun_musubi):
         opt, _ = core.resolve_optimizer(vpy, logs.append, requested="auto", allow_lion=False)
     assert opt == "AdamW", opt
+    assert lion_called["n"] == 0, "allow_lion=False 不应调用 Lion 预检"
 
     print("OPTIMIZER_RESOLUTION_UNIT_TESTS_OK")
+
+
+def test_preprocess_deps(base: Path):
+    """_ensure_preprocess_deps 单元测试（mock 子进程/补装，不真实修改 venv）。"""
+    vpy = str(base / "deps" / "venv" / "Scripts" / "python.exe")
+    kdir = str(base / "deps" / "kohya_ss")
+    logs = []
+
+    def probe(rc):
+        return subprocess.CompletedProcess([], rc, "", "")
+
+    # 1) 依赖本来就可用：不触发任何补装
+    install_called = {"n": 0}
+    def run_stream_ok(cmd, cwd=None, env=None, logf=print, **kwargs):
+        install_called["n"] += 1
+        return 0
+    with patch.object(core.subprocess, "run", return_value=probe(0)), \
+         patch.object(core, "run_stream", side_effect=run_stream_ok), \
+         patch.object(core, "build_env", return_value={}):
+        assert core._ensure_preprocess_deps(vpy, kdir, logs.append) is True
+    assert install_called["n"] == 0, "依赖可用时不应调用补装"
+    assert not logs, logs
+
+    # 2) 首次 import 失败 -> 内置 wheel 为空走国内镜像 -> 补装成功 -> 复检通过
+    state = {"import_ok": False}
+    def subrun_probe(cmd, *args, **kwargs):
+        return probe(0 if state["import_ok"] else 1)
+    install_cmd = {"seen": []}
+    def run_stream_install(cmd, cwd=None, env=None, logf=print, **kwargs):
+        install_cmd["seen"].append([str(x) for x in cmd])
+        if any("pip" in x for x in install_cmd["seen"][-1]):
+            state["import_ok"] = True  # 装完即复检通过
+        return 0
+    with patch.object(core.subprocess, "run", side_effect=subrun_probe), \
+         patch.object(core, "run_stream", side_effect=run_stream_install), \
+         patch.object(core, "build_env", return_value={}), \
+         patch.object(core, "_bundled_pip_wheels", return_value=[]), \
+         patch.object(core, "_wheels_for_python", return_value=[]):
+        assert core._ensure_preprocess_deps(vpy, kdir, logs.append) is True
+    assert any("tuna.tsinghua.edu.cn" in x for c in install_cmd["seen"] for x in c), install_cmd["seen"]
+
+    # 3) 补装也失败（离线+双镜像，两轮重试都失败） -> 返回 False
+    def subrun_bad(cmd, *args, **kwargs):
+        return probe(1)
+    def run_stream_bad(cmd, cwd=None, env=None, logf=print, **kwargs):
+        return 1
+    with patch.object(core.subprocess, "run", side_effect=subrun_bad), \
+         patch.object(core, "run_stream", side_effect=run_stream_bad), \
+         patch.object(core, "build_env", return_value={}), \
+         patch.object(core, "_bundled_pip_wheels", return_value=[]), \
+         patch.object(core, "_wheels_for_python", return_value=[]):
+        assert core._ensure_preprocess_deps(vpy, kdir, logs.append) is False
+    assert any("重试" in ln or "失败" in ln for ln in logs), logs
+
+    print("PREPROCESS_DEPS_UNIT_TESTS_OK")
+
+
+def test_preprocess_auto_retry(base: Path):
+    """preprocess() 子进程缺依赖失败时：补装后自动重试一次；补装也失败则报明确错误。"""
+    kdir = base / "pp" / "kohya_ss"
+    kdir.mkdir(parents=True, exist_ok=True)
+    vpy = kdir / "venv" / "Scripts" / "python.exe"
+    fake_python(vpy)
+    in_dir = base / "pp" / "images"
+    in_dir.mkdir(parents=True, exist_ok=True)
+    (in_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    out_dir = base / "pp" / "out"
+
+    # 场景 A：第一次跑 preprocess 失败 -> 补装成功 -> 自动重试一次成功
+    logs = []
+    calls = {"n": 0}
+    def run_stream_a(cmd, cwd=None, env=None, logf=print, **kwargs):
+        cmd = [str(x) for x in cmd]
+        if any("preprocess.py" in x for x in cmd):
+            calls["n"] += 1
+            return 1 if calls["n"] == 1 else 0
+        return 0
+    with patch.object(core, "venv_python", return_value=str(vpy)), \
+         patch.object(core, "_venv_python_ok", return_value=(True, "ok")), \
+         patch.object(core, "_ensure_preprocess_deps", return_value=True), \
+         patch.object(core, "get_kohya_dir", return_value=str(kdir)), \
+         patch.object(core, "dataset_train_dir", return_value=str(out_dir)), \
+         patch.object(core, "run_stream", side_effect=run_stream_a):
+        core.preprocess(logs.append, input_dir=str(in_dir), mode="style")
+    assert calls["n"] == 2, calls
+    assert any("自动重试预处理" in ln for ln in logs), logs
+
+    # 场景 B：子进程失败后补装也失败 -> 抛明确错误，不无限重试
+    logs2 = []
+    calls2 = {"n": 0}
+    deps_n = {"n": 0}
+    def ensure_deps(vpy, kdir, logf=print):
+        deps_n["n"] += 1
+        return deps_n["n"] == 1  # 开头自检通过；子进程失败后的补装失败
+    def run_stream_b(cmd, cwd=None, env=None, logf=print, **kwargs):
+        cmd = [str(x) for x in cmd]
+        if any("preprocess.py" in x for x in cmd):
+            calls2["n"] += 1
+        return 1
+    with patch.object(core, "venv_python", return_value=str(vpy)), \
+         patch.object(core, "_venv_python_ok", return_value=(True, "ok")), \
+         patch.object(core, "_ensure_preprocess_deps", side_effect=ensure_deps), \
+         patch.object(core, "get_kohya_dir", return_value=str(kdir)), \
+         patch.object(core, "dataset_train_dir", return_value=str(out_dir)), \
+         patch.object(core, "run_stream", side_effect=run_stream_b):
+        try:
+            core.preprocess(logs2.append, input_dir=str(in_dir), mode="style")
+            raise AssertionError("应抛出预处理失败错误")
+        except RuntimeError as e:
+            assert "缺少 Pillow/numpy 且自动补装失败" in str(e), e
+    assert calls2["n"] == 1, "补装失败时不应重试 preprocess"
+    assert deps_n["n"] == 2, deps_n
+    print("PREPROCESS_AUTO_RETRY_OK")
+
+
+
+def test_preinstall_torch_mirror_fallback(base: Path):
+    """_preinstall_torch 本地安装多镜像回退：清华失败 -> 阿里云成功；全部失败才报明确错误。"""
+    kdir = base / "pt" / "kohya_ss"
+    cache = base / "pt" / "cache" / "pytorch_wheels"
+    cache.mkdir(parents=True, exist_ok=True)
+    # 稀疏文件：逻辑大小满足 minsize（torch 1GB / torchvision 5MB），避免真写 1GB
+    for name, size in (
+            ("torch-2.7.1+cu128-cp310-cp310-win_amd64.whl", 1_000_000_000),
+            ("torchvision-0.22.1+cu128-cp310-cp310-win_amd64.whl", 5_000_000)):
+        with open(cache / name, "wb") as f:
+            f.truncate(size)
+    vpy = str(base / "pt" / "venv" / "Scripts" / "python.exe")
+    logs = []
+
+    def subrun(cmd, *args, **kwargs):
+        code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
+        if "sys.version_info" in code:
+            return result(0, "cp310")
+        if "import torch, torchvision" in code:
+            return result(0, "2.7.1+cu128\nTrue\n")
+        return result(0)
+
+    def data_sub(*parts):
+        return str(base.joinpath("pt", *parts))  # 与 cache 目录（base/pt/cache/pytorch_wheels）对齐
+
+    # 场景 A：清华失败 -> 阿里云成功
+    installs = {"n": 0, "indexes": []}
+    def run_stream_a(cmd, cwd=None, env=None, logf=print, **kwargs):
+        cmd = [str(x) for x in cmd]
+        if "pip" in cmd and "install" in cmd:
+            installs["n"] += 1
+            installs["indexes"].append((env or {}).get("PIP_INDEX_URL"))
+            return 1 if installs["n"] == 1 else 0  # 第一个镜像（清华）失败，第二个（阿里云）成功
+        return 0
+    with patch.object(core, "data_sub", side_effect=data_sub), \
+         patch.object(core, "_wheel_valid", return_value=True), \
+         patch.object(core.subprocess, "run", side_effect=subrun), \
+         patch.object(core, "run_stream", side_effect=run_stream_a), \
+         patch.object(core, "build_direct_env", return_value={}):
+        ok = core._preinstall_torch(vpy, str(kdir), logs.append,
+                                    torch_ver="2.7.1", tv_ver="0.22.1",
+                                    cu="cu128", label="第二引擎", force=True)
+    assert ok is True
+    assert installs["n"] == 2, installs
+    assert installs["indexes"][0] == "https://pypi.tuna.tsinghua.edu.cn/simple", installs
+    assert installs["indexes"][1] == "https://mirrors.aliyun.com/pypi/simple/", installs
+    assert any("自动切换下一镜像" in ln for ln in logs), logs
+
+    # 场景 B：三个镜像全部失败 -> 抛明确错误（不再笼统报「国内双镜像下载失败」）
+    installs2 = {"n": 0, "indexes": []}
+    def run_stream_b(cmd, cwd=None, env=None, logf=print, **kwargs):
+        cmd = [str(x) for x in cmd]
+        if "pip" in cmd and "install" in cmd:
+            installs2["n"] += 1
+            installs2["indexes"].append((env or {}).get("PIP_INDEX_URL"))
+        return 1
+    with patch.object(core, "data_sub", side_effect=data_sub), \
+         patch.object(core, "_wheel_valid", return_value=True), \
+         patch.object(core.subprocess, "run", side_effect=subrun), \
+         patch.object(core, "run_stream", side_effect=run_stream_b), \
+         patch.object(core, "build_direct_env", return_value={}):
+        try:
+            core._preinstall_torch(vpy, str(kdir), logs.append,
+                                   torch_ver="2.7.1", tv_ver="0.22.1",
+                                   cu="cu128", label="第二引擎", force=True)
+            raise AssertionError("应抛出本地安装失败错误")
+        except RuntimeError as e:
+            assert "本地安装 PyTorch 轮子失败" in str(e), e
+    assert installs2["n"] == 3, installs2  # 清华/阿里/上海交大各试一次
+    assert installs2["indexes"][2] == "https://mirror.sjtu.edu.cn/pypi/web/simple", installs2
+    assert installs2["indexes"][0] == "https://pypi.tuna.tsinghua.edu.cn/simple", installs2
+
+    print("PREINSTALL_TORCH_MIRROR_FALLBACK_OK")
 
 
 def main():
@@ -369,6 +555,9 @@ def main():
         test_second_engine_without_git(base)
         test_third_engine(base)
         test_optimizer_resolution(base)
+        test_preprocess_deps(base)
+        test_preinstall_torch_mirror_fallback(base)
+        test_preprocess_auto_retry(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

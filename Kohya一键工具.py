@@ -138,7 +138,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.15"
+APP_VERSION = "0.9.16"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -810,9 +810,8 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
         if not downloaded:
             raise RuntimeError("国内双镜像下载失败: %s" % local_name)
         paths.append(dest)
-    logf("[%s] 本地安装 PyTorch 轮子（依赖走清华镜像）…" % label)
+    logf("[%s] 本地安装 PyTorch 轮子（依赖自动多镜像回退）…" % label)
     env = build_direct_env()
-    env["PIP_INDEX_URL"] = "https://pypi.tuna.tsinghua.edu.cn/simple"
     env.pop("PIP_EXTRA_INDEX_URL", None)
     env.setdefault("PIP_RETRIES", "10")
     env.setdefault("PIP_TIMEOUT", "120")
@@ -820,8 +819,25 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
     if force:
         cmd.append("--force-reinstall")
     cmd += paths
-    if run_stream(cmd, cwd=kdir, env=env, logf=logf) != 0:
-        raise RuntimeError("本地安装 PyTorch 轮子失败，请查看上方日志")
+    # 本地 wheel 已下载好，但安装时仍需从国内镜像解析 torch 的依赖（filelock/typing-extensions/
+    # sympy/networkx/jinja2/fsspec 等）。部分用户网络下清华源不可达/超时，pip 会报
+    # "Could not find a version that satisfies the requirement filelock (from versions: none)"。
+    # 因此按 清华 -> 阿里云 -> 上海交大 顺序自动回退，任一成功即完成；全部失败才报错。
+    _install_ok = False
+    for _idx_name, _idx_url in (
+            ("清华", "https://pypi.tuna.tsinghua.edu.cn/simple"),
+            ("阿里云", "https://mirrors.aliyun.com/pypi/simple/"),
+            ("上海交大", "https://mirror.sjtu.edu.cn/pypi/web/simple")):
+        env["PIP_INDEX_URL"] = _idx_url
+        logf("[%s] 本地安装 PyTorch 轮子（依赖走%s镜像）…" % (label, _idx_name))
+        if run_stream(cmd, cwd=kdir, env=env, logf=logf) == 0:
+            _install_ok = True
+            break
+        logf("[%s] %s镜像依赖安装失败（可能是镜像不可达/超时），自动切换下一镜像…" % (label, _idx_name))
+    if not _install_ok:
+        raise RuntimeError(
+            "本地安装 PyTorch 轮子失败：依赖解析在清华/阿里云/上海交大三个国内镜像均失败，"
+            "请查看上方日志；网络恢复后重试（缓存轮子已存在，会跳过下载）")
     r = subprocess.run([vpy, "-c", "import torch, torchvision;print(torch.__version__);print(torch.cuda.is_available())"],
                        capture_output=True, text=True, timeout=180)
     logf("[%s] 验证：" % label + ((r.stdout or "").strip().replace("\n", " | ")))
@@ -1293,7 +1309,7 @@ def install_musubi_engine(logf=print):
             except Exception as e:
                 logf(f"[第二引擎] PyTorch 预下载失败（第{_try + 1}/3 次）：{e}（断点续传，可重试）")
         if not _torch_ok:
-            raise RuntimeError("torch cu128 国内双镜像下载失败。无需开代理，请稍后重试；缓存支持断点续传。")
+            raise RuntimeError("torch cu128 国内镜像下载/安装失败（详见上方日志：是下载失败还是依赖安装失败）。无需开代理，请稍后重试；缓存支持断点续传。")
         # 6) musubi-tuner（editable，带全套钉死依赖）。额外锁死 Torch 配对，
         # 防止 bitsandbytes/accelerate 等宽松依赖把已装 2.7.1 自动升级到 2.11/2.13。
         _constraints = os.path.join(data_sub("cache", "engine_sources"), "musubi-cu128-constraints.txt")
@@ -2255,7 +2271,7 @@ def install_ai_toolkit_engine(logf=print):
             except Exception as e:
                 logf(f"[第三引擎] PyTorch 预下载失败（第{_try + 1}/3 次）：{e}（断点续传，可重试）")
         if not _torch_ok:
-            raise RuntimeError("torch cu130 国内双镜像下载失败。无需开代理，请稍后重试；缓存支持断点续传。")
+            raise RuntimeError("torch cu130 国内镜像下载/安装失败（详见上方日志：是下载失败还是依赖安装失败）。无需开代理，请稍后重试；缓存支持断点续传。")
         # ai-toolkit 依赖：固定 Diffusers 从国内按需缓存安装，requirements 中不再含 git+https。
         _diff_zip = _download_engine_source("diffusers", logf)
         _diff_dir = os.path.join(_engine_source_cache_dir(), "diffusers-c9438378")
@@ -2813,6 +2829,51 @@ def _write_at_image_template(mode, params, output_name, out_dir=None):
 
 # ---------- 预处理 / UI / 训练 ----------
 
+def _ensure_preprocess_deps(vpy, kdir, logf=print):
+    """确保 kohya venv 可 import PIL.Image + numpy（预处理必需）。
+
+    缺失时自动补装：内置离线 wheel（按 venv Python 版本过滤）→ 清华 → 阿里，
+    装完再真实校验。返回 True=可用；False=补装后仍缺失。
+
+    注意用 `from PIL import Image; import numpy` 做校验（与 preprocess.py 实际
+    用法一致），只 import 顶层 PIL 包可能漏判半损坏的 Pillow 安装。
+    """
+    def _deps_importable():
+        try:
+            r = subprocess.run([vpy, "-c", "from PIL import Image; import numpy"],
+                               capture_output=True, text=True, timeout=120)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    if _deps_importable():
+        return True
+    logf("[预处理] kohya venv 缺少 Pillow/numpy（可能之前安装被中断），正在自动补装…")
+    env = build_env()
+    for _round in range(2):
+        _ok = False
+        _wheels = _wheels_for_python(_bundled_pip_wheels(), vpy)
+        if _wheels:
+            logf("[预处理] 使用内置离线 wheel 安装 Pillow/numpy…")
+            if run_stream([vpy, "-m", "pip", "install", "--no-input", "--no-index"] + _wheels,
+                          cwd=kdir, env=env, logf=logf) == 0:
+                _ok = True
+        if not _ok:
+            for _idx in ("https://pypi.tuna.tsinghua.edu.cn/simple",
+                         "https://mirrors.aliyun.com/pypi/simple/"):
+                if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                               "--index-url", _idx, "pillow", "numpy"], cwd=kdir, env=env, logf=logf) == 0:
+                    _ok = True
+                    break
+                logf("[预处理] 当前镜像下载失败，切换备用镜像重试…")
+        if _deps_importable():
+            logf("[预处理] Pillow/numpy 补装完成")
+            return True
+        if _round == 0:
+            logf("[预处理] 补装后仍不可用（可能是网络/镜像波动），重试一轮…")
+    return False
+
+
 def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
                reg_dir=None, repeats=5, dedup=False, wd14=True,
                square_crop=False, min_size=0, blur_threshold=0.0, report=None,
@@ -2833,36 +2894,12 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
             "请先重跑【② 安装训练内核】自动重建环境。" % _vdetail)
     if not input_dir or not os.path.isdir(input_dir):
         raise RuntimeError("请选择图片文件夹")
-    # 预处理依赖自检：kohya venv 必须能 import Pillow/numpy（部分中断安装会缺，导致预处理永远失败）。
-    # 缺失时自动补装（国内镜像，几秒），实现自愈，不用重装整个 kohya。
-    try:
-        _r = subprocess.run([vpy, "-c", "import PIL, numpy"], capture_output=True, text=True, timeout=120)
-        _deps_ok = _r.returncode == 0
-    except Exception:
-        _deps_ok = False
-    if not _deps_ok:
-        logf("[预处理] kohya venv 缺少 Pillow/numpy（可能之前安装被中断），正在自动补装…")
-        _kd = get_kohya_dir()
-        _env = build_env()
-        _ok = False
-        # 优先用内置离线 wheel（彻底绕开网络不稳）
-        _wheels = _wheels_for_python(_bundled_pip_wheels(), vpy)
-        if _wheels:
-            logf("[预处理] 使用内置离线 wheel 安装 Pillow/numpy…")
-            if run_stream([vpy, "-m", "pip", "install", "--no-input", "--no-index"] + _wheels,
-                          cwd=_kd, env=_env, logf=logf) == 0:
-                _ok = True
-        if not _ok:
-            for _idx in ("https://pypi.tuna.tsinghua.edu.cn/simple",
-                         "https://mirrors.aliyun.com/pypi/simple/"):
-                if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
-                               "--index-url", _idx, "pillow", "numpy"], cwd=_kd, env=_env, logf=logf) == 0:
-                    _ok = True
-                    break
-                logf("[预处理] 当前镜像下载失败，切换备用镜像重试…")
-        if not _ok:
-            raise RuntimeError("自动补装 Pillow/numpy 失败（网络不稳或镜像不可达），请检查网络后重试，或重跑【② 安装训练内核】")
-        logf("[预处理] Pillow/numpy 补装完成")
+    # 预处理依赖自检：kohya venv 必须能 import PIL.Image/numpy（部分中断安装会缺，导致预处理永远失败）。
+    # 缺失时自动补装（内置离线 wheel → 清华 → 阿里），实现自愈，不用重装整个 kohya。
+    if not _ensure_preprocess_deps(vpy, get_kohya_dir(), logf):
+        raise RuntimeError(
+            "自动补装 Pillow/numpy 失败（网络不稳或镜像不可达），请检查网络后重试，"
+            "或重跑【② 安装训练内核】重建环境")
     out = dataset_train_dir(dataset_mode or mode, project)
     os.environ["TRIGGER_WORD"] = trigger or ""
     os.environ["MODE"] = mode
@@ -2902,6 +2939,13 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
     if report:
         cmd += ["--report", report]
     rc = run_stream(cmd, logf=logf)
+    if rc != 0:
+        # 自愈：极少数情况父进程自检通过、但子进程仍缺依赖（半损坏 venv / 环境不一致），
+        # 若确认 venv 缺 Pillow/numpy 就补装并自动重试一次，避免卡在 preprocess.py 的原始报错。
+        if not _ensure_preprocess_deps(vpy, get_kohya_dir(), logf):
+            raise RuntimeError("预处理失败：venv 缺少 Pillow/numpy 且自动补装失败，请查看上方日志")
+        logf("[预处理] 已补装依赖，自动重试预处理…")
+        rc = run_stream(cmd, logf=logf)
     if rc != 0:
         raise RuntimeError("预处理失败，请查看上方日志")
     logf("[预处理] 完成。configs/dataset_config.toml 已自动更新。")
@@ -4281,14 +4325,52 @@ def _probe_adamw8bit(vpy, logf=print, timeout=180):
     return False, (lines[-1] if lines else "未知错误")[-200:]
 
 
-def _lion_available(vpy):
-    """检查 venv 中 lion-pytorch 是否可导入（kohya 的 Lion 优化器依赖）。"""
+def _probe_lion(vpy, logf=print, timeout=180):
+    """在真实 venv 里做一次 lion_pytorch.Lion 优化器 step 预检。
+
+    与 AdamW8bit 同理：lion_pytorch 能 import 不代表能在当前 torch 下真实 step
+    （旧版 lion-pytorch 与 torch 2.7 存在 API 不兼容，创建优化器/step 时才崩，
+    import 阶段不会暴露）。这里创建真实参数并执行 loss.backward() + optimizer.step()，
+    任何一步失败都判定不可用，避免训练到 optimizer.step() 阶段才崩溃。
+
+    返回 (ok, detail)。
+    """
+    code = (
+        "import sys\n"
+        "try:\n"
+        "    import torch\n"
+        "    if not torch.cuda.is_available():\n"
+        "        print('NO_CUDA')\n"
+        "        sys.exit(3)\n"
+        "    import lion_pytorch\n"
+        "    opt_cls = getattr(lion_pytorch, 'Lion', None)\n"
+        "    if opt_cls is None:\n"
+        "        print('NO_OPT_CLS')\n"
+        "        sys.exit(4)\n"
+        "    p = torch.nn.Parameter(torch.ones(4, device='cuda'))\n"
+        "    opt = opt_cls([p], lr=1e-4)\n"
+        "    loss = (p * p).sum()\n"
+        "    loss.backward()\n"
+        "    opt.step()\n"
+        "    opt.zero_grad()\n"
+        "    print('OK')\n"
+        "    sys.exit(0)\n"
+        "except Exception:\n"
+        "    import traceback\n"
+        "    print(traceback.format_exc())\n"
+        "    sys.exit(1)\n"
+    )
     try:
-        r = subprocess.run([vpy, "-c", "import lion_pytorch"],
-                           capture_output=True, text=True, timeout=60)
-        return r.returncode == 0
-    except Exception:
-        return False
+        r = subprocess.run([vpy, "-c", code], capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        return False, "Lion 预检进程异常：%s" % e
+    out = (r.stdout or "") + (r.stderr or "")
+    if r.returncode == 0 and "OK" in out:
+        return True, "lion_pytorch.Lion 真实 step 成功"
+    if "NO_CUDA" in out:
+        return False, "PyTorch 未启用 CUDA（Lion 无法验证）"
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    return False, (lines[-1] if lines else "未知错误")[-200:]
 
 
 def resolve_optimizer(vpy, logf=print, requested="auto", amd_mode=False, allow_lion=True):
@@ -4299,8 +4381,9 @@ def resolve_optimizer(vpy, logf=print, requested="auto", amd_mode=False, allow_l
       - optimizer_type 为 kohya/musubi 风格：AdamW8bit / Lion / AdamW；
       - AI Toolkit yaml 请用 _optimizer_yaml_name() 转换。
 
-    Windows + CUDA 12.8 下 bitsandbytes 可能能 import 但内核不可用，必须先做真实
-    step 预检；失败自动降级，避免训练到 optimizer.step() 阶段才崩溃。
+    Windows + CUDA 12.8 下 bitsandbytes / lion_pytorch 可能能 import 但真实 step 不可用
+    （8-bit 内核缺失 / 旧版 lion-pytorch 与 torch 不兼容），必须先做真实 step 预检；
+    失败自动降级，避免训练到 optimizer.step() 阶段才崩溃。
     """
     req = str(requested or "auto").strip().lower()
     if amd_mode:
@@ -4317,11 +4400,13 @@ def resolve_optimizer(vpy, logf=print, requested="auto", amd_mode=False, allow_l
     if req == "adamw8bit":
         logf("[优化器] 已指定 AdamW8bit，但 CUDA 内核不可用，自动降级以避免训练崩溃")
     if allow_lion and req in ("auto", "lion"):
-        if _lion_available(vpy):
-            logf("[优化器] 已自动降级为 Lion（纯 PyTorch，显存占用低于 AdamW）")
-            return "Lion", "AdamW8bit 不可用，降级为 Lion"
+        ok_lion, detail_lion = _probe_lion(vpy, logf)
+        if ok_lion:
+            logf("[优化器] 已自动降级为 Lion（预检真实 step 通过，显存占用低于 AdamW）")
+            return "Lion", "AdamW8bit 不可用，Lion 预检通过，降级为 Lion"
+        logf("[优化器] Lion 预检失败（%s），继续降级为 AdamW" % detail_lion)
         if req == "lion":
-            logf("[优化器] Lion 依赖不可用，自动降级为 AdamW")
+            logf("[优化器] Lion 不可用，自动降级为 AdamW")
     logf("[优化器] 已自动降级为 AdamW（纯 PyTorch，兼容性最好）")
     return "AdamW", "AdamW8bit 不可用，降级为 AdamW"
 

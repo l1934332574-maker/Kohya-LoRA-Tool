@@ -4,11 +4,19 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.9.15** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.9.16** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
 ---
+
+## 🆕 v0.9.16 更新重点
+
+### 安装与预处理稳定性修复
+
+- **torch 本地安装不再卡清华源**：torch 大轮子下载完成后，本地 `pip install` 的依赖解析（filelock 等）原来只走清华源，部分网络下清华源不可达会无限失败（`Could not find a version that satisfies the requirement filelock (from versions: none)`）。现在自动按 **清华 → 阿里云 → 上海交大** 顺序回退，任一镜像成功即完成；错误日志明确区分「下载失败」与「本地依赖安装失败」。
+- **预处理报「缺少 numpy」自愈**：预处理自检与 preprocess.py 实际用法完全对齐（`from PIL import Image; import numpy`），半损坏的 Pillow 也会被识别；子进程预处理失败后会自动补装依赖并**自动重试一次**，不再卡死在原始报错。
+- **Lion 优化器降级真实预检**：AdamW8bit 不可用时降级 Lion 改为真实 `backward + step` 预检，旧版 lion-pytorch 与 torch 2.7 不兼容也能识别，自动继续降级为 AdamW，不再训练到 `optimizer.step()` 才崩溃。
 
 ## 🆕 v0.9.15 更新重点
 
@@ -137,7 +145,7 @@ PyTorch 大轮子（2~3GB）下载改为：
 
 | 文件 | 说明 |
 |---|---|
-| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源和 WD14 打标模型；当前最新版为 v0.9.14 |
+| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源和 WD14 打标模型；当前最新版为 v0.9.16 |
 | `KohyaLoraTool_*_portable.zip` | 便携版，解压后运行；若该版本未上传 ZIP，请使用 `Setup.exe` |
 
 ### 国内镜像

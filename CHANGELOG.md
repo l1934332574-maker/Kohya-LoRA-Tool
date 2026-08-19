@@ -1,5 +1,21 @@
 # 更新日志（Changelog）
 
+## v0.9.16（2026-08-19）
+
+### 修复
+- **Lion 优化器降级后训练崩溃（v0.9.15 回归补漏）**：AdamW8bit 不可用时自动降级 Lion 只做了 `import lion_pytorch` 检查，未做真实 step 预检；部分机器上 lion-pytorch 能 import 但旧版与 torch 2.7 不兼容，训练到 `optimizer.step()` 才崩（Anima 报错命令含 `--optimizer_type=Lion`，退出码 1）。现已改为 `_probe_lion` 真实 step 预检（与 AdamW8bit 预检一致：创建参数 → backward → step），失败自动继续降级为纯 PyTorch AdamW，不再崩溃。
+
+- **第二引擎/第三引擎 torch 本地安装报 `Could not find a version that satisfies the requirement filelock (from versions: none)`（用户反馈，无限失败）**：torch 大轮子已从阿里云/上海交大断点续传下载成功（日志「已存在缓存轮子，跳过下载」），但下一步本地 `pip install` 安装时，依赖解析（filelock/typing-extensions/sympy/networkx/jinja2/fsspec 等）只走清华源；部分用户网络下清华源不可达/超时 → pip 报「from versions: none」→ 外层又笼统包成「国内双镜像下载失败」，误导排查。现已改为**本地安装多镜像自动回退**：清华 → 阿里云 → 上海交大，任一镜像成功即完成；全部失败才报错，且错误日志明确区分「下载失败」与「本地依赖安装失败」。
+
+- **预处理报「缺少 numpy」卡死（用户反馈）**：预处理开始前工具已有 Pillow/numpy 自检+自动补装，但旧检查只做 `import PIL, numpy`（顶层 import），preprocess.py 实际用 `from PIL import Image`，半损坏的 Pillow 顶层能过、子模块挂，导致父自检通过、子进程仍报「缺少 numpy」且不触发补装。现已改为 `_ensure_preprocess_deps`：用与 preprocess.py 完全一致的 `from PIL import Image; import numpy` 校验；子进程预处理失败后还会再次自检，确认缺依赖则自动补装（内置离线 wheel → 清华 → 阿里）并**自动重试一次**，不再卡死在原始报错。
+
+### 测试
+- `engine_install_smoke_test.py` 优化器单测更新为 mock `_probe_lion`：Lion 预检通过→Lion、Lion 预检失败→AdamW、musubi `allow_lion=False` 不调用 Lion 预检。
+- 新增 `_ensure_preprocess_deps` 单测（依赖可用不补装 / 缺失补装成功 / 补装失败返回 False）与 `preprocess` 自动重试单测（子进程失败→补装→重试成功；补装失败→明确报错且不无限重试）。
+- 新增 `_preinstall_torch` 多镜像回退单测（清华失败→阿里云成功；三镜像全失败→抛「本地安装失败」明确错误）。
+
+---
+
 ## v0.9.15（2026-08-18）
 
 ### 修复
