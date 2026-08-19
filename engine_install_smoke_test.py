@@ -707,6 +707,103 @@ def test_external_python_safe_cwd(base: Path):
     print("EXTERNAL_PYTHON_SAFE_CWD_UNIT_TESTS_OK")
 
 
+def test_amd_download_progress(base: Path):
+    """AMD 大文件阶段会向调用方上报下载进度，且不触发真实网络/安装。"""
+    events = []
+    logs = []
+    rocm_urls = [
+        "https://repo.radeon.com/test/rocm_a-1.0-py3-none-win_amd64.whl",
+        "https://repo.radeon.com/test/rocm_b-1.0-py3-none-win_amd64.whl",
+    ]
+    torch_urls = ["https://repo.radeon.com/test/torch-1.0-cp312-win_amd64.whl"]
+
+    def fake_download(url, dest, logf=print, progress_cb=None, **kwargs):
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(b"test-wheel-data")
+        if progress_cb:
+            progress_cb(4, 16)
+            progress_cb(16, 16)
+        return True
+
+    def progress(stage, filename, done, total, index, count):
+        events.append((stage, filename, done, total, index, count))
+
+    patches = (
+        patch.object(core, "data_dir", return_value=str(base / "data")),
+        patch.object(core, "AMD_ROC_WHEELS", rocm_urls),
+        patch.object(core, "_amd_torch_wheels", return_value=torch_urls),
+        patch.object(core, "_wheel_valid", return_value=False),
+        patch.object(core, "_download_with_resume", side_effect=fake_download),
+        patch.object(core, "run_pip_in_venv", return_value=0),
+    )
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        core.install_amd_rocm("fake-venv", logs.append, progress)
+        core.install_amd_torch("fake-venv", logs.append, progress)
+    assert events[0][:2] == ("ROCm", "rocm_a-1.0-py3-none-win_amd64.whl"), events
+    assert events[0][2:6] == (4, 16, 1, 2), events
+    assert any(e[0] == "ROCm" and e[4] == 2 and e[5] == 2 for e in events), events
+    assert any(e[0] == "PyTorch" and e[2:6] == (16, 16, 1, 1) for e in events), events
+    print("AMD_DOWNLOAD_PROGRESS_UNIT_TEST_OK")
+
+
+def test_amd_torch_verification(base: Path):
+    """AMD 最终验证保留真实错误，并区分正常 ROCm 与 GPU 不可用。"""
+    venv = base / "amd_verify" / "venv_amd"
+    fake_python(venv / "Scripts" / "python.exe")
+
+    ok_result = result(0, (
+        "TORCH_VERSION=2.9.1+rocm7.2.1\n"
+        "HIP_VERSION=7.2.1\n"
+        "CUDA_VERSION=\n"
+        "GPU_AVAILABLE=True\n"
+        "GPU_NAME=AMD Radeon RX 7900 XTX\n"
+    ))
+    with patch.object(core.subprocess, "run", return_value=ok_result):
+        ok, info, avail = core.verify_amd_torch(str(venv))
+    assert ok and avail, (ok, info, avail)
+    assert "2.9.1+rocm7.2.1" in info and "HIP 7.2.1" in info, info
+
+    import_error = result(1, "", "OSError: [WinError 126] 找不到指定的模块。\nError loading amdhip64_7.dll")
+    with patch.object(core.subprocess, "run", return_value=import_error):
+        ok, info, avail = core.verify_amd_torch(str(venv))
+    assert not ok and not avail, (ok, info, avail)
+    assert "amdhip64_7.dll" in info and info != "?", info
+
+    cpu_result = result(0, (
+        "TORCH_VERSION=2.9.1+rocm7.2.1\n"
+        "HIP_VERSION=7.2.1\n"
+        "CUDA_VERSION=\n"
+        "GPU_AVAILABLE=False\n"
+        "GPU_NAME=\n"
+    ))
+    with patch.object(core.subprocess, "run", return_value=cpu_result):
+        ok, info, avail = core.verify_amd_torch(str(venv))
+    assert not ok and not avail, (ok, info, avail)
+    assert "GPU 不可用" in info and "HIP 7.2.1" in info, info
+
+    print("AMD_TORCH_VERIFICATION_UNIT_TEST_OK")
+
+def test_accelerate_module_launcher(base: Path):
+    """训练启动器必须使用当前 venv 的 Python 模块，而不是系统 accelerate.exe。"""
+    venv = base / "launcher" / "venv"
+    py = venv / "Scripts" / "python.exe"
+    fake_python(py)
+    good = result(0, "1.14.0\nF:/venv/Lib/site-packages/accelerate/__init__.py\n" + str(py) + "\n")
+    with patch.object(core.subprocess, "run", return_value=good), patch.object(core, "build_env", return_value={}):
+        cmd = core._accelerate_launch_cmd(str(py))
+    assert cmd[:3] == [str(py), "-m", "accelerate.commands.launch"], cmd
+
+    mismatch = result(0, "1.14.0\nC:/Python312/Lib/site-packages/accelerate/__init__.py\nC:/Python312/python.exe\n")
+    with patch.object(core.subprocess, "run", return_value=mismatch), patch.object(core, "build_env", return_value={}):
+        try:
+            core._accelerate_launch_cmd(str(py))
+        except RuntimeError as e:
+            assert "不属于同一环境" in str(e), e
+        else:
+            raise AssertionError("system accelerate mismatch should be rejected")
+    print("ACCELERATE_MODULE_LAUNCHER_UNIT_TEST_OK")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -720,6 +817,9 @@ def main():
         test_tokenizer_cache(base)
         test_preprocess_auto_retry(base)
         test_external_python_safe_cwd(base)
+        test_amd_download_progress(base)
+        test_amd_torch_verification(base)
+        test_accelerate_module_launcher(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

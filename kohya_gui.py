@@ -12,6 +12,7 @@ import subprocess
 import functools
 import traceback
 import re
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox
@@ -3216,6 +3217,79 @@ class App:
         txt.insert("1.0", help_text)
         txt.configure(state="disabled")
 
+        progress_frame = ctk.CTkFrame(w, fg_color=CARD, corner_radius=8,
+                                      border_width=1, border_color=BORDER)
+        progress_frame.pack(fill="x", padx=16, pady=(2, 8))
+        progress_title = ctk.CTkLabel(progress_frame, text="等待开始 AMD 环境安装",
+                                      text_color=TXT, anchor="w", font=ui_font(FONT_BODY))
+        progress_title.pack(fill="x", padx=12, pady=(8, 2))
+        progress_bar = ctk.CTkProgressBar(progress_frame, height=8, corner_radius=4,
+                                          progress_color=ACC, fg_color=CARD2, mode="determinate")
+        progress_bar.pack(fill="x", padx=12, pady=3)
+        progress_bar.set(0)
+        progress_detail = ctk.CTkLabel(progress_frame, text="下载开始后将在这里实时显示速度和进度",
+                                       text_color=SUB, anchor="w", font=ui_font(FONT_HINT))
+        progress_detail.pack(fill="x", padx=12, pady=(2, 8))
+        progress_state = {"key": None, "bytes": 0, "time": 0.0, "indeterminate": False}
+
+        def _progress_ui(title, detail, fraction=None):
+            try:
+                if not w.winfo_exists():
+                    return
+                progress_title.configure(text=title)
+                progress_detail.configure(text=detail)
+                if fraction is None:
+                    if not progress_state["indeterminate"]:
+                        progress_bar.configure(mode="indeterminate")
+                        progress_bar.start()
+                        progress_state["indeterminate"] = True
+                else:
+                    if progress_state["indeterminate"]:
+                        progress_bar.stop()
+                        progress_bar.configure(mode="determinate")
+                        progress_state["indeterminate"] = False
+                    progress_bar.set(max(0.0, min(1.0, fraction)))
+            except Exception:
+                pass
+
+        def _set_progress_phase(title, detail, fraction=None):
+            self.root.after(0, lambda: _progress_ui(title, detail, fraction))
+
+        def _amd_download_progress(stage, filename, done, total, index, count):
+            now = time.monotonic()
+            key = (stage, filename)
+            if progress_state["key"] != key:
+                progress_state.update(key=key, bytes=done, time=now)
+                speed = 0.0
+            else:
+                elapsed = now - progress_state["time"]
+                speed = ((done - progress_state["bytes"]) / elapsed) if elapsed > 0 else 0.0
+                progress_state.update(bytes=done, time=now)
+            done_mb = done / (1024 * 1024)
+            speed_text = f" · {speed / (1024 * 1024):.1f} MB/s" if speed > 0 else ""
+            if total and total > 0:
+                total_mb = total / (1024 * 1024)
+                fraction = done / total
+                detail = f"{done_mb:.1f} / {total_mb:.1f} MB（{fraction * 100:.1f}%）{speed_text}"
+            else:
+                fraction = None
+                detail = f"已下载 {done_mb:.1f} MB{speed_text} · 正在获取文件总大小"
+            phase = 1 if stage == "ROCm" else 2
+            title = f"阶段 {phase}/3 · {stage} 下载 {index}/{count} · {filename}"
+            self.root.after(0, lambda: _progress_ui(title, detail, fraction))
+
+        def _amd_install_status(stage, status):
+            phase = 1 if stage == "ROCm" else 2
+            if status == "downloading":
+                _set_progress_phase(f"阶段 {phase}/3 · 准备下载 {stage}",
+                                    "正在连接 AMD 官方下载服务器…", None)
+            elif status == "installing":
+                _set_progress_phase(f"阶段 {phase}/3 · 正在安装 {stage}",
+                                    "下载已完成，正在写入训练环境…", None)
+            elif status == "complete":
+                _set_progress_phase(f"阶段 {phase}/3 · {stage} 安装完成",
+                                    "正在进入下一阶段…", 1.0)
+
         btns = ctk.CTkFrame(w, fg_color="transparent"); btns.pack(fill="x", padx=16, pady=(0, 14))
 
         def _btn(t, cb):
@@ -3270,18 +3344,28 @@ class App:
                 return
             self._set_busy(True)
             self._log("[AMD] 开始自动安装全部依赖（可在底部点「停止当前任务」中断）…")
+            progress_state.update(key=None, bytes=0, time=0.0)
+            _set_progress_phase("正在准备 AMD 环境安装", "即将连接 AMD 官方下载服务器…", None)
 
             def work():
                 try:
-                    core.install_amd_rocm(venv, self._log)
-                    core.install_amd_torch(venv, self._log)
+                    core.install_amd_rocm(venv, self._log, _amd_download_progress, _amd_install_status)
+                    core.install_amd_torch(venv, self._log, _amd_download_progress, _amd_install_status)
+                    _set_progress_phase("阶段 3/3 · 正在安装训练依赖",
+                                        "正在通过 PyPI 镜像安装其余依赖…", None)
                     core.install_amd_deps(venv, self._log)
                     okv, ver, avail = core.verify_amd_torch(venv)
+                    if okv and avail:
+                        _set_progress_phase("AMD 环境安装完成", ver, 1.0)
+                    else:
+                        _set_progress_phase("AMD 依赖已安装，但环境验证失败", ver, 0.0)
                     self.root.after(0, lambda: self._amd_install_done(okv and avail, ver, avail))
                 except core.StopRequested:
+                    _set_progress_phase("AMD 环境安装已停止", "已保留下载缓存，下次会从断点继续", 0.0)
                     self.root.after(0, lambda: self._amd_install_done(False, "已手动停止", False))
                 except Exception as e:
                     _err = str(e)
+                    _set_progress_phase("AMD 环境安装失败", _err, 0.0)
                     self.root.after(0, lambda _err=_err: self._amd_install_done(False, _err, False))
                 finally:
                     self.root.after(0, lambda: self._set_busy(False))
@@ -3343,14 +3427,14 @@ class App:
             self._log(f"[WARN] 依赖安装完成但 torch 验证未通过：{info}")
             messagebox.showwarning(core.APP_NAME, f"依赖安装完成，但 torch 验证未通过：\n{info}")
         else:
-            self._log(f"[ERROR] AMD 依赖安装失败：{info}")
+            self._log(f"[ERROR] AMD 环境验证失败：{info}")
             messagebox.showerror(
                 core.APP_NAME,
-                f"AMD 依赖安装失败：\n{info}\n\n"
-                "可能原因：\n"
-                "· 网络中断/镜像慢 → 可挂代理后点「重新检查」再试，或点「复制命令」手动装\n"
-                "· 权限不足 → 训练环境在 %APPDATA% 下一般无需管理员；若仍报权限错误，\n"
-                "   请确认 %APPDATA%\\KohyaLoraTool\\venv_amd 目录可写")
+                f"AMD 依赖已安装，但环境验证失败：\n{info}\n\n"
+                "请先根据上方真实错误排查：\n"
+                "· DLL/torch 导入错误 → 重新运行本窗口的自动安装，修复 ROCm/PyTorch 组件\n"
+                "· GPU 不可用 → 更新 AMD 驱动，并确认显卡受当前 ROCm 版本支持\n"
+                "· Python/venv 路径错误 → 重新创建 AMD 训练环境后再安装")
 
     def _ensure_krea2_ready(self):
         """Krea2 模式训练前检查：第二引擎已装 + Krea2 模型齐全。返回是否可继续。"""

@@ -1,3 +1,16 @@
+## v0.9.18（2026-08-20）
+
+### 修复
+- **Windows Accelerate 启动器串环境导致训练立即退出**：主引擎、Krea2、FLUX.2 统一使用当前训练环境的 `python.exe -m accelerate.commands.launch`，启动前验证 Accelerate 与训练 Python 属于同一 venv。
+- **AMD ROCm 安装与验证可见性**：保留实时下载进度；验证失败时显示 torch/HIP/GPU 状态及真实 traceback，不再只显示 `?`。
+- **AMD Windows 兼容性提示**：检测 RX 6000/gfx1030 时，在下载前提示当前 ROCm Windows 官方支持限制，避免无效下载数 GB 依赖。
+- **WD14 Triton 警告说明**：`No module named triton` 属于可选优化缺失，不影响 ONNX Runtime CUDA 打标。
+
+### 测试
+- 三引擎安装流程、AMD 下载/验证、Accelerate venv 一致性、项目冒烟测试全部通过。
+
+---
+
 # 更新日志（Changelog）
 
 ## v0.9.17（未发布）

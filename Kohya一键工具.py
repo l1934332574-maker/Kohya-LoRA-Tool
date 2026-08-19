@@ -152,7 +152,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.17"
+APP_VERSION = "0.9.18"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1482,6 +1482,47 @@ def write_musubi_dataset_config(image_dir, cache_dir, config_path, resolution=10
     return image_dir
 
 
+def _accelerate_launch_cmd(vpy, extra_args=()):
+    """通过当前训练环境的 Python 模块启动 Accelerate，避免 accelerate.exe 入口串到系统 Python。
+
+    Windows 上 venv 的 Scripts\accelerate.exe 可能是迁移前生成的旧脚本，或被系统
+    Python 的 PATH 覆盖；直接用 vpy -m 可以保证 accelerate、torch 和训练脚本属于同一环境。
+    """
+    if not vpy or not os.path.isfile(vpy):
+        raise RuntimeError(f"训练环境 Python 不存在：{vpy}")
+    try:
+        r = subprocess.run(
+            [vpy, "-c", "import accelerate,sys;print(accelerate.__version__);print(accelerate.__file__);print(sys.executable)"],
+            capture_output=True, encoding="utf-8", errors="replace", timeout=60,
+            env=build_env(),
+        )
+    except Exception as e:
+        raise RuntimeError(f"Accelerate 环境检查失败：{e}")
+    if r.returncode != 0:
+        detail = ((r.stderr or "") + (r.stdout or "")).strip()[-800:]
+        raise RuntimeError("当前训练环境无法导入 Accelerate，请重跑训练内核安装。\n" + (detail or "未知错误"))
+    lines = [x.strip() for x in (r.stdout or "").splitlines() if x.strip()]
+    if len(lines) >= 3:
+        log_path = lines[-2]
+        log_py = lines[-1]
+        if os.path.normcase(os.path.abspath(log_py)) != os.path.normcase(os.path.abspath(vpy)):
+            raise RuntimeError(f"Accelerate 与训练 Python 不属于同一环境：\n训练 Python：{vpy}\nAccelerate Python：{log_py}")
+    return [vpy, "-m", "accelerate.commands.launch"] + list(extra_args)
+
+
+def _amd_rocm_windows_support_warning(logf=print):
+    """给当前 Windows ROCm 版本之外的 AMD 显卡显示一次明确提示。"""
+    try:
+        name = detect_gpu_name() or ""
+        if not re.search(r"RX\s*6\d{3}", name, re.I):
+            return False
+        logf(f"[AMD] ⚠ 检测到 {name}：当前 Windows ROCm {AMD_ROC_VERSION} 官方 PyTorch 支持范围不含 RX 6000/gfx1030。")
+        logf("[AMD] ⚠ 可继续尝试，但可能只能使用 CPU；建议先确认显卡兼容性，不建议先下载数 GB 依赖。")
+        return True
+    except Exception:
+        return False
+
+
 def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from=None, progress=None):
     """Krea2 图像 LoRA 训练（第二引擎 musubi-tuner）。
 
@@ -1494,9 +1535,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         raise RuntimeError("第二训练引擎未安装，请先在左侧点「②' 第二引擎(可选)」安装。\n" + detail)
     kdir = get_kohya_dir()
     mt_dir = os.path.join(kdir, "musubi-tuner")
-    accel = os.path.join(os.path.dirname(mvpy), "accelerate.exe")
-    if not os.path.isfile(accel):
-        raise RuntimeError("musubi-venv 缺少 accelerate，请重装第二引擎")
+    accel = _accelerate_launch_cmd(mvpy)
     files = krea2_model_files()
     missing = krea2_missing_models()
     if missing:
@@ -1558,7 +1597,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     opt_k, _opt_d = resolve_optimizer(mvpy, logf, requested=params.get("optimizer", "auto"), allow_lion=False)
     logf(f"[Krea2] 优化器: {opt_k}")
     cmd = [
-        accel, "launch", "--num_cpu_threads_per_process", "1", "--mixed_precision", "bf16",
+        *accel, "--num_cpu_threads_per_process", "1", "--mixed_precision", "bf16",
         os.path.join(mt_dir, "krea2_train_network.py"),
         "--dit", files["raw"], "--vae", files["vae"],
         "--dataset_config", cfg_path,
@@ -1626,9 +1665,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         raise RuntimeError("第二训练引擎未安装，请先在左侧点「②' 第二引擎(可选)」安装。\n" + detail)
     kdir = get_kohya_dir()
     mt_dir = os.path.join(kdir, "musubi-tuner")
-    accel = os.path.join(os.path.dirname(mvpy), "accelerate.exe")
-    if not os.path.isfile(accel):
-        raise RuntimeError("musubi-venv 缺少 accelerate，请重装第二引擎")
+    accel = _accelerate_launch_cmd(mvpy)
     files = flux2_model_files()
     missing = flux2_missing_models()
     if missing:
@@ -1693,7 +1730,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     opt_k, _opt_d = resolve_optimizer(mvpy, logf, requested=params.get("optimizer", "auto"), allow_lion=False)
     logf(f"[FLUX.2] 优化器: {opt_k}")
     cmd = [
-        accel, "launch", "--num_cpu_threads_per_process", "1", "--mixed_precision", "bf16",
+        *accel, "--num_cpu_threads_per_process", "1", "--mixed_precision", "bf16",
         os.path.join(mt_dir, "flux_2_train_network.py"),
         "--model_version", FLUX2_MODEL_VERSION,
         "--dit", files["dit"], "--vae", files["vae"], "--text_encoder", files["te"],
@@ -3626,18 +3663,26 @@ def run_pip_in_venv(venv_dir, args, logf=print):
     return run_stream(cmd, env=env, logf=logf)
 
 
-def install_amd_rocm(venv_dir, logf=print):
+def install_amd_rocm(venv_dir, logf=print, progress_cb=None, status_cb=None):
     """自动安装 AMD ROCm 运行库（阶段 1/3，约 1~2GB，视网速 10~60 分钟）。
 
     先断点续传下载 wheel 到本地缓存（repo.radeon.com 网络不稳，避免半途失败），再本地安装。
+    progress_cb(stage, filename, done, total, index, count) 可选：实时上报下载进度。
+    status_cb(stage, status) 可选：上报 downloading / installing / complete 状态。
     """
+    if _amd_rocm_windows_support_warning(logf):
+        raise RuntimeError("当前 Windows ROCm 官方 PyTorch 不支持检测到的 RX 6000/gfx1030 显卡，已停止下载，避免浪费数 GB 流量。请改用受支持的 AMD 显卡、Linux ROCm，或 NVIDIA/CUDA。")
     logf("[AMD] 阶段 1/3：安装 AMD ROCm 运行库（文件较大，支持断点续传，可随时点停止）…")
     cache = os.path.join(data_dir(), "installer_cache", "amd_rocm")
     local = []
-    for _u in AMD_ROC_WHEELS:
+    _count = len(AMD_ROC_WHEELS)
+    if status_cb is not None:
+        status_cb("ROCm", "downloading")
+    for _index, _u in enumerate(AMD_ROC_WHEELS, 1):
         _fn = os.path.basename(_u)
         _dst = os.path.join(cache, _fn)
-        if not (os.path.isfile(_dst) and os.path.getsize(_dst) > 1024 * 1024 and _wheel_valid(_dst)):
+        _cached = os.path.isfile(_dst) and os.path.getsize(_dst) > 1024 * 1024 and _wheel_valid(_dst)
+        if not _cached:
             if os.path.isfile(_dst):
                 logf(f"[AMD] {_fn} 缓存文件不完整，重新下载…")
                 try:
@@ -3645,26 +3690,43 @@ def install_amd_rocm(venv_dir, logf=print):
                 except Exception:
                     pass
             logf(f"[AMD] 下载 {_fn}（可断点续传）…")
-            if not _download_with_resume(_u, _dst, logf):
+
+            def _progress(done, total, _fn=_fn, _index=_index):
+                if progress_cb is not None:
+                    progress_cb("ROCm", _fn, done, total, _index, _count)
+
+            if not _download_with_resume(_u, _dst, logf, progress_cb=_progress):
                 raise RuntimeError(f"ROCm 组件下载失败：{_fn}（网络不稳，请重试，已支持断点续传）")
+        if progress_cb is not None:
+            _size = os.path.getsize(_dst)
+            progress_cb("ROCm", _fn, _size, _size, _index, _count)
         local.append(_dst)
     logf("[AMD] ROCm 组件下载完成，开始安装 …")
+    if status_cb is not None:
+        status_cb("ROCm", "installing")
     rc = run_pip_in_venv(venv_dir, local, logf)
     if rc != 0:
         raise RuntimeError(f"ROCm 运行库安装失败（退出码 {rc}），请向上查看日志。")
+    if status_cb is not None:
+        status_cb("ROCm", "complete")
     logf("[OK] AMD ROCm 运行库安装完成")
     return True
 
 
-def install_amd_torch(venv_dir, logf=print):
+def install_amd_torch(venv_dir, logf=print, progress_cb=None, status_cb=None):
     """自动安装 AMD 版 PyTorch（阶段 2/3，约 2~3GB，支持断点续传）。"""
     logf("[AMD] 阶段 2/3：安装 AMD 版 PyTorch（文件较大，支持断点续传，请耐心等待）…")
     cache = os.path.join(data_dir(), "installer_cache", "amd_torch")
     local = []
-    for _u in _amd_torch_wheels(venv_dir):
+    _urls = _amd_torch_wheels(venv_dir)
+    _count = len(_urls)
+    if status_cb is not None:
+        status_cb("PyTorch", "downloading")
+    for _index, _u in enumerate(_urls, 1):
         _fn = os.path.basename(_u)
         _dst = os.path.join(cache, _fn)
-        if not (os.path.isfile(_dst) and os.path.getsize(_dst) > 1024 * 1024 and _wheel_valid(_dst)):
+        _cached = os.path.isfile(_dst) and os.path.getsize(_dst) > 1024 * 1024 and _wheel_valid(_dst)
+        if not _cached:
             if os.path.isfile(_dst):
                 logf(f"[AMD] {_fn} 缓存文件不完整，重新下载…")
                 try:
@@ -3672,13 +3734,25 @@ def install_amd_torch(venv_dir, logf=print):
                 except Exception:
                     pass
             logf(f"[AMD] 下载 {_fn}（可断点续传）…")
-            if not _download_with_resume(_u, _dst, logf):
+
+            def _progress(done, total, _fn=_fn, _index=_index):
+                if progress_cb is not None:
+                    progress_cb("PyTorch", _fn, done, total, _index, _count)
+
+            if not _download_with_resume(_u, _dst, logf, progress_cb=_progress):
                 raise RuntimeError(f"PyTorch 组件下载失败：{_fn}（网络不稳，请重试，已支持断点续传）")
+        if progress_cb is not None:
+            _size = os.path.getsize(_dst)
+            progress_cb("PyTorch", _fn, _size, _size, _index, _count)
         local.append(_dst)
     logf("[AMD] PyTorch 组件下载完成，开始安装 …")
+    if status_cb is not None:
+        status_cb("PyTorch", "installing")
     rc = run_pip_in_venv(venv_dir, local, logf)
     if rc != 0:
         raise RuntimeError(f"AMD 版 PyTorch 安装失败（退出码 {rc}），请向上查看日志。")
+    if status_cb is not None:
+        status_cb("PyTorch", "complete")
     logf("[OK] AMD 版 PyTorch 安装完成")
     return True
 
@@ -3694,21 +3768,56 @@ def install_amd_deps(venv_dir, logf=print):
 
 
 def verify_amd_torch(venv_dir):
-    """验证训练环境里的 torch 是否可用。返回 (ok, torch_ver, cuda_avail)。"""
-    try:
-        py = os.path.join(venv_dir, "Scripts", "python.exe")
-        if not os.path.isfile(py):
-            return False, "?", False
-        r = subprocess.run(
-            [py, "-c", "import torch;print(torch.__version__);print(torch.cuda.is_available())"],
-            capture_output=True, text=True, timeout=300)
-        lines = (r.stdout or "").strip().splitlines()
-        ver = lines[0] if lines else "?"
-        avail = "True" in "\n".join(lines)
-        return r.returncode == 0 and avail, ver, avail
-    except Exception:
-        return False, "?", False
+    """验证 AMD 训练环境里的 torch/ROCm 状态。
 
+    返回 (ok, info, gpu_available)。info 在失败时保留子进程最后的真实错误，
+    不再把导入失败吞掉后只显示 ``?``。
+    """
+    py = os.path.join(venv_dir, "Scripts", "python.exe")
+    if not os.path.isfile(py):
+        return False, f"找不到训练环境 Python：{py}", False
+    code = (
+        "import torch;"
+        "print('TORCH_VERSION=' + str(torch.__version__));"
+        "print('HIP_VERSION=' + str(getattr(torch.version, 'hip', '') or ''));"
+        "print('CUDA_VERSION=' + str(getattr(torch.version, 'cuda', '') or ''));"
+        "print('GPU_AVAILABLE=' + str(torch.cuda.is_available()));"
+        "print('GPU_NAME=' + (torch.cuda.get_device_name(0) if torch.cuda.is_available() else ''))"
+    )
+    try:
+        r = subprocess.run(
+            [py, "-c", code],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+            env=build_env(),
+        )
+    except Exception as e:
+        return False, f"启动 torch 验证进程失败：{e}", False
+    stdout = (r.stdout or "").strip()
+    stderr = (r.stderr or "").strip()
+    if r.returncode != 0:
+        raw = stderr or stdout or f"验证进程退出码 {r.returncode}"
+        detail = raw[-1200:]
+        return False, f"torch 导入/验证失败（退出码 {r.returncode}）：\n{detail}", False
+    values = {}
+    for line in stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip()
+    version = values.get("TORCH_VERSION")
+    if not version:
+        return False, f"torch 验证没有返回版本信息：\n{(stdout or stderr)[-800:]}", False
+    avail = values.get("GPU_AVAILABLE", "").lower() == "true"
+    hip = values.get("HIP_VERSION", "")
+    cuda = values.get("CUDA_VERSION", "")
+    name = values.get("GPU_NAME", "")
+    if avail:
+        backend = f"ROCm/HIP {hip}" if hip else (f"CUDA {cuda}" if cuda else "GPU")
+        return True, f"{version} · {backend} · {name or 'GPU'}", True
+    backend = f"HIP {hip}" if hip else (f"CUDA {cuda}" if cuda else "CPU")
+    return False, f"torch {version} 已导入，但 GPU 不可用（后端：{backend}）。请检查 AMD 驱动/ROCm 兼容性。", False
 
 def create_python_venv(py_ver, target, logf=print):
     """用指定 Python 版本创建虚拟环境（py -<ver> -m venv <target>）。返回 (ok, msg)。"""
@@ -3732,6 +3841,10 @@ def amd_env_status(vpy=None):
     """AMD 兼容模式环境状态。返回 (ok, backend, detail)。"""
     if not vpy or not os.path.isfile(vpy):
         return False, None, "未找到 kohya 训练环境（请先完成【一键安装】）。"
+    venv_dir = os.path.dirname(os.path.dirname(vpy))
+    verified, verify_detail, _ = verify_amd_torch(venv_dir)
+    if not verified:
+        return False, None, verify_detail
     bk = detect_torch_backend(vpy)
     if bk == "rocm":
         return True, bk, "检测到 ROCm 版 PyTorch，可直接训练（实验性）。"
@@ -4573,11 +4686,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     if not base_model or not os.path.isfile(base_model):
         raise RuntimeError("请选择底模（.safetensors）")
     if amd_mode and (params.get("train_env") or "").strip():
-        accel = os.path.join((params.get("train_env") or "").strip(), "Scripts", "accelerate.exe")
-    else:
-        accel = os.path.join(kdir, "venv", "Scripts", "accelerate.exe")
-    if not os.path.isfile(accel):
-        raise RuntimeError("accelerate 缺失，请重跑【一键安装】")
+        accel = _accelerate_launch_cmd(vpy)
 
     resolution = int(params.get("resolution") or arch_info["resolution"])
     train_dir = dataset_train_dir(mode, params.get("project"))
@@ -4690,7 +4799,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     save_every = 200
 
     cmd = [
-        accel, "launch", "--num_cpu_threads_per_process", "2", script,
+        *accel, "--num_cpu_threads_per_process", "2", script,
         f"--pretrained_model_name_or_path={base_model}",
         f"--dataset_config={cfg_path}",
         f"--tokenizer_cache_dir={data_sub('tokenizers')}",
