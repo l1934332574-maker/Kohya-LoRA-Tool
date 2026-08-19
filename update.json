@@ -2,5 +2,5 @@
   "version": "v0.9.18",
   "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.18/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.9.18：① 预处理「缺少 numpy」彻底修复——外部 Python 子进程自动避开打包版 python312.dll 污染目录，内置 numpy/pillow 三套离线 wheel 零联网补装并自动重试；② 分词器预缓存离线化，SD1.5/SDXL/FLUX/Anima 训练所需分词器内置，不再联网卡死。"
+  "notes": "v0.9.18：① 修复 Windows 下 Accelerate 启动器串用系统 Python，主引擎、Krea2、FLUX.2 统一由当前训练 venv 启动；② 增强 AMD ROCm 下载进度与 torch/HIP/GPU 验证诊断；③ 检测 RX 6000/gfx1030 Windows ROCm 兼容性限制，避免无效下载；④ WD14 的 Triton 缺失仅为可选优化警告，不影响 ONNX Runtime CUDA 打标。"
 }
