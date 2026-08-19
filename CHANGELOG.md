@@ -10,7 +10,7 @@
 - **预处理报「缺少 numpy」卡死（用户反馈）**：预处理开始前工具已有 Pillow/numpy 自检+自动补装，但旧检查只做 `import PIL, numpy`（顶层 import），preprocess.py 实际用 `from PIL import Image`，半损坏的 Pillow 顶层能过、子模块挂，导致父自检通过、子进程仍报「缺少 numpy」且不触发补装。现已改为 `_ensure_preprocess_deps`：用与 preprocess.py 完全一致的 `from PIL import Image; import numpy` 校验；子进程预处理失败后还会再次自检，确认缺依赖则自动补装（内置离线 wheel → 清华 → 阿里）并**自动重试一次**，不再卡死在原始报错。
 
 ### 测试
-- `engine_install_smoke_test.py` 优化器单测更新为 mock `_probe_lion`：Lion 预检通过→Lion、Lion 预检失败→AdamW、musubi `allow_lion=False` 不调用 Lion 预检。
+- `engine_install_smoke_test.py` 优化器单测更新为 mock `_probe_lion`：Lion 预检通过→Lion、Lion 预检失败→AdamW、用户明确选 Lion 但预检失败→自动降级 AdamW（Anima 反馈案例）、musubi `allow_lion=False` 不调用 Lion 预检。
 - 新增 `_ensure_preprocess_deps` 单测（依赖可用不补装 / 缺失补装成功 / 补装失败返回 False）与 `preprocess` 自动重试单测（子进程失败→补装→重试成功；补装失败→明确报错且不无限重试）。
 - 新增 `_preinstall_torch` 多镜像回退单测（清华失败→阿里云成功；三镜像全失败→抛「本地安装失败」明确错误）。
 

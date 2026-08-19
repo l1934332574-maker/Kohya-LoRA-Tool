@@ -340,6 +340,20 @@ def test_optimizer_resolution(base: Path):
         ok, detail = core._probe_adamw8bit(vpy, logs.append, timeout=1)
     assert not ok and "预检进程异常" in detail, detail
 
+    # 9.5) 用户明确指定 lion 但真实 step 预检失败 -> 自动降级 AdamW
+    #      （Anima 用户反馈：命令带 --optimizer_type=Lion，退出码 1；旧版只做 import 检查）
+    def subrun_lion_req_bad(cmd, *args, **kwargs):
+        code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
+        if "import lion_pytorch" in code:
+            return probe_result("RuntimeError: lion step incompatible\n", 1)
+        if "bitsandbytes" in code:
+            return probe_result("libbitsandbytes_cuda128.dll missing\n", 1)
+        return probe_result("", 0)
+    with patch.object(core.subprocess, "run", side_effect=subrun_lion_req_bad):
+        opt, _ = core.resolve_optimizer(vpy, logs.append, requested="lion")
+    assert opt == "AdamW", opt
+    assert any("Lion 不可用" in ln for ln in logs), logs
+
     # 9) musubi 第二引擎 allow_lion=False：即使 Lion 预检会通过也直接降级 AdamW，且不调用 Lion 预检
     lion_called = {"n": 0}
     def subrun_musubi(cmd, *args, **kwargs):
