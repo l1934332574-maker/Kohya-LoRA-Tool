@@ -1,6 +1,6 @@
 {
-  "version": "v0.9.19",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.19/Setup.exe",
+  "version": "v0.9.20",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.20/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.9.19：修复 v0.9.18 回归——主引擎（SD1.5/SDXL/FLUX/Anima）训练启动不再崩溃（accel 未定义），启动器无条件由当前训练环境解析，普通 NVIDIA 用户恢复正常训练。"
+  "notes": "v0.9.20：修复 Anima 训练两类崩溃（TensorBoard 日志中文路径崩溃、Qwen3 权重缺失/文件名不规范被误判）；Qwen3 残缺目录自动备份重下自愈；训练前检测 CPU 版 torch 并预警；监控 3 分钟无进展自动提示，不再假卡住。"
 }

@@ -1,3 +1,19 @@
+## v0.9.20（2026-08-21）
+
+### 修复
+- **Anima 训练 TensorBoard 日志目录中文路径崩溃**：安装目录含中文（如 `C:\Users\admin\Desktop\新建文件夹`）时，新版「跟随安装位置」使数据目录变成中文路径，TensorFlow 写 TensorBoard 日志报 `FailedPreconditionError: ... logs is not a directory`，训练全部准备完成后崩溃。现已自动把 `--logging_dir` 重定向到 ASCII 路径（`%APPDATA%\KohyaLoraTool\logs`），不影响训练本身。
+- **Qwen3-0.6B 完整性误判**：旧判定只查 `config.json` 是否存在，下载中断残留的目录（只有配置、没有权重）以及手动放置的文件名不规范（如浏览器下载的 `model.safetensors (1).safetensors`）都会被误判为已就绪，训练加载 Qwen3 时报 `OSError: no file named pytorch_model.bin, model.safetensors...`。现已校验「config.json + transformers 标准权重名（model.safetensors / pytorch_model.bin / 分片）」，不完整自动触发重新下载。
+
+### 自愈
+- **Qwen3 残缺目录自动备份重下**：检测到不完整时自动改名备份为 `Qwen3-0.6B.incomplete_时间戳` 并重新下载，用户无需手动删文件夹。
+- **训练前 torch 后端预警**：非 AMD 模式训练前检测，CPU 版 torch（CUDA 不可用）直接提示「训练会全程 CPU 且极慢，看起来像卡住」，不再干等。
+- **监控无进展超时提示**：训练启动后超过 3 分钟无任何新日志/loss 且步数为 0，监控面板显示「训练可能卡住或已退出，请看上方日志」，不再一直挂着「等待训练数据」。
+
+### 测试
+- 三引擎安装流程、Qwen3 完整性 7 场景、TrainMonitor 超时字段、项目冒烟测试全部通过。
+
+---
+
 ## v0.9.19（2026-08-20）
 
 ### 修复

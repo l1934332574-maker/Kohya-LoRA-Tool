@@ -484,6 +484,16 @@ class App:
                 self.mon_step_var.set("正在缓存数据集…（非训练进度）")
                 self.mon_eta_var.set("预计剩余: --")
                 return
+            # 无进展超时提示：训练已启动但长时间没有任何新日志/loss
+            # （如 CPU 训练极慢、子进程卡死/静默退出），给出明确提示而不是一直挂着"等待训练数据"。
+            if snap.get("running") and phase in ("idle", "train") and (snap.get("loss") is None) and (snap.get("step") or 0) == 0:
+                _last = snap.get("last_activity") or snap.get("started_at") or time.time()
+                _idle = time.time() - _last
+                if _idle > 180:
+                    self.mon_step_var.set(f"⚠ 已 {int(_idle // 60)} 分钟无训练输出，训练可能卡住或已退出，请看上方日志")
+                    self.mon_progress.set(0.0)
+                    self.mon_eta_var.set("预计剩余: --")
+                    return
             pct = (step / total) if total else 0.0
             self.mon_progress.set(min(max(pct, 0.0), 1.0))
             self.mon_step_var.set(f"步数 {step} / {total}（{pct*100:.0f}%）")

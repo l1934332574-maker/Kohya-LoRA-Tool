@@ -152,7 +152,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.19"
+APP_VERSION = "0.9.20"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -231,6 +231,8 @@ class TrainMonitor:
         self.phase_label = None     # 阶段提示文案（如"正在缓存数据集…"）
         self._last_step = 0
         self._last_time = None
+        self.started_at = None
+        self.last_activity = None
 
     def start(self, total=0):
         with self._lock:
@@ -238,6 +240,8 @@ class TrainMonitor:
             self.running = True
             self.total = int(total or 0)
             self._last_time = time.time()
+            self.started_at = time.time()
+            self.last_activity = time.time()
 
     def set_total(self, total):
         with self._lock:
@@ -268,6 +272,8 @@ class TrainMonitor:
             # run_stream 打印的命令行回显（"$ ..."）不参与阶段判定
             if low.startswith("$ "):
                 return False
+            with self._lock:
+                self.last_activity = time.time()
             # 缓存阶段检测
             if any(m in low for m in self._CACHE_MARKERS):
                 with self._lock:
@@ -369,6 +375,7 @@ class TrainMonitor:
                 "loss_history": list(self.loss_history),
                 "lr": self.lr, "speed": self.speed, "eta": self.eta,
                 "running": self.running,
+                "started_at": self.started_at, "last_activity": self.last_activity,
                 "phase": self.phase, "phase_label": self.phase_label,
             }
 
@@ -4633,6 +4640,40 @@ def _optimizer_yaml_name(optimizer_type):
     return {"AdamW8bit": "adamw8bit", "Lion": "lion", "AdamW": "adamw"}.get(optimizer_type, "adamw")
 
 
+def _tf_safe_logging_dir(preferred=None):
+    """TensorBoard 日志目录（TensorFlow 无法处理中文/非 ASCII 路径）。
+
+    TensorFlow 的 tf.io.gfile 在 Windows 上把 str 按 UTF-8 字节传给底层，
+    含中文的路径（如 C:/Users/xx/新建文件夹/KohyaLoraTool_data/logs）
+    会报 FailedPreconditionError: ... is not a directory，导致训练在
+    accelerator.init_trackers 阶段直接崩溃。
+    这里若首选路径含非 ASCII，自动重定向到 ASCII 路径（APPDATA / Public）。
+    """
+    def _is_ascii(p):
+        try:
+            p.encode("ascii")
+            return True
+        except UnicodeEncodeError:
+            return False
+
+    candidates = []
+    if preferred and _is_ascii(preferred):
+        candidates.append(preferred)
+    ap = os.environ.get("APPDATA", "")
+    if ap and _is_ascii(ap):
+        candidates.append(os.path.join(ap, "KohyaLoraTool", "logs"))
+    pub = os.environ.get("PUBLIC", r"C:\Users\Public")
+    if _is_ascii(pub):
+        candidates.append(os.path.join(pub, "KohyaLoraTool", "logs"))
+    for c in candidates:
+        try:
+            os.makedirs(c, exist_ok=True)
+            return c
+        except Exception:
+            continue
+    return preferred
+
+
 def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, resume_from=None, progress=None):
     params = params or {}
     amd_mode = bool(params.get("amd_mode", False))
@@ -4665,6 +4706,18 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
                 "AMD 显卡需要先配置 ROCm 版 PyTorch 或 ZLUDA 才能训练。\n"
                 "请按「使用说明」的 AMD 章节配置环境，或在界面关闭 AMD 兼容模式。" % (_bk or "未知"))
         logf("[训练] AMD 兼容模式（实验性）：torch 后端 = %s，参数已自动适配" % _bk)
+    else:
+        # 自愈预警：训练前检测 torch 后端。CPU 版 torch（CUDA 不可用）会让训练全程 CPU
+        # 极慢、看起来像"卡住没开始"，这里提前明确提示，避免用户干等。
+        try:
+            _bk = detect_torch_backend(vpy)
+            if _bk == "cpu":
+                logf("[训练] ⚠ 检测到当前 torch 为 CPU 版（CUDA 不可用）：训练会全程 CPU 且极慢，看起来像卡住。"
+                     "建议重跑【一键安装】安装 cu128 版 PyTorch，或检查 NVIDIA 驱动后重试。")
+            elif _bk is None:
+                logf("[训练] ⚠ 无法读取训练环境 torch 状态；若长时间无训练进度，请查看上方日志。")
+        except Exception:
+            pass
     # 自愈：确保训练环境（AMD=venv_amd，普通=kohya venv）具备完整运行时依赖
     # （PIL/numpy/transformers/huggingface_hub/toml 等，缺了会导致分词器缓存、
     #  Anima/FLUX 组件下载、sd-scripts 训练报 ModuleNotFoundError）
@@ -4799,6 +4852,13 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     # 保存节奏：约每 1/10 步保存一次（至少 100 步），用于中间快照与断点续训
     save_every = 200
 
+    # TensorBoard 日志目录：TensorFlow 在 Windows 上无法处理中文/非 ASCII 路径，
+    # 安装目录含中文时（如 C:\Users\xx\新建文件夹\KohyaLoraTool_data\logs）训练初始化会报
+    # FailedPreconditionError: ... is not a directory。自动重定向到 ASCII 路径，不影响训练本身。
+    _logs_dir = data_sub("logs")
+    _tf_logs_dir = _tf_safe_logging_dir(_logs_dir)
+    if _tf_logs_dir != _logs_dir:
+        logf(f"[训练] 数据目录含中文路径，TensorBoard 日志已重定向到 {_tf_logs_dir}（避免 TensorFlow 中文路径崩溃）")
     cmd = [
         *accel, "--num_cpu_threads_per_process", "2", script,
         f"--pretrained_model_name_or_path={base_model}",
@@ -4806,7 +4866,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         f"--tokenizer_cache_dir={data_sub('tokenizers')}",
         f"--output_dir={out_dir}",
         f"--output_name={output_name}",
-        f"--logging_dir={data_sub('logs')}",
+        f"--logging_dir={_tf_logs_dir}",
         "--save_model_as=safetensors", f"--save_precision={save_precision}",
         f"--network_module={network_module}",
         f"--network_dim={rank}", f"--network_alpha={alpha}",
@@ -5543,22 +5603,46 @@ def _anima_find_qwen3_any():
     return None, None
 
 
+def _qwen3_std_weight_in(dirpath):
+    """目录里是否含 transformers 能识别的标准权重文件。
+    model.safetensors / pytorch_model.bin / 分片 model-00001-of-0000X.safetensors|bin。
+    浏览器手动下载常见 "model.safetensors (1).safetensors" 这种非标准名，
+    transformers 不认，必须识别为未就绪，避免误判后训练崩在加载阶段。
+    """
+    for root, _dirs, files in os.walk(dirpath):
+        for f in files:
+            low = f.lower()
+            if low in ("model.safetensors", "pytorch_model.bin"):
+                return True
+            if re.match(r"^model-\d+-of-\d+\.(safetensors|bin)$", low):
+                return True
+    return False
+
+
 def _anima_find_qwen3(base):
     """在 anima 目录找 Qwen3 文本编码器，返回可用路径或 None。
 
     支持两种手动放置方式：
-      1) 完整模型目录（含 config.json）→ 返回目录路径
+      1) 完整模型目录（config.json + 标准权重）→ 返回目录路径
       2) 单个 .safetensors 权重文件 → 返回文件路径
          （sd-scripts 会自动用内置 configs/qwen3_06b/ 的 config/tokenizer 加载）
+
+    只有 config.json 没有权重、或权重文件名不规范（如 "model.safetensors (1).safetensors"）
+    都视为未就绪 → 触发重新下载/明确提示，避免训练时 transformers 报找不到权重。
     """
     qwen3_dir = os.path.join(base, "Qwen3-0.6B")
     if os.path.isdir(qwen3_dir):
-        if os.path.isfile(os.path.join(qwen3_dir, "config.json")):
-            return qwen3_dir
-        # 目录里只有 safetensors 权重（无 config.json）：取第一个（sd-scripts 单文件模式）
+        _has_cfg = os.path.isfile(os.path.join(qwen3_dir, "config.json"))
+        if _has_cfg:
+            # 完整模型目录：config.json + transformers 标准权重名
+            if _qwen3_std_weight_in(qwen3_dir):
+                return qwen3_dir
+            # config 在但权重缺失/名字不规范 → 未就绪（触发重新下载）
+            return None
+        # 无 config：目录里只有 safetensors 权重 → 单文件模式
         for root, _dirs, files in os.walk(qwen3_dir):
             for f in sorted(files):
-                if f.lower().endswith(".safetensors"):
+                if f.lower().endswith((".safetensors", ".bin")):
                     return os.path.join(root, f)
     # anima 根目录下直接放的单文件
     if os.path.isdir(base):
@@ -5566,8 +5650,6 @@ def _anima_find_qwen3(base):
             if f.lower().endswith(".safetensors") and f.lower().startswith("qwen"):
                 return os.path.join(base, f)
     return None
-
-
 def _ensure_anima_components(logf=print):
     """确保 Anima 的 Qwen3-0.6B 文本编码器和 Qwen-Image VAE 就位。
 
@@ -5581,6 +5663,15 @@ def _ensure_anima_components(logf=print):
     qwen3_path, qwen3_base = _anima_find_qwen3_any()
     if qwen3_path is None:
         qwen3_dir = os.path.join(base, "Qwen3-0.6B")
+        # 自愈：目录存在但不完整（下载中断残留 / 手动放置缺权重）→ 备份改名后重新下载，
+        # 避免 snapshot_download 误判"已存在"而跳过，也避免拿残缺目录去训练。
+        if os.path.isdir(qwen3_dir):
+            _bak = "%s.incomplete_%s" % (qwen3_dir, time.strftime("%Y%m%d_%H%M%S"))
+            try:
+                os.rename(qwen3_dir, _bak)
+                logf(f"[Anima] 检测到不完整的 Qwen3-0.6B（缺权重），已备份到 {_bak}，将自动重新下载…")
+            except Exception as _e:
+                logf(f"[Anima] 检测到不完整的 Qwen3-0.6B（缺权重），但自动备份失败（{_e}），将尝试重新下载…")
         logf("[Anima] 首次使用需要下载 Qwen3-0.6B 文本编码器（约 1.2GB，走 hf-mirror）…")
         try:
             _hf_download("Qwen/Qwen3-0.6B", qwen3_dir, logf)
