@@ -152,7 +152,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.18"
+APP_VERSION = "0.9.19"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -4685,8 +4685,9 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         raise RuntimeError(f"sd-scripts 缺失 {script}（当前架构 {BASE_TYPE_LABELS.get(base_type, base_type)}），请重跑【一键安装】")
     if not base_model or not os.path.isfile(base_model):
         raise RuntimeError("请选择底模（.safetensors）")
-    if amd_mode and (params.get("train_env") or "").strip():
-        accel = _accelerate_launch_cmd(vpy)
+    # 任何模式都必须先解析 Accelerate 启动器（v0.9.18 回归：accel 只在 AMD 分支赋值，
+    # 导致普通 NVIDIA 用户训练启动即报 UnboundLocalError: accel）。
+    accel = _accelerate_launch_cmd(vpy)
 
     resolution = int(params.get("resolution") or arch_info["resolution"])
     train_dir = dataset_train_dir(mode, params.get("project"))

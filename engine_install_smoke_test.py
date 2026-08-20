@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tempfile
 import zipfile
@@ -803,6 +804,19 @@ def test_accelerate_module_launcher(base: Path):
             raise AssertionError("system accelerate mismatch should be rejected")
     print("ACCELERATE_MODULE_LAUNCHER_UNIT_TEST_OK")
 
+def test_main_engine_accel_always_defined(base: Path):
+    """v0.9.18 回归：accel 只在 AMD 自定义环境分支赋值，普通 NVIDIA 用户训练启动即
+    UnboundLocalError（cannot access local variable 'accel'）。现在主引擎 train()
+    必须无条件调用 _accelerate_launch_cmd(vpy)，任何模式都能拿到启动器。"""
+    src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    bad = ('if amd_mode and (params.get("train_env") or "").strip():\n'
+           '        accel = _accelerate_launch_cmd(vpy)')
+    assert bad not in src, "accel 仍只在 AMD 分支赋值（v0.9.18 回归未修复）"
+    m = re.search(r"^    accel = _accelerate_launch_cmd\(vpy\)$", src, re.M)
+    assert m, "主引擎 train() 未找到无条件 accel 赋值"
+    print("MAIN_ENGINE_ACCEL_ALWAYS_DEFINED_UNIT_TEST_OK")
+
+
 
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
@@ -820,6 +834,7 @@ def main():
         test_amd_download_progress(base)
         test_amd_torch_verification(base)
         test_accelerate_module_launcher(base)
+        test_main_engine_accel_always_defined(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

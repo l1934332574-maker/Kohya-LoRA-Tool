@@ -1,3 +1,10 @@
+## v0.9.19（2026-08-20）
+
+### 修复
+- **v0.9.18 回归：训练启动即崩溃（cannot access local variable 'accel'）**：上一版把主引擎训练启动器 `accel` 的赋值错误地放进了「AMD 兼容模式且设置了自定义训练环境」分支，普通 NVIDIA 用户（SD1.5/SDXL/FLUX/Anima）走不到赋值语句，一点「一键开始训练」就直接报 `UnboundLocalError`。现已改为**无条件**通过当前训练环境解析 Accelerate 启动器，所有用户恢复正常训练。
+- 新增回归测试 `MAIN_ENGINE_ACCEL_ALWAYS_DEFINED`，防止再次出现 accel 未定义。
+
+---
 ## v0.9.18（2026-08-20）
 
 ### 修复

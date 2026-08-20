@@ -1,6 +1,6 @@
 {
-  "version": "v0.9.18",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.18/Setup.exe",
+  "version": "v0.9.19",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.19/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.9.18：① 修复 Windows 下 Accelerate 启动器串用系统 Python，主引擎、Krea2、FLUX.2 统一由当前训练 venv 启动；② 增强 AMD ROCm 下载进度与 torch/HIP/GPU 验证诊断；③ 检测 RX 6000/gfx1030 Windows ROCm 兼容性限制，避免无效下载；④ WD14 的 Triton 缺失仅为可选优化警告，不影响 ONNX Runtime CUDA 打标。"
+  "notes": "v0.9.19：修复 v0.9.18 回归——主引擎（SD1.5/SDXL/FLUX/Anima）训练启动不再崩溃（accel 未定义），启动器无条件由当前训练环境解析，普通 NVIDIA 用户恢复正常训练。"
 }
