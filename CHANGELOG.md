@@ -1,3 +1,13 @@
+## v0.9.22（2026-08-21）
+
+### 修复：AMD RX 6000 检测在多显卡（核显+独显）机器上失效
+- **现象**：RX 6800 XT 用户更新到 v0.9.21 后，AMD 安装仍走官方 7.2.1 源，下载损坏报 `BadZipFile`，没走社区 ROCm 7.1.1。
+- **根因**：`_amd_is_gfx103x()` 依赖 `detect_gpu_name()`，而它用 WMI 时 `Select-Object -First 1` **只取第一个显卡**；核显+独显的机器上取到的是核显（Intel UHD / AMD Radeon Graphics），名字不匹配 RX 6xxx → 误判为「非 gfx103x」→ 走了官方源。
+- **已修**：`_amd_is_gfx103x()` 改为**遍历 `Win32_VideoController` 全部显卡名称**，任一匹配 `RX 6xxx` / `gfx103x` 即判定为 gfx103x，自动切换社区源。
+- **验证**：核显+RX6800XT / 核显+NVIDIA / 直接识别 / gfx1030 / WMI 空 共 5 场景全过；冒烟测试全过。
+
+---
+
 ## v0.9.21（2026-08-21）
 
 ### 新增：AMD RX 6000/gfx103x 显卡支持（社区 ROCm 7.1.1 构建）

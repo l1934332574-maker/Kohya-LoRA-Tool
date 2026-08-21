@@ -152,7 +152,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.21"
+APP_VERSION = "0.9.22"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1518,13 +1518,29 @@ def _accelerate_launch_cmd(vpy, extra_args=()):
 
 
 def _amd_is_gfx103x():
-    """当前显卡是否为 AMD RX 6000 系 / gfx103x（官方 Windows ROCm 6.4.4+ 不支持，需社区构建）。"""
+    """当前显卡是否为 AMD RX 6000 系 / gfx103x（官方 Windows ROCm 6.4.4+ 不支持，需社区构建）。
+
+    detect_gpu_name() 在核显+独显的机器上可能只取到核显（Intel/AMD iGPU），
+    这里必须遍历所有显卡控制器，否则 RX 6800 XT 用户会被误判为不支持 gfx103x、
+    错误地走官方 7.2.1 源（下载损坏 + 官方本就不支持 RDNA2）。
+    """
+    def _match(n):
+        n = n or ""
+        return bool(re.search(r"RX\s*6\d{3}", n, re.I) or re.search(r"gfx103\d", n, re.I))
+
     try:
-        name = detect_gpu_name() or ""
-        if re.search(r"RX\s*6\d{3}", name, re.I):
+        if _match(detect_gpu_name()):
             return True
-        if re.search(r"gfx103\d", name, re.I):
-            return True
+    except Exception:
+        pass
+    # 多显卡：遍历 Win32_VideoController 全部名称，找 RX 6xxx / gfx103x
+    try:
+        ps = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+              "Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }"]
+        r = subprocess.run(ps, capture_output=True, text=True, timeout=30)
+        for _ln in (r.stdout or "").splitlines():
+            if _match(_ln.strip()):
+                return True
     except Exception:
         pass
     return False
