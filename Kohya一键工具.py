@@ -152,7 +152,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.22"
+APP_VERSION = "0.9.23"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1598,6 +1598,65 @@ def _patch_krea2_encoder(enc, logf=print):
         logf(f"[Krea2] musubi tokenizer 补丁失败（忽略，走镜像兜底）: {e}")
 
 
+def _check_musubi_krea2_version(kdir, logf=print):
+    """待办：检查 musubi Krea2 是否强制 bf16；旧版（没有）直接提示阻止，避免 float32 傻跑 300s/步。"""
+    try:
+        enc = os.path.join(kdir, "musubi-tuner", "src", "musubi_tuner", "krea2_train_network.py")
+        if os.path.isfile(enc):
+            with open(enc, "r", encoding="utf-8", errors="ignore") as f:
+                src = f.read()
+            if "args.dit_dtype" not in src or "bfloat16" not in src:
+                raise RuntimeError(
+                    "检测到 musubi 版本过旧（Krea2 未强制 bf16/fp8，会以 float32 训练导致显存爆、极慢）。\n"
+                    "请重跑【② 第二引擎安装】更新 musubi，或更新到最新版软件后重试。")
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+
+
+def _patch_musubi_fp8_scaled_mm(kdir, logf=print):
+    """方案 A：给 musubi krea2_utils.py / flux2_utils.py 打幂等补丁，
+    fp8 的 use_scaled_mm 按 GPU 算力自动开启（SM 8.9+ / RTX 40/50 系硬件加速）。
+    否则 use_scaled_mm=False 时 fp8 反量化成 float32 计算（8GB 爆显存、300s/步）。"""
+    _block = ("# === KOHYA_TOOL_PATCH_BEGIN: fp8 scaled_mm 自动（SM 8.9+ 硬件加速） ===\n"
+              "import torch as _k2_patch_torch\n"
+              "try:\n"
+              "    _k2_cap = _k2_patch_torch.cuda.get_device_capability(0) if _k2_patch_torch.cuda.is_available() else (0, 0)\n"
+              "    _K2_USE_SCALED_MM = (_k2_cap[0] * 10 + _k2_cap[1]) >= 89\n"
+              "except Exception:\n"
+              "    _K2_USE_SCALED_MM = False\n"
+              "# === KOHYA_TOOL_PATCH_END ===\n")
+    _repls = [
+        ("apply_fp8_monkey_patch(dit, sd, use_scaled_mm=False)", "apply_fp8_monkey_patch(dit, sd, use_scaled_mm=_K2_USE_SCALED_MM)"),
+        ("apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)", "apply_fp8_monkey_patch(model, sd, use_scaled_mm=_K2_USE_SCALED_MM)"),
+    ]
+    for _rel in ("krea2/krea2_utils.py", "flux_2/flux2_utils.py"):
+        _fp = os.path.join(kdir, "musubi-tuner", "src", "musubi_tuner", _rel)
+        try:
+            if not os.path.isfile(_fp):
+                continue
+            with open(_fp, "r", encoding="utf-8") as f:
+                src = f.read()
+            if "KOHYA_TOOL_PATCH_BEGIN" in src and "_K2_USE_SCALED_MM" in src:
+                continue
+            if "KOHYA_TOOL_PATCH_BEGIN" not in src:
+                _lines = src.split("\n")
+                _ins = 0
+                for _i, _l in enumerate(_lines):
+                    if _l.startswith(("import ", "from ")):
+                        _ins = _i + 1
+                _lines.insert(_ins, _block.rstrip("\n"))
+                src = "\n".join(_lines)
+            for _o, _n in _repls:
+                src = src.replace(_o, _n)
+            with open(_fp, "w", encoding="utf-8") as f:
+                f.write(src)
+            logf(f"[Krea2] 已给 musubi {_rel} 打 fp8 scaled_mm 自动补丁（SM 8.9+ 硬件加速）")
+        except Exception as e:
+            logf(f"[Krea2] musubi fp8 补丁失败（忽略）: {e}")
+
+
 def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
     """确保 Krea2/FLUX.2（musubi）的 Qwen3-VL-4B tokenizer 本地就绪并让 musubi 用本地目录。
 
@@ -1618,6 +1677,10 @@ def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
         _enc = os.path.join(_kdir, "musubi-tuner", "src", "musubi_tuner", "krea2", "krea2_encoder.py")
         if os.path.isfile(_enc):
             _patch_krea2_encoder(_enc, logf)
+        # 待办：musubi 版本过旧（Krea2 未强制 bf16）→ 阻止训练，避免 float32 傻跑
+        _check_musubi_krea2_version(_kdir, logf)
+        # 方案 A：musubi fp8 改 use_scaled_mm 自动（SM 8.9+ 硬件加速），否则 fp8 退化成 float32 计算
+        _patch_musubi_fp8_scaled_mm(_kdir, logf)
         try:
             _r = subprocess.run([mvpy, "-c", "import protobuf"], capture_output=True, text=True, timeout=60)
             if _r.returncode != 0:
@@ -4803,6 +4866,24 @@ def _tf_safe_logging_dir(preferred=None):
     return preferred
 
 
+def fix_cpu_torch(vpy, kdir, logf=print):
+    """训练前自愈：NVIDIA 卡 + torch 为 CPU 版时自动重装 cu128 版 PyTorch。
+
+    复用 _preinstall_torch（阿里云/上海交大双国内镜像 + 断点续传）。
+    返回 (ok, message)：ok=True 表示 CUDA 已可用。失败抛错由调用方提示，不回退海外源。
+    """
+    logf("[训练] 检测到 CPU 版 torch，开始自动重装 cu128 版 PyTorch（约 3.3GB，国内镜像，断点续传，可随时点停止）…")
+    try:
+        _preinstall_torch(vpy, kdir, logf=logf, label="Kohya")
+    except Exception as e:
+        return False, f"cu128 PyTorch 自动重装失败：{e}（无需开代理，请稍后重试；已下载缓存支持断点续传）"
+    _bk = detect_torch_backend(vpy)
+    if _bk == "cuda":
+        logf("[训练] ✓ cu128 PyTorch 重装成功，CUDA 已可用，继续训练。")
+        return True, ""
+    return False, "cu128 PyTorch 重装后 CUDA 仍不可用：请更新 NVIDIA 驱动，或重跑【② 安装训练内核】重建环境。"
+
+
 def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, resume_from=None, progress=None):
     params = params or {}
     amd_mode = bool(params.get("amd_mode", False))
@@ -4836,15 +4917,22 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
                 "请按「使用说明」的 AMD 章节配置环境，或在界面关闭 AMD 兼容模式。" % (_bk or "未知"))
         logf("[训练] AMD 兼容模式（实验性）：torch 后端 = %s，参数已自动适配" % _bk)
     else:
-        # 自愈预警：训练前检测 torch 后端。CPU 版 torch（CUDA 不可用）会让训练全程 CPU
-        # 极慢、看起来像"卡住没开始"，这里提前明确提示，避免用户干等。
+        # 自愈：训练前检测 torch 后端。CPU 版 torch（CUDA 不可用）会让训练全程 CPU 极慢。
+        # GUI 已在训练前弹窗确认（params["fix_cpu_torch"]），确认则自动重装 cu128；否则仅警告。
         try:
             _bk = detect_torch_backend(vpy)
             if _bk == "cpu":
-                logf("[训练] ⚠ 检测到当前 torch 为 CPU 版（CUDA 不可用）：训练会全程 CPU 且极慢，看起来像卡住。"
-                     "建议重跑【一键安装】安装 cu128 版 PyTorch，或检查 NVIDIA 驱动后重试。")
+                if params.get("fix_cpu_torch"):
+                    _ok, _msg = fix_cpu_torch(vpy, kdir, logf)
+                    if not _ok:
+                        raise RuntimeError(_msg)
+                else:
+                    logf("[训练] ⚠ 检测到当前 torch 为 CPU 版（CUDA 不可用）：训练会全程 CPU 且极慢，看起来像卡住。"
+                         "建议重跑【一键安装】安装 cu128 版 PyTorch，或检查 NVIDIA 驱动后重试。")
             elif _bk is None:
                 logf("[训练] ⚠ 无法读取训练环境 torch 状态；若长时间无训练进度，请查看上方日志。")
+        except RuntimeError:
+            raise
         except Exception:
             pass
     # 自愈：确保训练环境（AMD=venv_amd，普通=kohya venv）具备完整运行时依赖

@@ -1,3 +1,23 @@
+## v0.9.23（2026-08-22）
+
+### 新增：训练前自动检测 CPU 版 torch + 一键确认自动重装 cu128（自愈）
+- **背景**：部分用户训练时 `accelerator device: cpu`、300s/步，根因是 venv 里 torch 是 CPU 版（CUDA 不可用），软件只警告不修复。
+- **已实现**：
+  - 训练前（NVIDIA 卡）自动检测 `detect_torch_backend`；
+  - 检测到 CPU 版 → **弹窗询问**「是否自动重装 cu128 版 PyTorch（约 3.3GB，国内镜像，断点续传，可停止）」；
+  - 用户确认 → 自动调用 `_preinstall_torch` 重装 cu128 → 重装后重新验证，仍不可用则明确提示更新 NVIDIA 驱动；
+  - 用户拒绝 → 仅警告，按 CPU 继续（不阻断）；AMD 卡 / CUDA 正常用户完全不受影响（增量）。
+- **验证**：fix_cpu_torch 三场景（成功/重装失败/仍 CPU）、GUI 确认五场景（确认/拒绝/AMD/CUDA 正常/非 NVIDIA）、冒烟测试全过。
+
+### 修复：Krea2/FLUX.2 fp8 退化成 float32 计算（300s/步根因）
+- **根因**：musubi `krea2_utils.py` / `flux2_utils.py` 写死 `apply_fp8_monkey_patch(..., use_scaled_mm=False)`；`use_scaled_mm=False` 时每次前向把 fp8 权重**反量化成 float32** 计算 → fp8 只省存储、计算还是 float32 → 8GB 爆显存、300s/步（日志 `DiT dtype: torch.float32`）。与 musubi 版本/重装无关。
+- **已修（方案 A）**：训练前自动给 musubi 打幂等补丁，`use_scaled_mm` 按 GPU 算力自动开启（**SM 8.9+ / RTX 40/50 系 → True**，硬件 fp8 加速）；30 系及以下仍走 float32 兜底。
+- **已修（待办十一）**：训练前检查 musubi 版本，Krea2 源码没有 bf16 强制（旧版）→ 直接提示「musubi 版本过旧，请重装第二引擎/更新软件」并阻止训练。
+
+### 提示：Krea2 8GB 强提示（方案 B）
+- Krea2 是 12.9B 大模型，8G 显存训练会非常慢（每步数十秒以上）；训练前明确弹窗「强烈不建议在此显卡上训练 Krea 2」，可拒绝。
+---
+
 ## v0.9.22（2026-08-21）
 
 ### 修复：AMD RX 6000 检测在多显卡（核显+独显）机器上失效

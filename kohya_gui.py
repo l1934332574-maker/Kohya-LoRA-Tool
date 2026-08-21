@@ -3470,6 +3470,39 @@ class App:
             return False
         return True
 
+    def _ask_fix_cpu_torch(self, params):
+        """训练前自愈：NVIDIA 卡 + torch 为 CPU 版时，询问是否自动重装 cu128（须主线程调用）。
+        返回 True=要自动重装 cu128；否则不触发。"""
+        try:
+            if params.get("amd_mode"):
+                return False  # AMD 走 ROCm/ZLUDA，不适用 cu128 重装
+            if not core.detect_nvidia_gpu():
+                return False
+            vpy = core.venv_python()
+            if not vpy or not os.path.isfile(vpy):
+                return False
+            if core.detect_torch_backend(vpy) != "cpu":
+                return False
+        except Exception:
+            return False
+        # 方案 B：Krea2（12.9B）8G 显存强提示（fp8 在部分显卡退化 + 重度层换内存，每步数十秒以上）
+        if params.get("mode") == "krea2" and vram < 12:
+            return messagebox.askyesno(
+                core.APP_NAME,
+                f"Krea 2 是 12.9B 大模型，建议 16G+ 显存；你的显卡只有约 {vram:.1f}G。\n\n"
+                "8G 显存即使开 fp8 + 层换内存（blocks_to_swap），训练也会非常慢（每步数十秒以上），"
+                "且 fp8 在部分显卡上可能退化成 float32 计算。\n\n"
+                "强烈不建议在此显卡上训练 Krea 2，是否仍要继续？")
+
+        return messagebox.askyesno(
+            core.APP_NAME,
+            "检测到当前训练环境是 CPU 版 PyTorch（CUDA 不可用）。\n\n"
+            "这样训练会全程 CPU，非常慢（每步可能数百秒）。\n\n"
+            "是否自动重装 CUDA 版（cu128）PyTorch？\n"
+            "· 约 3.3GB，国内镜像，断点续传，可随时点停止\n"
+            "· 选「否」将继续用 CPU 训练（不推荐）")
+
+
     def _warn_no_nvidia(self):
         """显卡兼容检查：N 卡直接放行；AMD 卡走兼容模式；其他保持原警告。返回 True=继续。"""
         try:
@@ -3621,6 +3654,8 @@ class App:
         if not self._warn_no_nvidia():
             self._set_busy(False)
             return
+        # 自愈：CPU 版 torch（NVIDIA 卡）→ 弹窗确认是否自动重装 cu128，决定传给训练线程
+        params["fix_cpu_torch"] = self._ask_fix_cpu_torch(params)
         if not self._warn_low_vram(params):
             self._set_busy(False)
             return

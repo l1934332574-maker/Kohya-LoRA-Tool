@@ -1,6 +1,6 @@
 {
-  "version": "v0.9.22",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.22/Setup.exe",
+  "version": "v0.9.23",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.23/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.9.22：修复 AMD RX 6000 检测在多显卡（核显+独显）机器上失效——改为遍历所有显卡，RX 6800 XT 用户正确自动切换社区 ROCm 7.1.1（魔搭镜像），不再误走官方源。"
+  "notes": "v0.9.23：修复 Krea2/FLUX.2 fp8 退化成 float32 计算（300s/步真根因，40/50 系自动硬件加速）；训练前 CPU torch 自动检测+确认重装 cu128；musubi 旧版检测；Krea2 8G 强提示。"
 }
