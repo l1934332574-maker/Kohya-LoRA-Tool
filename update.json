@@ -1,6 +1,6 @@
 {
-  "version": "v0.9.20",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.20/Setup.exe",
+  "version": "v0.9.21",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.21/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.9.20：修复 Anima 训练两类崩溃（TensorBoard 日志中文路径崩溃、Qwen3 权重缺失/文件名不规范被误判）；Qwen3 残缺目录自动备份重下自愈；训练前检测 CPU 版 torch 并预警；监控 3 分钟无进展自动提示，不再假卡住。"
+  "notes": "v0.9.21：新增 AMD RX 6000/gfx103x 支持（自动切换社区 ROCm 7.1.1，国内魔搭镜像无需代理）；修复 Krea2/FLUX.2「缓存文本编码器输出」HF 联网超时（内置 Qwen3-VL tokenizer + 自动本地化补丁）。"
 }

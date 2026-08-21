@@ -1,3 +1,26 @@
+## v0.9.21（2026-08-21）
+
+### 新增：AMD RX 6000/gfx103x 显卡支持（社区 ROCm 7.1.1 构建）
+- **背景**：官方 Windows ROCm 6.4.4+（含 7.2.1）均不支持 RDNA2（RX 6000/gfx103x），此前软件检测到 RX 6000 会直接阻止 AMD 安装。
+- **现已集成社区预编译的 ROCm 7.1.1（gfx103x target）构建**（guinmoon/rocm7_builds）：rocm_sdk + torch/torchvision 共约 2.6GB，已转存**魔搭国内镜像**（`amd_rocm_gfx103x/`，无需代理）。
+- RX 6000 用户开启「AMD 兼容模式」后，软件**自动**从魔搭下载安装社区 ROCm 7.1.1 + PyTorch，全程无需手动操作；训练时自动设置 `HSA_OVERRIDE_GFX_VERSION=10.3.0` 兼容运行。
+- 注意：社区构建非官方，稳定性/性能不保证；仅支持 Python 3.12（非 3.12 会明确提示重建 AMD 环境）。
+
+### 修复：Krea2 / FLUX.2 训练「缓存文本编码器输出」阶段联网超时（用户反馈）
+- **根因**：musubi-tuner 的 `krea2_encoder.py` 用 `AutoTokenizer.from_pretrained("Qwen/Qwen3-VL-4B-Instruct")` 在线拉 tokenizer，国内直连 huggingface.co 超时（`ConnectTimeoutError`），训练中断。
+- **已修（自愈，用户零手动）**：
+  - **内置 Qwen3-VL-4B tokenizer**（config/tokenizer_config/tokenizer.json/vocab/merges，约 11MB）随安装包离线分发；
+  - 训练前自动确保本地 tokenizer 就绪（内置 → hf-mirror/魔搭镜像兜底）；
+  - 自动给 musubi `krea2_encoder.py` 打幂等补丁：`KREA2_TOKENIZER_DIR` 环境变量指向本地目录 + `local_files_only=True`，不再联网；
+  - 自动补装 `protobuf`（transformers fast tokenizer 依赖）；
+  - `train_krea2` / `train_flux2` 均已接入。
+- **验证**：补丁幂等、环境变量生效、本地 tokenizer 真实加载（AutoTokenizer + Qwen2TokenizerFast）、冒烟测试全过。
+
+### 测试
+- AMD gfx103x 检测（RX 6800/RTX 4070 mock）、社区源 URL、三引擎冒烟测试全部通过。
+
+---
+
 ## v0.9.20（2026-08-21）
 
 ### 修复

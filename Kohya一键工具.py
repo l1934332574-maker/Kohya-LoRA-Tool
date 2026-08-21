@@ -152,7 +152,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.20"
+APP_VERSION = "0.9.21"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1517,17 +1517,99 @@ def _accelerate_launch_cmd(vpy, extra_args=()):
     return [vpy, "-m", "accelerate.commands.launch"] + list(extra_args)
 
 
-def _amd_rocm_windows_support_warning(logf=print):
-    """给当前 Windows ROCm 版本之外的 AMD 显卡显示一次明确提示。"""
+def _amd_is_gfx103x():
+    """当前显卡是否为 AMD RX 6000 系 / gfx103x（官方 Windows ROCm 6.4.4+ 不支持，需社区构建）。"""
     try:
         name = detect_gpu_name() or ""
-        if not re.search(r"RX\s*6\d{3}", name, re.I):
+        if re.search(r"RX\s*6\d{3}", name, re.I):
+            return True
+        if re.search(r"gfx103\d", name, re.I):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _amd_rocm_windows_support_warning(logf=print):
+    """给 RX 6000/gfx103x 显卡提示：官方 7.2.1 不支持，软件将自动改用社区构建。
+    返回 True 表示命中 gfx103x（调用方据此切换下载源）。"""
+    try:
+        name = detect_gpu_name() or ""
+        if not _amd_is_gfx103x():
             return False
-        logf(f"[AMD] ⚠ 检测到 {name}：当前 Windows ROCm {AMD_ROC_VERSION} 官方 PyTorch 支持范围不含 RX 6000/gfx1030。")
-        logf("[AMD] ⚠ 可继续尝试，但可能只能使用 CPU；建议先确认显卡兼容性，不建议先下载数 GB 依赖。")
+        logf(f"[AMD] ⚠ 检测到 {name}：官方 Windows ROCm {AMD_ROC_VERSION} 不支持 RX 6000/gfx103x。")
+        logf("[AMD] 已自动切换为社区 ROCm 7.1.1（gfx103x）构建，从国内魔搭镜像下载，无需代理。")
         return True
     except Exception:
         return False
+def _patch_krea2_encoder(enc, logf=print):
+    """给 musubi 的 krea2_encoder.py 打幂等补丁：KREA2_TOKENIZER_DIR 环境变量本地化 tokenizer。
+    musubi 默认 AutoTokenizer.from_pretrained("Qwen/Qwen3-VL-4B-Instruct") 在线拉 tokenizer，
+    国内直连 HF 超时；补丁让 tokenizer_repo 优先用环境变量指向的本地目录 + local_files_only。
+    """
+    try:
+        with open(enc, "r", encoding="utf-8") as f:
+            src = f.read()
+        if "KOHYA_TOOL_PATCH_BEGIN" in src and "local_files_only=_K2_TK_LOCAL" in src:
+            return
+        _block = (
+            "# === KOHYA_TOOL_PATCH_BEGIN: tokenizer 本地化（国内无代理离线） ===\n"
+            "import os as _k2_patch_os\n"
+            "_K2_TK_DIR = _k2_patch_os.environ.get('KREA2_TOKENIZER_DIR', '').strip()\n"
+            "_K2_TK_LOCAL = bool(_K2_TK_DIR)\n"
+            "if _K2_TK_DIR:\n"
+            "    QWEN3_VL_4B_INSTRUCT_REPO_ID = _K2_TK_DIR\n"
+            "# === KOHYA_TOOL_PATCH_END ===\n\n"
+        )
+        if "KOHYA_TOOL_PATCH_BEGIN" not in src:
+            _m = 'QWEN3_VL_4B_INSTRUCT_REPO_ID = "Qwen/Qwen3-VL-4B-Instruct"'
+            if _m not in src:
+                logf("[Krea2] musubi krea2_encoder.py 结构变化，跳过 tokenizer 补丁")
+                return
+            src = src.replace(_m, _m + "\n" + _block, 1)
+        _o1 = "AutoTokenizer.from_pretrained(tokenizer_repo, max_length=max_length)"
+        _n1 = "AutoTokenizer.from_pretrained(tokenizer_repo, max_length=max_length, local_files_only=_K2_TK_LOCAL)"
+        _o2 = "Qwen2TokenizerFast.from_pretrained(tokenizer_repo, max_length=max_length)"
+        _n2 = "Qwen2TokenizerFast.from_pretrained(tokenizer_repo, max_length=max_length, local_files_only=_K2_TK_LOCAL)"
+        if _o1 in src:
+            src = src.replace(_o1, _n1, 1)
+        if _o2 in src:
+            src = src.replace(_o2, _n2, 1)
+        with open(enc, "w", encoding="utf-8") as f:
+            f.write(src)
+        logf("[Krea2] 已给 musubi krea2_encoder.py 打本地 tokenizer 补丁")
+    except Exception as e:
+        logf(f"[Krea2] musubi tokenizer 补丁失败（忽略，走镜像兜底）: {e}")
+
+
+def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
+    """确保 Krea2/FLUX.2（musubi）的 Qwen3-VL-4B tokenizer 本地就绪并让 musubi 用本地目录。
+
+    背景：musubi krea2_encoder.py 用 AutoTokenizer.from_pretrained("Qwen/Qwen3-VL-4B-Instruct")
+    在线拉 tokenizer，国内直连 HF 超时 → "缓存文本编码器输出"阶段 ConnectTimeoutError。
+    这里：1) 内置/镜像确保 tokenizer 文件本地；2) 给 krea2_encoder.py 打幂等补丁
+    （KREA2_TOKENIZER_DIR 指向本地 + local_files_only）；3) 确保 protobuf（fast tokenizer 依赖）。
+    返回本地 tokenizer 目录。
+    """
+    _tk_cache = data_sub("tokenizers")
+    try:
+        _ensure_tokenizer_cached(_tk_cache, "Qwen/Qwen3-VL-4B-Instruct", logf, kind="auto", vpy=mvpy)
+    except Exception as e:
+        logf(f"[Krea2] tokenizer 预缓存失败（忽略，仍尝试本地）: {e}")
+    _tk_dir = os.path.join(_tk_cache, "Qwen_Qwen3-VL-4B-Instruct")
+    if mvpy and os.path.isfile(mvpy):
+        _kdir = get_kohya_dir()
+        _enc = os.path.join(_kdir, "musubi-tuner", "src", "musubi_tuner", "krea2", "krea2_encoder.py")
+        if os.path.isfile(_enc):
+            _patch_krea2_encoder(_enc, logf)
+        try:
+            _r = subprocess.run([mvpy, "-c", "import protobuf"], capture_output=True, text=True, timeout=60)
+            if _r.returncode != 0:
+                logf("[Krea2] musubi venv 缺 protobuf（transformers fast tokenizer 依赖），自动补装…")
+                run_pip_in_venv(os.path.join(_kdir, "musubi-venv"), ["protobuf"], logf)
+        except Exception:
+            pass
+    return _tk_dir
 
 
 def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from=None, progress=None):
@@ -1567,11 +1649,16 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
                    "--dataset_config", cfg_path, "--vae", files["vae"], "--num_workers", "1"],
                   cwd=mt_dir, logf=logf) != 0:
         raise RuntimeError("latents 缓存失败，请查看上方日志")
+    # 自愈：Qwen3-VL-4B tokenizer 本地化（避免 musubi 在线拉 HF tokenizer 国内超时）
+    _k2tk = _ensure_krea2_tokenizer_ready(logf, mvpy)
+    _k2env = build_direct_env()
+    _k2env["KREA2_TOKENIZER_DIR"] = _k2tk
+    _k2env["HF_ENDPOINT"] = "https://hf-mirror.com"
     # 预缓存文本编码器输出
     logf("[Krea2] 缓存文本编码器输出 …")
     if run_stream([mvpy, os.path.join(mt_dir, "krea2_cache_text_encoder_outputs.py"),
                    "--dataset_config", cfg_path, "--text_encoder", files["te"], "--batch_size", "1", "--num_workers", "1"],
-                  cwd=mt_dir, logf=logf) != 0:
+                  cwd=mt_dir, logf=logf, env=_k2env) != 0:
         raise RuntimeError("文本编码器缓存失败，请查看上方日志")
     # 训练参数
     rank = int(params.get("rank", 32))
@@ -1698,12 +1785,17 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
                    "--model_version", FLUX2_MODEL_VERSION, "--num_workers", "1"],
                   cwd=mt_dir, logf=logf) != 0:
         raise RuntimeError("latents 缓存失败，请查看上方日志")
+    # 自愈：Qwen3-VL-4B tokenizer 本地化（避免 musubi 在线拉 HF tokenizer 国内超时）
+    _k2tk = _ensure_krea2_tokenizer_ready(logf, mvpy)
+    _k2env = build_direct_env()
+    _k2env["KREA2_TOKENIZER_DIR"] = _k2tk
+    _k2env["HF_ENDPOINT"] = "https://hf-mirror.com"
     # 预缓存文本编码器输出
     logf("[FLUX.2] 缓存文本编码器输出 …")
     if run_stream([mvpy, os.path.join(mt_dir, "flux_2_cache_text_encoder_outputs.py"),
                    "--dataset_config", cfg_path, "--text_encoder", files["te"],
                    "--batch_size", "1", "--num_workers", "1", "--model_version", FLUX2_MODEL_VERSION],
-                  cwd=mt_dir, logf=logf) != 0:
+                  cwd=mt_dir, logf=logf, env=_k2env) != 0:
         raise RuntimeError("文本编码器缓存失败，请查看上方日志")
     # 训练参数
     rank = int(params.get("rank", 32))
@@ -3217,6 +3309,22 @@ AMD_ROC_WHEELS = [
     f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/rocm_sdk_libraries_custom-{AMD_ROC_VERSION}-py3-none-win_amd64.whl",
     f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/rocm-{AMD_ROC_VERSION}.tar.gz",
 ]
+# AMD RX 6000/gfx103x 社区构建（guinmoon/rocm7_builds 的 ROCm 7.1.1 GFX103X-all）：
+# 官方 Windows ROCm 6.4.4+ 已移除 RDNA2（RX 6000）支持，社区预编译了含 gfx103x target 的
+# torch 轮子；本工具将社区 wheel 转存到魔搭国内镜像（无需代理）供软件内自动下载安装。
+AMD_GFX103X_MS_BASE = "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/amd_rocm_gfx103x"
+AMD_GFX103X_ROC_WHEELS = [
+    AMD_GFX103X_MS_BASE + "/rocm-7.1.1.tar.gz",
+    AMD_GFX103X_MS_BASE + "/rocm_sdk_core-7.1.1-py3-none-win_amd64.whl",
+    AMD_GFX103X_MS_BASE + "/rocm_sdk_devel-7.1.1-py3-none-win_amd64.whl",
+    AMD_GFX103X_MS_BASE + "/rocm_sdk_libraries_gfx103x_all-7.1.1-py3-none-win_amd64.whl",
+]
+AMD_GFX103X_TORCH_WHEELS = [
+    AMD_GFX103X_MS_BASE + "/torch-2.9.1%2Brocmsdk20251207-cp312-cp312-win_amd64.whl",
+    AMD_GFX103X_MS_BASE + "/torchaudio-2.9.0%2Brocmsdk20251207-cp312-cp312-win_amd64.whl",
+    AMD_GFX103X_MS_BASE + "/torchvision-0.24.0%2Brocmsdk20251207-cp312-cp312-win_amd64.whl",
+]
+
 AMD_TRAIN_DEPS = "transformers==4.54.1 diffusers==0.32.1 accelerate safetensors omegaconf numpy pillow av opencv-python einops sentencepiece toml voluptuous imagesize rich ftfy"
 
 
@@ -3365,7 +3473,14 @@ def venv_python_version(venv_dir):
 def _amd_torch_wheels(venv_dir):
     """按训练环境 Python 版本生成 AMD 版 PyTorch wheel URL（cp310/cp311/cp312）。
 
-    注意：之前 3.10 会错配成 cp312，导致 AMD 环境 torch 装不上。"""
+    注意：之前 3.10 会错配成 cp312，导致 AMD 环境 torch 装不上。
+    RX 6000/gfx103x：官方 7.2.1 轮子不支持，改用社区 ROCm 7.1.1 构建（仅 cp312）。
+    """
+    if _amd_is_gfx103x():
+        ver = venv_python_version(venv_dir) or "3.12"
+        if not ".".join(ver.split(".")[:2]).startswith("3.12"):
+            raise RuntimeError("AMD RX 6000/gfx103x 的社区 ROCm 构建仅支持 Python 3.12，请用 Python 3.12 重建 AMD 训练环境。")
+        return list(AMD_GFX103X_TORCH_WHEELS)
     ver = venv_python_version(venv_dir) or "3.12"
     cp = {"3.10": "cp310", "3.11": "cp311", "3.12": "cp312"}.get(
         ".".join(ver.split(".")[:2]), "cp312")
@@ -3374,8 +3489,6 @@ def _amd_torch_wheels(venv_dir):
         f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/torchaudio-{AMD_TORCH_VERSION}%2Brocm{AMD_ROC_VERSION}-{cp}-{cp}-win_amd64.whl",
         f"https://repo.radeon.com/rocm/windows/rocm-rel-{AMD_ROC_VERSION}/torchvision-{AMD_TORCHVISION_VERSION}%2Brocm{AMD_ROC_VERSION}-{cp}-{cp}-win_amd64.whl",
     ]
-
-
 def _bundled_pip_wheels():
     """内置离线 wheel（pillow/numpy，供预处理自愈离线安装，绕开网络不稳）。"""
     d = os.path.join(KIT_DIR, "installers", "python_libs")
@@ -3677,15 +3790,15 @@ def install_amd_rocm(venv_dir, logf=print, progress_cb=None, status_cb=None):
     progress_cb(stage, filename, done, total, index, count) 可选：实时上报下载进度。
     status_cb(stage, status) 可选：上报 downloading / installing / complete 状态。
     """
-    if _amd_rocm_windows_support_warning(logf):
-        raise RuntimeError("当前 Windows ROCm 官方 PyTorch 不支持检测到的 RX 6000/gfx1030 显卡，已停止下载，避免浪费数 GB 流量。请改用受支持的 AMD 显卡、Linux ROCm，或 NVIDIA/CUDA。")
-    logf("[AMD] 阶段 1/3：安装 AMD ROCm 运行库（文件较大，支持断点续传，可随时点停止）…")
+    gfx103x = _amd_rocm_windows_support_warning(logf)
+    wheels = AMD_GFX103X_ROC_WHEELS if gfx103x else AMD_ROC_WHEELS
+    logf("[AMD] 阶段 1/3：安装 %s ROCm 运行库（文件较大，支持断点续传，可随时点停止）…" % ("社区 7.1.1（gfx103x）" if gfx103x else "AMD"))
     cache = os.path.join(data_dir(), "installer_cache", "amd_rocm")
     local = []
-    _count = len(AMD_ROC_WHEELS)
+    _count = len(wheels)
     if status_cb is not None:
         status_cb("ROCm", "downloading")
-    for _index, _u in enumerate(AMD_ROC_WHEELS, 1):
+    for _index, _u in enumerate(wheels, 1):
         _fn = os.path.basename(_u)
         _dst = os.path.join(cache, _fn)
         _cached = os.path.isfile(_dst) and os.path.getsize(_dst) > 1024 * 1024 and _wheel_valid(_dst)
