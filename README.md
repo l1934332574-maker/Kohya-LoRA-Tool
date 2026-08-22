@@ -4,19 +4,17 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.9.27** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.9.28** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
 ---
 
-## 🆕 v0.9.27 更新重点
+## 🆕 v0.9.28 更新重点
 
-- **Krea2 / FLUX.2 8G 显存大幅提速**：8~16G 显存自动启用 INT8 量化（实测比 fp8 快约 2.6 倍），可选 torch.compile / NF4，H2D 单向块交换。
-- **RDNA2（RX 6000）自动切 fp16**：不再需要手动开启 AMD 兼容模式，修复黑图 / 第一步 NaN。
-- **高级参数新增「优化器」下拉**：自动 / AdamW / Lion / AdamW8bit，遇 bitsandbytes 崩溃可手动切换。
-- **修复「卡在训练前 / accelerator device: cpu」**：残留 accelerate 配置 `use_cpu=true` 自动修复。
-- **各引擎 torchvision 缺失自动补装**；Anima latent 缓存 NaN 自动提示；WD14 打标脚本查找增强。
+- **修复 AMD RDNA2（RX 6000）Anima 训练第一步 loss=NaN**：VAE 强制 fp32 编码 latent（消除 fp16 溢出根因），换任何图/任何分辨率都不再复现。
+- **旧 NaN 缓存自动清理**：训练前自动删除坏的 latent 缓存并用 fp32 重新生成，无需手动删文件。
+- 仅影响 RDNA2 + Anima 路径；NVIDIA / RDNA3+ 行为不变。
 
 > 完整更新记录见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -92,7 +90,7 @@
 
 | 文件 | 说明 |
 |---|---|
-| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源和 WD14 打标模型；当前最新版为 v0.9.27 |
+| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源和 WD14 打标模型；当前最新版为 v0.9.28 |
 | `KohyaLoraTool_*_portable.zip` | 便携版，解压后运行；若该版本未上传 ZIP，请使用 `Setup.exe` |
 
 ### 国内镜像
