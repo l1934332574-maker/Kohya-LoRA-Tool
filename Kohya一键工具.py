@@ -152,7 +152,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.23"
+APP_VERSION = "0.9.24"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1657,6 +1657,50 @@ def _patch_musubi_fp8_scaled_mm(kdir, logf=print):
             logf(f"[Krea2] musubi fp8 补丁失败（忽略）: {e}")
 
 
+def _patch_musubi_rdna2_fp16(kdir, logf=print):
+    """方案：给 musubi krea2/flux2 的 main 打幂等补丁——读 KREA2_FP16 环境变量，
+    RDNA2（RX 6000）时 dit_dtype/VAE 用 fp16（RDNA2 不原生支持 bf16，避免黑图）。"""
+    _repl = {
+        "krea2_train_network.py": (
+            '    args.dit_dtype = "bfloat16"',
+            '    # === KOHYA_TOOL_PATCH_BEGIN: RDNA2 fp16 ===\n'
+            '    import os as _k2_fp16_os\n'
+            '    if _k2_fp16_os.environ.get("KREA2_FP16"):\n'
+            '        args.dit_dtype = "float16"\n'
+            '        if args.vae_dtype is None:\n'
+            '            args.vae_dtype = "float16"\n'
+            '    else:\n'
+            '        args.dit_dtype = "bfloat16"\n'
+            '    # === KOHYA_TOOL_PATCH_END ===',
+        ),
+        "flux_2_train_network.py": (
+            '    args.dit_dtype = None  # set from mixed_precision',
+            '    # === KOHYA_TOOL_PATCH_BEGIN: RDNA2 fp16 ===\n'
+            '    import os as _k2_fp16_os\n'
+            '    args.dit_dtype = "float16" if _k2_fp16_os.environ.get("KREA2_FP16") else None  # set from mixed_precision\n'
+            '    # === KOHYA_TOOL_PATCH_END ===',
+        ),
+    }
+    for _fn, (_o, _n) in _repl.items():
+        _fp = os.path.join(kdir, "musubi-tuner", "src", "musubi_tuner", _fn)
+        try:
+            if not os.path.isfile(_fp):
+                continue
+            with open(_fp, "r", encoding="utf-8") as f:
+                src = f.read()
+            if "KOHYA_TOOL_PATCH_BEGIN" in src and "KREA2_FP16" in src:
+                continue
+            if _o not in src:
+                logf(f"[Krea2] musubi {_fn} 结构变化，跳过 RDNA2 fp16 补丁")
+                continue
+            src = src.replace(_o, _n, 1)
+            with open(_fp, "w", encoding="utf-8") as f:
+                f.write(src)
+            logf(f"[Krea2] 已给 musubi {_fn} 打 RDNA2 fp16 补丁")
+        except Exception as e:
+            logf(f"[Krea2] musubi RDNA2 fp16 补丁失败（忽略）: {e}")
+
+
 def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
     """确保 Krea2/FLUX.2（musubi）的 Qwen3-VL-4B tokenizer 本地就绪并让 musubi 用本地目录。
 
@@ -1681,6 +1725,8 @@ def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
         _check_musubi_krea2_version(_kdir, logf)
         # 方案 A：musubi fp8 改 use_scaled_mm 自动（SM 8.9+ 硬件加速），否则 fp8 退化成 float32 计算
         _patch_musubi_fp8_scaled_mm(_kdir, logf)
+        # RDNA2（RX 6000）fp16：musubi 默认强制 bf16，RDNA2 不原生支持 → 黑图；打补丁读 KREA2_FP16
+        _patch_musubi_rdna2_fp16(_kdir, logf)
         try:
             _r = subprocess.run([mvpy, "-c", "import protobuf"], capture_output=True, text=True, timeout=60)
             if _r.returncode != 0:
@@ -1733,6 +1779,12 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     _k2env = build_direct_env()
     _k2env["KREA2_TOKENIZER_DIR"] = _k2tk
     _k2env["HF_ENDPOINT"] = "https://hf-mirror.com"
+    # RDNA2（RX 6000）不原生支持 bf16 → 黑图；改用 fp16（musubi 补丁读 KREA2_FP16）
+    _rdna2 = _amd_is_gfx103x()
+    _mp = "fp16" if _rdna2 else "bf16"
+    if _rdna2:
+        _k2env["KREA2_FP16"] = "1"
+        logf("[Krea2] 检测到 RDNA2（RX 6000），改用 fp16 混合精度（避免 bf16 黑图）")
     # 预缓存文本编码器输出
     logf("[Krea2] 缓存文本编码器输出 …")
     if run_stream([mvpy, os.path.join(mt_dir, "krea2_cache_text_encoder_outputs.py"),
@@ -1770,11 +1822,11 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     opt_k, _opt_d = resolve_optimizer(mvpy, logf, requested=params.get("optimizer", "auto"), allow_lion=False)
     logf(f"[Krea2] 优化器: {opt_k}")
     cmd = [
-        *accel, "--num_cpu_threads_per_process", "1", "--mixed_precision", "bf16",
+        *accel, "--num_cpu_threads_per_process", "1", "--mixed_precision", _mp,
         os.path.join(mt_dir, "krea2_train_network.py"),
         "--dit", files["raw"], "--vae", files["vae"],
         "--dataset_config", cfg_path,
-        "--sdpa", "--mixed_precision", "bf16",
+        "--sdpa", "--mixed_precision", _mp,
         "--timestep_sampling", "shift", "--weighting_scheme", "none", "--discrete_flow_shift", "2.5",
         "--optimizer_type", opt_k.lower(), "--learning_rate", str(lr), "--gradient_checkpointing",
         "--max_data_loader_n_workers", "1",
@@ -1869,6 +1921,12 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     _k2env = build_direct_env()
     _k2env["KREA2_TOKENIZER_DIR"] = _k2tk
     _k2env["HF_ENDPOINT"] = "https://hf-mirror.com"
+    # RDNA2（RX 6000）不原生支持 bf16 → 黑图；改用 fp16（musubi 补丁读 KREA2_FP16）
+    _rdna2 = _amd_is_gfx103x()
+    _mp = "fp16" if _rdna2 else "bf16"
+    if _rdna2:
+        _k2env["KREA2_FP16"] = "1"
+        logf("[FLUX.2] 检测到 RDNA2（RX 6000），改用 fp16 混合精度（避免 bf16 黑图）")
     # 预缓存文本编码器输出
     logf("[FLUX.2] 缓存文本编码器输出 …")
     if run_stream([mvpy, os.path.join(mt_dir, "flux_2_cache_text_encoder_outputs.py"),
@@ -1908,12 +1966,12 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     opt_k, _opt_d = resolve_optimizer(mvpy, logf, requested=params.get("optimizer", "auto"), allow_lion=False)
     logf(f"[FLUX.2] 优化器: {opt_k}")
     cmd = [
-        *accel, "--num_cpu_threads_per_process", "1", "--mixed_precision", "bf16",
+        *accel, "--num_cpu_threads_per_process", "1", "--mixed_precision", _mp,
         os.path.join(mt_dir, "flux_2_train_network.py"),
         "--model_version", FLUX2_MODEL_VERSION,
         "--dit", files["dit"], "--vae", files["vae"], "--text_encoder", files["te"],
         "--dataset_config", cfg_path,
-        "--sdpa", "--mixed_precision", "bf16",
+        "--sdpa", "--mixed_precision", _mp,
         "--timestep_sampling", "flux2_shift", "--weighting_scheme", "none",
         "--optimizer_type", opt_k.lower(), "--learning_rate", str(lr),
         "--max_data_loader_n_workers", "1",
@@ -5044,7 +5102,12 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         out_dir = data_sub("output")
     mixed = arch_info["mixed"]
     if amd_mode:
-        mixed = "bf16"                # AMD RDNA3 原生支持 bf16，统一用 bf16 更稳
+        if _amd_is_gfx103x():
+            # RDNA2（RX 6000）不原生支持 bf16 → bf16 训练数值错误、LoRA 出黑图；改用 fp16（RDNA2 原生支持）
+            mixed = "fp16"
+            logf("[训练] AMD 兼容模式：检测到 RDNA2（RX 6000），混合精度改用 fp16（避免 bf16 数值错误黑图）")
+        else:
+            mixed = "bf16"                # AMD RDNA3+ 原生支持 bf16
     save_precision = arch_info["save_precision"]
     min_bucket, max_bucket = arch_info["min_bucket"], arch_info["max_bucket"]
     network_module = arch_info["network_module"]
@@ -5168,7 +5231,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     if params.get("global_neg"):
         logf("[训练] 附加全局负向提示词: 仅记录进报告/模板（kohya 训练不使用负向提示词）。")
     if amd_mode:
-        logf("[训练] AMD 兼容模式：sdpa + bf16 + AdamW 优化器（实验性，不承诺稳定）")
+        logf("[训练] AMD 兼容模式：sdpa + %s + AdamW 优化器（实验性，不承诺稳定）" % mixed)
 
     # 训练中模型/tokenizer 只走 hf-mirror，直接清除历史 Clash/v2ray 代理，
     # 避免用户不开代理时反而被失效的本地代理端口阻断。
