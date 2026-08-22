@@ -39,7 +39,7 @@ pushd "%KDIR%"
 call venv\Scripts\activate.bat
 
 echo [4/6] 确认 pip 清华镜像源…
-python -m pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+python -m pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
 
 echo [5/6] 安装全部依赖（约 10~30 分钟，请保持代理开启）…
 python -m pip install --upgrade pip setuptools wheel -q

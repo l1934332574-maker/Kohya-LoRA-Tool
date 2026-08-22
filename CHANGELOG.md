@@ -7,6 +7,32 @@
   - Krea2/FLUX.2（musubi）：训练前自动给 musubi 打幂等补丁，RDNA2 时 `dit_dtype`/VAE 用 fp16（读 `KREA2_FP16` 环境变量），命令 `--mixed_precision` 同步改 fp16。
 - **验证**：musubi 补丁幂等 + 主引擎精度分支 + 冒烟测试全过。
 
+### 新增：训练 loss=NaN/Inf 自愈检测
+- 训练过程中检测到 loss 为 NaN/Inf（数值异常，常见 AMD RDNA2 + bf16 / 模型或数据问题）→ **自动停止训练**，避免「跑完 100% 卡在保存 checkpoint」的假死。
+- 日志明确提示原因与建议（更新到最新版 / 检查数据）。
+- 验证：正常 loss 不触发、NaN/Inf 触发一次、冒烟测试全过。
+### 修复：视频模式（H3）模型状态行被挤出窗口
+- h3_row 一行 8 个按钮（模型/引擎/字幕操作）超宽被挤出窗口；拆成两行（模型操作行 + 引擎/字幕行），视频模式下正常显示。
+
+### 新增：Krea2 / FLUX.2 支持「画风 / 人物」训练类型切换
+- 第二引擎（Krea2 / FLUX.2）现在和 Qwen-Image/Z-Image 一样，可选择「画风（过滤人物标签）/ 人物（保留全部标签）」；
+- 训练数据集目录按子模式自动选（画风=train，人物=train_character），与预处理一致；trigger 提示同步。
+### 修复：Krea2/FLUX.2 训练回归（v0.9.23 引入，本机 4070 实测复现）
+- **根因**：v0.9.23 给 musubi 打补丁自动开 fp8 `use_scaled_mm=True`（40/50 系），但 **Krea2/FLUX.2 的 fp8 量化是 per-channel，不兼容 scaled_mm** → 训练一进入 forward 就崩（`ValueError: scaled_mm only supports per-tensor scale_weight`）。这就是「v0.9.9 能跑、后续版本不行」的根因。
+- **已修**：回退该补丁，恢复 `use_scaled_mm=False`（与 v0.9.9 一致，慢但能跑完）；已打补丁的用户升级后训练时自动撤销。
+- **实测**：4070 复现崩溃 → 回退后训练正常进入 GPU 计算（不崩）；Krea2 12.9B 在 8GB 上 float32 计算极慢属预期（配 8GB 强提示 + loss=NaN 检测）。
+### 调整：pip 国内镜像默认改用阿里云（清华保留兜底）
+- 用户反馈清华源经常出问题；所有默认/首选 pip 镜像从清华改为**阿里云**（`mirrors.aliyun.com/pypi/simple/`），清华保留为兜底、上海交大第三；
+- 涉及：主引擎/第二/第三引擎依赖安装、pip config 默认源、PyTorch 轮子依赖镜像、预处理补装、安装脚本 bat；
+- 冒烟测试断言同步更新，全部通过。
+### 修复：Krea2/FLUX.2 fp8 反量化成 float32 计算（DiT dtype: float32 根因）
+- **根因**：musubi `fp8_optimization_utils.py` 在 `use_scaled_mm=False` 时 `original_dtype = self.scale_weight.dtype`（固定 float32）→ fp8 权重每次前向反量化成 **float32** 计算 → 8GB 爆显存、每步极慢（日志 `DiT dtype: torch.float32`）。
+- **已修**：打幂等补丁改为 `original_dtype = x.dtype`（用输入计算 dtype，bf16/fp16 跟 mixed precision 走），scale 同步转 dtype；不再 float32 计算。
+- **本机 4070 实测**：显存占用从 ~7800MiB 降至 ~7071MiB（约 -700MB），训练正常计算不崩。
+### 修复：MiniMax-H3 视频训练 processor 联网加载失败
+- AI Toolkit 训练时从 `MiniMaxAI/MiniMax-H3` 在线加载 tokenizer/processor，国内连不上报 `Can't load processor ... processor_config.json`。
+- 已修：训练前自动下载 H3 的 `FL2VA/tokenizer`（4 文件）+ `FL2VA/processor`（7 文件）到本地（hf-mirror 直连+代理兜底），并给 `minimax_h3.py` 打幂等补丁读 `H3_REPO_DIR` 环境变量指向本地；不再在线拉 HF。
+- 验证：补丁幂等 + ai_toolkit venv py_compile + 冒烟测试全过。
 ---
 
 ## v0.9.23（2026-08-22）

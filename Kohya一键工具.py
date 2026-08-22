@@ -152,7 +152,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.24"
+APP_VERSION = "0.9.25"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -233,6 +233,7 @@ class TrainMonitor:
         self._last_time = None
         self.started_at = None
         self.last_activity = None
+        self.nan_detected = False   # 自愈：训练 loss 变成 NaN/Inf（数值异常）时置位
 
     def start(self, total=0):
         with self._lock:
@@ -325,8 +326,16 @@ class TrainMonitor:
                 if total and total > 0:
                     self.total = total
                 # loss：兼容 'loss:' 与 'loss='；同样 lr
-                ml = re.search(r"loss[=:]\s*([0-9.eE+-]+)", s)
+                ml = re.search(r"loss[=:]\s*([0-9.eE+-]+|nan|inf)", s, re.I)
                 loss = float(ml.group(1)) if ml else None
+                # 自愈：loss 为 NaN/Inf → 训练数值异常（常见 AMD RDNA2 + bf16 / 模型或数据问题）
+                if loss is not None and (loss != loss or abs(loss) == float("inf")):
+                    if not self.nan_detected:
+                        self.nan_detected = True
+                        try:
+                            stop_active_process()  # 自动停止，避免跑完 100% 卡在保存 checkpoint
+                        except Exception:
+                            pass
                 mr = re.search(r"lr[=:]\s*([0-9.eE+-]+)", s)
                 lr = float(mr.group(1)) if mr else None
                 # 速度：tqdm 的 'x.xx it/s' 或 'x.xx s/it'
@@ -377,6 +386,7 @@ class TrainMonitor:
                 "running": self.running,
                 "started_at": self.started_at, "last_activity": self.last_activity,
                 "phase": self.phase, "phase_label": self.phase_label,
+                "nan_detected": self.nan_detected,
             }
 
     def finish(self):
@@ -843,11 +853,11 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
     # 本地 wheel 已下载好，但安装时仍需从国内镜像解析 torch 的依赖（filelock/typing-extensions/
     # sympy/networkx/jinja2/fsspec 等）。部分用户网络下清华源不可达/超时，pip 会报
     # "Could not find a version that satisfies the requirement filelock (from versions: none)"。
-    # 因此按 清华 -> 阿里云 -> 上海交大 顺序自动回退，任一成功即完成；全部失败才报错。
+    # 因此按 阿里云 -> 清华 -> 上海交大 顺序自动回退，任一成功即完成；全部失败才报错。
     _install_ok = False
     for _idx_name, _idx_url in (
-            ("清华", "https://pypi.tuna.tsinghua.edu.cn/simple"),
             ("阿里云", "https://mirrors.aliyun.com/pypi/simple/"),
+            ("清华", "https://pypi.tuna.tsinghua.edu.cn/simple"),
             ("上海交大", "https://mirror.sjtu.edu.cn/pypi/web/simple")):
         env["PIP_INDEX_URL"] = _idx_url
         logf("[%s] 本地安装 PyTorch 轮子（依赖走%s镜像）…" % (label, _idx_name))
@@ -1008,8 +1018,8 @@ def install_kohya(logf=print):
                               cwd=kdir, env=_env2, logf=logf) == 0:
                     _ok2 = True
             if not _ok2:
-                for _idx2 in ("https://pypi.tuna.tsinghua.edu.cn/simple",
-                              "https://mirrors.aliyun.com/pypi/simple/"):
+                for _idx2 in ("https://mirrors.aliyun.com/pypi/simple/",
+                              "https://pypi.tuna.tsinghua.edu.cn/simple"):
                     if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
                                    "--index-url", _idx2, "pillow", "numpy"], cwd=kdir, env=_env2, logf=logf) == 0:
                         _ok2 = True
@@ -1025,7 +1035,7 @@ def install_kohya(logf=print):
             return kdir
         logf("[Kohya] 设置 pip 镜像源（清华/阿里 PyPI 双国内源，无需代理）…")
         subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
-                        "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
+                        "https://mirrors.aliyun.com/pypi/simple/"], capture_output=True, timeout=60)
         # 旧版本可能把已失效的 PyTorch 专用源写进全局配置；PyTorch 现在由本地 wheel 安装。
         subprocess.run([vpy, "-m", "pip", "config", "unset", "global.extra-index-url"],
                        capture_output=True, timeout=60)
@@ -1061,7 +1071,7 @@ def install_kohya(logf=print):
                 logf(f"[Kohya] 清理官方 PyTorch 源失败（继续使用已预装 Torch）：{_e}")
         logf("[Kohya] 安装全部依赖（官方无人值守模式，约 10-30 分钟）…")
         env = build_direct_env([os.path.dirname(git)])
-        env["PIP_INDEX_URL"] = "https://pypi.tuna.tsinghua.edu.cn/simple"
+        env["PIP_INDEX_URL"] = "https://mirrors.aliyun.com/pypi/simple/"
         env.pop("PIP_EXTRA_INDEX_URL", None)
         if run_stream([vpy, "setup\\setup_windows.py", "--headless"], cwd=kdir, env=env, logf=logf) != 0:
             raise RuntimeError("依赖安装失败，请向上滚动查看 pip 报错")
@@ -1311,7 +1321,7 @@ def install_musubi_engine(logf=print):
                  f"torchvision {MUSUBI_TORCHVISION_VERSION}+cu128 …")
         # 4) 普通依赖使用清华/阿里国内 PyPI；PyTorch 由下方双镜像 wheel 安装。
         subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
-                        "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
+                        "https://mirrors.aliyun.com/pypi/simple/"], capture_output=True, timeout=60)
         logf("[第二引擎] 升级 pip / setuptools / wheel …")
         if not _upgrade_pip(vpy, kdir, logf, label="第二引擎"):
             raise RuntimeError(
@@ -1616,20 +1626,13 @@ def _check_musubi_krea2_version(kdir, logf=print):
 
 
 def _patch_musubi_fp8_scaled_mm(kdir, logf=print):
-    """方案 A：给 musubi krea2_utils.py / flux2_utils.py 打幂等补丁，
-    fp8 的 use_scaled_mm 按 GPU 算力自动开启（SM 8.9+ / RTX 40/50 系硬件加速）。
-    否则 use_scaled_mm=False 时 fp8 反量化成 float32 计算（8GB 爆显存、300s/步）。"""
-    _block = ("# === KOHYA_TOOL_PATCH_BEGIN: fp8 scaled_mm 自动（SM 8.9+ 硬件加速） ===\n"
-              "import torch as _k2_patch_torch\n"
-              "try:\n"
-              "    _k2_cap = _k2_patch_torch.cuda.get_device_capability(0) if _k2_patch_torch.cuda.is_available() else (0, 0)\n"
-              "    _K2_USE_SCALED_MM = (_k2_cap[0] * 10 + _k2_cap[1]) >= 89\n"
-              "except Exception:\n"
-              "    _K2_USE_SCALED_MM = False\n"
-              "# === KOHYA_TOOL_PATCH_END ===\n")
+    """回退 v0.9.23 的错误补丁：Krea2/FLUX.2 的 fp8 量化是 per-channel，不兼容
+    use_scaled_mm=True（musubi 检查 scale_weight.ndim != 1 直接 raise，训练崩）。
+    这里把已打补丁的 musubi 文件撤销，恢复 use_scaled_mm=False（慢但能跑，如 v0.9.9）。
+    未打补丁的保持原样。"""
     _repls = [
-        ("apply_fp8_monkey_patch(dit, sd, use_scaled_mm=False)", "apply_fp8_monkey_patch(dit, sd, use_scaled_mm=_K2_USE_SCALED_MM)"),
-        ("apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)", "apply_fp8_monkey_patch(model, sd, use_scaled_mm=_K2_USE_SCALED_MM)"),
+        ("apply_fp8_monkey_patch(dit, sd, use_scaled_mm=_K2_USE_SCALED_MM)", "apply_fp8_monkey_patch(dit, sd, use_scaled_mm=False)"),
+        ("apply_fp8_monkey_patch(model, sd, use_scaled_mm=_K2_USE_SCALED_MM)", "apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)"),
     ]
     for _rel in ("krea2/krea2_utils.py", "flux_2/flux2_utils.py"):
         _fp = os.path.join(kdir, "musubi-tuner", "src", "musubi_tuner", _rel)
@@ -1638,23 +1641,20 @@ def _patch_musubi_fp8_scaled_mm(kdir, logf=print):
                 continue
             with open(_fp, "r", encoding="utf-8") as f:
                 src = f.read()
-            if "KOHYA_TOOL_PATCH_BEGIN" in src and "_K2_USE_SCALED_MM" in src:
-                continue
-            if "KOHYA_TOOL_PATCH_BEGIN" not in src:
-                _lines = src.split("\n")
-                _ins = 0
-                for _i, _l in enumerate(_lines):
-                    if _l.startswith(("import ", "from ")):
-                        _ins = _i + 1
-                _lines.insert(_ins, _block.rstrip("\n"))
-                src = "\n".join(_lines)
+            if "KOHYA_TOOL_PATCH_BEGIN" not in src or "_K2_USE_SCALED_MM" not in src:
+                continue  # 未打过错误补丁，无需处理
             for _o, _n in _repls:
                 src = src.replace(_o, _n)
+            _b = src.find("# === KOHYA_TOOL_PATCH_BEGIN: fp8 scaled_mm")
+            _e = src.find("# === KOHYA_TOOL_PATCH_END ===")
+            if _b >= 0 and _e >= 0:
+                _e2 = src.find("\n", _e) + 1
+                src = src[:_b] + src[_e2:]
             with open(_fp, "w", encoding="utf-8") as f:
                 f.write(src)
-            logf(f"[Krea2] 已给 musubi {_rel} 打 fp8 scaled_mm 自动补丁（SM 8.9+ 硬件加速）")
+            logf(f"[Krea2] 已回退 musubi {_rel} 的 fp8 scaled_mm 补丁（Krea2 fp8 不兼容 scaled_mm，恢复 use_scaled_mm=False）")
         except Exception as e:
-            logf(f"[Krea2] musubi fp8 补丁失败（忽略）: {e}")
+            logf(f"[Krea2] musubi fp8 回退失败（忽略）: {e}")
 
 
 def _patch_musubi_rdna2_fp16(kdir, logf=print):
@@ -1701,6 +1701,43 @@ def _patch_musubi_rdna2_fp16(kdir, logf=print):
             logf(f"[Krea2] musubi RDNA2 fp16 补丁失败（忽略）: {e}")
 
 
+def _patch_musubi_fp8_dequant_bf16(kdir, logf=print):
+    """修复：musubi fp8 在 use_scaled_mm=False 时把权重反量化成 float32 计算（慢+爆显存）。
+    打幂等补丁改为用输入计算 dtype（bf16/fp16，跟 mixed precision 走）。
+    NVIDIA 40/50 系 bf16、AMD RDNA2 fp16 均适用。"""
+    _mark = "# === KOHYA_TOOL_PATCH_BEGIN: fp8 dequant 用计算 dtype（避免 float32） ===\n"
+    _mark_end = "# === KOHYA_TOOL_PATCH_END ===\n"
+    _repls = [
+        ("original_dtype = self.scale_weight.dtype", "original_dtype = x.dtype  # 用输入计算 dtype（bf16/fp16），避免反量化到 float32"),
+        ("dequantized_weight = self.weight.to(original_dtype) * self.scale_weight", "dequantized_weight = self.weight.to(original_dtype) * self.scale_weight.to(original_dtype)"),
+        ("dequantized_weight = dequantized_weight * self.scale_weight", "dequantized_weight = dequantized_weight * self.scale_weight.to(original_dtype)"),
+    ]
+    _fp = os.path.join(kdir, "musubi-tuner", "src", "musubi_tuner", "modules", "fp8_optimization_utils.py")
+    try:
+        if not os.path.isfile(_fp):
+            return
+        with open(_fp, "r", encoding="utf-8") as f:
+            src = f.read()
+        if "KOHYA_TOOL_PATCH_BEGIN" in src and "x.dtype  # 用输入计算 dtype" in src:
+            return  # 已打补丁
+        # 移除旧标记（若有残留）
+        _b = src.find("# === KOHYA_TOOL_PATCH_BEGIN: fp8 dequant")
+        _e = src.find("# === KOHYA_TOOL_PATCH_END ===")
+        if _b >= 0 and _e >= 0:
+            _e2 = src.find("\n", _e) + 1
+            src = src[:_b] + src[_e2:]
+        # 在文件头插入标记
+        src = _mark + _mark_end + src
+        for _o, _n in _repls:
+            if _o in src:
+                src = src.replace(_o, _n, 1)
+        with open(_fp, "w", encoding="utf-8") as f:
+            f.write(src)
+        logf("[Krea2] 已给 musubi fp8 打「反量化用计算 dtype」补丁（bf16/fp16，不再 float32 计算）")
+    except Exception as e:
+        logf(f"[Krea2] musubi fp8 dequant 补丁失败（忽略）: {e}")
+
+
 def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
     """确保 Krea2/FLUX.2（musubi）的 Qwen3-VL-4B tokenizer 本地就绪并让 musubi 用本地目录。
 
@@ -1727,6 +1764,8 @@ def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
         _patch_musubi_fp8_scaled_mm(_kdir, logf)
         # RDNA2（RX 6000）fp16：musubi 默认强制 bf16，RDNA2 不原生支持 → 黑图；打补丁读 KREA2_FP16
         _patch_musubi_rdna2_fp16(_kdir, logf)
+        # fp8 反量化用计算 dtype（bf16/fp16），避免 musubi 反量化成 float32 慢+爆显存
+        _patch_musubi_fp8_dequant_bf16(_kdir, logf)
         try:
             _r = subprocess.run([mvpy, "-c", "import protobuf"], capture_output=True, text=True, timeout=60)
             if _r.returncode != 0:
@@ -1756,7 +1795,9 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         raise RuntimeError(
             "Krea2 训练缺少模型文件，请下载放入 models/krea2/ 文件夹：\n\n" + "\n".join(missing) +
             "\n\n（在软件里点「打开 Krea2 模型文件夹」，用浏览器打开上面的国内镜像直链下载后放进去）")
-    train_dir = dataset_train_dir(mode, params.get("project"))
+    # 画风/人物子模式：画风=train 目录，人物=train_character 目录（与预处理一致）
+    _sub_mode = params.get("at_sub_mode") or "character"
+    train_dir = dataset_train_dir("style" if _sub_mode == "style" else "character", params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
     # 数据集配置 + 独立缓存目录
@@ -1897,7 +1938,9 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         raise RuntimeError(
             "FLUX.2 训练缺少模型文件，请下载放入 models/flux2/ 文件夹：\n\n" + "\n".join(missing) +
             "\n\n（在软件里点「打开 FLUX.2 模型文件夹」，用应用内下载或浏览器打开上面的国内镜像直链下载后放进去）")
-    train_dir = dataset_train_dir(mode, params.get("project"))
+    # 画风/人物子模式：画风=train 目录，人物=train_character 目录（与预处理一致）
+    _sub_mode = params.get("at_sub_mode") or "character"
+    train_dir = dataset_train_dir("style" if _sub_mode == "style" else "character", params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
     # 数据集配置 + 独立缓存目录
@@ -2572,8 +2615,8 @@ def install_ai_toolkit_engine(logf=print):
                       "numpy==2.5.2\nscipy==1.18.0\n")
         logf("[第三引擎] 安装 ai-toolkit 依赖（清华/阿里国内 PyPI，不访问 GitHub，锁定兼容版本）…")
         if run_stream([vpy, "-m", "pip", "install", "--upgrade", "--no-input", "--retries", "10", "--timeout", "120",
-                       "--index-url", "https://pypi.tuna.tsinghua.edu.cn/simple",
-                       "--extra-index-url", "https://mirrors.aliyun.com/pypi/simple/",
+                       "--index-url", "https://mirrors.aliyun.com/pypi/simple/",
+                       "--extra-index-url", "https://pypi.tuna.tsinghua.edu.cn/simple",
                        "-c", _constraints, "-r", _req_tmp], cwd=at_dir, env=env, logf=logf) != 0:
             raise RuntimeError("ai-toolkit 依赖安装失败（国内 PyPI 镜像均不可达或依赖冲突）")
         # 验证
@@ -2839,6 +2882,81 @@ def _find_latest_safetensors(root):
     return best
 
 
+H3_PROCESSOR_FILES = {
+    "FL2VA/tokenizer": ["merges.txt", "tokenizer.json", "tokenizer_config.json", "vocab.json"],
+    "FL2VA/processor": ["chat_template.json", "merges.txt", "preprocessor_config.json",
+                        "tokenizer.json", "tokenizer_config.json", "video_preprocessor_config.json", "vocab.json"],
+}
+
+
+def _ensure_h3_processor_local(logf=print):
+    """确保 MiniMax-H3 的 FL2VA tokenizer/processor 本地就绪（避免训练时在线拉 HF 失败）。
+    从 hf-mirror 下载（直连 + 代理兜底），返回本地 repo 目录。"""
+    repo_dir = os.path.join(data_sub("h3"), "MiniMax-H3")
+    _missing = []
+    for _sub, _files in H3_PROCESSOR_FILES.items():
+        for _fn in _files:
+            _dst = os.path.join(repo_dir, _sub, _fn)
+            if not (os.path.isfile(_dst) and os.path.getsize(_dst) > 0):
+                _missing.append((_sub, _fn, _dst))
+    if not _missing:
+        return repo_dir
+    logf("[视频] 准备 MiniMax-H3 tokenizer/processor（国内镜像下载）…")
+    _base = "https://hf-mirror.com/MiniMaxAI/MiniMax-H3/resolve/main/"
+    _openers = [
+        ("直连", urllib.request.build_opener(urllib.request.ProxyHandler({}))),
+        ("代理", urllib.request.build_opener(urllib.request.ProxyHandler(urllib.request.getproxies()))),
+    ]
+    for _sub, _fn, _dst in _missing:
+        os.makedirs(os.path.dirname(_dst), exist_ok=True)
+        _url = _base + _sub + "/" + _fn
+        _ok = False
+        for _label, _opener in _openers:
+            try:
+                _req = urllib.request.Request(_url, headers={"User-Agent": "Mozilla/5.0"})
+                with _opener.open(_req, timeout=30) as _r:
+                    _data = _r.read()
+                with open(_dst, "wb") as _f:
+                    _f.write(_data)
+                _ok = True
+                break
+            except Exception:
+                continue
+        if not _ok:
+            logf(f"[视频] H3 {_sub}/{_fn} 下载失败（忽略，仍尝试在线加载）")
+    return repo_dir
+
+
+def _patch_minimax_h3_processor(kdir, logf=print):
+    """给 ai-toolkit minimax_h3.py 打幂等补丁：ORIGINAL_REPO 读 H3_REPO_DIR 环境变量（本地 processor）。"""
+    _fp = os.path.join(kdir, "ai-toolkit", "extensions_built_in", "diffusion_models", "minimax_h3", "minimax_h3.py")
+    try:
+        if not os.path.isfile(_fp):
+            return
+        with open(_fp, "r", encoding="utf-8") as f:
+            src = f.read()
+        if "KOHYA_TOOL_PATCH_BEGIN" in src and "H3_REPO_DIR" in src:
+            return
+        _m = 'ORIGINAL_REPO = "MiniMaxAI/MiniMax-H3"'
+        if _m not in src:
+            return
+        _block = (
+            _m + "\n"
+            "# === KOHYA_TOOL_PATCH_BEGIN: H3 processor 本地化（国内离线） ===\n"
+            "import os as _k3_patch_os\n"
+            "_H3_REPO = _k3_patch_os.environ.get(\"H3_REPO_DIR\", \"\").strip()\n"
+            "if _H3_REPO:\n"
+            "    ORIGINAL_REPO = _H3_REPO\n"
+            "# === KOHYA_TOOL_PATCH_END ===\n"
+        )
+        src = src.replace(_m, _block, 1)
+        with open(_fp, "w", encoding="utf-8") as f:
+            f.write(src)
+        logf("[视频] 已给 ai-toolkit minimax_h3.py 打 processor 本地化补丁")
+    except Exception as e:
+        logf(f"[视频] H3 processor 补丁失败（忽略）: {e}")
+
+
 def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from=None, progress=None):
     """MiniMax H3 视频 LoRA 训练（第三引擎 AI Toolkit，T2V）。"""
     params = params or {}
@@ -2879,6 +2997,13 @@ def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from
     logf(f"[视频] 显存 {vram_gb if vram_gb else '?'}GB（推荐 24GB+）| bf16 + 梯度检查点 + 文本嵌入缓存")
     env = build_direct_env()
     env["HF_ENDPOINT"] = "https://hf-mirror.com"
+    # 自愈：MiniMax-H3 processor/tokenizer 本地化（避免训练时在线拉 HF 失败）
+    try:
+        _h3repo = _ensure_h3_processor_local(logf)
+        env["H3_REPO_DIR"] = _h3repo
+        _patch_minimax_h3_processor(kdir, logf)
+    except Exception as e:
+        logf(f"[视频] H3 processor 本地化失败（忽略，仍尝试在线）: {e}")
     if progress is not None:
         try:
             progress.set_total(steps)
@@ -3150,8 +3275,8 @@ def _ensure_preprocess_deps(vpy, kdir, logf=print, force=False):
                           cwd=kdir, env=env, logf=logf) == 0:
                 _ok = True
         if not _ok:
-            for _idx in ("https://pypi.tuna.tsinghua.edu.cn/simple",
-                         "https://mirrors.aliyun.com/pypi/simple/"):
+            for _idx in ("https://mirrors.aliyun.com/pypi/simple/",
+                         "https://pypi.tuna.tsinghua.edu.cn/simple"):
                 if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
                                "--index-url", _idx, "pillow==12.3.0", "numpy==2.1.3"],
                               cwd=kdir, env=env, logf=logf) == 0:
@@ -3552,10 +3677,10 @@ def _upgrade_pip(vpy, cwd, logf=print, label="环境"):
         return False
     common = [vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q",
               "--retries", "10", "--timeout", "120"]
-    for idx, source in enumerate(("https://pypi.tuna.tsinghua.edu.cn/simple",
-                                  "https://mirrors.aliyun.com/pypi/simple/"), 1):
+    for idx, source in enumerate(("https://mirrors.aliyun.com/pypi/simple/",
+                                  "https://pypi.tuna.tsinghua.edu.cn/simple"), 1):
         if idx > 1:
-            logf(f"[{label}] 清华镜像失败，切换备用镜像（阿里）重试…")
+            logf(f"[{label}] 阿里云镜像失败，切换备用镜像（清华）重试…")
         if run_stream(common + ["--index-url", source], cwd=cwd,
                       env=build_direct_env(), logf=logf) == 0:
             return True
@@ -3745,9 +3870,9 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
         return True
     logf("[环境] 训练环境需要补装/校正依赖（PIL/numpy/transformers/huggingface_hub/toml 等），正在处理…")
     subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
-                    "https://pypi.tuna.tsinghua.edu.cn/simple"], capture_output=True, timeout=60)
+                    "https://mirrors.aliyun.com/pypi/simple/"], capture_output=True, timeout=60)
     env = build_direct_env()
-    env["PIP_INDEX_URL"] = "https://pypi.tuna.tsinghua.edu.cn/simple"
+    env["PIP_INDEX_URL"] = "https://mirrors.aliyun.com/pypi/simple/"
     env.pop("PIP_EXTRA_INDEX_URL", None)
     _all_wheels = _bundled_pip_wheels()
     wheels = _wheels_for_python(_all_wheels, vpy)
@@ -3772,7 +3897,7 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
             "numpy==2.1.3", "scipy==1.15.3", "protobuf==5.29.5"]   # 兼容 Python 3.10-3.12、TensorFlow/W&B，避免旧 SciPy 引用 numpy.Inf
     ok = False
     for _round in range(2):
-        for _idx in ("https://pypi.tuna.tsinghua.edu.cn/simple", "https://mirrors.aliyun.com/pypi/simple/"):
+        for _idx in ("https://mirrors.aliyun.com/pypi/simple/", "https://pypi.tuna.tsinghua.edu.cn/simple"):
             if run_stream([vpy, "-m", "pip", "install", "--upgrade", "--no-input", "--retries", "10", "--timeout", "120",
                            "--index-url", _idx] + pkgs, cwd=kdir, env=env, logf=logf) == 0:
                 ok = True
@@ -3916,7 +4041,7 @@ def run_pip_in_venv(venv_dir, args, logf=print):
     cmd = [py, "-m", "pip", "install", "--no-cache-dir", "--retries", "10", "--timeout", "120"] + args
     env = build_direct_env()
     env.setdefault("PIP_NO_INPUT", "1")
-    env.setdefault("PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple")
+    env.setdefault("PIP_INDEX_URL", "https://mirrors.aliyun.com/pypi/simple/")
     return run_stream(cmd, env=env, logf=logf)
 
 

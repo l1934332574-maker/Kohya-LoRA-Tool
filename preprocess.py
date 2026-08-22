@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Kohya-SS LoRA 数据集预处理脚本（Windows / 通用）
@@ -422,8 +422,8 @@ def _ensure_onnx(py, logf=print):
         _env["NO_PROXY"] = "*"
         r = subprocess.run([py, "-m", "pip", "install", "--no-input", "--retries", "10",
                             "--timeout", "120", "--index-url",
-                            "https://pypi.tuna.tsinghua.edu.cn/simple",
-                            "--extra-index-url", "https://mirrors.aliyun.com/pypi/simple/",
+                            "https://mirrors.aliyun.com/pypi/simple/",
+                            "--extra-index-url", "https://pypi.tuna.tsinghua.edu.cn/simple",
                             "onnxruntime", "onnx"], env=_env,
                            capture_output=True, text=True, timeout=600)
         if r.returncode == 0 and _has_wd14_deps(py):

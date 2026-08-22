@@ -723,22 +723,24 @@ class App:
                                        text_color="#ffffff", font=ui_font(FONT_BODY),
                                        command=self.cmd_dl_h3_models)
         self.btn_h3_dl.pack(side="left", padx=(4, 4))
-        self.btn_at_install = ctk.CTkButton(self.h3_row, text="⚙ 安装第三引擎", width=108, height=30,
+        # 第二行：引擎/字幕操作（避免 8 个按钮挤一行被挤出窗口）
+        self.h3_row2 = ctk.CTkFrame(top, fg_color="transparent")
+        self.btn_at_install = ctk.CTkButton(self.h3_row2, text="⚙ 安装第三引擎", width=108, height=30,
                                             fg_color="transparent", hover_color="#252a36", border_width=1,
                                             border_color=ACC, text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
                                             command=self.cmd_install_at)
         self.btn_at_install.pack(side="left", padx=(4, 4))
-        self.btn_at_import = ctk.CTkButton(self.h3_row, text="📂 导入已装环境", width=116, height=30,
+        self.btn_at_import = ctk.CTkButton(self.h3_row2, text="📂 导入已装环境", width=116, height=30,
                                            fg_color=CARD2, hover_color="#343a46", border_width=1, border_color=BORDER,
                                            text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
                                            command=self.cmd_import_at_env)
         self.btn_at_import.pack(side="left", padx=(4, 4))
-        self.btn_h3_captions = ctk.CTkButton(self.h3_row, text="一键生成占位字幕", width=120, height=30,
+        self.btn_h3_captions = ctk.CTkButton(self.h3_row2, text="一键生成占位字幕", width=120, height=30,
                                              fg_color=CARD2, hover_color="#343a46", border_width=1, border_color=BORDER,
                                              text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
                                              command=self.cmd_gen_h3_captions)
         self.btn_h3_captions.pack(side="left", padx=(4, 4))
-        self.btn_h3_caption_ai = ctk.CTkButton(self.h3_row, text="✨ AI 自动描述", width=112, height=30,
+        self.btn_h3_caption_ai = ctk.CTkButton(self.h3_row2, text="✨ AI 自动描述", width=112, height=30,
                                                fg_color=CARD2, hover_color="#343a46", border_width=1,
                                                border_color=BORDER, text_color=TXT, corner_radius=6,
                                                font=ui_font(FONT_BODY),
@@ -1724,7 +1726,7 @@ class App:
             pass
         # Qwen-Image / Z-Image：显示「画风/人物」训练类型切换；其他模式隐藏
         try:
-            _is_at = self.mode in ("qwen_image", "zimage")
+            _is_at = self.mode in ("qwen_image", "zimage", "krea2", "flux2")
             if _is_at:
                 self.at_sub_row.pack(fill="x", padx=22, pady=(0, 6))
             else:
@@ -1734,12 +1736,15 @@ class App:
         try:
             if self.mode == "video":
                 _hint = core.TRIGGER_HINT_VIDEO
-            elif self.mode in ("qwen_image", "zimage"):
-                _hint = core.TRIGGER_HINT_STYLE if self._at_sub_label() == "style" else core.TRIGGER_HINT_AT
-            elif self.mode == "krea2":
-                _hint = core.TRIGGER_HINT_KREA2
-            elif self.mode == "flux2":
-                _hint = core.TRIGGER_HINT_FLUX2
+            elif self.mode in ("qwen_image", "zimage", "krea2", "flux2"):
+                if self._at_sub_label() == "style":
+                    _hint = core.TRIGGER_HINT_STYLE
+                elif self.mode in ("qwen_image", "zimage"):
+                    _hint = core.TRIGGER_HINT_AT
+                elif self.mode == "krea2":
+                    _hint = core.TRIGGER_HINT_KREA2
+                else:
+                    _hint = core.TRIGGER_HINT_FLUX2
             elif self.mode == "character":
                 _hint = core.TRIGGER_HINT_CHARACTER
             else:
@@ -1801,9 +1806,17 @@ class App:
                 if self.mode == "video":
                     self._refresh_h3_status()
                     self.h3_row.pack(fill="x", pady=(8, 0))
+                    try:
+                        self.h3_row2.pack(fill="x", pady=(2, 0))
+                    except Exception:
+                        pass
                 else:
                     try:
                         self.h3_row.pack_forget()
+                    except Exception:
+                        pass
+                    try:
+                        self.h3_row2.pack_forget()
                     except Exception:
                         pass
             except Exception:
@@ -2964,7 +2977,11 @@ class App:
                            params=params, vram_gb=vram, resume_from=resume, progress=self._train_mon)
             self._log("[OK] 训练完成，模型在 output 文件夹")
         except core.StopRequested:
-            self._log("[停止] 训练已手动停止，进度快照已保留，下次可断点续训")
+            if getattr(self._train_mon, "nan_detected", False):
+                self._log("[停止] 检测到训练 loss 为 NaN/Inf（数值异常），已自动停止，避免卡在保存。"
+                         "常见原因：AMD RDNA2（RX 6000）+ bf16、模型/数据问题。请更新到最新版或检查数据。")
+            else:
+                self._log("[停止] 训练已手动停止，进度快照已保留，下次可断点续训")
         except Exception as e:
             self._log(f"[ERROR] 训练失败：{e}")
             traceback.print_exc()

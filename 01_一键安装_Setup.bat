@@ -153,7 +153,7 @@ if not errorlevel 1 (
 
 rem ================= 设置镜像 =================
 echo [第 4 步] 设置 pip 清华 pypi + 阿里 pytorch 镜像（无需代理）…
-"%KOHYA_DIR%\venv\Scripts\python.exe" -m pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+"%KOHYA_DIR%\venv\Scripts\python.exe" -m pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
 "%KOHYA_DIR%\venv\Scripts\python.exe" -m pip config set global.extra-index-url https://mirrors.aliyun.com/pytorch-wheels/cu128
 
 rem ================= 安装全部依赖 =================

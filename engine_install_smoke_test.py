@@ -410,7 +410,7 @@ def test_preprocess_deps(base: Path):
          patch.object(core, "_bundled_pip_wheels", return_value=[]), \
          patch.object(core, "_wheels_for_python", return_value=[]):
         assert core._ensure_preprocess_deps(vpy, kdir, logs.append) is True
-    assert any("tuna.tsinghua.edu.cn" in x for c in install_cmd["seen"] for x in c), install_cmd["seen"]
+    assert any("mirrors.aliyun.com" in x for c in install_cmd["seen"] for x in c), install_cmd["seen"]
 
     # 2.5) force=True：即使快速校验通过（-c 可 import），也强制补装一轮
     force_install = {"n": 0}
@@ -553,8 +553,8 @@ def test_preinstall_torch_mirror_fallback(base: Path):
                                     cu="cu128", label="第二引擎", force=True)
     assert ok is True
     assert installs["n"] == 2, installs
-    assert installs["indexes"][0] == "https://pypi.tuna.tsinghua.edu.cn/simple", installs
-    assert installs["indexes"][1] == "https://mirrors.aliyun.com/pypi/simple/", installs
+    assert installs["indexes"][0] == "https://mirrors.aliyun.com/pypi/simple/", installs
+    assert installs["indexes"][1] == "https://pypi.tuna.tsinghua.edu.cn/simple", installs
     assert any("自动切换下一镜像" in ln for ln in logs), logs
 
     # 场景 B：三个镜像全部失败 -> 抛明确错误（不再笼统报「国内双镜像下载失败」）
@@ -579,7 +579,7 @@ def test_preinstall_torch_mirror_fallback(base: Path):
             assert "本地安装 PyTorch 轮子失败" in str(e), e
     assert installs2["n"] == 3, installs2  # 清华/阿里/上海交大各试一次
     assert installs2["indexes"][2] == "https://mirror.sjtu.edu.cn/pypi/web/simple", installs2
-    assert installs2["indexes"][0] == "https://pypi.tuna.tsinghua.edu.cn/simple", installs2
+    assert installs2["indexes"][0] == "https://mirrors.aliyun.com/pypi/simple/", installs2
 
     print("PREINSTALL_TORCH_MIRROR_FALLBACK_OK")
 

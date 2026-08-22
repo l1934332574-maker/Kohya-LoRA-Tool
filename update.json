@@ -1,6 +1,6 @@
 {
-  "version": "v0.9.24",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.24/Setup.exe",
+  "version": "v0.9.25",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.25/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.9.24：修复 AMD RX 6000（RDNA2）训练 LoRA 出黑图，自动改用 fp16 混合精度。"
+  "notes": "v0.9.25：修复 Krea2/FLUX.2 fp8 反量化 float32（DiT float32 根因）；Krea2/FLUX.2 支持画风/人物模式；MiniMax-H3 processor 本地化；视频 UI 布局修复；pip 默认阿里云；loss=NaN 自愈。"
 }
