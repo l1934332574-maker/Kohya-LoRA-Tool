@@ -3004,12 +3004,18 @@ class App:
         elif params.get("mode") == "video":
             if not self._ensure_video_ready():
                 return
+        elif params.get("mode") == "krea2":
+            if not self._ensure_krea2_ready():
+                return
+        elif params.get("mode") == "flux2":
+            if not self._ensure_flux2_ready():
+                return
         else:
             if not params["base_model"]:
                 messagebox.showwarning(core.APP_NAME, "请先选择底模（步骤③）。")
                 return
         _need_trigger = (self.mode == "character") or \
-            (self.mode in ("qwen_image", "zimage") and self._at_sub_label() == "character")
+            (self.mode in ("qwen_image", "zimage", "krea2", "flux2") and self._at_sub_label() == "character")
         if _need_trigger and not params["trigger"]:
             messagebox.showwarning(core.APP_NAME, "人物模式建议填写 Trigger 触发词（步骤②）。")
             return
@@ -3486,6 +3492,31 @@ class App:
                 self.cmd_dl_krea2_models()
             return False
         return True
+
+    def _ensure_flux2_ready(self):
+        """FLUX.2 模式训练前检查：第二引擎已装 + FLUX.2 模型齐全。返回是否可继续。"""
+        try:
+            ok, detail, _ = core.musubi_engine_status()
+        except Exception as e:
+            ok, detail = False, str(e)
+        if not ok:
+            messagebox.showwarning(core.APP_NAME,
+                                   "第二训练引擎未安装。\n请先点左侧「②' 第二引擎(可选)」安装。\n\n" + detail)
+            return False
+        missing = core.flux2_missing_models()
+        if missing:
+            d = core.flux2_models_dir()
+            if messagebox.askyesno(core.APP_NAME,
+                    "FLUX.2 模式还缺少模型文件，需要先下载放入 models/flux2/：\n\n" + "\n".join(missing) +
+                    f"\n\n是否现在打开「应用内下载」对话框？（带断点续传，下完自动识别）"):
+                try:
+                    os.makedirs(d, exist_ok=True)
+                except Exception:
+                    pass
+                self.cmd_dl_flux2_models()
+            return False
+        return True
+
 
     def _ask_fix_cpu_torch(self, params):
         """训练前自愈：NVIDIA 卡 + torch 为 CPU 版时，询问是否自动重装 cu128（须主线程调用）。

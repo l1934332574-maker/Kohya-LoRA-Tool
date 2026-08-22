@@ -33,6 +33,9 @@
 - AI Toolkit 训练时从 `MiniMaxAI/MiniMax-H3` 在线加载 tokenizer/processor，国内连不上报 `Can't load processor ... processor_config.json`。
 - 已修：训练前自动下载 H3 的 `FL2VA/tokenizer`（4 文件）+ `FL2VA/processor`（7 文件）到本地（hf-mirror 直连+代理兜底），并给 `minimax_h3.py` 打幂等补丁读 `H3_REPO_DIR` 环境变量指向本地；不再在线拉 HF。
 - 验证：补丁幂等 + ai_toolkit venv py_compile + 冒烟测试全过。
+### 修复：Krea2/FLUX.2 左侧全绿仍提示「请先选择底模」
+- 根因：`cmd_one_click_train` 只把 qwen_image/zimage/video 排除在底模检查外，Krea2/FLUX.2 走 else 分支强制检查 `base_model`（它们用 raw/dit，无底模）→ 误报。
+- 已修：Krea2/FLUX.2 改为调用 `_ensure_krea2_ready` / 新增 `_ensure_flux2_ready`（检查第二引擎 + 模型齐全）；人物子模式 trigger 检查同步覆盖 Krea2/FLUX.2。
 ---
 
 ## v0.9.23（2026-08-22）
