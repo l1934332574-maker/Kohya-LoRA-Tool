@@ -177,22 +177,40 @@ def _md5_file(path):
 
 
 def find_wd14_tagger():
-    """在 kohya_ss（含 sd-scripts）里查找官方 WD14 打标脚本。"""
+    """在 kohya_ss（含 sd-scripts）里查找官方 WD14 打标脚本。
+
+    兼容 kohya_dir.txt 指向 kohya_ss 根、或数据根（KohyaLoraTool_data）、或为空三种情况；
+    找不到返回 None（调用方打印候选路径便于排查，2026-08-22 补全）。
+    """
     cands = []
     kit = os.path.dirname(os.path.abspath(__file__))
     for base in (kit, os.path.expanduser("~")):
         cands.append(os.path.join(base, "kohya_ss", "finetune", "tag_images_by_wd14_tagger.py"))
         cands.append(os.path.join(base, "kohya_ss", "sd-scripts", "finetune", "tag_images_by_wd14_tagger.py"))
     kdf = os.path.join(kit, "kohya_dir.txt")
+    kd = None
     if os.path.isfile(kdf):
         try:
             with open(kdf, "r", encoding="utf-8") as f:
-                kd = f.read().strip().lstrip("\ufeff").strip()
-            cands.append(os.path.join(kd, "finetune", "tag_images_by_wd14_tagger.py"))
-            cands.append(os.path.join(kd, "sd-scripts", "finetune", "tag_images_by_wd14_tagger.py"))
+                kd = f.read().strip().lstrip("\ufeff").strip() or None
         except Exception:
-            pass
+            kd = None
+    # kd 可能是 kohya_ss 根（正常），也可能是数据根（KohyaLoraTool_data）——两种都试
+    for base in ((kd, os.path.join(kd, "kohya_ss")) if kd else ()):
+        cands.append(os.path.join(base, "finetune", "tag_images_by_wd14_tagger.py"))
+        cands.append(os.path.join(base, "sd-scripts", "finetune", "tag_images_by_wd14_tagger.py"))
+    # 兜底：跟随安装位置的数据目录 / APPDATA（打包版数据在安装目录同级 KohyaLoraTool_data）
+    for root in (os.path.join(os.path.dirname(kit), "KohyaLoraTool_data"),
+                 os.path.join(os.environ.get("APPDATA", ""), "KohyaLoraTool")):
+        base = os.path.join(root, "kohya_ss")
+        cands.append(os.path.join(base, "finetune", "tag_images_by_wd14_tagger.py"))
+        cands.append(os.path.join(base, "sd-scripts", "finetune", "tag_images_by_wd14_tagger.py"))
+    # 去重后返回第一个存在的
+    seen = set()
     for p in cands:
+        if not p or p in seen:
+            continue
+        seen.add(p)
         if os.path.isfile(p):
             return p
     return None
@@ -969,7 +987,7 @@ def main():
         else:
             _fill_missing_captions(output_dir, DEFAULT_CHARACTER_CAPTION)
             if not tagger:
-                print("[WARN] 未找到 kohya 官方 WD14 打标脚本，缺少标签的图片使用了兜底 caption。")
+                print("[WARN] 未找到 kohya 官方 WD14 打标脚本，缺少标签的图片使用了兜底 caption。/n       （已检查：安装目录/用户目录 kohya_ss、kohya_dir.txt 指向目录、安装目录同级 KohyaLoraTool_data/kohya_ss、%APPDATA%/KohyaLoraTool/kohya_ss 下的 finetune 与 sd-scripts/finetune；若确认脚本存在，请检查 kohya_dir.txt 路径）")
         # 还原原图自带的 .txt（完整保留用户标签）
         for stem, cap in user_captions.items():
             if cap.strip():
@@ -1007,7 +1025,7 @@ def main():
         else:
             _fill_missing_captions(output_dir, DEFAULT_CAPTION)
             if not tagger:
-                print("[WARN] 未找到 kohya 官方 WD14 打标脚本，缺少标签的图片使用了兜底 caption。")
+                print("[WARN] 未找到 kohya 官方 WD14 打标脚本，缺少标签的图片使用了兜底 caption。/n       （已检查：安装目录/用户目录 kohya_ss、kohya_dir.txt 指向目录、安装目录同级 KohyaLoraTool_data/kohya_ss、%APPDATA%/KohyaLoraTool/kohya_ss 下的 finetune 与 sd-scripts/finetune；若确认脚本存在，请检查 kohya_dir.txt 路径）")
         # 还原原图自带 txt（过滤人物标签）
         for stem, cap in user_captions.items():
             if cap.strip():

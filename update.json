@@ -1,6 +1,6 @@
 {
-  "version": "v0.9.26",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.26/Setup.exe",
+  "version": "v0.9.27",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.27/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.9.26：修复 Krea2/FLUX.2 左侧全绿仍提示「请先选择底模」的误报。"
+  "notes": "v0.9.27：Krea2/FLUX.2 8G 显存大幅提速（INT8 量化实测快约 2.6 倍）；RDNA2 自动切 fp16；高级参数新增优化器下拉；修复「卡在训练前 / accelerator device: cpu」（残留 accelerate 配置自动修复）。"
 }

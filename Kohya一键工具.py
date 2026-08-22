@@ -31,6 +31,7 @@ import tempfile
 import webbrowser
 import urllib.request
 import ctypes
+from collections import deque
 
 # ---------- 全局隐藏子进程窗口 ----------
 # GUI 程序没有控制台窗口，直接 subprocess 启动的子进程（git/python/nvidia-smi/powershell 等）
@@ -152,7 +153,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.26"
+APP_VERSION = "0.9.27"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -178,6 +179,7 @@ def _lerp_color(c1, c2, t):
 from kohya_core.configs import *  # noqa: E402,F401（模式注册表配置）
 from kohya_core import KIT_DIR, KOHYA_DIR_FILE  # noqa: E402
 from kohya_core.utils import *  # noqa: E402,F401（通用工具函数）
+from kohya_core.musubi_quant_patch import patch_musubi_quant_base  # noqa: E402（INT8/NF4 量化底模补丁）
 from kohya_core.paths import *  # noqa: E402,F401（路径与项目管理）
 from kohya_core.gpu import *  # noqa: E402,F401（显卡检测）
 
@@ -1499,7 +1501,80 @@ def write_musubi_dataset_config(image_dir, cache_dir, config_path, resolution=10
     return image_dir
 
 
-def _accelerate_launch_cmd(vpy, extra_args=()):
+def _accelerate_config_path():
+    """accelerate 默认配置文件位置（launch 时若存在会覆盖 CLI 默认值）。"""
+    p = os.environ.get("ACCELERATE_CONFIG_FILE", "")
+    if p and os.path.isfile(p):
+        return p
+    return os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "accelerate", "default_config.yaml")
+
+
+def _accelerate_config_use_cpu():
+    """残留 accelerate 默认配置是否强制 CPU（use_cpu=true）。
+
+    根因：accelerate launch 读 ~/.cache/huggingface/accelerate/default_config.yaml，
+    若 use_cpu=true 会设置 ACCELERATE_USE_CPU=true → Accelerator().device=cpu →
+    caching latents / 训练全程 CPU（表现为“卡在训练前、无报错、CPU/GPU 无负荷”），
+    而 torch 预检（不走 accelerate）却正常 —— 与本机多次用户反馈完全吻合。"""
+    p = _accelerate_config_path()
+    if not os.path.isfile(p):
+        return False
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            raw = f.read()
+    except Exception:
+        return False
+    return '"use_cpu": true' in raw or "'use_cpu': true" in raw or "use_cpu: true" in raw
+
+
+def _neutralize_accelerate_cpu_config(logf=print):
+    """把残留 accelerate 配置里的 use_cpu=true 改回 false。返回是否修复成功。"""
+    p = _accelerate_config_path()
+    if not os.path.isfile(p):
+        return False
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            raw = f.read()
+    except Exception:
+        return False
+    if not ('"use_cpu": true' in raw or "'use_cpu': true" in raw or "use_cpu: true" in raw):
+        return False
+    fixed = raw.replace('"use_cpu": true', '"use_cpu": false')
+    fixed = fixed.replace("'use_cpu': true", "'use_cpu': false")
+    fixed = fixed.replace("use_cpu: true", "use_cpu: false")
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(fixed)
+    except Exception as e:
+        logf(f"[加速器] ⚠ 自动修复 accelerate 配置失败（{e}）：{p}")
+        return False
+    logf(f"[加速器] 已自动修复残留 accelerate 配置 use_cpu=true→false：{p}")
+    return True
+
+
+def _probe_accelerate_device(vpy, logf=print, timeout=180):
+    """用与训练相同的 accelerate launch 路径真实探测 Accelerator 设备。
+
+    返回设备字符串（'cpu' / 'cuda:0' 等）；探测失败返回 ''（调用方不阻断）。"""
+    tmp = os.path.join(tempfile.gettempdir(), "kohya_accel_probe.py")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("from accelerate import Accelerator\nprint('ACCELDEVICE', Accelerator().device)\n")
+        r = subprocess.run(
+            [vpy, "-m", "accelerate.commands.launch", "--num_processes", "1", "--num_machines", "1",
+             "--num_cpu_threads_per_process", "1", tmp],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, env=build_direct_env(),
+        )
+        m = re.search(r"ACCELDEVICE\s+([A-Za-z0-9:_]+)", (r.stdout or "") + (r.stderr or ""))
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return ""
+
+
+def _accelerate_launch_cmd(vpy, extra_args=(), logf=print):
     """通过当前训练环境的 Python 模块启动 Accelerate，避免 accelerate.exe 入口串到系统 Python。
 
     Windows 上 venv 的 Scripts\accelerate.exe 可能是迁移前生成的旧脚本，或被系统
@@ -1524,7 +1599,22 @@ def _accelerate_launch_cmd(vpy, extra_args=()):
         log_py = lines[-1]
         if os.path.normcase(os.path.abspath(log_py)) != os.path.normcase(os.path.abspath(vpy)):
             raise RuntimeError(f"Accelerate 与训练 Python 不属于同一环境：\n训练 Python：{vpy}\nAccelerate Python：{log_py}")
-    return [vpy, "-m", "accelerate.commands.launch"] + list(extra_args)
+    # 自愈：残留 accelerate 配置若 use_cpu=true，会让整个训练（含 caching latents）跑 CPU，
+    # 表现为“卡在训练前、无报错、CPU/GPU 无负荷”，而 torch 预检（不走 accelerate）却正常。
+    # 命中即自动改回 false，并用与训练相同的 accelerate launch 路径复核设备。
+    try:
+        if _accelerate_config_use_cpu():
+            logf("[加速器] 检测到残留 accelerate 配置 use_cpu=true（会导致训练全程 CPU、卡在训练前），正在自动修复…")
+            if _neutralize_accelerate_cpu_config(logf):
+                _dev = _probe_accelerate_device(vpy, logf)
+                if _dev == "cpu":
+                    logf("[加速器] ❌ 修复后 accelerate 仍为 CPU。请停止训练，检查 "
+                         "~/.cache/huggingface/accelerate/default_config.yaml 的 use_cpu 是否为 false，"
+                         "或重装训练内核（显卡无 CUDA/ROCm 时 CPU 训练本不可用）。")
+    except Exception:
+        pass
+    # 显式单进程单机：避免残留配置里的多卡/分布式设置意外生效
+    return [vpy, "-m", "accelerate.commands.launch", "--num_processes", "1", "--num_machines", "1"] + list(extra_args)
 
 
 def _amd_is_gfx103x():
@@ -1766,6 +1856,8 @@ def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
         _patch_musubi_rdna2_fp16(_kdir, logf)
         # fp8 反量化用计算 dtype（bf16/fp16），避免 musubi 反量化成 float32 慢+爆显存
         _patch_musubi_fp8_dequant_bf16(_kdir, logf)
+        # INT8/NF4 量化底模补丁（幂等；Krea2/FLUX.2 共用；结构变化自动跳过，不影响原 fp8 流程）
+        patch_musubi_quant_base(_kdir, logf)
         try:
             _r = subprocess.run([mvpy, "-c", "import protobuf"], capture_output=True, text=True, timeout=60)
             if _r.returncode != 0:
@@ -1783,12 +1875,15 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     模型需放入 models/krea2/（国内镜像下载，见 krea2_missing_models）。
     """
     params = params or {}
+    _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     ok, detail, mvpy = musubi_engine_status()
     if not ok:
         raise RuntimeError("第二训练引擎未安装，请先在左侧点「②' 第二引擎(可选)」安装。\n" + detail)
     kdir = get_kohya_dir()
     mt_dir = os.path.join(kdir, "musubi-tuner")
-    accel = _accelerate_launch_cmd(mvpy)
+    accel = _accelerate_launch_cmd(mvpy, logf=logf)
+    if not _ensure_torchvision_deps(mvpy, logf, label="Krea2", cwd=mt_dir):
+        raise RuntimeError("Krea2 引擎（第二引擎）venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第二引擎。")
     files = krea2_model_files()
     missing = krea2_missing_models()
     if missing:
@@ -1838,15 +1933,26 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     lr = params.get("unet_lr", 1e-4)
     epochs = int(params.get("max_epochs", 16))
     gc_on = decide_gradient_checkpointing(params.get("gc", "自动"), vram_gb)
-    # 显存适配：fp8 + blocks_to_swap（需实测校准）
+    # 显存适配：量化（nf4/int8/fp8）+ blocks_to_swap（需实测校准）
+    # 本机实测（4070 8G, 512px, H2D-only swap24）：fp8 ≈138s/it → torch.compile ≈70s/it（2×）→ int8 ≈53s/it（2.6×）→ nf4 待测
     fp8 = vram_gb is None or vram_gb < 24
+    _quant, _quant_detail = _resolve_quant_mode(mvpy, logf, vram_gb, label="Krea2",
+                                                requested=params.get("quant_mode", "auto"))
+    use_nf4 = _quant == "nf4"
+    use_int8 = _quant == "int8"
+    if use_nf4 or use_int8:
+        fp8 = False
+    logf(f"[Krea2] 量化: {_quant}（{_quant_detail}）")
     swap = 2
     if vram_gb is None or vram_gb < 12:
-        swap = 20
+        swap = 24          # 8G 档接近上限（Krea2 上限 26），减少 GPU 驻留块
     elif vram_gb < 16:
         swap = 12
     elif vram_gb < 24:
         swap = 6
+    swap = min(swap, 26)   # Krea2 上限 26
+    # H2D-only 单向块交换：LoRA 冻结底模专用，只 Host→Device 不再回传（Fizgig 实测块交换快 ~6.4×）
+    h2d_only = (vram_gb is None or vram_gb < 16) and gc_on
     # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
     per_epoch = int(params.get("repeats", 5)) * count_images(train_dir)
     if per_epoch * epochs > KREA2_MAX_STEPS:
@@ -1875,17 +1981,30 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         "--max_train_epochs", str(epochs), "--save_every_n_epochs", "1", "--seed", "42",
         "--output_dir", out_dir, "--output_name", output_name,
     ]
-    if fp8:
+    if use_nf4:
+        cmd += ["--nf4_base"]
+    elif use_int8:
+        cmd += ["--int8_base", "--int8_scaled"]
+    elif fp8:
         cmd += ["--fp8_base", "--fp8_scaled"]
+    # torch.compile（可选，默认关）：实测 fp8 + compile ≈2×，int8 + compile 再快 ~8%；
+    # Windows triton 首次编译慢、偶发不稳定，故仅当用户显式开启时使用
+    _k2_compile = str(params.get("compile") or "").lower() in ("1", "true", "on", "开")
+    if _k2_compile:
+        cmd += ["--compile"]
     if swap > 0:
         cmd += ["--blocks_to_swap", str(swap)]
+    if h2d_only:
+        # 不用 --use_pinned_memory_for_block_swap：8G 低显存实测 pin_memory OOM（2026-08-22 本机验证）
+        cmd += ["--block_swap_h2d_only", "--block_swap_ring_size", "2"]
     if gc_on:
         cmd += ["--gradient_checkpointing"]
     logf(f"[Krea2] 底模(RAW): {files['raw']}")
     logf(f"[Krea2] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 5)}")
-    logf(f"[Krea2] fp8={'开' if fp8 else '关'} | blocks_to_swap={swap} | 梯度检查点={'开' if gc_on else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
-    rc = run_stream(cmd, cwd=mt_dir, logf=logf)
+    logf(f"[Krea2] 量化={_quant} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 梯度检查点={'开' if gc_on else '关'} | torch.compile={'开' if _k2_compile else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
+    rc = run_stream(cmd, cwd=mt_dir, logf=logf, collect=_log_tail)
     if rc != 0:
+        _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError(f"Krea2 训练结束，退出码 {rc}，请查看上方日志")
     model_path = os.path.join(out_dir, output_name + ".safetensors")
     logf(f"[Krea2] 完成！模型: {model_path}")
@@ -1926,12 +2045,15 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     模型需放入 models/flux2/（国内镜像下载，见 flux2_missing_models）。
     """
     params = params or {}
+    _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     ok, detail, mvpy = musubi_engine_status()
     if not ok:
         raise RuntimeError("第二训练引擎未安装，请先在左侧点「②' 第二引擎(可选)」安装。\n" + detail)
     kdir = get_kohya_dir()
     mt_dir = os.path.join(kdir, "musubi-tuner")
-    accel = _accelerate_launch_cmd(mvpy)
+    accel = _accelerate_launch_cmd(mvpy, logf=logf)
+    if not _ensure_torchvision_deps(mvpy, logf, label="FLUX.2", cwd=mt_dir):
+        raise RuntimeError("FLUX.2 引擎（第二引擎）venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第二引擎。")
     files = flux2_model_files()
     missing = flux2_missing_models()
     if missing:
@@ -1993,6 +2115,8 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     elif vram_gb < 24:
         swap = 2
     swap = min(swap, 13)
+    # H2D-only 单向块交换：LoRA 冻结底模专用，只 Host→Device 不再回传（仅低显存开启，行为最小变化）
+    h2d_only = (vram_gb is None or vram_gb < 16) and gc_on
     # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
     per_epoch = int(params.get("repeats", 2)) * count_images(train_dir)
     if per_epoch * epochs > FLUX2_MAX_STEPS:
@@ -2022,17 +2146,26 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         "--max_train_epochs", str(epochs), "--save_every_n_epochs", "1", "--seed", "42",
         "--output_dir", out_dir, "--output_name", output_name,
     ]
-    if fp8:
+    # FLUX.2：<16G 自动 int8（实测同 Krea2 减量化开销）；int8 时文本编码器仍走 fp8
+    _flux2_int8 = (str(params.get("quant_mode") or "auto").lower() == "int8") or (
+        str(params.get("quant_mode") or "auto").lower() == "auto" and vram_gb is not None and vram_gb < 16)
+    if _flux2_int8:
+        cmd += ["--int8_base", "--int8_scaled", "--fp8_text_encoder"]
+    elif fp8:
         cmd += ["--fp8_base", "--fp8_scaled", "--fp8_text_encoder"]
     if swap > 0:
         cmd += ["--blocks_to_swap", str(swap)]
+    if h2d_only:
+        # 不用 --use_pinned_memory_for_block_swap：8G 低显存实测 pin_memory OOM（2026-08-22 本机验证）
+        cmd += ["--block_swap_h2d_only", "--block_swap_ring_size", "2"]
     if gc_on:
         cmd += ["--gradient_checkpointing"]
     logf(f"[FLUX.2] 底模: {files['dit']}")
     logf(f"[FLUX.2] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 2)}")
-    logf(f"[FLUX.2] fp8={'开' if fp8 else '关'} | blocks_to_swap={swap} | 梯度检查点={'开' if gc_on else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
-    rc = run_stream(cmd, cwd=mt_dir, logf=logf)
+    logf(f"[FLUX.2] 量化={'int8' if _flux2_int8 else 'fp8'} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 梯度检查点={'开' if gc_on else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
+    rc = run_stream(cmd, cwd=mt_dir, logf=logf, collect=_log_tail)
     if rc != 0:
+        _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError(f"FLUX.2 训练结束，退出码 {rc}，请查看上方日志")
     model_path = os.path.join(out_dir, output_name + ".safetensors")
     logf(f"[FLUX.2] 完成！模型: {model_path}")
@@ -2960,6 +3093,7 @@ def _patch_minimax_h3_processor(kdir, logf=print):
 def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from=None, progress=None):
     """MiniMax H3 视频 LoRA 训练（第三引擎 AI Toolkit，T2V）。"""
     params = params or {}
+    _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     ok, detail, vpy = ai_toolkit_engine_status()
     if not ok:
         raise RuntimeError("第三训练引擎未安装，请点顶部「⚙ 安装第三引擎」安装。\n" + detail)
@@ -2967,6 +3101,8 @@ def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from
     at_dir = _at_dirs()[1]
     if not os.path.isfile(os.path.join(at_dir, "run.py")):
         raise RuntimeError("ai-toolkit 源码缺失，请重装第三引擎")
+    if not _ensure_torchvision_deps(vpy, logf, label="第三引擎", cwd=at_dir):
+        raise RuntimeError("第三引擎 venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第三引擎。")
     missing = h3_missing_models()
     if missing:
         raise RuntimeError(
@@ -3010,8 +3146,9 @@ def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from
         except Exception:
             pass
     logf("[视频] 启动 AI Toolkit 训练（首次要加载 30GB+ 模型，请耐心等待）…")
-    rc = run_stream([vpy, os.path.join(at_dir, "run.py"), cfg_path], cwd=at_dir, env=env, logf=logf)
+    rc = run_stream([vpy, os.path.join(at_dir, "run.py"), cfg_path], cwd=at_dir, env=env, logf=logf, collect=_log_tail)
     if rc != 0:
+        _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError(f"MiniMax H3 训练结束，退出码 {rc}，请查看上方日志")
     model_path = _find_latest_safetensors(out_dir) or os.path.join(out_dir, "h3_video_lora.safetensors")
     logf(f"[视频] 完成！模型: {model_path}")
@@ -3171,6 +3308,7 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
 def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, resume_from=None, progress=None):
     """AI Toolkit 图像 LoRA 训练（Qwen-Image / Z-Image，第三引擎）。"""
     params = params or {}
+    _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     info = AT_IMAGE_MODELS.get(mode)
     if not info:
         raise RuntimeError(f"未知模式: {mode}")
@@ -3181,6 +3319,8 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     at_dir = _at_dirs()[1]
     if not os.path.isfile(os.path.join(at_dir, "run.py")):
         raise RuntimeError("ai-toolkit 源码缺失，请重装第三引擎")
+    if not _ensure_torchvision_deps(vpy, logf, label="第三引擎", cwd=at_dir):
+        raise RuntimeError("第三引擎 venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第三引擎。")
     train_dir = dataset_train_dir(mode, params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】或【一键开始训练】")
@@ -3203,8 +3343,9 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
         except Exception:
             pass
     logf("[训练] 启动 AI Toolkit 训练（首次要下载/加载大模型，请耐心等待）…")
-    rc = run_stream([vpy, os.path.join(at_dir, "run.py"), cfg_path], cwd=at_dir, env=env, logf=logf)
+    rc = run_stream([vpy, os.path.join(at_dir, "run.py"), cfg_path], cwd=at_dir, env=env, logf=logf, collect=_log_tail)
     if rc != 0:
+        _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError(f"训练结束，退出码 {rc}，请查看上方日志")
     model_path = _find_latest_safetensors(out_dir) or os.path.join(out_dir, "lora.safetensors")
     logf(f"[{info['label']}] 完成！模型: {model_path}")
@@ -3288,6 +3429,96 @@ def _ensure_preprocess_deps(vpy, kdir, logf=print, force=False):
             return True
         if _round == 0:
             logf("[预处理] 补装后仍不可用（可能是网络/镜像波动），重试一轮…")
+    return False
+
+
+def _start_anima_latent_nan_watcher(dataset_dir, vpy, logf=print):
+    """后台线程：训练期间周期性扫描 Anima latent 缓存（*_anima.npz），发现 NaN/Inf 提示具体图片（不自动停止）。
+
+    用 venv python 子进程扫（保证 numpy 可用），每 15 秒一次；命中后提示并结束；最多监控 1 小时。
+    仅提示不自动删/停，避免误伤（2026-08-22 待办二十九②）。
+    """
+    _code = (
+        "import glob,os,sys,numpy as np\n"
+        "bad=[]\n"
+        "for f in glob.glob(os.path.join(sys.argv[1],'*_anima.npz')):\n"
+        "    try:\n"
+        "        with np.load(f) as z:\n"
+        "            for k in z.files:\n"
+        "                a=z[k]\n"
+        "                if a.dtype.kind=='f' and (np.isnan(a).any() or np.isinf(a).any()):\n"
+        "                    bad.append(os.path.basename(f)); break\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "print('\\n'.join(bad))\n"
+    )
+    if not dataset_dir or not os.path.isdir(dataset_dir) or not os.path.isfile(vpy):
+        return
+    import threading
+    def _watch():
+        reported = set()
+        t0 = time.time()
+        while time.time() - t0 < 3600:
+            try:
+                r = subprocess.run([vpy, "-c", _code, dataset_dir], capture_output=True, text=True, timeout=120)
+                bad_lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+                if bad_lines:
+                    for ln in bad_lines:
+                        if ln not in reported:
+                            reported.add(ln)
+                            logf(f"[训练] ⚠ 检测到 latent 缓存含 NaN/Inf：{ln}")
+                    logf("[训练] 这会导致训练第一步 loss=nan。建议停止训练，删除上面这些图片（连同同名 .txt/.npz）后重新预处理再训练。")
+                    break
+            except Exception:
+                pass
+            time.sleep(15)
+    threading.Thread(target=_watch, daemon=True).start()
+
+
+def _ensure_torchvision_deps(vpy, logf=print, label="Kohya", cwd=None):
+    """确保训练 venv 可 import torchvision（torch 在但 torchvision 缺时自动补装匹配版本）。
+
+    版本映射：torch 2.7.x → torchvision 0.22.x（patch 同号）；阿里云 pytorch-wheels 源优先，官方源兜底。
+    torch 本身不可用/未知时跳过（由安装流程处理）。返回 True=可用/跳过；False=补装后仍不可用。
+    """
+    def _check_import():
+        try:
+            return subprocess.run([vpy, "-c", "import torchvision"],
+                                  capture_output=True, text=True, timeout=120).returncode == 0
+        except Exception:
+            return False
+    if _check_import():
+        return True
+    # torch 可用才补装（torch 缺失由安装流程处理，单独装 torchvision 无意义）
+    tver = ""
+    try:
+        r = subprocess.run([vpy, "-c", "import torch; print(torch.__version__)"],
+                           capture_output=True, text=True, timeout=120)
+        tver = (r.stdout or "").strip()
+    except Exception:
+        tver = ""
+    if not tver:
+        logf(f"[{label}] 未检测到 torch 版本，跳过 torchvision 补装（由安装流程处理）")
+        return True
+    ver = ""
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)", tver)
+    if m and int(m.group(1)) == 2:
+        _minor = int(m.group(2)) - 5
+        if 0 <= _minor <= 22:
+            ver = "torchvision==0.%d.%s+cu128" % (_minor, m.group(3))
+    if not ver:
+        ver = "torchvision==0.22.0+cu128"
+    logf(f"[{label}] venv 缺 torchvision（torch {tver}），自动补装 {ver}（国内镜像，无需代理）…")
+    env = build_env()
+    for _idx in ("https://mirrors.aliyun.com/pytorch-wheels/cu128",
+                 "https://download.pytorch.org/whl/cu128"):
+        rc = run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                         "--index-url", _idx, ver], cwd=cwd or os.getcwd(), env=env, logf=logf)
+        if rc == 0 and _check_import():
+            logf(f"[{label}] torchvision 补装完成")
+            return True
+        logf(f"[{label}] 当前源安装 torchvision 失败，切换备用源重试…")
+    logf(f"[{label}] torchvision 补装失败，训练可能报 No module named 'torchvision'。")
     return False
 
 
@@ -4924,6 +5155,95 @@ def _probe_adamw8bit(vpy, logf=print, timeout=180):
     return False, (lines[-1] if lines else "未知错误")[-200:]
 
 
+
+def _ensure_musubi_bnb(mvpy, logf=print, label="Krea2"):
+    """确保 musubi venv 里有 bitsandbytes（NF4 需要）。已装直接过；缺则国内镜像补装。"""
+    try:
+        r = subprocess.run([mvpy, "-c", "import bitsandbytes, sys; print(bitsandbytes.__version__)"],
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode == 0 and r.stdout.strip():
+            return True
+    except Exception:
+        pass
+    logf(f"[{label}] 未检测到 bitsandbytes，自动补装（国内镜像，约 30~100MB）…")
+    r = subprocess.run([mvpy, "-m", "pip", "install", "bitsandbytes",
+                        "-i", "https://mirrors.aliyun.com/pypi/simple/",
+                        "--timeout", "120", "--retries", "5"],
+                       capture_output=True, text=True, timeout=1800)
+    if r.returncode == 0:
+        logf(f"[{label}] bitsandbytes 补装成功")
+        return True
+    logf(f"[{label}] bitsandbytes 补装失败：{(r.stderr or r.stdout or '')[-300:]}")
+    return False
+
+
+def _probe_nf4(vpy, logf=print, timeout=180):
+    """在真实 venv 里做一次 bitsandbytes NF4 量化/反量化 CUDA 预检（仿 _probe_adamw8bit）。
+
+    仅 import 成功不代表 4-bit CUDA 内核可用；这里真实量化+反量化，失败则判不可用，
+    让调用方自动回退 INT8/fp8。返回 (ok, detail)。"""
+    code = (
+        "import sys\n"
+        "try:\n"
+        "    import torch\n"
+        "    if not torch.cuda.is_available():\n"
+        "        print('NO_CUDA')\n"
+        "        sys.exit(3)\n"
+        "    import bitsandbytes as bnb\n"
+        "    w = torch.randn(256, 256, dtype=torch.bfloat16, device='cuda')\n"
+        "    data, qs = bnb.functional.quantize_4bit(w, quant_type='nf4', compress_statistics=False)\n"
+        "    dq = bnb.functional.dequantize_nf4(data, qs)\n"
+        "    if dq.numel() != w.numel():\n"
+        "        print('BAD_SHAPE')\n"
+        "        sys.exit(5)\n"
+        "    print('OK')\n"
+        "    sys.exit(0)\n"
+        "except Exception:\n"
+        "    import traceback\n"
+        "    print(traceback.format_exc())\n"
+        "    sys.exit(1)\n"
+    )
+    try:
+        r = subprocess.run([vpy, "-c", code], capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        return False, "NF4 预检进程异常：%s" % e
+    out = (r.stdout or "") + (r.stderr or "")
+    if r.returncode == 0 and "OK" in out:
+        return True, "bitsandbytes NF4 CUDA 量化/反量化真实 step 成功"
+    if "NO_CUDA" in out:
+        return False, "PyTorch 未启用 CUDA（无法做 NF4 预检）"
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    return False, (lines[-1] if lines else "未知错误")[-200:]
+
+
+def _resolve_quant_mode(mvpy, logf, vram_gb, label="Krea2", requested="auto", allow_nf4=True):
+    """按显存档位 + 用户请求（auto/nf4/int8/fp8）决定量化方式，返回 (quant, detail)。
+
+    quant ∈ {"fp8","int8","nf4"}。NF4 需要 bitsandbytes 可用（自动补装 + CUDA 预检），
+    失败自动回退 int8（<16G）或 fp8。"""
+    req = str(requested or "auto").lower()
+    if req == "fp8":
+        return "fp8", "用户指定 fp8"
+    if req == "int8":
+        return "int8", "用户指定 int8（W8A8 对称量化）"
+    # 本机实测（4070 8G, 512px, H2D-only swap24）：
+    #   fp8 ≈138s/it → torch.compile ≈70s/it（2.0×）→ int8 ≈53s/it（2.6×）→ nf4(swap0) ≈97s/it
+    # 结论：8~16G 默认 int8（最快且无额外依赖）；NF4 因 bnb 反量化开销 + 与块交换冲突，仅显式指定时启用。
+    want_int8 = (req == "auto" and vram_gb is not None and vram_gb < 16)
+    if want_int8:
+        return "int8", "8~16G 档自动 int8（W8A8，实测比 fp8 快约 2.6×）"
+    if req == "nf4" and allow_nf4:
+        if _ensure_musubi_bnb(mvpy, logf, label=label):
+            ok, detail = _probe_nf4(mvpy, logf)
+            if ok:
+                return "nf4", f"NF4 4-bit（bnb 预检通过：{detail}）"
+            logf(f"[{label}] NF4 预检失败（{detail}），自动回退 fp8")
+        else:
+            logf(f"[{label}] bitsandbytes 不可用，自动回退 fp8")
+        return "fp8", "自动回退 fp8"
+    return "fp8", "显存充足/自动档保持 fp8"
+
+
 def _probe_lion(vpy, logf=print, timeout=180):
     """在真实 venv 里做一次 lion_pytorch.Lion 优化器 step 预检。
 
@@ -4970,6 +5290,34 @@ def _probe_lion(vpy, logf=print, timeout=180):
         return False, "PyTorch 未启用 CUDA（Lion 无法验证）"
     lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
     return False, (lines[-1] if lines else "未知错误")[-200:]
+
+
+def _diagnose_optimizer_failure(opt_k, log_text, logf=print):
+    """训练失败后诊断：用了 AdamW8bit 且日志命中 bitsandbytes 8-bit 崩溃关键字时，给出明确提示。
+
+    opt_k 为空时自动从日志命令行解析 --optimizer_type=...。
+    返回 True=命中 bnb 8-bit 问题（调用方可在报错信息里追加建议）。
+    """
+    if not log_text:
+        return False
+    if not opt_k:
+        m = re.search(r"(?:^|\s)--?optimizer_?type[=:\s]+([A-Za-z0-9_]+)", log_text, re.I)
+        opt_k = m.group(1) if m else ""
+    if str(opt_k).lower() not in ("adamw8bit", "adamw_8bit", "8bit"):
+        return False
+    keys = ("libbitsandbytes", "str2optimizer8bit_blockwise", "bitsandbytes",
+            "compiled without GPU support", "cuda setup", "8-bit optimizer", "8bit")
+    # 剔除 $ 开头的命令行（里面必含 --optimizer_type=AdamW8bit，会污染 "8bit" 关键字匹配），
+    # 只在实际输出里找 bnb 崩溃特征
+    low = "\n".join(l for l in log_text.splitlines() if not l.lstrip().startswith("$ ")).lower()
+    hit = [k for k in keys if k in low]
+    if not hit:
+        return False
+    logf("[训练] ⚠ 检测到训练失败与 bitsandbytes 8-bit 优化器(AdamW8bit)相关（命中：" + "、".join(hit) + "）")
+    logf("[训练] 原因：Windows + CUDA 下 bitsandbytes 的 8-bit CUDA 内核缺失/不兼容，训练到 optimizer.step() 阶段崩溃。")
+    logf("[训练] 解决：把优化器改成 AdamW 或 Lion（纯 PyTorch，不依赖 bitsandbytes）再训练即可。")
+    logf("[训练]       当前版本自动选择优化器，遇到此问题可在下个版本选择 AdamW/Lion，或先重装训练内核。")
+    return True
 
 
 def resolve_optimizer(vpy, logf=print, requested="auto", amd_mode=False, allow_lion=True):
@@ -5070,6 +5418,7 @@ def fix_cpu_torch(vpy, kdir, logf=print):
 def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, resume_from=None, progress=None):
     params = params or {}
     amd_mode = bool(params.get("amd_mode", False))
+    _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     if progress is not None:
         _orig_logf = logf
         def logf(line):
@@ -5140,7 +5489,9 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         raise RuntimeError("请选择底模（.safetensors）")
     # 任何模式都必须先解析 Accelerate 启动器（v0.9.18 回归：accel 只在 AMD 分支赋值，
     # 导致普通 NVIDIA 用户训练启动即报 UnboundLocalError: accel）。
-    accel = _accelerate_launch_cmd(vpy)
+    accel = _accelerate_launch_cmd(vpy, logf=logf)
+    if not _ensure_torchvision_deps(vpy, logf, label="Kohya", cwd=kdir):
+        raise RuntimeError("Kohya venv 的 torchvision 自动补装失败，请检查网络后重试，或重跑【② 安装训练内核】重建环境。")
 
     resolution = int(params.get("resolution") or arch_info["resolution"])
     train_dir = dataset_train_dir(mode, params.get("project"))
@@ -5226,13 +5577,13 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     else:
         out_dir = data_sub("output")
     mixed = arch_info["mixed"]
-    if amd_mode:
-        if _amd_is_gfx103x():
-            # RDNA2（RX 6000）不原生支持 bf16 → bf16 训练数值错误、LoRA 出黑图；改用 fp16（RDNA2 原生支持）
-            mixed = "fp16"
-            logf("[训练] AMD 兼容模式：检测到 RDNA2（RX 6000），混合精度改用 fp16（避免 bf16 数值错误黑图）")
-        else:
-            mixed = "bf16"                # AMD RDNA3+ 原生支持 bf16
+    if _amd_is_gfx103x():
+        # RDNA2（RX 6000）不原生支持 bf16 → bf16 训练数值错误、LoRA 出黑图；改用 fp16（RDNA2 原生支持）。
+        # 与第二引擎（Krea2/FLUX.2）一致：自动检测 RDNA2 → 自动切 fp16，无需用户手动开 AMD 兼容模式。
+        mixed = "fp16"
+        logf("[训练] 检测到 RDNA2（RX 6000）显卡，混合精度自动改用 fp16（避免 bf16 数值错误黑图；无需手动开 AMD 兼容模式）")
+    elif amd_mode:
+        mixed = "bf16"                # AMD RDNA3+ 原生支持 bf16
     save_precision = arch_info["save_precision"]
     min_bucket, max_bucket = arch_info["min_bucket"], arch_info["max_bucket"]
     network_module = arch_info["network_module"]
@@ -5369,8 +5720,11 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
             logf("[训练] AMD 兼容模式：RX 6000 系已设置 HSA_OVERRIDE_GFX_VERSION=10.3.0")
         env.setdefault("DISABLE_ADDMM_CUDA_LT", "1")  # ZLUDA/ROCm 兼容
         env.setdefault("MIOPEN_FIND_MODE", "2")       # ROCm 卷积搜索加速
+    # Anima：后台扫描 latent 缓存，第一步 loss=nan 时定位是哪些图（只提示不自动停止）
+    if family == "anima":
+        _start_anima_latent_nan_watcher(dataset_dir, vpy, logf)
     try:
-        rc = run_stream(cmd, cwd=sds, env=env, logf=logf)
+        rc = run_stream(cmd, cwd=sds, env=env, logf=logf, collect=_log_tail)
     except StopRequested:
         # 手动停止：清理全局提示词临时数据集后原样抛出，由界面层友好提示
         if progress is not None:
@@ -5390,6 +5744,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
                 progress.finish()
             except Exception:
                 pass
+        _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError(f"训练结束，退出码 {rc}，请查看上方日志（可用断点续训继续）")
     if progress is not None:
         try:

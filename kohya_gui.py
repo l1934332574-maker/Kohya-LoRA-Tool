@@ -108,6 +108,10 @@ _MAIN_BTN_TIPS = {
 }
 
 
+# GUI 显示 → 训练参数 optimizer 映射（resolve_optimizer 接受小写）
+_OPT_GUI_MAP = {"自动": "auto", "AdamW": "adamw", "Lion": "lion", "AdamW8bit": "adamw8bit"}
+
+
 class Tooltip:
     """鼠标悬停显示通俗中文说明的气泡（适配 customtkinter 控件）。"""
 
@@ -1361,6 +1365,7 @@ class App:
                 "te_lr": params.get("te_lr"),
                 "repeats": params.get("repeats"),
                 "max_epochs": params.get("max_epochs"),
+                "optimizer": params.get("optimizer") or "auto",
             },
         }
 
@@ -1408,7 +1413,14 @@ class App:
             if te:
                 self.train_env_var.set(te)
             p = data.get("params") or {}
+            _opt_gui = {v: k for k, v in _OPT_GUI_MAP.items()}.get((p.get("optimizer") or "auto"), "自动")
+            try:
+                self.optimizer_var.set(_opt_gui)
+            except Exception:
+                pass
             for k, v in p.items():
+                if k == "optimizer":
+                    continue
                 if v is not None:
                     self.param_vars.setdefault(k, tk.StringVar()).set(str(v))
                     self._manual_override.add(k)   # 项目参数优先，不被预设覆盖
@@ -2303,6 +2315,22 @@ class App:
                                               text_color=HINT, corner_radius=6, font=ui_font(FONT_HINT),
                                               command=self.cmd_reset_presets)
         self.btn_reset_preset.pack(side="left", padx=(20, 0))
+        ow = ctk.CTkFrame(self.adv_body, fg_color="transparent"); ow.pack(anchor="w", pady=(6, 0))
+        ctk.CTkLabel(ow, text="优化器", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        self.optimizer_var = tk.StringVar(value="自动")
+        try:
+            self.optimizer_var.trace_add("write", lambda *a: self._schedule_autosave())
+        except Exception:
+            pass
+        self.optimizer_menu = ctk.CTkOptionMenu(
+            ow, variable=self.optimizer_var,
+            values=["自动", "AdamW", "Lion", "AdamW8bit"], width=130, height=26,
+            fg_color=CARD2, button_color=CARD2, button_hover_color="#3a4150",
+            text_color=SUB, font=ui_font(FONT_HINT), dropdown_font=ui_font(FONT_HINT),
+            dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150")
+        self.optimizer_menu.pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(ow, text="（自动=按环境预检选 AdamW8bit 或降级；若报 bitsandbytes 崩溃，改选 AdamW/Lion）",
+                     font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         self.global_frame = ctk.CTkFrame(self.adv_body, fg_color="transparent")
         self.global_frame.pack(fill="x", pady=(10, 0))
         ctk.CTkLabel(self.global_frame, text="附加全局提示词（可选，训练时自动加到标签最前面，不写入图片 txt）",
@@ -2442,6 +2470,7 @@ class App:
             "global_neg": self.global_neg_var.get().strip(),
             "amd_mode": bool(self.amd_var.get()),
             "train_env": self.train_env_var.get().strip() or None,
+            "optimizer": (_OPT_GUI_MAP.get(self.optimizer_var.get()) if hasattr(self, "optimizer_var") else "auto"),
         }
 
     def _maybe_migrate_legacy_dataset(self, name):

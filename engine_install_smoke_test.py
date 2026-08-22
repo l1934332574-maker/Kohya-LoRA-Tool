@@ -812,10 +812,105 @@ def test_main_engine_accel_always_defined(base: Path):
     bad = ('if amd_mode and (params.get("train_env") or "").strip():\n'
            '        accel = _accelerate_launch_cmd(vpy)')
     assert bad not in src, "accel 仍只在 AMD 分支赋值（v0.9.18 回归未修复）"
-    m = re.search(r"^    accel = _accelerate_launch_cmd\(vpy\)$", src, re.M)
+    m = re.search(r"^    accel = _accelerate_launch_cmd\(vpy(?:, logf=logf)?\)$", src, re.M)
     assert m, "主引擎 train() 未找到无条件 accel 赋值"
     print("MAIN_ENGINE_ACCEL_ALWAYS_DEFINED_UNIT_TEST_OK")
 
+
+
+
+
+def test_quant_mode_resolution(base):
+    """_resolve_quant_mode：档位默认 / 显式指定 / NF4 回退。"""
+    fake_vpy = object()
+    real_ensure = core._ensure_musubi_bnb
+    real_probe = core._probe_nf4
+    try:
+        core._ensure_musubi_bnb = lambda mvpy, logf=print, label="X": True
+        core._probe_nf4 = lambda vpy, logf=print, timeout=180: (True, "ok")
+        cases = [
+            ((None, "auto"), "fp8"), ((8, "auto"), "int8"), ((14, "auto"), "int8"),
+            ((24, "auto"), "fp8"), ((8, "fp8"), "fp8"), ((8, "int8"), "int8"),
+            ((8, "nf4"), "nf4"), ((24, "nf4"), "nf4"),
+        ]
+        for (vram, req), expect in cases:
+            q, _ = core._resolve_quant_mode(fake_vpy, print, vram, label="T", requested=req)
+            assert q == expect, (vram, req, q, expect)
+        core._probe_nf4 = lambda vpy, logf=print, timeout=180: (False, "kernel fail")
+        q, _ = core._resolve_quant_mode(fake_vpy, print, 8, label="T", requested="nf4")
+        assert q == "fp8", "NF4 预检失败应回退 fp8"
+    finally:
+        core._ensure_musubi_bnb = real_ensure
+        core._probe_nf4 = real_probe
+    print("QUANT_MODE_RESOLUTION_UNIT_TESTS_OK")
+
+
+def test_musubi_quant_patch(base):
+    """musubi INT8/NF4 补丁：对随包 musubi-tuner-main.zip 应用全部成功且幂等。"""
+    import zipfile
+    from kohya_core.musubi_quant_patch import patch_musubi_quant_base, _patch_fp8_utils,         _patch_lora_utils, _patch_krea2_utils, _patch_krea2_train, _patch_flux2_utils, _patch_flux2_train
+    zip_path = ROOT / "installers" / "musubi-tuner" / "musubi-tuner-main.zip"
+    assert zip_path.is_file(), f"缺少随包 musubi 源码: {zip_path}"
+    dst = base / "musubi_patch_test"
+    with zipfile.ZipFile(str(zip_path)) as z:
+        z.extractall(str(dst))
+    mt = dst / "musubi-tuner-main" / "src" / "musubi_tuner"
+    rs = [
+        _patch_fp8_utils(mt, print), _patch_lora_utils(mt, print),
+        _patch_krea2_utils(mt, print), _patch_krea2_train(mt, print),
+        _patch_flux2_utils(mt, print), _patch_flux2_train(mt, print),
+    ]
+    assert all(rs), f"补丁应全部首次应用成功: {rs}"
+    # 幂等：第二次全部跳过
+    rs2 = [
+        _patch_fp8_utils(mt, print), _patch_lora_utils(mt, print),
+        _patch_krea2_utils(mt, print), _patch_krea2_train(mt, print),
+        _patch_flux2_utils(mt, print), _patch_flux2_train(mt, print),
+    ]
+    assert not any(rs2), f"补丁应幂等（第二次全跳过）: {rs2}"
+    print("MUSUBI_QUANT_PATCH_UNIT_TESTS_OK")
+
+
+def test_accelerate_cpu_config_self_heal(base):
+    """残留 accelerate use_cpu=true 自愈：检测→修复→复核；launch 显式单进程、配置干净零探测。"""
+    cfg = base / "accelerate" / "default_config.yaml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text('{\n  "use_cpu": true,\n  "num_processes": 2\n}\n', encoding="utf-8")
+
+    real_path = core._accelerate_config_path
+    real_run = core.subprocess.run
+    real_probe = core._probe_accelerate_device
+    try:
+        core._accelerate_config_path = lambda: str(cfg)
+        # 1) 检测 + 修复
+        assert core._accelerate_config_use_cpu() is True
+        assert core._neutralize_accelerate_cpu_config(print) is True
+        raw = cfg.read_text(encoding="utf-8")
+        assert '"use_cpu": false' in raw and '"use_cpu": true' not in raw
+        assert core._accelerate_config_use_cpu() is False
+
+        # 2) 配置干净时 launch 零探测，且 argv 带显式单进程
+        calls = []
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return result(0, stdout="accelerate 1.0.0\nC:\\x\\accelerate\\__init__.py\n" + str(cmd[0]))
+        core.subprocess.run = fake_run
+        core._probe_accelerate_device = lambda *a, **k: (_ for _ in ()).throw(AssertionError("干净配置不应触发探测"))
+        argv = core._accelerate_launch_cmd(str(cfg))   # vpy 用存在的配置文件路径占位，fake_run 不真执行
+        assert argv[1:3] == ["-m", "accelerate.commands.launch"]
+        assert "--num_processes" in argv and "--num_machines" in argv
+
+        # 3) use_cpu=true 时 launch 内自动修复 + 复核（探测返回 cuda）
+        cfg.write_text('{"use_cpu": true}', encoding="utf-8")
+        core._probe_accelerate_device = lambda *a, **k: "cuda:0"
+        argv2 = core._accelerate_launch_cmd(str(cfg))
+        assert '"use_cpu": false' in cfg.read_text(encoding="utf-8")
+        assert "--num_processes" in argv2
+    finally:
+        core._accelerate_config_path = real_path
+        core.subprocess.run = real_run
+        core._probe_accelerate_device = real_probe
+    print("ACCELERATE_CPU_CONFIG_SELF_HEAL_OK")
 
 
 def main():
@@ -835,6 +930,9 @@ def main():
         test_amd_torch_verification(base)
         test_accelerate_module_launcher(base)
         test_main_engine_accel_always_defined(base)
+        test_quant_mode_resolution(base)
+        test_musubi_quant_patch(base)
+        test_accelerate_cpu_config_self_heal(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

@@ -142,7 +142,7 @@ def build_direct_env(extra_dirs=()):
     return clear_proxy_env(build_env(extra_dirs))
 
 
-def run_stream(cmd, cwd=None, env=None, logf=print):
+def run_stream(cmd, cwd=None, env=None, logf=print, collect=None):
     """运行命令并把 stdout/stderr 实时交给 logf。返回退出码。
 
     支持手动停止：stop_active_process() 会终止当前进程树，
@@ -151,6 +151,11 @@ def run_stream(cmd, cwd=None, env=None, logf=print):
     global _ACTIVE_PROC
     if logf:
         logf("$ " + " ".join(str(x) for x in cmd))
+    if collect is not None:
+        try:
+            collect.append("$ " + " ".join(str(x) for x in cmd))
+        except Exception:
+            pass
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         cwd=cwd, env=env, text=True, encoding="utf-8", errors="replace",
@@ -162,8 +167,14 @@ def run_stream(cmd, cwd=None, env=None, logf=print):
         _terminate_tree(proc)
     try:
         for line in proc.stdout:
+            _l = line.rstrip("\n").rstrip("\r")
             if logf:
-                logf(line.rstrip("\n").rstrip("\r"))
+                logf(_l)
+            if collect is not None:
+                try:
+                    collect.append(_l)
+                except Exception:
+                    pass
             if _STOP_EVENT.is_set():
                 _terminate_tree(proc)
                 if logf:

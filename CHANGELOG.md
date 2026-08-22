@@ -1,4 +1,30 @@
-## v0.9.24（2026-08-22）
+## v0.9.27（2026-08-22）
+
+### 新增：Krea2 / FLUX.2 8G 显存大幅提速（INT8 量化 + 可选 torch.compile / NF4）
+- **INT8（W8A8 对称量化）**：8~16G 显存自动启用。本机 4070 8G 实测：fp8 ≈138s/步 → **int8 ≈53s/步（快约 2.6 倍）**，量化误差比 fp8 更小（0.0032 vs 0.0104），loss 与 fp8 基本一致；显存充足（≥16G）保持 fp8 不变。
+- **NF4（4-bit，bitsandbytes）**：显式开启才用（bnb 自动补装 + CUDA 真实量化/反量化预检，失败自动回退 fp8）。
+- **torch.compile 可选开关**：默认关（Windows triton 首次编译慢、偶发不稳）；开启后 fp8 ≈2 倍、int8 ≈2.8 倍。
+- **H2D-only 单向块交换**：8G 低显存档自动开启（只 Host→Device 不再回传，避免 pin_memory OOM），比双向交换更快。
+- 新增 `kohya_core/musubi_quant_patch.py` 幂等补丁（结构变化自动跳过，不影响原 fp8 流程）。
+
+### 新增：主引擎 RDNA2（RX 6000）自动切 fp16
+- 之前只在手动开启「AMD 兼容模式」时才切 fp16；现在自动检测 gfx103x → 直接 fp16（与第二引擎一致），修 AMD 6000 系第一步 loss=NaN / 黑图；NVIDIA 与 RDNA3+ 逻辑不变。
+
+### 新增：高级参数「优化器」下拉框
+- 自动 / AdamW / Lion / AdamW8bit，默认「自动」= 行为零变化；遇 bitsandbytes（AdamW8bit）崩溃可手动切换 AdamW/Lion。
+- 训练失败自动诊断：命令用 AdamW8bit 且日志命中 bitsandbytes 8-bit 崩溃关键字时，明确提示改用 AdamW/Lion。
+
+### 修复：训练「卡在训练前 / accelerator device: cpu」（残留 accelerate 配置）
+- **根因**：`accelerate launch` 读 `%USERPROFILE%\.cache\huggingface\accelerate\default_config.yaml`，若 `use_cpu=true` → 训练（含 caching latents）全程 CPU，表现为「卡在训练前、无报错、CPU/GPU 无负荷」；而 torch/优化器预检（不走 accelerate）却正常。
+- **已修**：训练前自动检测残留配置并改回 `use_cpu=false`，用与训练相同的 accelerate launch 路径复核设备；launch 显式 `--num_processes 1 --num_machines 1` 防残留多卡配置。
+
+### 修复/增强
+- 各引擎 venv 缺 torchvision 自动补装匹配版本（torch 2.7.x → torchvision 0.22.x，阿里云源+官方兜底），修 `ModuleNotFoundError: No module named 'torchvision'`。
+- Anima 训练期间后台扫描 latent 缓存，发现 NaN/Inf 报出具体图片名并提示删除（只提示不自动删/停）。
+- WD14 打标脚本查找增强：kohya_dir.txt 指向数据根、安装目录同级 KohyaLoraTool_data、%APPDATA% 等候选路径；找不到时 WARN 附已查路径便于排查。
+- 验证：engine_install_smoke_test（18 项，含量化决策 / musubi 补丁幂等 / accelerate 配置自愈）+ smoke_test.py 全过。
+
+---## v0.9.24（2026-08-22）
 
 ### 修复：AMD RDNA2（RX 6000）训练出的 LoRA 出黑图
 - **根因**：软件 AMD 模式统一用 bf16 混合精度，但 **RDNA2（RX 6000）硬件不原生支持 bf16**（RDNA3 才支持）→ bf16 训练数值错误 → LoRA 权重损坏 → 出图全黑。同一个 LoRA 在 7800 XT（RDNA3）上正常。
@@ -665,3 +691,4 @@
 ### 说明
 - AMD 兼容模式（实验性）：sdpa + bf16 + AdamW 自动适配
 - kohya 环境重定向 `%APPDATA%`，升级覆盖不重装环境
+
