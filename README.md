@@ -4,83 +4,21 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.9.17** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.9.27** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
 ---
 
-## 🆕 v0.9.17 更新重点
+## 🆕 v0.9.27 更新重点
 
-### 预处理「缺少 numpy」彻底修复（DLL 污染根因）
+- **Krea2 / FLUX.2 8G 显存大幅提速**：8~16G 显存自动启用 INT8 量化（实测比 fp8 快约 2.6 倍），可选 torch.compile / NF4，H2D 单向块交换。
+- **RDNA2（RX 6000）自动切 fp16**：不再需要手动开启 AMD 兼容模式，修复黑图 / 第一步 NaN。
+- **高级参数新增「优化器」下拉**：自动 / AdamW / Lion / AdamW8bit，遇 bitsandbytes 崩溃可手动切换。
+- **修复「卡在训练前 / accelerator device: cpu」**：残留 accelerate 配置 `use_cpu=true` 自动修复。
+- **各引擎 torchvision 缺失自动补装**；Anima latent 缓存 NaN 自动提示；WD14 打标脚本查找增强。
 
-- **根因已定位**：打包版应用目录自带的 `python312.dll` 会污染从该目录启动的 venv Python（Windows DLL 搜索优先命中打包版 DLL，与 venv 基座 Python 版本不匹配 → `_ctypes` 崩溃 → 误报「缺少 numpy」）。已改为外部 Python 子进程自动避开污染目录，全部引擎生效。
-- **内置 numpy 2.1.3 + pillow 12.3.0 三套离线 wheel（cp310/311/312）**：预处理缺依赖时零联网补装，不再依赖网络镜像。
-- **预处理失败自动补装并重试一次**：子进程失败后强制补装一轮再重试，不再卡死在原始报错。
-- **分词器预缓存离线化**：内置 openai/clip-vit-large-patch14、laion/CLIP-ViT-bigG-14、google/t5-v1_1-xxl 三套常用分词器（约 8MB），SD1.5 / SDXL / FLUX / Anima 训练所需分词器完全离线，不再因 hf-mirror 超时而卡死。
-
-## 🆕 v0.9.16 更新重点
-
-### 安装与预处理稳定性修复
-
-- **torch 本地安装不再卡清华源**：torch 大轮子下载完成后，本地 `pip install` 的依赖解析（filelock 等）原来只走清华源，部分网络下清华源不可达会无限失败（`Could not find a version that satisfies the requirement filelock (from versions: none)`）。现在自动按 **清华 → 阿里云 → 上海交大** 顺序回退，任一镜像成功即完成；错误日志明确区分「下载失败」与「本地依赖安装失败」。
-- **预处理报「缺少 numpy」自愈**：预处理自检与 preprocess.py 实际用法完全对齐（`from PIL import Image; import numpy`），半损坏的 Pillow 也会被识别；子进程预处理失败后会自动补装依赖并**自动重试一次**，不再卡死在原始报错。
-- **Lion 优化器降级真实预检**：AdamW8bit 不可用时降级 Lion 改为真实 `backward + step` 预检，旧版 lion-pytorch 与 torch 2.7 不兼容也能识别，自动继续降级为 AdamW，不再训练到 `optimizer.step()` 才崩溃。
-
-## 🆕 v0.9.15 更新重点
-
-### 训练稳定性：AdamW8bit 崩溃自动降级
-
-Windows + CUDA 12.8 下 bitsandbytes 可能能 import 但 8-bit CUDA 内核不可用（`libbitsandbytes_cuda128.dll` 缺失 / `compiled without GPU support` / `str2optimizer8bit_blockwise is not defined`），之前会在训练 `optimizer.step()` 阶段崩溃。
-
-- 训练开始前先做一次**真实 8-bit 优化器 step 预检**，通过才用 AdamW8bit。
-- 失败自动降级：**Lion**（显存更低）→ **AdamW**（纯 PyTorch，兼容性最好），不会再在训练中途崩溃。
-- 覆盖全部引擎：第一引擎（SD/SDXL/FLUX/Anima）、第二引擎（Krea2/FLUX.2）、第三引擎（Qwen-Image / Z-Image / MiniMax H3 视频）；第二引擎 musubi-tuner 不支持 Lion 会直接降级 AdamW；AMD 兼容模式固定 AdamW。
-
-### 下载不再“看起来卡死”
-
-PyTorch 大轮子（2~3GB）下载改为：
-
-- 下载到 `.part` 文件断点续传，中断后自动从断点继续，不再删掉重下 3GB。
-- 每 5 秒输出一条下载进度（`下载进度：xxx / xxx MB（xx%）`），用户能实时看到在下载。
-- 新增限速看门狗：120 秒平均低于 20KB/s 自动切换备用国内镜像，避免无限挂起。
-
-## 🆕 v0.9.14 更新重点
-
-### 三套训练引擎安装稳定性修复
-
-- **第一引擎**：修复安装流程中的 `git is not defined`；已有环境重跑安装时会校正 NumPy/SciPy/Protobuf，解决 Anima 导入 `numpy.Inf` 报错。
-- **第二引擎**：严格锁定 `torch 2.7.1+cu128 + torchvision 0.22.1+cu128`，自动识别并修复旧版错误配对或被依赖升级的环境；缺 pip 时自动自愈/重建。
-- **第三引擎**：补齐 venv 健康检查，迁盘、换用户或跨 Python DLL 冲突时会保留旧环境并自动重建；修复 NumPy/SciPy 解析冲突。
-- 三个引擎的大型 PyTorch 轮子继续使用阿里云/上海交大国内镜像断点续传，不需要代理；下载失败会干净停止，不再留下半安装环境。
-- 新增三引擎安装回归测试，覆盖源码解压、venv 创建与损坏恢复、pip 自愈、Torch 版本锁定和最终验证流程。
-
-### v0.9.12 更新重点
-
-### v0.9.12 环境与安装修复
-
-- **修复打包版污染外部 Python venv 的 DLL 问题**：解决 Python 3.10/3.11 Kohya 环境被软件自带 Python 3.12 DLL 误加载，导致 `python312.dll conflicts`、`DLL load failed`、Qwen/T5 分词器预缓存失败以及训练退出码 1。
-- **Torch 验证信息更完整**：安装后显示 Torch 版本、CUDA 构建版本和 CUDA 可用状态；导入失败会输出真实错误，不再出现 `torch ? / CUDA ?` 后仍显示安装成功。
-- **修复失效代理下的 Git 克隆命令**：修正 `git -c ... git clone` 重复拼接 `git` 的问题；主引擎、第二引擎、第三引擎均使用正确的 Git 参数顺序。
-- **v0.9.12 可直接覆盖旧版本**：一般不需要删除已有 venv，也不需要重新下载已经安装的 Torch。
-
-### Qwen-Image / Z-Image 支持画风与人物训练
-
-这两个模式不再固定按人物数据处理，现在可以在软件中直接选择：
-
-- **🎨 画风 LoRA**：按画风逻辑预处理和过滤人物、五官及角色类标签。
-- **👤 人物 LoRA**：保留人物特征标签，支持 Trigger 触发词。
-- 训练类型会随项目配置自动保存和恢复。
-- 修复一键训练时 Qwen-Image / Z-Image 预处理模式传递错误的问题。
-
-### 数据目录可迁移，减少 C 盘占用
-
-- 新安装的打包版默认将训练引擎、数据集、模型缓存和输出放在**安装目录同级的 `KohyaLoraTool_data`**。
-- 软件主页新增 **「💾 数据目录」**，可查看当前位置与占用空间。
-- 支持一键迁移到安装盘，也可手动选择 D 盘、E 盘等任意位置。
-- 老用户可以直接迁移原 `%APPDATA%\KohyaLoraTool` 数据，无需重新安装训练环境。
-- 迁移过程会先检查空间、复制并校验，成功后才清理旧数据；失败时保留原文件。
-- 少量全局设置仍保存在 `%APPDATA%\KohyaLoraTool\settings.json`，属于正常现象。
+> 完整更新记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
@@ -154,7 +92,7 @@ PyTorch 大轮子（2~3GB）下载改为：
 
 | 文件 | 说明 |
 |---|---|
-| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源和 WD14 打标模型；当前最新版为 v0.9.16 |
+| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源和 WD14 打标模型；当前最新版为 v0.9.27 |
 | `KohyaLoraTool_*_portable.zip` | 便携版，解压后运行；若该版本未上传 ZIP，请使用 `Setup.exe` |
 
 ### 国内镜像
