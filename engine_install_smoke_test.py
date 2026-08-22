@@ -913,6 +913,26 @@ def test_accelerate_cpu_config_self_heal(base):
     print("ACCELERATE_CPU_CONFIG_SELF_HEAL_OK")
 
 
+def test_anima_vae_fp32_patch(base: Path):
+    """Anima VAE fp32 补丁：对随包 sd-scripts anima_train_network.py 首次应用成功 + 幂等。"""
+    import zipfile
+    zip_path = ROOT / "installers" / "kohya_ss" / "sd-scripts-main.zip"
+    assert zip_path.is_file(), f"缺少随包 sd-scripts 源码: {zip_path}"
+    kdir = base / "kohya_ss"
+    target = kdir / "sd-scripts" / "anima_train_network.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(str(zip_path)) as z:
+        target.write_bytes(z.read("sd-scripts-main/anima_train_network.py"))
+    core._patch_anima_vae_fp32(str(kdir), print)
+    src = target.read_text(encoding="utf-8")
+    assert "ANIMA_VAE_FP32" in src and "KOHYA_TOOL_PATCH_BEGIN" in src, "补丁未应用"
+    assert "vae.to(torch.float32)" in src, "fp32 分支缺失"
+    core._patch_anima_vae_fp32(str(kdir), print)   # 幂等
+    cnt = src.count("KOHYA_TOOL_PATCH_BEGIN: anima VAE fp32")
+    assert cnt == 1, f"补丁应只出现一次，实际 {cnt}"
+    print("ANIMA_VAE_FP32_PATCH_OK")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -933,6 +953,7 @@ def main():
         test_quant_mode_resolution(base)
         test_musubi_quant_patch(base)
         test_accelerate_cpu_config_self_heal(base)
+        test_anima_vae_fp32_patch(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

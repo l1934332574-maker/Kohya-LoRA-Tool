@@ -153,7 +153,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.27"
+APP_VERSION = "0.9.28"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1789,6 +1789,48 @@ def _patch_musubi_rdna2_fp16(kdir, logf=print):
             logf(f"[Krea2] 已给 musubi {_fn} 打 RDNA2 fp16 补丁")
         except Exception as e:
             logf(f"[Krea2] musubi RDNA2 fp16 补丁失败（忽略）: {e}")
+
+
+def _patch_anima_vae_fp32(kdir, logf=print):
+    """Anima VAE fp32 幂等补丁（RDNA2 NaN 自愈，2026-08-23）。
+
+    根因：RDNA2（RX 6000）上 fp16 的 Qwen-Image VAE 编码 latent 普遍数值溢出 →
+    *_anima.npz 含 NaN/Inf → 训练第一步 loss=nan（换任何图/任何分辨率都复现）。
+    补丁让 anima_train_network.py 读 ANIMA_VAE_FP32 环境变量：为 1 时 VAE 保持 fp32
+    （缓存 latent 是一次性的；训练 DiT 仍用 mixed precision），否则行为与官方一致。"""
+    _fp = os.path.join(kdir, "sd-scripts", "anima_train_network.py")
+    _o = (
+        '        vae = anima_train_utils.load_qwen_image_vae(args, device="cpu", disable_mmap=True)\n'
+        '        vae.to(weight_dtype)\n'
+        '        vae.eval()'
+    )
+    _n = (
+        '        vae = anima_train_utils.load_qwen_image_vae(args, device="cpu", disable_mmap=True)\n'
+        '        # === KOHYA_TOOL_PATCH_BEGIN: anima VAE fp32（RDNA2 NaN 自愈）===\n'
+        '        import os as _anima_vae_fp32_os\n'
+        '        if _anima_vae_fp32_os.environ.get("ANIMA_VAE_FP32") == "1":\n'
+        '            vae.to(torch.float32)\n'
+        '        else:\n'
+        '            vae.to(weight_dtype)\n'
+        '        # === KOHYA_TOOL_PATCH_END ===\n'
+        '        vae.eval()'
+    )
+    try:
+        if not os.path.isfile(_fp):
+            return
+        with open(_fp, "r", encoding="utf-8") as f:
+            fsrc = f.read()
+        if "KOHYA_TOOL_PATCH_BEGIN" in fsrc and "ANIMA_VAE_FP32" in fsrc:
+            return
+        if _o not in fsrc:
+            logf("[Anima] sd-scripts anima_train_network.py 结构变化，跳过 VAE fp32 补丁")
+            return
+        fsrc = fsrc.replace(_o, _n, 1)
+        with open(_fp, "w", encoding="utf-8") as f:
+            f.write(fsrc)
+        logf("[Anima] 已打 VAE fp32 补丁（RDNA2 时 latent 缓存用 fp32，消除 NaN 根因）")
+    except Exception as e:
+        logf(f"[Anima] VAE fp32 补丁失败（忽略）: {e}")
 
 
 def _patch_musubi_fp8_dequant_bf16(kdir, logf=print):
@@ -3430,6 +3472,52 @@ def _ensure_preprocess_deps(vpy, kdir, logf=print, force=False):
         if _round == 0:
             logf("[预处理] 补装后仍不可用（可能是网络/镜像波动），重试一轮…")
     return False
+
+
+def _scan_anima_nan_latents(dataset_dir, vpy, logf=print, delete=False):
+    """扫描 Anima latent 缓存（*_anima.npz）里的 NaN/Inf，返回问题文件名列表。
+
+    delete=True 时自动删除（RDNA2 fp16 旧缓存必坏：删掉后训练会用 fp32 VAE 重新缓存）。
+    """
+    _code = (
+        "import glob,os,sys,numpy as np\n"
+        "bad=[]\n"
+        "for f in glob.glob(os.path.join(sys.argv[1],'*_anima.npz')):\n"
+        "    try:\n"
+        "        with np.load(f) as z:\n"
+        "            for k in z.files:\n"
+        "                a=z[k]\n"
+        "                if a.dtype.kind=='f' and (np.isnan(a).any() or np.isinf(a).any()):\n"
+        "                    bad.append(os.path.basename(f)); break\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "print('\\n'.join(bad))\n"
+    )
+    if not dataset_dir or not os.path.isdir(dataset_dir) or not os.path.isfile(vpy):
+        return []
+    try:
+        r = subprocess.run([vpy, "-c", _code, dataset_dir], capture_output=True, text=True, timeout=300)
+        bad = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+    except Exception:
+        return []
+    if not bad:
+        return bad
+    if delete:
+        removed = 0
+        for ln in bad:
+            fp = os.path.join(dataset_dir, ln)
+            try:
+                if os.path.isfile(fp):
+                    os.remove(fp)
+                    removed += 1
+            except Exception:
+                pass
+        logf(f"[训练] ⚠ 检测到 {len(bad)} 个 NaN/Inf 的 latent 缓存（RDNA2 fp16 溢出产物），"
+             f"已自动删除 {removed} 个，本次将用 fp32 VAE 重新缓存。")
+    else:
+        for ln in bad:
+            logf(f"[训练] ⚠ 检测到 latent 缓存含 NaN/Inf：{ln}")
+    return bad
 
 
 def _start_anima_latent_nan_watcher(dataset_dir, vpy, logf=print):
@@ -5650,6 +5738,8 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         elif vram_gb < 16:
             cmd += ["--fp8_base"]
     elif family == "anima":
+        # RDNA2 上 fp16 VAE 编码 latent 普遍 NaN → 训练第一步 loss=nan；训练前打幂等补丁（配合 ANIMA_VAE_FP32=1）
+        _patch_anima_vae_fp32(kdir, logf)
         qwen3, vae = _ensure_anima_components(logf)
         cmd += [f"--qwen3={qwen3}", f"--vae={vae}",
                 "--qwen_image_vae_2d", "--vae_chunk_size=64"]
@@ -5720,6 +5810,11 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
             logf("[训练] AMD 兼容模式：RX 6000 系已设置 HSA_OVERRIDE_GFX_VERSION=10.3.0")
         env.setdefault("DISABLE_ADDMM_CUDA_LT", "1")  # ZLUDA/ROCm 兼容
         env.setdefault("MIOPEN_FIND_MODE", "2")       # ROCm 卷积搜索加速
+    # Anima：RDNA2（RX 6000）fp16 VAE 溢出 NaN 自愈——强制 VAE fp32 + 自动清理旧 NaN 缓存
+    if family == "anima" and _amd_is_gfx103x():
+        env["ANIMA_VAE_FP32"] = "1"
+        logf("[训练] 检测到 RDNA2（RX 6000）：Anima VAE 强制 fp32 编码 latent（消除 fp16 溢出 NaN 根因）")
+        _scan_anima_nan_latents(dataset_dir, vpy, logf, delete=True)
     # Anima：后台扫描 latent 缓存，第一步 loss=nan 时定位是哪些图（只提示不自动停止）
     if family == "anima":
         _start_anima_latent_nan_watcher(dataset_dir, vpy, logf)

@@ -1,4 +1,15 @@
-## v0.9.27（2026-08-22）
+## v0.9.28（2026-08-23）
+
+### 修复：AMD RDNA2（RX 6000）Anima 训练第一步 loss=NaN（VAE fp32）
+
+- **根因**：训练脚本把 Qwen-Image VAE 用 `vae.to(weight_dtype)` 转成 fp16 编码 latent；RDNA2（RX 6000）上 fp16 的 VAE 编码**普遍数值溢出** → `*_anima.npz` 含 NaN/Inf → 训练第一步 `avr_loss=nan`。真实用户反馈：换任何图片、1024/768/512 三种分辨率都复现，连之前低轮次跑通的也报错 → 不是个别图片问题。
+- **已修**：
+  - 新增 `_patch_anima_vae_fp32` 幂等补丁：`anima_train_network.py` 读 `ANIMA_VAE_FP32` 环境变量，为 1 时 VAE 保持 **fp32** 编码 latent（缓存一次性，训练 DiT 仍走 fp16，速度不变），否则行为与官方一致。
+  - `train()` 在 **RDNA2 + Anima** 时自动设 `ANIMA_VAE_FP32=1`；NVIDIA / RDNA3+ 完全不受影响。
+  - 新增 `_scan_anima_nan_latents(delete=True)`：训练前自动扫描并删除旧 NaN 缓存，删后自动用 fp32 重新缓存，**用户无需手动删文件**。
+- **验证**：补丁首次应用 + 幂等（`ANIMA_VAE_FP32_PATCH_OK`）+ engine_install_smoke_test 全过。
+
+---## v0.9.27（2026-08-22）
 
 ### 新增：Krea2 / FLUX.2 8G 显存大幅提速（INT8 量化 + 可选 torch.compile / NF4）
 - **INT8（W8A8 对称量化）**：8~16G 显存自动启用。本机 4070 8G 实测：fp8 ≈138s/步 → **int8 ≈53s/步（快约 2.6 倍）**，量化误差比 fp8 更小（0.0032 vs 0.0104），loss 与 fp8 基本一致；显存充足（≥16G）保持 fp8 不变。
@@ -691,4 +702,5 @@
 ### 说明
 - AMD 兼容模式（实验性）：sdpa + bf16 + AdamW 自动适配
 - kohya 环境重定向 `%APPDATA%`，升级覆盖不重装环境
+
 
