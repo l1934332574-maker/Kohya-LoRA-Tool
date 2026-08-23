@@ -153,7 +153,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.28"
+APP_VERSION = "0.9.29"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -5381,23 +5381,36 @@ def _probe_lion(vpy, logf=print, timeout=180):
 
 
 def _diagnose_optimizer_failure(opt_k, log_text, logf=print):
-    """训练失败后诊断：用了 AdamW8bit 且日志命中 bitsandbytes 8-bit 崩溃关键字时，给出明确提示。
+    """训练失败后诊断：优先识别数据集配置校验错误，其次判断 bitsandbytes 8-bit 崩溃。
 
     opt_k 为空时自动从日志命令行解析 --optimizer_type=...。
-    返回 True=命中 bnb 8-bit 问题（调用方可在报错信息里追加建议）。
+    返回 True=已给出明确诊断（调用方可在报错信息里追加建议）。
     """
     if not log_text:
         return False
+    # 数据集配置校验失败（voluptuous schema 拒绝 dataset_config.toml）：与优化器无关，
+    # 必须优先报告真实原因，避免误导用户去改优化器
+    if "Invalid user config" in log_text or "extra keys not allowed" in log_text or "MultipleInvalid" in log_text:
+        m = re.search(r"extra keys not allowed\s*@\s*(\S+)", log_text)
+        where = f"（非法键位置：{m.group(1)}）" if m else ""
+        logf("[训练] ⚠ 检测到数据集配置 dataset_config.toml 校验失败" + where)
+        logf("[训练] 原因：TOML 中存在 sd-scripts 不认识的键，或键写错了层级"
+             "（例如 is_reg 必须写在 [[datasets.subsets]] 子集层级，不能写在 [[datasets]] 层级）。")
+        logf("[训练] 解决：重新执行数据预处理让工具重写配置，或手动修正 configs/dataset_config.toml 后重试。")
+        return True
     if not opt_k:
         m = re.search(r"(?:^|\s)--?optimizer_?type[=:\s]+([A-Za-z0-9_]+)", log_text, re.I)
         opt_k = m.group(1) if m else ""
     if str(opt_k).lower() not in ("adamw8bit", "adamw_8bit", "8bit"):
         return False
     keys = ("libbitsandbytes", "str2optimizer8bit_blockwise", "bitsandbytes",
-            "compiled without GPU support", "cuda setup", "8-bit optimizer", "8bit")
+            "compiled without GPU support", "cuda setup", "8-bit optimizer")
     # 剔除 $ 开头的命令行（里面必含 --optimizer_type=AdamW8bit，会污染 "8bit" 关键字匹配），
     # 只在实际输出里找 bnb 崩溃特征
-    low = "\n".join(l for l in log_text.splitlines() if not l.lstrip().startswith("$ ")).lower()
+    low = "\n".join(
+        l for l in log_text.splitlines()
+        if not l.lstrip().startswith("$ ") and "command '[" not in l.lower()
+    ).lower()
     hit = [k for k in keys if k in low]
     if not hit:
         return False
@@ -5743,6 +5756,10 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         qwen3, vae = _ensure_anima_components(logf)
         cmd += [f"--qwen3={qwen3}", f"--vae={vae}",
                 "--qwen_image_vae_2d", "--vae_chunk_size=64"]
+        # RDNA2：官方 --no_half_vae 让 VAE 全程 fp32（sd-scripts 的 cache_latents 阶段会用
+        # vae_dtype=weight_dtype 把 VAE 转回 fp16，仅改 load 的补丁不够 → latent 仍 NaN → 训练第一步 loss=nan）
+        if _amd_is_gfx103x():
+            cmd += ["--no_half_vae"]
         # 8~12G 显存：把 DiT 层搬到内存省显存（Anima 不支持 fp8，只能用 blocks_to_swap），
         # 否则 1024px 下 2B DiT + Qwen3 + 优化器超出 8G 显存 → 系统换页 → 每步 100+ 秒。
         # 文本编码器始终冻结 → 缓存其输出，省掉每步的前向计算。

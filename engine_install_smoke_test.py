@@ -933,6 +933,70 @@ def test_anima_vae_fp32_patch(base: Path):
     print("ANIMA_VAE_FP32_PATCH_OK")
 
 
+def test_dataset_config_is_reg_subset(base: Path):
+    """is_reg 必须写在 [[datasets.subsets]] 子集层，不能写在 [[datasets]] 层（issue #3）。"""
+    import preprocess
+    train = base / "train"; reg = base / "reg"
+    train.mkdir(parents=True, exist_ok=True); reg.mkdir(parents=True, exist_ok=True)
+    cfg = base / "dataset_config.toml"
+    preprocess.write_dataset_config(str(train), str(cfg), resolution=1024, num_repeats=5, reg_dir=str(reg))
+    txt = cfg.read_text(encoding="utf-8")
+    blocks = txt.split("[[datasets]]")
+    assert len(blocks) == 3, f"应含训练+正则两个数据集块: {len(blocks)-1}"
+    for b in blocks[1:]:
+        ds = [l for l in b.splitlines() if l.strip() and not l.startswith("  ")]
+        assert not any("is_reg" in l for l in ds), f"datasets 层不应有 is_reg: {ds}"
+    assert "  is_reg = true" in blocks[2], "正则子集应含 is_reg=true"
+    print("DATASET_CONFIG_IS_REG_SUBSET_OK")
+
+
+def test_diagnose_optimizer_failure_scenarios(base: Path):
+    """_diagnose_optimizer_failure：配置校验错误优先、bnb 命中、OOM/命令重印不误报。"""
+    def run(txt):
+        buf = []
+        ok = core._diagnose_optimizer_failure(None, txt, buf.append)
+        return ok, "\n".join(buf)
+    # 1) voluptuous 配置校验失败（issue #3 主场景）
+    ok, out = run(
+        "voluptuous.error.MultipleInvalid: extra keys not allowed @ data['datasets'][1]['is_reg']\n"
+        "subprocess.CalledProcessError: Command '[... --optimizer_type=AdamW8bit ...]' returned non-zero exit status 1."
+    )
+    assert ok and "数据集配置" in out and "is_reg" in out and "bitsandbytes" not in out, out
+    # 2) 真实 bitsandbytes 崩溃仍命中（日志含命令行回显，opt_k 可解析）
+    ok, out = run(
+        "$ C:\\x\\python.exe -m accelerate.commands.launch ... --optimizer_type=AdamW8bit ...\n"
+        "Traceback: NameError: name 'str2optimizer8bit_blockwise' is not defined\n"
+        "bitsandbytes CUDA binary not found ... libbitsandbytes_cuda128.dll"
+    )
+    assert ok and "bitsandbytes" in out, out
+    # 3) CalledProcessError 重印命令 + OOM 不误报
+    ok, out = run(
+        "subprocess.CalledProcessError: Command '[... --optimizer_type=AdamW8bit ...]' returned non-zero exit status 1.\n"
+        "CUDA out of memory."
+    )
+    assert not ok, "OOM 不应误报 bnb"
+    # 4) 正常日志不触发
+    ok, out = run("steps: 1/100, avr_loss=0.07")
+    assert not ok
+    print("DIAGNOSE_OPTIMIZER_FAILURE_SCENARIOS_OK")
+
+
+def test_anima_rdna2_no_half_vae(base: Path):
+    """RDNA2 + Anima 必须传官方 --no_half_vae（cache_latents 阶段 vae_dtype 会覆盖 load 补丁）。"""
+    src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    # anima 分支内 RDNA2 自动加 --no_half_vae
+    assert "--no_half_vae" in src, "train() 应含 --no_half_vae"
+    m = re.search(r'if _amd_is_gfx103x\(\):\n\s+cmd \+= \["--no_half_vae"\]', src)
+    assert m, "anima 分支 RDNA2 未自动加 --no_half_vae"
+    # 官方参数确实存在于随包 sd-scripts（不是自造参数）
+    import zipfile
+    zp = ROOT / "installers" / "kohya_ss" / "sd-scripts-main.zip"
+    with zipfile.ZipFile(str(zp)) as z:
+        tn = z.read("sd-scripts-main/train_network.py").decode("utf-8", errors="replace")
+    assert '"--no_half_vae"' in tn, "sd-scripts 无 --no_half_vae 参数"
+    print("ANIMA_RDNA2_NO_HALF_VAE_OK")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -954,6 +1018,9 @@ def main():
         test_musubi_quant_patch(base)
         test_accelerate_cpu_config_self_heal(base)
         test_anima_vae_fp32_patch(base)
+        test_dataset_config_is_reg_subset(base)
+        test_diagnose_optimizer_failure_scenarios(base)
+        test_anima_rdna2_no_half_vae(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

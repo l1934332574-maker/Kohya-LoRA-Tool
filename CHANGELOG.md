@@ -1,4 +1,22 @@
-## v0.9.28（2026-08-23）
+## v0.9.29（2026-08-23）
+
+### 修复：人物模式 + 正则数据集训练必崩（is_reg 写错 TOML 层级，GitHub issue #3）
+- **根因**：`preprocess.write_dataset_config()` 把 `is_reg = true` 写在 `[[datasets]]` 层级，而 sd-scripts 的 schema 要求它写在 `[[datasets.subsets]]` 子集层级 → 任何「人物模式 + 正则数据集」组合 100% 触发 `voluptuous.error.MultipleInvalid: extra keys not allowed @ data['datasets'][1]['is_reg']`，训练启动即崩。
+- **已修**：is_reg 从 `[[datasets]]` 块移除，改写到正则数据集的每个 `[[datasets.subsets]]` 子集块内。
+
+### 修复：训练失败误诊为 bitsandbytes 8-bit 问题
+- **根因**：`_diagnose_optimizer_failure()` 关键字含裸 `"8bit"`，且只过滤 `$ ` 开头命令行；`CalledProcessError` 会把含 `--optimizer_type=AdamW8bit` 的整条命令重印出来，未被过滤 → 配置校验错误、OOM 等都被误报成 bitsandbytes 问题。
+- **已修**：优先识别数据集配置校验失败（`Invalid user config` / `extra keys not allowed` / `MultipleInvalid`）并报出非法键位置；关键字移除裸 `"8bit"`；过滤 `Command '[...]'` 重印行。真实 bnb 崩溃仍能正确命中。
+
+### 修复：RDNA2（RX 6000）Anima latent 缓存仍 NaN（补 --no_half_vae 根治）
+- **根因**：上一版只改了 `load_target_model` 的 `vae.to(weight_dtype)`，但 sd-scripts 的 `cache_latents` 阶段会 `vae.to(device, dtype=vae_dtype)`，`vae_dtype = torch.float32 if args.no_half_vae else weight_dtype` → VAE 被转回 fp16 编码 → latent 仍 NaN（用户实测：补丁生效但缓存阶段 watcher 仍报 10 个 npz NaN）。
+- **已修**：RDNA2 + Anima 时训练命令自动加官方 **`--no_half_vae`**，VAE 在 load / cache_latents / 采样全流程保持 fp32；保留原有 load 补丁双保险。NVIDIA / RDNA3+ 不受影响。
+- 说明：自动停止（loss=NaN 检测）只是保护动作，不是问题来源。
+
+### 验证
+- 新增冒烟测试：`DATASET_CONFIG_IS_REG_SUBSET_OK`、`DIAGNOSE_OPTIMIZER_FAILURE_SCENARIOS_OK`（4 场景）、`ANIMA_RDNA2_NO_HALF_VAE_OK`；engine_install_smoke_test + smoke_test 全过。
+
+---## v0.9.28（2026-08-23）
 
 ### 修复：AMD RDNA2（RX 6000）Anima 训练第一步 loss=NaN（VAE fp32）
 
@@ -702,5 +720,6 @@
 ### 说明
 - AMD 兼容模式（实验性）：sdpa + bf16 + AdamW 自动适配
 - kohya 环境重定向 `%APPDATA%`，升级覆盖不重装环境
+
 
 

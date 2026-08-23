@@ -644,7 +644,7 @@ def write_dataset_config(output_dir, config_path, resolution=768, batch_size=1,
     - num_repeats：训练图片重复次数（平铺数据集时生效）；
     - subsets：[(image_dir, num_repeats), ...]，支持秋叶式 repeats_名称 子目录结构，
       每个子目录独立重复次数；传入时按多个 [[datasets.subsets]] 输出，忽略单一 num_repeats；
-    - reg_dir：正则数据集文件夹（非空时额外写一个 is_reg = true 的 [[datasets]]）；
+    - reg_dir：正则数据集文件夹（非空时额外写一个 [[datasets]]，is_reg=true 写在子集层）；
     - reg_subsets：正则数据集子集列表（同 subsets 语义，默认为 [(reg_dir, 1)]）；
     - keep_tokens：保留在 caption 开头的 token 数（人物模式保护 trigger，通常=1）。
     """
@@ -692,7 +692,6 @@ def write_dataset_config(output_dir, config_path, resolution=768, batch_size=1,
             "[[datasets]]",
             f"resolution = {resolution}",
             f"batch_size = {batch_size}",
-            "is_reg = true",
             "enable_bucket = true",
             "bucket_no_upscale = true",
             "bucket_reso_steps = 64",
@@ -708,6 +707,7 @@ def write_dataset_config(output_dir, config_path, resolution=768, batch_size=1,
                 "  [[datasets.subsets]]",
                 f'  image_dir = "{_abs}"',
                 f"  num_repeats = {int(_nr)}",
+                "  is_reg = true",
             ]
     toml_text = "\n".join(lines) + "\n"
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
