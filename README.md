@@ -4,17 +4,17 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.9.28** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.9.29** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
 ---
 
-## 🆕 v0.9.28 更新重点
+## 🆕 v0.9.29 更新重点
 
-- **修复 AMD RDNA2（RX 6000）Anima 训练第一步 loss=NaN**：VAE 强制 fp32 编码 latent（消除 fp16 溢出根因），换任何图/任何分辨率都不再复现。
-- **旧 NaN 缓存自动清理**：训练前自动删除坏的 latent 缓存并用 fp32 重新生成，无需手动删文件。
-- 仅影响 RDNA2 + Anima 路径；NVIDIA / RDNA3+ 行为不变。
+- **修复「人物模式 + 正则数据集」训练必崩**：`is_reg` 写错 TOML 层级（应写在子集层），现按 sd-scripts schema 修正。
+- **修复失败误诊**：训练失败不再被误报为 bitsandbytes 8-bit 问题，优先报告真实原因（配置校验 / OOM / 优化器）。
+- **RDNA2（RX 6000）Anima 训练加官方 `--no_half_vae`**：VAE 全程 fp32（含缓存阶段），根治 latent NaN / 第一步 loss=nan。
 
 > 完整更新记录见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -90,7 +90,7 @@
 
 | 文件 | 说明 |
 |---|---|
-| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源和 WD14 打标模型；当前最新版为 v0.9.28 |
+| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源和 WD14 打标模型；当前最新版为 v0.9.29 |
 | `KohyaLoraTool_*_portable.zip` | 便携版，解压后运行；若该版本未上传 ZIP，请使用 `Setup.exe` |
 
 ### 国内镜像
