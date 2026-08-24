@@ -1135,6 +1135,36 @@ def test_video_preprocess_no_auto_train(base: Path):
     print("VIDEO_PREPROCESS_NO_AUTO_TRAIN_OK")
 
 
+def test_build_env_utf8_output(base: Path):
+    """训练子进程强制 UTF-8 输出：英文系统（cp1252）下打印中文不再 UnicodeEncodeError。"""
+    import os as _os
+    # 1) 复现崩溃：子进程 PYTHONIOENCODING=cp1252 打印中文 → 非零退出
+    bad_env = dict(_os.environ)
+    bad_env["PYTHONIOENCODING"] = "cp1252"
+    r1 = subprocess.run([sys.executable, "-c", "print('中文测试')"],
+                        capture_output=True, text=True, timeout=60, env=bad_env)
+    assert r1.returncode != 0, f"cp1252 打印中文应失败，实际 rc={r1.returncode} stdout={r1.stdout!r}"
+    # 2) 修复：build_env 必须带 PYTHONIOENCODING=utf-8
+    env = core.build_env()
+    assert env.get("PYTHONIOENCODING") == "utf-8", env
+    # 3) 用 build_env 跑同样的打印 → 成功
+    r2 = subprocess.run([sys.executable, "-c", "print('中文测试')"],
+                        capture_output=True, text=True, encoding="utf-8", timeout=60, env=env)
+    assert r2.returncode == 0, (r2.returncode, r2.stderr)
+    assert "中文测试" in r2.stdout
+    print("BUILD_ENV_UTF8_OUTPUT_OK")
+
+
+def test_krea2_style_subdir_consistency(base: Path):
+    """Krea2/Qwen-Image 画风子模式：预处理输出 train_character，训练必须读 train_character（防「缺少预处理数据」）。"""
+    src_all = Path(core.__file__).read_text(encoding="utf-8-sig")
+    # train_krea2 / train_at_image 不再按 at_sub_mode 切换 train/train_character
+    assert src_all.count('train_dir = dataset_train_dir("character", params.get("project"))') >= 2, "训练目录未统一为 train_character"
+    # 不再存在按子模式切换 train/train_character 的旧写法
+    assert 'dataset_train_dir("style" if _sub_mode == "style"' not in src_all, "仍存在按子模式切换目录"
+    print("KREA2_STYLE_SUBDIR_CONSISTENCY_OK")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -1164,6 +1194,8 @@ def main():
         test_preprocess_python_fallback(base)
         test_h3_integrity_and_nvfp4_required(base)
         test_video_preprocess_no_auto_train(base)
+        test_build_env_utf8_output(base)
+        test_krea2_style_subdir_consistency(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

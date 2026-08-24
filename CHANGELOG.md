@@ -1,4 +1,18 @@
-## v0.10.2（待发布）
+## v0.10.3（2026-08-25）
+
+### 修复：英文系统（cp1252）下训练打印中文崩溃（UnicodeEncodeError）
+- **背景**：用户（Administrator，英文 Windows）Anima 训练时 `accelerator.print()` 打印含中文的内容（trigger/项目名/caption）→ 子进程 stdout 编码为 cp1252（英文系统默认）→ `UnicodeEncodeError: 'charmap' codec can't encode characters` → 训练直接崩溃。
+- **根因**：`build_env()` / `build_direct_env()` 未设置 `PYTHONIOENCODING`，训练/预处理子进程 stdout 跟随系统 locale（英文=cp1252），无法编码中文。
+- **已修**：`build_env()` 全局 `env.setdefault("PYTHONIOENCODING", "utf-8")`（不覆盖用户已有设置），所有训练/预处理/安装子进程 stdout 强制 UTF-8；`run_stream` 父进程本就按 UTF-8 解码，天然一致。
+- **验证**：新增 `BUILD_ENV_UTF8_OUTPUT_OK` 冒烟测试（cp1252 打印中文复现崩溃 → build_env 强制 utf-8 后正常），engine_install_smoke_test + smoke_test 全过。
+
+### 修复：Krea2 / Qwen-Image / Z-Image 画风子模式训练报「缺少预处理数据」
+- **背景**：用户 Krea2 画风子模式一键训练，预处理"可用图片 29 张"成功，但训练报 `缺少预处理数据：...dataset\<项目>\train`。
+- **根因**：预处理对 Krea2/Qwen-Image/Z-Image 统一输出到 `train_character`（`dataset_mode="character"`），但 `train_krea2` / `train_at_image` 按画风子模式（`at_sub_mode=style`）读 `train` 目录 → 目录不一致。
+- **已修**：`train_krea2` / `train_at_image` 统一读 `train_character`（与预处理一致），画风子模式不再切到 `train`。
+- **验证**：新增 `KREA2_STYLE_SUBDIR_CONSISTENCY_OK` 冒烟测试，engine_install_smoke_test + smoke_test 全过。
+
+---## v0.10.2（2026-08-24）
 
 ### 修复：Krea2 / FLUX.2 / Qwen-Image / Z-Image 只装第二/第三引擎时，一键训练误报「Kohya 尚未安装」
 - **根因**：`preprocess()`（数据预处理）固定用第一引擎（Kohya）venv 的 Python（`venv_python()`），Krea2/FLUX.2/Qwen-Image 用户只装第二/第三引擎、没装 Kohya → 一键训练预处理阶段报「Kohya 尚未安装」。该 bug 自 Krea2 模式加入以来一直存在。

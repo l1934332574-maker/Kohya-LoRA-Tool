@@ -134,6 +134,10 @@ def build_env(extra_dirs=()):
     # 网络不稳时 pip 容易 IncompleteRead 中断：全局加大重试次数与超时
     env.setdefault("PIP_RETRIES", "10")
     env.setdefault("PIP_TIMEOUT", "120")
+    # 子进程 stdout/stderr 强制 UTF-8：英文系统（cp1252）下训练/预处理打印中文会
+    # UnicodeEncodeError（accelerator.print 输出含中文项目名/trigger/caption 时崩溃）。
+    # setdefault 不覆盖用户已有的 PYTHONIOENCODING；run_stream 父进程本就按 utf-8 解码。
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     return env
 
 

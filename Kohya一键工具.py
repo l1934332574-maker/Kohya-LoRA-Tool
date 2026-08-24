@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.2"
+APP_VERSION = "0.10.3"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1946,7 +1946,9 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
             "\n\n（在软件里点「打开 Krea2 模型文件夹」，用浏览器打开上面的国内镜像直链下载后放进去）")
     # 画风/人物子模式：画风=train 目录，人物=train_character 目录（与预处理一致）
     _sub_mode = params.get("at_sub_mode") or "character"
-    train_dir = dataset_train_dir("style" if _sub_mode == "style" else "character", params.get("project"))
+    # Krea2/Qwen-Image/Z-Image 数据统一放 train_character（与预处理 dataset_mode="character" 一致），
+    # 即使画风子模式也读 train_character，避免「预处理输出 train_character / 训练读 train」不一致。
+    train_dir = dataset_train_dir("character", params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
     # 数据集配置 + 独立缓存目录
@@ -2116,7 +2118,9 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
             "\n\n（在软件里点「打开 FLUX.2 模型文件夹」，用应用内下载或浏览器打开上面的国内镜像直链下载后放进去）")
     # 画风/人物子模式：画风=train 目录，人物=train_character 目录（与预处理一致）
     _sub_mode = params.get("at_sub_mode") or "character"
-    train_dir = dataset_train_dir("style" if _sub_mode == "style" else "character", params.get("project"))
+    # Krea2/Qwen-Image/Z-Image 数据统一放 train_character（与预处理 dataset_mode="character" 一致），
+    # 即使画风子模式也读 train_character，避免「预处理输出 train_character / 训练读 train」不一致。
+    train_dir = dataset_train_dir("character", params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
     # 数据集配置 + 独立缓存目录
