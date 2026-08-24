@@ -1,4 +1,26 @@
-## v0.10.1（2026-08-24）
+## v0.10.2（待发布）
+
+### 修复：Krea2 / FLUX.2 / Qwen-Image / Z-Image 只装第二/第三引擎时，一键训练误报「Kohya 尚未安装」
+- **根因**：`preprocess()`（数据预处理）固定用第一引擎（Kohya）venv 的 Python（`venv_python()`），Krea2/FLUX.2/Qwen-Image 用户只装第二/第三引擎、没装 Kohya → 一键训练预处理阶段报「Kohya 尚未安装」。该 bug 自 Krea2 模式加入以来一直存在。
+- **已修**：新增 `_pick_preprocess_python()` 多引擎 fallback：Kohya venv → musubi-venv（第二引擎）→ ai_toolkit_venv（第三引擎）；预处理只需要 PIL/numpy（缺失自动补装），任何引擎 venv 都能跑。
+- **验证**：新增 `PREPROCESS_PYTHON_FALLBACK_OK` 冒烟测试（kohya/musubi/ai_toolkit 优先序 + 全缺失），engine_install_smoke_test + smoke_test 全过。
+
+### 新增：MiniMax H3 模型完整性校验（防 SafetensorError）
+- **背景**：用户 nvfp4 下载中断残留损坏文件，工具只按文件名判定「模型齐全」，训练加载时 `SafetensorError: incomplete metadata, file not fully covered`。
+- **已做**：`h3_model_files()` 增加文件大小校验（nvfp4 ≈11.7GB / int8 ≈19.5GB / TE ≈15GB / video_vae ≈5GB），明显偏小的文件视为缺失；新增 `h3_incomplete_files()`，`h3_missing_models()` 会提示「文件疑似下载不完整，请删除后重新下载」。
+
+### 新增：12~16G 显存 H3 训练前强提示必须用 nvfp4
+- **背景**：12G + int8（19.5G）物理放不下，训练准备阶段 `unet.to(device)` 必 OOM（实测）。
+- **已做**：`train_h3` 检测 `vram_gb<16 且无 nvfp4` 时直接阻止并给出魔搭直链（int8 仅 24G+ 放行）。
+
+### 修复：视频模式「数据预处理」不再自动跳训练
+- **背景**：视频模式点「数据预处理」→ 扫描后 AUTO_CONFIRM 自动进入训练确认（含重装 torch 弹窗）→ 误触发训练。
+- **已做**：视频模式点「数据预处理」只扫描并提示「视频数据已就绪，请直接点【一键训练】」，不再自动进入训练流程。
+
+### 验证
+- 新增 `H3_INTEGRITY_AND_NVFP4_REQUIRED_OK`、`VIDEO_PREPROCESS_NO_AUTO_TRAIN_OK`、`PREPROCESS_PYTHON_FALLBACK_OK` 冒烟测试；engine_install_smoke_test + smoke_test 全过。
+
+---## v0.10.1（2026-08-24）
 
 ### 修复：H3 模型下载全部改走魔搭（ModelScope）国内直链
 - **背景**：用户反馈 nvfp4 量化模型走 hf-mirror 下载巨慢（部分文件慢/不稳定）。

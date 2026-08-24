@@ -4,7 +4,7 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.10.1** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.10.2** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
@@ -20,9 +20,14 @@
 - **MiniMax H3（视频 LoRA）低显存自动适配**：所有 H3 训练默认开 `low_vram`，<24G 自动开分层交换，12G 卡不再加载就 OOM。
 - **MiniMax H3 支持 nvfp4 量化主模型**（12~16G 显存推荐，约 11.7GB 更小更稳），自动检测并优先使用。
 
-## 🆕 v0.10.1 更新重点
-
 - **MiniMax H3 模型下载全部改走魔搭国内直链**（ModelScope）：int8 / nvfp4 主模型、Qwen3-VL-32B 文本编码器、视频/音频 VAE 全部改为国内 CDN 直链，支持断点续传，再也不用苦等 hf-mirror。
+
+## 🆕 v0.10.2 更新重点
+
+- **MiniMax H3 模型完整性校验**：下载不完整的文件会被识别并提示重新下载，不再等训练时报 SafetensorError。
+- **12~16G 显存 H3 训练前强提示**：必须用 nvfp4 主模型（int8 19.5GB 物理放不下），直接给魔搭下载链接。
+- **视频模式「数据预处理」不再自动跳训练**：只检查提示，避免误触发训练。
+- **修复 Krea2/FLUX.2 只装第二引擎时一键训练误报「Kohya 尚未安装」**：预处理自动多引擎 fallback。
 
 > 完整更新记录见 [CHANGELOG.md](CHANGELOG.md)。
 

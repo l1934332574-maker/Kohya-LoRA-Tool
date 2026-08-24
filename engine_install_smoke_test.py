@@ -1041,8 +1041,10 @@ def test_h3_vram_adapt(base: Path):
     assert "dit_fl2va_pruned_path: " in tn4, tn4
     assert nvfp4_file.name in tn4, tn4
 
-    # h3_model_files：nvfp4 文件名能被检测到
-    with patch.object(core, "h3_models_dir", return_value=str(base / "h3_cfg")):
+    # h3_model_files：nvfp4 文件名能被检测到（fake 文件很小，需把完整性阈值降到 1 字节）
+    tiny_sizes = {k: 1 for k in core.H3_MIN_SIZES}
+    with patch.object(core, "H3_MIN_SIZES", tiny_sizes), \
+         patch.object(core, "h3_models_dir", return_value=str(base / "h3_cfg")):
         files = core.h3_model_files()
     assert files["dit_nvfp4"] and not files["dit"], files
     # h3_missing_models：<16G 且两者都缺时推荐 nvfp4（11.7GB）+ int8 可选项；>=24G 只要求 int8
@@ -1072,6 +1074,67 @@ def test_video_caption_args(base: Path):
     print("VIDEO_CAPTION_ARGS_OK")
 
 
+def test_preprocess_python_fallback(base: Path):
+    """Krea2/FLUX.2 只装第二引擎时，预处理用 musubi venv 而非误报「Kohya 尚未安装」。"""
+    kdir = base / "kohya_ss"
+    mv = kdir / "musubi-venv" / "Scripts" / "python.exe"
+    fake_python(mv)
+    with patch.object(core, "get_kohya_dir", return_value=str(kdir)):
+        py = core._pick_preprocess_python()
+    assert py == str(mv), py
+    av = kdir / "ai_toolkit_venv" / "Scripts" / "python.exe"
+    fake_python(av)
+    with patch.object(core, "get_kohya_dir", return_value=str(kdir)):
+        py2 = core._pick_preprocess_python()
+    assert py2 == str(mv), py2  # musubi 优先于 ai_toolkit
+    kv = kdir / "venv" / "Scripts" / "python.exe"
+    fake_python(kv)
+    with patch.object(core, "get_kohya_dir", return_value=str(kdir)):
+        py3 = core._pick_preprocess_python()
+    assert py3 == str(kv), py3  # kohya venv 最优先
+    with patch.object(core, "get_kohya_dir", return_value=str(base / "empty")):
+        py4 = core._pick_preprocess_python()
+    assert py4 == "", py4
+    # preprocess 入口改用多引擎 fallback，不再硬报「Kohya 尚未安装」
+    _src_all = Path(core.__file__).read_text(encoding="utf-8-sig")
+    assert "vpy = _pick_preprocess_python()" in _src_all, "preprocess 未使用 fallback"
+    assert "尚未安装任何训练引擎" in _src_all, "preprocess 报错文案未更新"
+    print("PREPROCESS_PYTHON_FALLBACK_OK")
+
+
+def test_h3_integrity_and_nvfp4_required(base: Path):
+    """H3 模型完整性校验（防 SafetensorError）+ 12~16G 必须 nvfp4 强提示。"""
+    # 1) 不完整文件：目录里有小体积 nvfp4 → 视为缺失 + h3_missing_models 提示
+    d = base / "h3_partial"
+    d.mkdir(exist_ok=True)
+    (d / "MiniMax_H3_FL2VA_pruned_nvfp4.safetensors").write_bytes(b"x" * 1024)
+    with patch.object(core, "h3_models_dir", return_value=str(d)):
+        files = core.h3_model_files()
+        inc = core.h3_incomplete_files()
+        miss = core.h3_missing_models(12)
+    assert not files.get("dit_nvfp4"), files
+    assert len(inc) == 1 and "nvfp4" in inc[0][0], inc
+    assert any("不完整" in m for m in miss), miss
+    # 2) 完整文件（超过阈值→这里用 mock 大小不行，直接验证阈值逻辑存在）
+    src_all = Path(core.__file__).read_text(encoding="utf-8-sig")
+    assert "H3_MIN_SIZES" in src_all and "h3_incomplete_files" in src_all
+    # 3) 12~16G 必须 nvfp4：train_h3 含强提示（int8 物理放不下）
+    assert "12~16G 显存训练 MiniMax H3 必须用 nvfp4 主模型" in src_all, "train_h3 缺 nvfp4 强提示"
+    print("H3_INTEGRITY_AND_NVFP4_REQUIRED_OK")
+
+
+def test_video_preprocess_no_auto_train(base: Path):
+    """视频模式「数据预处理」只检查提示，不再自动进入训练（避免误触发训练）。"""
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    i = g.find("if params.get(\"mode\") == \"video\":")
+    assert i != -1, "视频分支未找到"
+    seg = g[i:g.find("def ", i + 10)]
+    assert "视频无需图片预处理" in seg, "视频分支未改为提示"
+    # 视频分支不再 q.put AUTO_CONFIRM
+    assert 'q.put(("AUTO_CONFIRM"' not in seg, "视频分支仍会自动进入训练流程"
+    print("VIDEO_PREPROCESS_NO_AUTO_TRAIN_OK")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -1098,6 +1161,9 @@ def main():
         test_anima_rdna2_no_half_vae(base)
         test_h3_vram_adapt(base)
         test_video_caption_args(base)
+        test_preprocess_python_fallback(base)
+        test_h3_integrity_and_nvfp4_required(base)
+        test_video_preprocess_no_auto_train(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

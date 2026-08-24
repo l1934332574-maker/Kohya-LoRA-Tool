@@ -1,6 +1,6 @@
 {
-  "version": "v0.10.1",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.10.1/Setup.exe",
+  "version": "v0.10.2",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.10.2/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.10.1：MiniMax H3 模型下载全部改走魔搭国内直链（int8/nvfp4 主模型、文本编码器、VAE），支持断点续传、不再用 hf-mirror。"
+  "notes": "v0.10.2：H3 模型完整性校验；12~16G H3 强提示必用 nvfp4；视频模式预处理不自动跳训练；修复 Krea2/FLUX.2 误报「Kohya 尚未安装」。"
 }

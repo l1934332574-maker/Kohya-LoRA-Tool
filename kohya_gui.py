@@ -2945,9 +2945,13 @@ class App:
         try:
             report = os.path.join(os.environ.get("TEMP", "."), "kohya_auto_report.json")
             if params.get("mode") == "video":
-                videos, _t, _n = core.scan_video_dataset(params.get("raw_dir"))
-                stats = {"ok": len(videos), "skipped_existing": 0}
-                self.q.put(("AUTO_CONFIRM", params, stats, len(videos)))
+                # 视频模式「数据预处理」只做检查提示，不自动进入训练（避免误触发训练流程）。
+                videos, _t, no_cap = core.scan_video_dataset(params.get("raw_dir"))
+                if not videos:
+                    self._log("[预处理] 视频文件夹里没有找到视频，请先选择视频数据集文件夹。")
+                else:
+                    self._log(f"[预处理] 视频数据已就绪：{len(videos)} 个视频，{no_cap} 个缺字幕。"
+                              "视频无需图片预处理；字幕请用「AI 视频自动打标」或放同名 .txt，然后直接点【一键训练】。")
                 return
             if params.get("mode") in ("krea2", "qwen_image", "zimage"):
                 pp_mode = params.get("at_sub_mode") or "character"

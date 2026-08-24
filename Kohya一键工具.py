@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.1"
+APP_VERSION = "0.10.2"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2294,25 +2294,69 @@ def h3_models_dir():
     return os.path.join(KIT_DIR, "models", "minimax_h3")
 
 
+# 各 H3 模型文件的最小完整大小（下载中断残留会远小于此，用于识别损坏文件防 SafetensorError）
+H3_MIN_SIZES = {
+    "dit": 18_000_000_000,        # int8 主模型 ~19.5GB
+    "dit_nvfp4": 11_000_000_000,  # nvfp4 主模型 ~11.7GB
+    "te": 14_000_000_000,         # Qwen3-VL-32B 文本编码器 ~15GB
+    "video_vae": 4_500_000_000,   # 视频 VAE ~5GB
+    "audio_vae": 500_000_000,     # 音频 VAE ~0.6GB
+}
+
+_H3_WANT_FILES = {
+    "dit": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+    "dit_nvfp4": "minimax_h3_fl2va_pruned_nvfp4.safetensors",
+    "te": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    "video_vae": "minimax_h3_video_vae_fp16.safetensors",
+    "audio_vae": "minimax_h3_audio_vae_fp32.safetensors",
+}
+
+
+def h3_incomplete_files():
+    """返回模型目录里「存在但大小明显不足」的文件（下载中断残留）。
+
+    返回 [(文件名, 当前字节, 期望最小字节), ...]，供 h3_missing_models 提示用户删除重下。
+    """
+    d = h3_models_dir()
+    out = []
+    if not os.path.isdir(d):
+        return out
+    for root, _dirs, files in os.walk(d):
+        for f in files:
+            low = f.lower()
+            for key, fname in _H3_WANT_FILES.items():
+                if low == fname:
+                    p = os.path.join(root, f)
+                    try:
+                        sz = os.path.getsize(p)
+                    except Exception:
+                        sz = 0
+                    if sz < H3_MIN_SIZES[key]:
+                        out.append((f, sz, H3_MIN_SIZES[key]))
+    return out
+
+
 def h3_model_files():
-    """扫描 models/minimax_h3（含子目录），返回 {dit,te,video_vae,audio_vae} 路径或 None。"""
+    """扫描 models/minimax_h3（含子目录），返回 {dit,te,video_vae,audio_vae} 路径或 None。
+
+    大小明显不足（下载中断残留）的文件视为缺失，避免训练加载时 SafetensorError。
+    """
     d = h3_models_dir()
     out = {"dit": None, "dit_nvfp4": None, "te": None, "video_vae": None, "audio_vae": None}
     if not os.path.isdir(d):
         return out
-    want = {
-        "dit": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
-        "dit_nvfp4": "minimax_h3_fl2va_pruned_nvfp4.safetensors",
-        "te": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
-        "video_vae": "minimax_h3_video_vae_fp16.safetensors",
-        "audio_vae": "minimax_h3_audio_vae_fp32.safetensors",
-    }
     for root, _dirs, files in os.walk(d):
         for f in files:
             low = f.lower()
-            for key, fname in want.items():
+            for key, fname in _H3_WANT_FILES.items():
                 if out[key] is None and low == fname:
-                    out[key] = os.path.join(root, f)
+                    p = os.path.join(root, f)
+                    try:
+                        if os.path.getsize(p) < H3_MIN_SIZES[key]:
+                            continue  # 下载不完整，视为缺失
+                    except Exception:
+                        pass
+                    out[key] = p
     return out
 
 
@@ -2323,6 +2367,8 @@ def h3_missing_models(vram_gb=None):
     """
     files = h3_model_files()
     missing = []
+    for _fn, _sz, _mn in h3_incomplete_files():
+        missing.append(f"· ⚠ 文件疑似下载不完整：{_fn}（当前 {_sz/1048576:.0f}MB，应约 {_mn/1048576:.0f}MB+）\n  请删除该文件后重新下载（下载链接见上）")
     if not (files.get("dit") or files.get("dit_nvfp4")):
         if vram_gb is not None and vram_gb < 16:
             fname, desc, url = H3_MODEL_LINKS["dit_nvfp4"]
@@ -3223,6 +3269,13 @@ def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from
     os.makedirs(out_dir, exist_ok=True)
     cfg_path = os.path.join(KIT_DIR, "configs", "h3_train.yaml")
     _files = h3_model_files()
+    if vram_gb is not None and vram_gb < 16 and not _files.get("dit_nvfp4"):
+        raise RuntimeError(
+            "12~16G 显存训练 MiniMax H3 必须用 nvfp4 主模型（约 11.7GB）。\n"
+            "int8 主模型（19.5GB）物理上放不进 12~16G 显存，offload 也救不了（实测训练准备阶段必 OOM）。\n\n"
+            "请先下载 nvfp4 主模型放进 models/minimax_h3/：\n"
+            "https://modelscope.cn/models/Abiray/MiniMax-H3-nvfp4-INT4-INT8-Convrot/resolve/master/MiniMax_H3_FL2VA_pruned_nvfp4.safetensors\n"
+            "（下载后工具会自动识别并优先使用 nvfp4；24G+ 显存无此限制）")
     _dit_nvfp4 = _files.get("dit_nvfp4") if (vram_gb is not None and vram_gb < 16) else None
     if _dit_nvfp4:
         logf("[视频] 检测到 nvfp4 主模型（12~16G 显存推荐），将用 nvfp4 加载（更小更稳）")
@@ -3670,6 +3723,21 @@ def _ensure_torchvision_deps(vpy, logf=print, label="Kohya", cwd=None):
     return False
 
 
+def _pick_preprocess_python():
+    """选择可用的预处理 Python：优先 Kohya venv，其次第二引擎（musubi）、第三引擎（ai_toolkit）。
+
+    预处理只需要 PIL/numpy（缺失会自动补装），任何引擎 venv 都可用；
+    Krea2/FLUX.2/Qwen-Image/Z-Image 用户只装第二/第三引擎也能正常一键训练，
+    不再因为没装第一引擎（Kohya）而误报「Kohya 尚未安装」。
+    """
+    kdir = get_kohya_dir()
+    for sub in ("venv", "musubi-venv", "ai_toolkit_venv"):
+        c = os.path.join(kdir, sub, "Scripts", "python.exe")
+        if os.path.isfile(c):
+            return c
+    return ""
+
+
 def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
                reg_dir=None, repeats=5, dedup=False, wd14=True,
                square_crop=False, min_size=0, blur_threshold=0.0, report=None,
@@ -3679,13 +3747,14 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
     Qwen-Image/Z-Image/Krea2 数据统一放 train_character 目录（与训练读取一致），
     即使画风子模式 mode=style 也传 dataset_mode="character"，避免预处理/训练目录不一致。
     """
-    vpy = venv_python()
-    if not os.path.isfile(vpy):
-        raise RuntimeError("Kohya 尚未安装，请先点击【一键安装】")
+    vpy = _pick_preprocess_python()
+    if not vpy:
+        raise RuntimeError("尚未安装任何训练引擎（Kohya / 第二引擎 / 第三引擎）。\n"
+                           "请先按左侧引导安装对应引擎后再试。")
     _vok, _vdetail = _venv_python_ok(vpy)
     if not _vok:
         raise RuntimeError(
-            "Kohya 训练环境已损坏（%s）。\n"
+            "训练环境已损坏（%s）。\n"
             "常见原因：数据目录迁移到新盘/更换系统用户后，venv 指向的 Python 已不存在。\n"
             "请先重跑【② 安装训练内核】自动重建环境。" % _vdetail)
     if not input_dir or not os.path.isdir(input_dir):
