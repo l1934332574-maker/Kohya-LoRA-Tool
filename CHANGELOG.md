@@ -1,3 +1,12 @@
+## v0.10.1（2026-08-24）
+
+### 修复：H3 模型下载全部改走魔搭（ModelScope）国内直链
+- **背景**：用户反馈 nvfp4 量化模型走 hf-mirror 下载巨慢（部分文件慢/不稳定）。
+- **已修**：`H3_MODEL_LINKS` 5 个文件（int8 主模型、nvfp4 主模型、Qwen3-VL-32B TE、视频 VAE、音频 VAE）全部改为魔搭国内直链（`cdn-lfs-cn-1.modelscope.cn`，已验证支持断点续传、国内直连快）。
+  - int8/TE/VAE 用 `Comfy-Org/minimax-H3`；nvfp4 用 `Abiray/MiniMax-H3-nvfp4-INT4-INT8-Convrot`（魔搭同名镜像）。
+- 冒烟测试全过。
+
+---
 ## v0.10.0（2026-08-24）
 
 ### 新增：MiniMax H3（视频 LoRA）低显存自动适配（照搬 ai-toolkit 官方 / RunComfy 社区配置）
@@ -24,7 +33,6 @@
 ### 修复：视频（H3）模式打开「标签编辑器」空白
 - **根因**：标签编辑器是图片专用（逐张看图改标签），读 `dataset/<project>/train_character`；视频模式数据在用户选的视频文件夹（同名 .txt 字幕），不写该目录 → 必然空白。
 - **已修**：视频模式点「标签编辑器」直接提示说明（视频字幕=视频文件夹同名 txt / 占位字幕 / AI 打标），不再弹空白窗口。
-
 
 ---## v0.9.30（2026-08-24）
 
@@ -313,7 +321,6 @@ ealpath + normcase 容错；**真实环境不一致仍保留硬报错**（不掩
 - 第三引擎源码不进入 Setup.exe；本版安装包继续控制在 500MB 以内。
 
 ---
-
 
 ## v0.9.12（2026-08-18）
 
@@ -668,7 +675,6 @@ ealpath + normcase 容错；**真实环境不一致仍保留硬报错**（不掩
 
 ## v0.5.5（2026-08-12）
 
-
 ### 修复
 - **训练环境运行时依赖自愈**：训练前检查 kohya venv / AMD venv 是否具备完整依赖
   （PIL/numpy/transformers/huggingface_hub/toml/voluptuous/safetensors/diffusers/accelerate/omegaconf），
@@ -680,7 +686,6 @@ ealpath + normcase 容错；**真实环境不一致仍保留硬报错**（不掩
 
 ## v0.5.4（2026-08-12）
 
-
 ### 修复
 - **AMD 训练环境缺 toml/voluptuous**：训练走 venv_amd 跑 sd-scripts 时报
   `ModuleNotFoundError: No module named 'toml'`（AMD 依赖列表漏了这两个小包）
@@ -689,7 +694,6 @@ ealpath + normcase 容错；**真实环境不一致仍保留硬报错**（不掩
 ---
 
 ## v0.5.3（2026-08-12）
-
 
 ### 修复
 - **显卡显存检测改用 DXGI**（DedicatedVideoMemory）：修复 AMD 卡显存误报
@@ -701,7 +705,6 @@ ealpath + normcase 容错；**真实环境不一致仍保留硬报错**（不掩
 
 ## v0.5.2（2026-08-12）
 
-
 ### 新增 / 调整
 - **Krea2 使用引导**：软件内新增「📖 Krea 2 使用引导」窗口，第 1~6 步逐步教学（装第二引擎→下载模型→选图→预处理→训练→出图），含模型国内镜像直链与常见问题
 - **Krea2 参数校准**：预设 repeats 5→2（官方/社区量级，防过拟合）；隐藏无效的「文本编码器学习率」字段（Krea2 文本编码器预缓存、不训练）
@@ -711,7 +714,6 @@ ealpath + normcase 容错；**真实环境不一致仍保留硬报错**（不掩
 ---
 
 ## v0.5.1（2026-08-12）
-
 
 ### 修复 / 增强
 - **预处理自愈**：kohya venv 缺 Pillow/numpy 时自动补装，安装验证加强（修复中断安装导致的预处理永久失败）
@@ -723,7 +725,6 @@ ealpath + normcase 容错；**真实环境不一致仍保留硬报错**（不掩
 ---
 
 ## v0.5.0（2026-08-12）
-
 
 ### 新增
 - **第二训练引擎（musubi-tuner，实验性）**：左侧新增「②' 第二引擎(可选)」独立环境安装入口，与现有 Kohya 环境完全隔离，可随时安装/跳过
@@ -762,6 +763,4 @@ ealpath + normcase 容错；**真实环境不一致仍保留硬报错**（不掩
 ### 说明
 - AMD 兼容模式（实验性）：sdpa + bf16 + AdamW 自动适配
 - kohya 环境重定向 `%APPDATA%`，升级覆盖不重装环境
-
-
 

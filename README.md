@@ -4,7 +4,7 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.10.0** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.10.1** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
@@ -17,10 +17,12 @@
 - **修复老系统 curl 不兼容导致 torch 大轮子下载永远失败**：`--retry-all-errors` 需 curl 8.0+，Windows 自带旧版 curl 自动省略该参数，Kohya/第二引擎/AMD 大文件下载不再报错。
 - **修复 Accelerate 中文路径误报「不属于同一环境」**：子进程强制 UTF-8 + realpath 容错比较，中文安装目录不再误报（真实环境不一致仍硬报错）。
 
-## 🆕 v0.10.0 更新重点
-
 - **MiniMax H3（视频 LoRA）低显存自动适配**：所有 H3 训练默认开 `low_vram`，<24G 自动开分层交换，12G 卡不再加载就 OOM。
 - **MiniMax H3 支持 nvfp4 量化主模型**（12~16G 显存推荐，约 11.7GB 更小更稳），自动检测并优先使用。
+
+## 🆕 v0.10.1 更新重点
+
+- **MiniMax H3 模型下载全部改走魔搭国内直链**（ModelScope）：int8 / nvfp4 主模型、Qwen3-VL-32B 文本编码器、视频/音频 VAE 全部改为国内 CDN 直链，支持断点续传，再也不用苦等 hf-mirror。
 
 > 完整更新记录见 [CHANGELOG.md](CHANGELOG.md)。
 

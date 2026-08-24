@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.0"
+APP_VERSION = "0.10.1"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2264,16 +2264,17 @@ H3_FRAMES = 73                 # 默认抽帧数（17n+5=73，约 3 秒 @24fps�
 
 # H3 模型文件（放 models/minimax_h3/，不内置；国内镜像直链）
 H3_MODEL_LINKS = {
+    # 全部改走魔搭（ModelScope）国内直链（cdn-lfs-cn，支持断点续传），不再用 hf-mirror（部分文件慢/不稳定）
     "dit": ("minimax_h3_fl2va_pruned_int8_convrot.safetensors", "H3 主模型 FL2VA（pruned int8，约 19.5GB，训练必需）",
-            "https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"),
+            "https://modelscope.cn/models/Comfy-Org/minimax-H3/resolve/master/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"),
     "dit_nvfp4": ("MiniMax_H3_FL2VA_pruned_nvfp4.safetensors", "H3 主模型 FL2VA（pruned nvfp4，约 11.7GB，12~16G 显存推荐，更小更稳）",
-                  "https://hf-mirror.com/Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot/resolve/main/MiniMax_H3_FL2VA_pruned_nvfp4.safetensors"),
-    "te": ("qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "Qwen3-VL-32B 文本编码器（nvfp4 AWQ，约 18GB）",
-           "https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"),
-    "video_vae": ("minimax_h3_video_vae_fp16.safetensors", "视频 VAE（fp16，约 1GB）",
-                  "https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors"),
-    "audio_vae": ("minimax_h3_audio_vae_fp32.safetensors", "音频 VAE（fp32，约 1GB，可选）",
-                  "https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors"),
+                  "https://modelscope.cn/models/Abiray/MiniMax-H3-nvfp4-INT4-INT8-Convrot/resolve/master/MiniMax_H3_FL2VA_pruned_nvfp4.safetensors"),
+    "te": ("qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "Qwen3-VL-32B 文本编码器（nvfp4 AWQ，约 15GB）",
+           "https://modelscope.cn/models/Comfy-Org/minimax-H3/resolve/master/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"),
+    "video_vae": ("minimax_h3_video_vae_fp16.safetensors", "视频 VAE（fp16，约 5GB）",
+                  "https://modelscope.cn/models/Comfy-Org/minimax-H3/resolve/master/vae/minimax_h3_video_vae_fp16.safetensors"),
+    "audio_vae": ("minimax_h3_audio_vae_fp32.safetensors", "音频 VAE（fp32，约 0.6GB，可选）",
+                  "https://modelscope.cn/models/Comfy-Org/minimax-H3/resolve/master/vae/minimax_h3_audio_vae_fp32.safetensors"),
 }
 FLUX_MODEL_LINKS = {
     "dit": ("flux1-dev.safetensors", "FLUX.1-dev DiT 主模型（约 23.8GB，训练必需；非门禁镜像）",
