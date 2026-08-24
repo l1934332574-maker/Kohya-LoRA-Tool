@@ -1,4 +1,18 @@
-## v0.9.29（2026-08-23）
+## v0.9.30（2026-08-24）
+
+### 修复：老系统 curl 不兼容导致 torch 大轮子下载永远失败
+- **根因**：_download_with_resume() 硬编码 --retry-all-errors（curl 8.0+ 才有）。Windows 10 及更老系统自带的 system32/curl.exe 多为 7.x，识别不了该参数会直接 curl: option --retry-all-errors: is unknown 拒绝执行 → 阿里云 / 上海交大双国内镜像都失败、进度 0%（用户反馈：Kohya 训练内核安装失败）。
+- **已修**：新增 _curl_supports_retry_all_errors() 检测 curl 版本，**>=8.0 才加该参数**；旧版本自动省略（--retry 5 --retry-delay 5、断点续传 -C - 不受影响）。覆盖 Kohya / 第二引擎 / AMD 全部大文件下载场景。
+
+### 修复：Accelerate 环境预检中文路径误报「不属于同一环境」
+- **根因**：预检子进程按系统 ANSI（GBK）编码输出含中文的 sys.executable 路径，父进程按 UTF-8 解码 → 中文变乱码 → 字符串比较失败 → 误报；安装/数据目录含中文（如 C:\\ai绘画\...）时必现，实际环境完全正常。
+- **已修**：子进程强制 -X utf8 + PYTHONIOENCODING=utf-8，中文路径正确回传；路径比较改用 
+ealpath + normcase 容错；**真实环境不一致仍保留硬报错**（不掩盖 venv 损坏，引导重装内核）。
+
+### 验证
+- 新增 curl 版本解析 7 场景 + 下载命令构造 3 场景（旧/新 curl × direct/代理）；engine_install_smoke_test（20+ 项）+ smoke_test（5 项）全过。
+
+---## v0.9.29（2026-08-23）
 
 ### 修复：人物模式 + 正则数据集训练必崩（is_reg 写错 TOML 层级，GitHub issue #3）
 - **根因**：`preprocess.write_dataset_config()` 把 `is_reg = true` 写在 `[[datasets]]` 层级，而 sd-scripts 的 schema 要求它写在 `[[datasets.subsets]]` 子集层级 → 任何「人物模式 + 正则数据集」组合 100% 触发 `voluptuous.error.MultipleInvalid: extra keys not allowed @ data['datasets'][1]['is_reg']`，训练启动即崩。

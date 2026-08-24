@@ -32,6 +32,7 @@ import webbrowser
 import urllib.request
 import ctypes
 from collections import deque
+from functools import lru_cache
 
 # ---------- 全局隐藏子进程窗口 ----------
 # GUI 程序没有控制台窗口，直接 subprocess 启动的子进程（git/python/nvidia-smi/powershell 等）
@@ -153,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.29"
+APP_VERSION = "0.9.30"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1583,10 +1584,15 @@ def _accelerate_launch_cmd(vpy, extra_args=(), logf=print):
     if not vpy or not os.path.isfile(vpy):
         raise RuntimeError(f"训练环境 Python 不存在：{vpy}")
     try:
+        # 子进程强制 UTF-8（-X utf8 + PYTHONIOENCODING）：安装/数据目录含中文时，
+        # 默认 stdout 走 GBK 编码，父进程按 UTF-8 解码会把中文路径变乱码 → 误报
+        # “不属于同一环境”（两行路径实际完全一致）。修复后中文路径可正确回传。
+        _env = build_env()
+        _env.setdefault("PYTHONIOENCODING", "utf-8")
         r = subprocess.run(
-            [vpy, "-c", "import accelerate,sys;print(accelerate.__version__);print(accelerate.__file__);print(sys.executable)"],
+            [vpy, "-X", "utf8", "-c", "import accelerate,sys;print(accelerate.__version__);print(accelerate.__file__);print(sys.executable)"],
             capture_output=True, encoding="utf-8", errors="replace", timeout=60,
-            env=build_env(),
+            env=_env,
         )
     except Exception as e:
         raise RuntimeError(f"Accelerate 环境检查失败：{e}")
@@ -1597,7 +1603,13 @@ def _accelerate_launch_cmd(vpy, extra_args=(), logf=print):
     if len(lines) >= 3:
         log_path = lines[-2]
         log_py = lines[-1]
-        if os.path.normcase(os.path.abspath(log_py)) != os.path.normcase(os.path.abspath(vpy)):
+        try:
+            _same = os.path.normcase(os.path.realpath(log_py)) == os.path.normcase(os.path.realpath(vpy))
+        except Exception:
+            _same = os.path.normcase(os.path.abspath(log_py)) == os.path.normcase(os.path.abspath(vpy))
+        if not _same:
+            # 编码已强制 UTF-8（上面 -X utf8），此处仍不一致说明 accelerate 与训练 Python 确实
+            # 不在同一环境（如迁移后 venv 指向的 Python 已不存在），保留硬报错引导重建环境。
             raise RuntimeError(f"Accelerate 与训练 Python 不属于同一环境：\n训练 Python：{vpy}\nAccelerate Python：{log_py}")
     # 自愈：残留 accelerate 配置若 use_cpu=true，会让整个训练（含 caching latents）跑 CPU，
     # 表现为“卡在训练前、无报错、CPU/GPU 无负荷”，而 torch 预检（不走 accelerate）却正常。
@@ -4286,6 +4298,25 @@ def _http_total_size(url, timeout=20, direct=False):
     return None
 
 
+@lru_cache(maxsize=8)
+def _curl_supports_retry_all_errors(curl_path):
+    """检测 curl 是否支持 --retry-all-errors（curl 8.0+ 才有）。
+
+    Windows 10 及更老系统自带的 system32/curl.exe 多为 7.x，识别不了该参数会直接
+    “curl: option --retry-all-errors: is unknown” 拒绝执行；这里解析失败/版本过旧时
+    一律返回 False（省略该参数，--retry/断点续传 -C - 不受影响）。
+    """
+    try:
+        r = subprocess.run([curl_path, "--version"], capture_output=True, text=True, timeout=10)
+        m = re.search(r"curl\s+(\d+)(?:\.(\d+))?", (r.stdout or "") + (r.stderr or ""))
+        if m:
+            major = int(m.group(1))
+            return major >= 8
+    except Exception:
+        pass
+    return False
+
+
 def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False):
     """用 curl 断点续传下载大文件（repo.radeon.com 网络不稳时关键，断了可续传）。
 
@@ -4315,15 +4346,18 @@ def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False)
         threading.Thread(target=_monitor, daemon=True).start()
     try:
         if curl and os.path.isfile(curl):
-            cmd = [curl, "-sS", "-L", "-C", "-", "--retry", "5", "--retry-delay", "5", "--retry-all-errors",
-                   "--connect-timeout", "20", "--max-time", "10800", "--speed-limit", "20480", "--speed-time", "120",
-                   "-o", dest, url]
+            # Windows 自带 curl 版本差异：--retry-all-errors 需 curl 8.0+，老系统（7.x）不识别该参数，
+            # 会直接 “option --retry-all-errors: is unknown” 拒绝执行，导致 torch 大轮子下载永远失败。
+            base = [curl, "-sS", "-L", "-C", "-", "--retry", "5", "--retry-delay", "5"]
+            if _curl_supports_retry_all_errors(curl):
+                base.append("--retry-all-errors")
+            base += ["--connect-timeout", "20", "--max-time", "10800", "--speed-limit", "20480", "--speed-time", "120"]
+            cmd = list(base)
             if not direct:
                 _px = system_proxy()
                 if _px:
-                    cmd = [curl, "-sS", "-L", "-C", "-", "--retry", "5", "--retry-delay", "5", "--retry-all-errors",
-                           "--connect-timeout", "20", "--max-time", "10800", "--speed-limit", "20480", "--speed-time", "120",
-                           "--proxy", _px, "-o", dest, url]
+                    cmd = list(base) + ["--proxy", _px]
+            cmd += ["-o", dest, url]
             return run_stream(cmd, env=(build_direct_env() if direct else build_env()), logf=logf) == 0
         # urllib 兜底：Range 断点续传
         import urllib.request

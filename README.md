@@ -4,17 +4,20 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.9.29** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.9.30** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
 ---
 
-## 🆕 v0.9.29 更新重点
-
 - **修复「人物模式 + 正则数据集」训练必崩**：`is_reg` 写错 TOML 层级（应写在子集层），现按 sd-scripts schema 修正。
 - **修复失败误诊**：训练失败不再被误报为 bitsandbytes 8-bit 问题，优先报告真实原因（配置校验 / OOM / 优化器）。
 - **RDNA2（RX 6000）Anima 训练加官方 `--no_half_vae`**：VAE 全程 fp32（含缓存阶段），根治 latent NaN / 第一步 loss=nan。
+
+## 🆕 v0.9.30 更新重点
+
+- **修复老系统 curl 不兼容导致 torch 大轮子下载永远失败**：`--retry-all-errors` 需 curl 8.0+，Windows 自带旧版 curl 自动省略该参数，Kohya/第二引擎/AMD 大文件下载不再报错。
+- **修复 Accelerate 中文路径误报「不属于同一环境」**：子进程强制 UTF-8 + realpath 容错比较，中文安装目录不再误报（真实环境不一致仍硬报错）。
 
 > 完整更新记录见 [CHANGELOG.md](CHANGELOG.md)。
 
