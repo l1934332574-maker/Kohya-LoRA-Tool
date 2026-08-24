@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -997,6 +998,80 @@ def test_anima_rdna2_no_half_vae(base: Path):
     print("ANIMA_RDNA2_NO_HALF_VAE_OK")
 
 
+def test_h3_vram_adapt(base: Path):
+    """H3 训练 yaml 按显存自动启用 low_vram / layer_offloading（照搬 ai-toolkit 官方/RunComfy 社区配置）。
+
+    - low_vram: true 对所有 H3 训练默认开启（DiT≈19.5G + TE≈14.6G 无法同时常驻显存，24G 卡也一样）
+    - layer_offloading: <24G 自动开（int8 DiT 对 12/16G 仍太大，分层交换兜底），24G+/未知保持关闭
+    """
+    import io as _io
+    out = base / "h3_cfg"
+    out.mkdir(exist_ok=True)
+    params = {"project": "t", "rank": 32, "alpha": 32,
+              "video_steps": 100, "video_frames": 73, "unet_lr": 2e-4}
+
+    def gen(vram):
+        cfg = out / ("cfg_%s.yaml" % ("none" if vram is None else vram))
+        core.write_h3_train_yaml(params, str(base / "videos"), str(base / "out"),
+                                 str(cfg), vpy=None, logf=lambda *a: None, vram_gb=vram)
+        return _io.open(str(cfg), encoding="utf-8").read()
+
+    t12 = gen(12)
+    assert "low_vram: true" in t12 and "layer_offloading: true" in t12, t12
+    assert "layer_offloading_transformer_percent: 0.6" in t12, t12
+    assert "layer_offloading_text_encoder_percent: 1.0" in t12, t12
+    t20 = gen(20)
+    assert "layer_offloading: true" in t20, t20
+    assert "layer_offloading_transformer_percent: 0.3" in t20, t20
+    assert "layer_offloading_text_encoder_percent: 0.8" in t20, t20
+    t24 = gen(24)
+    assert "low_vram: true" in t24 and "layer_offloading: true" not in t24, t24
+    tn = gen(None)
+    assert "low_vram: true" in tn and "layer_offloading: true" not in tn, tn
+    # 缩进：low_vram 与 name_or_path 同级（8 空格）
+    assert "        low_vram: true\n" in t12, "low_vram 缩进错误"
+
+    # nvfp4 主模型：12~16G 传 dit_nvfp4_path → yaml 生成 dit_fl2va_pruned_path 覆盖
+    nvfp4_file = base / "h3_cfg" / "MiniMax_H3_FL2VA_pruned_nvfp4.safetensors"
+    nvfp4_file.write_bytes(b"fake")
+    cfg = out / "cfg_nvfp4.yaml"
+    core.write_h3_train_yaml(params, str(base / "videos"), str(base / "out"), str(cfg),
+                             vpy=None, logf=lambda *a: None, vram_gb=12, dit_nvfp4_path=str(nvfp4_file))
+    tn4 = _io.open(str(cfg), encoding="utf-8").read()
+    assert "dit_fl2va_pruned_path: " in tn4, tn4
+    assert nvfp4_file.name in tn4, tn4
+
+    # h3_model_files：nvfp4 文件名能被检测到
+    with patch.object(core, "h3_models_dir", return_value=str(base / "h3_cfg")):
+        files = core.h3_model_files()
+    assert files["dit_nvfp4"] and not files["dit"], files
+    # h3_missing_models：<16G 且两者都缺时推荐 nvfp4（11.7GB）+ int8 可选项；>=24G 只要求 int8
+    empty_dir = base / "h3_empty"
+    empty_dir.mkdir(exist_ok=True)
+    with patch.object(core, "h3_models_dir", return_value=str(empty_dir)):
+        miss12 = core.h3_missing_models(12)
+    assert any("11.7GB" in m for m in miss12), miss12
+    assert any("19.5GB" in m for m in miss12), miss12
+    with patch.object(core, "h3_models_dir", return_value=str(empty_dir)):
+        miss24 = core.h3_missing_models(24)
+    assert not any("11.7GB" in m for m in miss24), miss24
+    assert any("19.5GB" in m for m in miss24), miss24
+    print("H3_VRAM_ADAPT_OK")
+
+
+def test_video_caption_args(base: Path):
+    """video_caption.py 的 args 引用必须全部有定义（修复 args.model 未定义导致视频自动打标必崩）。"""
+    vc = (ROOT / "video_caption.py").read_text(encoding="utf-8")
+    defined = set(re.findall(r'add_argument\("--([a-z_]+)"', vc))
+    used = set(re.findall(r"args\.([a-z_]+)", vc))
+    assert not (used - defined), f"video_caption.py 未定义参数: {used - defined}"
+    r = subprocess.run([sys.executable, str(ROOT / "video_caption.py"), "--help"],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "--model" in r.stdout and "Qwen/Qwen2.5-VL-3B-Instruct" in r.stdout, r.stdout
+    print("VIDEO_CAPTION_ARGS_OK")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -1021,6 +1096,8 @@ def main():
         test_dataset_config_is_reg_subset(base)
         test_diagnose_optimizer_failure_scenarios(base)
         test_anima_rdna2_no_half_vae(base)
+        test_h3_vram_adapt(base)
+        test_video_caption_args(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

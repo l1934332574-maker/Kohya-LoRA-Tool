@@ -11,6 +11,9 @@ import argparse
 import os
 import sys
 
+# 默认模型：Qwen2.5-VL-3B-Instruct（约 6~7GB，首次使用自动下载，走 hf-mirror 国内镜像）
+MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
+
 
 def find_videos(folder):
     exts = (".mp4", ".avi", ".mov", ".webm", ".mkv", ".wmv", ".m4v", ".flv")
@@ -53,6 +56,7 @@ def main():
     ap.add_argument("--trigger", default="")
     ap.add_argument("--frames", type=int, default=6)
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument("--model", default=MODEL_ID, help="Qwen2.5-VL 模型 ID（默认 %s）" % MODEL_ID)
     args = ap.parse_args()
 
     videos = find_videos(args.video_dir)

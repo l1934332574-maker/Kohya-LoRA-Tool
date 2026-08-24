@@ -1,4 +1,32 @@
-## v0.9.30（2026-08-24）
+## v0.10.0（2026-08-24）
+
+### 新增：MiniMax H3（视频 LoRA）低显存自动适配（照搬 ai-toolkit 官方 / RunComfy 社区配置）
+- **背景**：用户 12G 显卡训练 H3 在加载阶段 OOM（`text_encoder.to(device)` 时 `CUDA out of memory`）。H3 为 33B 全模态模型，DiT int8 约 19.5G + Qwen3-VL-32B TE 约 14.6G，无法同时常驻显存（24G 卡也一样）。
+- **已做**（`write_h3_train_yaml`）：
+  - **`low_vram: true` 对所有 H3 训练默认开启**（ai-toolkit GUI 默认值、RunComfy 官方指南建议）：DiT/TE 初始放 CPU、训练按需搬显存，根治「加载即 OOM」。
+  - **`layer_offloading` <24G 自动开启**（分层交换兜底）：12~16G → DiT 交换 60% / TE 交换 100%；16~24G → DiT 30% / TE 80%；24G+ / 显存未知 → 关闭保速度（RunComfy 建议仅作最后兜底）。
+  - 配合已有的 `cache_text_embeddings: true`（缓存文本嵌入后自动卸载 TE）。
+
+### 新增：MiniMax H3 支持 nvfp4 量化主模型（12~16G 显存推荐）
+- **背景**：int8 DiT（19.5G）对 12/16G 显存仍偏大，社区（awesome-minimax-h3）12~16G 推荐 nvfp4 量化版（DiT 约 11.7G，更小更稳）。
+- **已做**：
+  - `H3_MODEL_LINKS` 新增 nvfp4 主模型下载项（国内镜像直链，约 11.7GB）。
+  - `h3_model_files` 自动检测 nvfp4 文件；`h3_missing_models(vram_gb)` <16G 时优先推荐 nvfp4、int8 作为可选项。
+  - `train_h3` <16G 且存在 nvfp4 文件时自动使用：通过 `model_kwargs.dit_fl2va_pruned_path` 覆盖加载路径（ai-toolkit 默认只认 int8 文件名），并输出日志。
+  - GUI：H3 状态检测（dit 或 nvfp4 任一算齐全）、使用引导补充 nvfp4 下载说明。
+- **验证**：`H3_VRAM_ADAPT_OK` 冒烟测试扩展 nvfp4 三场景（yaml 覆盖路径 / 文件检测 / 缺失推荐），engine_install_smoke_test + smoke_test 全过。
+- 说明：低显存会变慢（层需反复交换）；nvfp4 为社区量化版，如加载异常请换回 int8。
+
+### 修复：AI 视频自动打标必崩（args.model 未定义）
+- **根因**：`video_caption.py` 加载 Qwen2.5-VL 时引用 `args.model`，但 argparse 从未定义 `--model` → 启动即 `AttributeError` → 退出码 1 → 工具报「视频自动打标失败」，所有用户视频打标永远打不上（与显存/网络无关）。
+- **已修**：补 `--model` 参数（默认 `Qwen/Qwen2.5-VL-3B-Instruct`，与文档一致，也支持换模型）；新增 `VIDEO_CAPTION_ARGS_OK` 冒烟测试。
+
+### 修复：视频（H3）模式打开「标签编辑器」空白
+- **根因**：标签编辑器是图片专用（逐张看图改标签），读 `dataset/<project>/train_character`；视频模式数据在用户选的视频文件夹（同名 .txt 字幕），不写该目录 → 必然空白。
+- **已修**：视频模式点「标签编辑器」直接提示说明（视频字幕=视频文件夹同名 txt / 占位字幕 / AI 打标），不再弹空白窗口。
+
+
+---## v0.9.30（2026-08-24）
 
 ### 修复：老系统 curl 不兼容导致 torch 大轮子下载永远失败
 - **根因**：_download_with_resume() 硬编码 --retry-all-errors（curl 8.0+ 才有）。Windows 10 及更老系统自带的 system32/curl.exe 多为 7.x，识别不了该参数会直接 curl: option --retry-all-errors: is unknown 拒绝执行 → 阿里云 / 上海交大双国内镜像都失败、进度 0%（用户反馈：Kohya 训练内核安装失败）。

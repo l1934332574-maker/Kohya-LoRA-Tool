@@ -1,6 +1,6 @@
 {
-  "version": "v0.9.30",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.9.30/Setup.exe",
+  "version": "v0.10.0",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.10.0/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.9.30：修复老系统 curl 不兼容导致 torch 大轮子下载失败（旧版自动省略 --retry-all-errors）；修复 Accelerate 中文路径误报「不属于同一环境」。"
+  "notes": "v0.10.0：MiniMax H3 视频 LoRA 低显存自动适配（low_vram 默认开，<24G 自动分层交换）；支持 nvfp4 量化主模型（12~16G 推荐）。"
 }

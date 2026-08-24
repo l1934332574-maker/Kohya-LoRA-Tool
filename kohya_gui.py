@@ -2500,6 +2500,12 @@ class App:
     def cmd_label_editor(self):
         """打开标签编辑器（浏览/修改/批量操作/统计/整理数据集）。"""
         try:
+            if self._collect_params().get("mode") == "video":
+                messagebox.showinfo(core.APP_NAME,
+                                    "视频模式没有「标签编辑器」。\n\n"
+                                    "视频的字幕是视频文件夹里的同名 .txt（如 myvideo.mp4 + myvideo.txt），\n"
+                                    "直接用记事本打开修改即可；也可用「一键生成占位字幕」或「AI 视频自动打标」。")
+                return
             if self._label_editor is not None:
                 try:
                     self._label_editor.win.lift()
@@ -2851,7 +2857,13 @@ class App:
         try:
             ok, detail, _ = core.ai_toolkit_engine_status()
             _files = core.h3_model_files()
-            _miss = "、".join(k for k in ("dit", "te", "video_vae") if not _files.get(k))
+            _miss_parts = []
+            if not (_files.get("dit") or _files.get("dit_nvfp4")):
+                _miss_parts.append("dit")
+            for k in ("te", "video_vae"):
+                if not _files.get(k):
+                    _miss_parts.append(k)
+            _miss = "、".join(_miss_parts)
             if not ok:
                 self.h3_model_var.set("第三引擎：未装（点⚙安装） · H3 模型：" + ("缺 " + _miss if _miss else "齐全"))
             elif _miss:
@@ -2875,7 +2887,7 @@ class App:
             "📖 MiniMax H3 视频 LoRA 训练 · 详细引导（小白版）\n\n"
             "▍原理一句话\n"
             "H3 是 33.1B 的全模态视频模型（视频+声音一起生成）。用几段短视频就能训出「你的角色/风格」视频 LoRA。\n"
-            "⚠ 实验性功能：需要 24G+ NVIDIA 显存，模型文件 40GB+，训练一次要数小时。\n\n"
+            "⚠ 实验性功能：推荐 24G+ NVIDIA 显存；12~16G 用 nvfp4 主模型可跑（软件自动开低显存模式，较慢）；模型文件 40GB+，训练一次要数小时。\n\n"
             "▍第 1 步：安装第三引擎\n"
             "· 切到「🎬 视频LoRA（MiniMax H3）」模式 → 点「⚙ 安装第三引擎」\n"
             "· 自动创建独立环境（不影响现有画风/人物/Krea2）\n"
@@ -2884,6 +2896,8 @@ class App:
             "▍第 2 步：下载 H3 模型（3~4 个文件，放进 models/minimax_h3/）\n"
             f"1) {h3['dit'][0]} —— {h3['dit'][1]}\n"
             f"   国内镜像：{h3['dit'][2]}\n"
+            f"   （12~16G 显存建议用 nvfp4 版：{h3['dit_nvfp4'][0]}（约 11.7GB，更小更稳）\n"
+            f"    下载：{h3['dit_nvfp4'][2]}）\n"
             f"2) {h3['te'][0]} —— {h3['te'][1]}\n"
             f"   国内镜像：{h3['te'][2]}\n"
             f"3) {h3['video_vae'][0]} —— {h3['video_vae'][1]}\n"
@@ -2905,7 +2919,7 @@ class App:
             "· 该 LoRA 只能用于 MiniMax H3 系列模型出视频\n\n"
             "❓ 常见问题\n"
             "Q: 显存不够？\n"
-            "A: H3 是 33B 大模型，16G 以下不建议训练（会 OOM 或极慢）；24G 是推荐起点。\n\n"
+            "A: 12~16G 请下载 nvfp4 主模型（约 11.7GB，见第 2 步），软件自动开低显存模式（low_vram + 分层交换）能跑但会慢；24G+ 用 int8 主模型。\n\n"
             "Q: AMD 显卡能训吗？\n"
             "A: 不能。AI Toolkit 训练走 CUDA/NVFP4，是 NVIDIA 专属；AMD 用户请继续用画风/人物/Krea2 模式。\n\n"
             "Q: 下载慢/老断？\n"

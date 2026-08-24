@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.9.30"
+APP_VERSION = "0.10.0"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2264,8 +2264,10 @@ H3_FRAMES = 73                 # 默认抽帧数（17n+5=73，约 3 秒 @24fps�
 
 # H3 模型文件（放 models/minimax_h3/，不内置；国内镜像直链）
 H3_MODEL_LINKS = {
-    "dit": ("minimax_h3_fl2va_pruned_int8_convrot.safetensors", "H3 主模型 FL2VA（pruned int8，约 22GB，训练必需）",
+    "dit": ("minimax_h3_fl2va_pruned_int8_convrot.safetensors", "H3 主模型 FL2VA（pruned int8，约 19.5GB，训练必需）",
             "https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"),
+    "dit_nvfp4": ("MiniMax_H3_FL2VA_pruned_nvfp4.safetensors", "H3 主模型 FL2VA（pruned nvfp4，约 11.7GB，12~16G 显存推荐，更小更稳）",
+                  "https://hf-mirror.com/Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot/resolve/main/MiniMax_H3_FL2VA_pruned_nvfp4.safetensors"),
     "te": ("qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "Qwen3-VL-32B 文本编码器（nvfp4 AWQ，约 18GB）",
            "https://hf-mirror.com/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"),
     "video_vae": ("minimax_h3_video_vae_fp16.safetensors", "视频 VAE（fp16，约 1GB）",
@@ -2294,11 +2296,12 @@ def h3_models_dir():
 def h3_model_files():
     """扫描 models/minimax_h3（含子目录），返回 {dit,te,video_vae,audio_vae} 路径或 None。"""
     d = h3_models_dir()
-    out = {"dit": None, "te": None, "video_vae": None, "audio_vae": None}
+    out = {"dit": None, "dit_nvfp4": None, "te": None, "video_vae": None, "audio_vae": None}
     if not os.path.isdir(d):
         return out
     want = {
         "dit": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "dit_nvfp4": "minimax_h3_fl2va_pruned_nvfp4.safetensors",
         "te": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
         "video_vae": "minimax_h3_video_vae_fp16.safetensors",
         "audio_vae": "minimax_h3_audio_vae_fp32.safetensors",
@@ -2312,11 +2315,23 @@ def h3_model_files():
     return out
 
 
-def h3_missing_models():
-    """返回缺失的 H3 模型说明列表（含国内镜像直链）；音频 VAE 可选不算缺失。"""
+def h3_missing_models(vram_gb=None):
+    """返回缺失的 H3 模型说明列表（含国内镜像直链）；音频 VAE 可选不算缺失。
+
+    vram_gb < 16 时优先推荐 nvfp4 量化主模型（11.7GB，更小更稳），int8（19.5GB）作为可选项。
+    """
     files = h3_model_files()
     missing = []
-    for key in ("dit", "te", "video_vae"):
+    if not (files.get("dit") or files.get("dit_nvfp4")):
+        if vram_gb is not None and vram_gb < 16:
+            fname, desc, url = H3_MODEL_LINKS["dit_nvfp4"]
+            missing.append(f"· {desc}\n  文件: {fname}\n  下载: {url}")
+            fname2, desc2, url2 = H3_MODEL_LINKS["dit"]
+            missing.append(f"· {desc2}（12~16G 也可用，低显存模式会较慢）\n  文件: {fname2}\n  下载: {url2}")
+        else:
+            fname, desc, url = H3_MODEL_LINKS["dit"]
+            missing.append(f"· {desc}\n  文件: {fname}\n  下载: {url}")
+    for key in ("te", "video_vae"):
         if not files.get(key):
             fname, desc, url = H3_MODEL_LINKS[key]
             missing.append(f"· {desc}\n  文件: {fname}\n  下载: {url}")
@@ -2966,7 +2981,7 @@ def _ensure_amd_distributed_compat(vpy, logf=print):
 
 
 
-def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=print):
+def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=print, vram_gb=None, dit_nvfp4_path=None):
     """生成 AI Toolkit 的 MiniMax H3 训练 yaml（增量、可复用）。返回 yaml 路径。"""
     name = _sanitize_dirname(params.get("project")) or "h3_video_lora"
     rank = int(params.get("rank", 32))
@@ -2985,6 +3000,31 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
         _opt_k = "AdamW"
     _opt_yaml = _optimizer_yaml_name(_opt_k)
     model_dir = h3_models_dir().replace("\\", "/")
+    # 显存适配：照搬 ai-toolkit 官方 / RunComfy 社区配置（H3 为 33B 视频模型）
+    #  - low_vram: true —— 官方默认开启；DiT(约19.5G)+Qwen3-VL-32B TE(约14.6G) 无法同时常驻
+    #    显存（24G 卡也一样），low_vram 让模型初始放 CPU、训练按需搬显存，根治「加载即 OOM」。
+    #  - layer_offloading: <24G 自动开 —— int8 DiT 19.5G 对 12/16G 仍太大，分层交换兜底
+    #    （RunComfy 建议仅作最后兜底；24G+ 关闭保速度）。
+    _h3_lo = ""
+    if vram_gb is not None and vram_gb < 24:
+        _tr_pct = 0.6 if vram_gb < 16 else 0.3
+        _te_pct = 1.0 if vram_gb < 16 else 0.8
+        _h3_lo = (
+            "        layer_offloading: true\n"
+            "        layer_offloading_transformer_percent: %.1f\n"
+            "        layer_offloading_text_encoder_percent: %.1f\n" % (_tr_pct, _te_pct)
+        )
+        logf("[视频] 显存 %sGB：已启用 low_vram + layer_offloading（DiT 交换 %.0f%% / TE 交换 %.0f%%），低显存可跑但会变慢" % (vram_gb, _tr_pct * 100, _te_pct * 100))
+    elif vram_gb is not None:
+        logf("[视频] 显存 %sGB：已启用 low_vram（DiT/TE 初始放 CPU、按需搬显存）；24G+ 不启用分层交换保速度" % vram_gb)
+    else:
+        logf("[视频] 显存未知：仍启用 low_vram（官方默认），未开启分层交换")
+    # nvfp4 主模型：ai-toolkit 默认只认 int8 文件名，通过 model_kwargs.dit_fl2va_pruned_path
+    # 指定 nvfp4 文件绝对路径加载（12~16G 显存推荐，更小更稳）
+    _mk_extra = ""
+    if dit_nvfp4_path and os.path.isfile(dit_nvfp4_path):
+        _mk_extra = '          dit_fl2va_pruned_path: ' + _yq(dit_nvfp4_path.replace("\\", "/")) + "\n"
+        logf("[视频] 使用 nvfp4 量化主模型：" + dit_nvfp4_path)
     video_dir = os.path.abspath(video_dir).replace("\\", "/")
     out_dir = os.path.abspath(out_dir).replace("\\", "/")
     sample_prompt = (trig + ", ") if trig else ""
@@ -3026,8 +3066,11 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
         "      model:\n"
         "        name_or_path: " + _yq(model_dir) + "\n"
         "        arch: 'minimax_h3'\n"
+        "        low_vram: true\n"
+        + _h3_lo +
         "        model_kwargs:\n"
         "          partition: \"fl2va_pruned\"\n"
+        + _mk_extra +
         "        quantize: false\n"
         "      sample:\n"
         "        sampler: \"flowmatch\"\n"
@@ -3157,7 +3200,7 @@ def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from
         raise RuntimeError("ai-toolkit 源码缺失，请重装第三引擎")
     if not _ensure_torchvision_deps(vpy, logf, label="第三引擎", cwd=at_dir):
         raise RuntimeError("第三引擎 venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第三引擎。")
-    missing = h3_missing_models()
+    missing = h3_missing_models(vram_gb)
     if missing:
         raise RuntimeError(
             "MiniMax H3 训练缺少模型文件，请下载放入 models/minimax_h3/ 文件夹：\n\n" + "\n".join(missing) +
@@ -3178,7 +3221,11 @@ def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from
     out_dir = data_sub("output", proj)
     os.makedirs(out_dir, exist_ok=True)
     cfg_path = os.path.join(KIT_DIR, "configs", "h3_train.yaml")
-    write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=vpy, logf=logf)
+    _files = h3_model_files()
+    _dit_nvfp4 = _files.get("dit_nvfp4") if (vram_gb is not None and vram_gb < 16) else None
+    if _dit_nvfp4:
+        logf("[视频] 检测到 nvfp4 主模型（12~16G 显存推荐），将用 nvfp4 加载（更小更稳）")
+    write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=vpy, logf=logf, vram_gb=vram_gb, dit_nvfp4_path=_dit_nvfp4)
     steps = int(params.get("video_steps", H3_DEFAULT_STEPS))
     logf(f"[视频] 数据集: {video_dir}（{len(videos)} 个视频，共约 {total_sec/60:.1f} 分钟，{no_cap} 个缺字幕）")
     _files = h3_model_files()
