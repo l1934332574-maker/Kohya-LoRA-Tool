@@ -153,6 +153,11 @@ def run_stream(cmd, cwd=None, env=None, logf=print, collect=None):
     并在读取循环中抛出 StopRequested（调用方按“用户主动停止”处理）。
     """
     global _ACTIVE_PROC
+    if env is None:
+        # 默认用工具标准环境：强制子进程 stdout 用 UTF-8（PYTHONIOENCODING），
+        # 防止英文(cp1252)/繁体(cp950)等系统打印中文路径/日志时 UnicodeEncodeError 崩溃
+        # （krea2_cache_latents 等调用漏传 env 时会命中此默认值）。
+        env = build_env()
     if logf:
         logf("$ " + " ".join(str(x) for x in cmd))
     if collect is not None:

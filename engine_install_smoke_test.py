@@ -1181,6 +1181,22 @@ def test_project_open_robust(base: Path):
     print("PROJECT_OPEN_ROBUST_OK")
 
 
+def test_run_stream_default_utf8(base: Path):
+    """run_stream 默认 env 强制 UTF-8：繁体(cp950)/英文(cp1252)系统打印中文不再崩（krea2_cache_latents 漏传 env 根因）。"""
+    u = (ROOT / "kohya_core" / "utils.py").read_text(encoding="utf-8")
+    # run_stream env=None 时默认 build_env()
+    i = u.find("def run_stream")
+    assert i != -1
+    seg = u[i:u.find("def ", i + 10)]
+    assert "if env is None:" in seg and "env = build_env()" in seg, "run_stream 缺默认 build_env"
+    # 实测：run_stream 跑 python 打印中文（含项目名「项目_」）应成功
+    logs = []
+    rc = core.run_stream([sys.executable, "-c", "print('\u9879\u76ee_\u6d4b\u8bd5')"], logf=logs.append)
+    assert rc == 0, (rc, logs)
+    assert any("\u9879\u76ee_\u6d4b\u8bd5" in l for l in logs), logs
+    print("RUN_STREAM_DEFAULT_UTF8_OK")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -1213,6 +1229,7 @@ def main():
         test_build_env_utf8_output(base)
         test_krea2_style_subdir_consistency(base)
         test_project_open_robust(base)
+        test_run_stream_default_utf8(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

@@ -1,4 +1,12 @@
-## v0.10.4（2026-08-25）
+## v0.10.5（2026-08-25）
+
+### 修复：繁体/英文系统下 Krea2 缓存 latents 打印中文崩溃（cp950/cp1252 UnicodeEncodeError）
+- **背景**：用户（繁体中文系统，cp950）Krea2 一键训练，`krea2_cache_latents.py` 打印含项目名「项目_」的路径时崩溃：`UnicodeEncodeError: 'cp950' codec can't encode character '\u9879'`。
+- **根因**：`train_krea2` 调用 `krea2_cache_latents.py` 时**漏传 env**，子进程 stdout 跟随系统 locale（cp950 繁体 / cp1252 英文）→ 打印中文崩；上一轮只在 `build_env()` 加了 `PYTHONIOENCODING=utf-8`，但只对显式传 env 的调用生效，漏掉了这个入口。
+- **已修**：`run_stream()`（所有子进程统一入口）`env=None` 时默认用 `build_env()`（含 `PYTHONIOENCODING=utf-8`），全局防线——任何调用漏传 env 都不会再出现编码崩溃。
+- **验证**：新增 `RUN_STREAM_DEFAULT_UTF8_OK` 冒烟测试（静态断言 + 实测 run_stream 打印中文成功），engine_install_smoke_test + smoke_test 全过。
+
+---## v0.10.4（2026-08-25）
 
 ### 修复：手动修改项目 json 后点「打开」无反应（静默失败）
 - **背景**：用户手动编辑项目 json（改 base_model 等字段）后，软件里点「打开」没反应、打不开项目。
