@@ -1,6 +1,6 @@
 {
-  "version": "v0.10.3",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.10.3/Setup.exe",
+  "version": "v0.10.4",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.10.4/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.10.3：修复英文系统训练打印中文崩溃；修复 Krea2/Qwen-Image 画风子模式训练报「缺少预处理数据」。"
+  "notes": "v0.10.4：修复手动改项目 json 后点「打开」无反应；FLUX 模型下载改走魔搭国内直链。"
 }

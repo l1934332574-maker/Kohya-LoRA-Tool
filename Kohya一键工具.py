@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.3"
+APP_VERSION = "0.10.4"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2281,14 +2281,15 @@ H3_MODEL_LINKS = {
                   "https://modelscope.cn/models/Comfy-Org/minimax-H3/resolve/master/vae/minimax_h3_audio_vae_fp32.safetensors"),
 }
 FLUX_MODEL_LINKS = {
-    "dit": ("flux1-dev.safetensors", "FLUX.1-dev DiT 主模型（约 23.8GB，训练必需；非门禁镜像）",
-            "https://hf-mirror.com/Comfy-Org/flux1-dev/resolve/main/flux1-dev.safetensors"),
+    # 全部走魔搭（ModelScope）国内直链（cdn-lfs-cn，支持断点续传），不再用 hf-mirror（偶发不稳/SSL）
+    "dit": ("flux1-dev.safetensors", "FLUX.1-dev DiT 主模型（约 22.2GB，训练必需；非门禁镜像）",
+            "https://modelscope.cn/models/Comfy-Org/flux1-dev/resolve/master/flux1-dev.safetensors"),
     "clip_l": ("clip_l.safetensors", "CLIP-L 文本编码器（约 0.25GB）",
-               "https://hf-mirror.com/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors"),
+               "https://modelscope.cn/models/comfyanonymous/flux_text_encoders/resolve/master/clip_l.safetensors"),
     "t5xxl": ("t5xxl_fp16.safetensors", "T5-XXL 文本编码器 fp16（约 9.2GB）",
-              "https://hf-mirror.com/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors"),
+              "https://modelscope.cn/models/comfyanonymous/flux_text_encoders/resolve/master/t5xxl_fp16.safetensors"),
     "ae": ("ae.safetensors", "FLUX AE（VAE，约 0.2GB；非门禁镜像，自动存为 ae.safetensors）",
-           "https://hf-mirror.com/Kijai/flux-fp8/resolve/main/flux-vae-bf16.safetensors"),
+           "https://modelscope.cn/models/Kijai/flux-fp8/resolve/master/flux-vae-bf16.safetensors"),
 }
 
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".webm", ".mkv", ".wmv", ".m4v", ".flv"}

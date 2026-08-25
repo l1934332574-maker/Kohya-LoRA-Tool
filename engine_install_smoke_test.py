@@ -1165,6 +1165,22 @@ def test_krea2_style_subdir_consistency(base: Path):
     print("KREA2_STYLE_SUBDIR_CONSISTENCY_OK")
 
 
+def test_project_open_robust(base: Path):
+    """手动改坏项目 json（base_model/params 类型异常）后点「打开」不能静默无反应。"""
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    # cmd_open_project 内 _apply_project_data 必须被 try/except 包裹（失败按默认配置打开 + 日志提示）
+    i = g.find("def cmd_open_project")
+    assert i != -1, "cmd_open_project 未找到"
+    seg = g[i:g.find("def ", i + 10)]
+    assert "try:" in seg and "_apply_project_data(data)" in seg, "cmd_open_project 缺容错"
+    assert "已按默认配置打开" in seg, "缺失败提示文案"
+    # _apply_project_data 对关键字段做类型校验
+    a = g[g.find("def _apply_project_data"):g.find("def _schedule_autosave")]
+    assert "isinstance(bm, str)" in a, "base_model 缺类型校验"
+    assert "isinstance(p, dict)" in a, "params 缺类型校验"
+    print("PROJECT_OPEN_ROBUST_OK")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -1196,6 +1212,7 @@ def main():
         test_video_preprocess_no_auto_train(base)
         test_build_env_utf8_output(base)
         test_krea2_style_subdir_consistency(base)
+        test_project_open_robust(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

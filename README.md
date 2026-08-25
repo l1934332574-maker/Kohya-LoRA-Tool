@@ -4,7 +4,7 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.10.3** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.10.4** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
@@ -27,10 +27,13 @@
 - **视频模式「数据预处理」不再自动跳训练**：只检查提示，避免误触发训练。
 - **修复 Krea2/FLUX.2 只装第二引擎时一键训练误报「Kohya 尚未安装」**：预处理自动多引擎 fallback。
 
-## 🆕 v0.10.3 更新重点
-
 - **修复英文系统（cp1252）下训练打印中文崩溃**：所有训练/预处理子进程强制 UTF-8 输出，不再 UnicodeEncodeError。
 - **修复 Krea2/Qwen-Image/Z-Image 画风子模式训练报「缺少预处理数据」**：训练统一读 train_character（与预处理一致）。
+
+## 🆕 v0.10.4 更新重点
+
+- **修复手动修改项目 json 后点「打开」无反应**：配置恢复容错，失败时按默认配置打开并提示。
+- **FLUX 模型下载改走魔搭国内直链**：DiT / CLIP-L / T5-XXL / AE 全部国内 CDN 直连、支持断点续传，不再直连 HuggingFace（避免 SSL 失败）。
 
 > 完整更新记录见 [CHANGELOG.md](CHANGELOG.md)。
 

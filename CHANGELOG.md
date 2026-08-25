@@ -1,4 +1,19 @@
-## v0.10.3（2026-08-25）
+## v0.10.4（2026-08-25）
+
+### 修复：手动修改项目 json 后点「打开」无反应（静默失败）
+- **背景**：用户手动编辑项目 json（改 base_model 等字段）后，软件里点「打开」没反应、打不开项目。
+- **根因**：`cmd_open_project` 未包裹异常；手动改过的 json 字段类型/结构异常（如 base_model 非字符串、params 非 dict）→ `_apply_project_data` 抛异常 → 冒泡到按钮回调，GUI 静默失败（无提示）。
+- **已修**：
+  - `cmd_open_project` 用 try/except 包裹配置恢复，失败时日志提示「已按默认配置打开」并继续打开（不再静默无反应）。
+  - `_apply_project_data` 对 `mode` / `base_type` / `base_model` / `params` 做类型校验（非字符串/dict 自动忽略/回退），手动改坏字段也能安全打开。
+- **验证**：新增 `PROJECT_OPEN_ROBUST_OK` 冒烟测试，engine_install_smoke_test + smoke_test 全过。
+
+### 优化：FLUX 模型下载全部改走魔搭（ModelScope）国内直链
+- **背景**：用户反馈 FLUX 模型直连 HuggingFace 下载 SSL 失败（`CERTIFICATE_VERIFY_FAILED`）；hf-mirror 偶发不稳。
+- **已做**：`FLUX_MODEL_LINKS` 4 个文件（DiT 22.2G / CLIP-L / T5-XXL / AE）全部改为魔搭国内直链（已验证 `Comfy-Org/flux1-dev`、`comfyanonymous/flux_text_encoders`、`Kijai/flux-fp8` 魔搭镜像，支持断点续传、国内 CDN）。
+- 验证：链接检查 + smoke_test + engine_install_smoke_test 全过。
+
+---## v0.10.3（2026-08-25）
 
 ### 修复：英文系统（cp1252）下训练打印中文崩溃（UnicodeEncodeError）
 - **背景**：用户（Administrator，英文 Windows）Anima 训练时 `accelerator.print()` 打印含中文的内容（trigger/项目名/caption）→ 子进程 stdout 编码为 cp1252（英文系统默认）→ `UnicodeEncodeError: 'charmap' codec can't encode characters` → 训练直接崩溃。

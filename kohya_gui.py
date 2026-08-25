@@ -1264,7 +1264,16 @@ class App:
             messagebox.showwarning(core.APP_NAME, f"项目「{name}」不存在或已损坏。")
             self._build_home()
             return
-        self._apply_project_data(data)
+        try:
+            self._apply_project_data(data)
+        except Exception as e:
+            # 手动改过 json（字段类型/结构异常）时不能静默无反应：提示并按默认配置打开。
+            self._log(f"[项目] 配置恢复遇到异常（可能是手动修改 json 导致），已按默认配置打开：{e}")
+            traceback.print_exc()
+            try:
+                self._apply_project_data({})
+            except Exception:
+                pass
         self.current_project = name
         self.proj_title.configure(text="项目：" + name)
         self._show_work()
@@ -1375,6 +1384,8 @@ class App:
         self._manual_override.clear()
         try:
             m = data.get("mode", "character")
+            if not isinstance(m, str):
+                m = "character"
             if m in core.MODE_LABELS:
                 self.mode = m
                 try:
@@ -1382,6 +1393,8 @@ class App:
                 except Exception:
                     pass
             bt = data.get("base_type", "sdxl")
+            if not isinstance(bt, str):
+                bt = "sdxl"
             if bt in core.BASE_TYPE_LABELS:
                 self.base_type = bt
                 try:
@@ -1399,6 +1412,8 @@ class App:
             self.global_pos_var.set(data.get("global_pos") or "")
             self.global_neg_var.set(data.get("global_neg") or "")
             bm = data.get("base_model") or ""
+            if not isinstance(bm, str):
+                bm = ""
             if bm:
                 self.base_model_var.set(bm)
                 bt2 = core.detect_base_type(bm)
@@ -1413,6 +1428,8 @@ class App:
             if te:
                 self.train_env_var.set(te)
             p = data.get("params") or {}
+            if not isinstance(p, dict):
+                p = {}
             _opt_gui = {v: k for k, v in _OPT_GUI_MAP.items()}.get((p.get("optimizer") or "auto"), "自动")
             try:
                 self.optimizer_var.set(_opt_gui)
