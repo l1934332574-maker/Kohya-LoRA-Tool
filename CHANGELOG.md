@@ -1,4 +1,12 @@
-## v0.10.5（2026-08-25）
+## v0.10.6（2026-08-25）
+
+### 修复：FLUX.2 低显存 int8 训练启动即断言崩溃（musubi 只处理 fp8 不处理 int8）
+- **背景**：用户 8G（FLUX.2 自动 int8）训练启动崩：`flux2_utils.load_flow_model` 断言 `(fp8_scaled or int8_base) and dit_weight_dtype is None` 不成立 → `AssertionError`。
+- **根因**：musubi `trainer_base.py` 的 `dit_weight_dtype = ... if args.fp8_base else dit_dtype` 只处理 `fp8_base`，`--int8_base` 时仍取 `dit_dtype`(bf16) → 与断言冲突（int8 时 dit 权重 dtype 应为 None）。
+- **已修**：新增 `_patch_musubi_int8_weight_dtype()` 幂等补丁（随 Krea2/FLUX.2 共用补丁链自动打）：`fp8_base 或 int8_base` 时 `dit_weight_dtype=None`；普通 bf16/fp16 训练不受影响。
+- **验证**：新增 `MUSUBI_INT8_WEIGHT_DTYPE_PATCH_OK` 冒烟测试（模拟 musubi 文件替换 + int8/普通两场景断言），engine_install_smoke_test + smoke_test 全过。
+
+---## v0.10.5（2026-08-25）
 
 ### 修复：繁体/英文系统下 Krea2 缓存 latents 打印中文崩溃（cp950/cp1252 UnicodeEncodeError）
 - **背景**：用户（繁体中文系统，cp950）Krea2 一键训练，`krea2_cache_latents.py` 打印含项目名「项目_」的路径时崩溃：`UnicodeEncodeError: 'cp950' codec can't encode character '\u9879'`。

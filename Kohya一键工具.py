@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.5"
+APP_VERSION = "0.10.6"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1882,6 +1882,36 @@ def _patch_musubi_fp8_dequant_bf16(kdir, logf=print):
         logf(f"[Krea2] musubi fp8 dequant 补丁失败（忽略）: {e}")
 
 
+def _patch_musubi_int8_weight_dtype(kdir, logf=print):
+    """给 musubi trainer_base 打幂等补丁：int8_base 时 dit_weight_dtype 应为 None。
+
+    musubi 原逻辑只处理 fp8_base（dit_weight_dtype=None），int8_base 时仍取 dit_dtype(bf16)，
+    导致 flux2_utils.load_flow_model 断言失败：
+      assert (not (fp8_scaled or int8_base) and dit_weight_dtype is not None) or ((fp8_scaled or int8_base) and dit_weight_dtype is None)
+    FLUX.2 <16G 自动 int8（--int8_base --int8_scaled）时必现。
+    """
+    fp = os.path.join(kdir, "musubi-tuner", "src", "musubi_tuner", "training", "trainer_base.py")
+    if not os.path.isfile(fp):
+        return False
+    try:
+        s = open(fp, encoding="utf-8").read()
+    except Exception:
+        return False
+    old = "dit_weight_dtype = (None if args.fp8_scaled else torch.float8_e4m3fn) if args.fp8_base else dit_dtype"
+    new = ("dit_weight_dtype = (None if (args.fp8_scaled or args.int8_base) else torch.float8_e4m3fn) "
+           "if (args.fp8_base or args.int8_base) else dit_dtype  # KOHYA_TOOL_PATCH: int8_base -> None")
+    if old in s:
+        s = s.replace(old, new, 1)
+        try:
+            open(fp, "w", encoding="utf-8", newline="\n").write(s)
+            logf("[FLUX.2] 已打 musubi int8 dit_weight_dtype 补丁（int8 量化不再断言崩溃）")
+            return True
+        except Exception as e:
+            logf(f"[FLUX.2] musubi int8 补丁写入失败（忽略）: {e}")
+            return False
+    return True  # 已打过或结构变化（跳过）
+
+
 def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
     """确保 Krea2/FLUX.2（musubi）的 Qwen3-VL-4B tokenizer 本地就绪并让 musubi 用本地目录。
 
@@ -1906,6 +1936,8 @@ def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
         _check_musubi_krea2_version(_kdir, logf)
         # 方案 A：musubi fp8 改 use_scaled_mm 自动（SM 8.9+ 硬件加速），否则 fp8 退化成 float32 计算
         _patch_musubi_fp8_scaled_mm(_kdir, logf)
+        # int8 量化：musubi 只处理 fp8，int8_base 时 dit_weight_dtype 应为 None（FLUX.2 <16G 必用）
+        _patch_musubi_int8_weight_dtype(_kdir, logf)
         # RDNA2（RX 6000）fp16：musubi 默认强制 bf16，RDNA2 不原生支持 → 黑图；打补丁读 KREA2_FP16
         _patch_musubi_rdna2_fp16(_kdir, logf)
         # fp8 反量化用计算 dtype（bf16/fp16），避免 musubi 反量化成 float32 慢+爆显存

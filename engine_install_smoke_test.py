@@ -1197,6 +1197,36 @@ def test_run_stream_default_utf8(base: Path):
     print("RUN_STREAM_DEFAULT_UTF8_OK")
 
 
+def test_musubi_int8_weight_dtype_patch(base: Path):
+    """FLUX.2 <16G int8 量化：musubi 断言不再崩溃（int8_base 时 dit_weight_dtype 应为 None）。"""
+    import types as _types
+    # 1) 模拟 musubi trainer_base.py，调用补丁应正确替换
+    mt = base / "musubi-tuner" / "src" / "musubi_tuner" / "training"
+    mt.mkdir(parents=True, exist_ok=True)
+    tb = mt / "trainer_base.py"
+    tb.write_text('dit_weight_dtype = (None if args.fp8_scaled else torch.float8_e4m3fn) if args.fp8_base else dit_dtype\n',
+                  encoding="utf-8")
+    logs = []
+    with patch.object(core, "get_kohya_dir", return_value=str(base)):
+        core._patch_musubi_int8_weight_dtype(str(base), logs.append)
+    s = tb.read_text(encoding="utf-8")
+    assert "args.int8_base" in s and "KOHYA_TOOL_PATCH" in s, s
+    # 2) 验证替换后逻辑：int8_base=True / fp8_scaled=True / fp8_base=False → dit_weight_dtype=None（断言通过）
+    args = _types.SimpleNamespace(fp8_scaled=True, int8_base=True, fp8_base=False)
+    dit_dtype = "bf16"
+    ns = {"args": args, "dit_dtype": dit_dtype, "torch": None}
+    # 提取替换后的表达式（去掉注释）
+    expr = s.split("KOHYA_TOOL_PATCH")[0].strip()
+    exec("dit_weight_dtype = " + expr.replace("torch.float8_e4m3fn", "None"), ns)
+    assert ns["dit_weight_dtype"] is None, ns
+    # 3) 普通模式（int8=False, fp8=False）→ dit_weight_dtype=dit_dtype（不受影响）
+    args2 = _types.SimpleNamespace(fp8_scaled=False, int8_base=False, fp8_base=False)
+    ns2 = {"args": args2, "dit_dtype": "bf16", "torch": None}
+    exec("dit_weight_dtype = " + expr.replace("torch.float8_e4m3fn", "None"), ns2)
+    assert ns2["dit_weight_dtype"] == "bf16", ns2
+    print("MUSUBI_INT8_WEIGHT_DTYPE_PATCH_OK")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -1230,6 +1260,7 @@ def main():
         test_krea2_style_subdir_consistency(base)
         test_project_open_robust(base)
         test_run_stream_default_utf8(base)
+        test_musubi_int8_weight_dtype_patch(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 
