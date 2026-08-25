@@ -265,6 +265,8 @@ class App:
         self.param_vars = {}
         self.raw_dir_var = tk.StringVar()
         self.trigger_var = tk.StringVar()
+        # 人物强绑定（默认开）：自动把 trigger + 100% 一致特征词固定到标签开头，一个词绑定一个人物
+        self.strong_bind_var = tk.BooleanVar(value=True)
         # Qwen-Image / Z-Image 的画风/人物子模式（AT_SUB_LABELS 见类级常量）
         self.at_sub_var = tk.StringVar(value="人物（保留全部标签）")
         self.reg_var = tk.StringVar()
@@ -939,6 +941,11 @@ class App:
             self._attach_main_tooltips()
         finally:
             self._main_cards_built = True
+        # 卡片构建后才刷新模式相关行的显隐（人物强绑定等按模式显示）
+        try:
+            self._update_mode_ui()
+        except Exception:
+            pass
 
     def _show_work(self):
         """显示工作区（训练配置页），隐藏主页。"""
@@ -1123,6 +1130,10 @@ class App:
             except Exception:
                 pass
             try:
+                self.strong_bind_var.trace_add("write", _on_any)
+            except Exception:
+                pass
+            try:
                 self.amd_var.trace_add("write", _on_any)
             except Exception:
                 pass
@@ -1155,6 +1166,7 @@ class App:
         self.global_pos_var.set("")
         self.global_neg_var.set("")
         self.unet_only_var.set(False)
+        self.strong_bind_var.set(True)
         try:
             self.train_env_var.set("")
         except Exception:
@@ -1375,6 +1387,7 @@ class App:
                 "repeats": params.get("repeats"),
                 "max_epochs": params.get("max_epochs"),
                 "optimizer": params.get("optimizer") or "auto",
+                "strong_bind": bool(params.get("strong_bind", True)),
             },
         }
 
@@ -1437,6 +1450,12 @@ class App:
                 pass
             for k, v in p.items():
                 if k == "optimizer":
+                    continue
+                if k == "strong_bind":
+                    try:
+                        self.strong_bind_var.set(bool(v))
+                    except Exception:
+                        pass
                     continue
                 if v is not None:
                     self.param_vars.setdefault(k, tk.StringVar()).set(str(v))
@@ -1535,6 +1554,14 @@ class App:
                                           border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
                                           font=ui_font(FONT_BODY), command=self.cmd_pick_reg)
         self.btn_pick_reg.pack(side="left")
+        # 人物强绑定（人物模式显示，默认勾选）
+        self.strong_bind_row = ctk.CTkFrame(card2, fg_color="transparent")
+        self.chk_strong_bind = ctk.CTkCheckBox(
+            self.strong_bind_row, text="人物强绑定（自动把 trigger + 100% 一致特征词固定到标签开头）",
+            variable=self.strong_bind_var, fg_color=ACC, hover_color=ACC_H,
+            text_color=TXT, font=ui_font(FONT_BODY))
+        self.chk_strong_bind.pack(side="left")
+        self.strong_bind_row.pack_forget()
         # 画风描述词（画风模式专用，默认隐藏）
         self.style_caption_var = tk.StringVar()
         self.style_caption_row = ctk.CTkFrame(card2, fg_color="transparent")
@@ -1914,6 +1941,17 @@ class App:
                 self.style_caption_row.pack(fill="x", padx=22, pady=(0, 4))
             else:
                 self.style_caption_row.pack_forget()
+        except Exception:
+            pass
+        # 人物强绑定行：仅「人物」语义的模式显示（人物模式 / AI 图像・Krea2・FLUX.2 的人物子模式）
+        try:
+            _is_person = (self.mode == "character") or (
+                self.mode in ("qwen_image", "zimage", "krea2", "flux2")
+                and self._at_sub_label() == "character")
+            if _is_person:
+                self.strong_bind_row.pack(fill="x", padx=22, pady=(0, 4))
+            else:
+                self.strong_bind_row.pack_forget()
         except Exception:
             pass
         # 画风模式：隐藏触发词/正则卡片内容（用 pack_forget 显示/隐藏行）
@@ -2470,6 +2508,7 @@ class App:
             "base_type": self.base_type,
             "at_sub_mode": self._at_sub_label(),
             "trigger": self.trigger_var.get().strip(),
+            "strong_bind": bool(self.strong_bind_var.get()),
             "reg_dir": self.reg_var.get().strip() or None,
             "raw_dir": self.raw_dir_var.get().strip(),
             "base_model": self.base_model_var.get().strip() or None,
@@ -2983,7 +3022,8 @@ class App:
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None, project=self.current_project,
                 style_caption=params.get("style_caption") or "",
-                dataset_mode="character" if params.get("mode") in ("krea2", "qwen_image", "zimage") else None)
+                dataset_mode="character" if params.get("mode") in ("krea2", "qwen_image", "zimage") else None,
+                strong_bind=params.get("strong_bind", True))
             self._log("[OK] 预处理完成")
         except core.StopRequested:
             self._log("[停止] 预处理已手动停止")
@@ -3107,7 +3147,8 @@ class App:
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None, project=self.current_project,
                 style_caption=params.get("style_caption") or "",
-                dataset_mode="character" if params.get("mode") in ("krea2", "qwen_image", "zimage") else None)
+                dataset_mode="character" if params.get("mode") in ("krea2", "qwen_image", "zimage") else None,
+                strong_bind=params.get("strong_bind", True))
             stats = {}
             if os.path.isfile(report):
                 try:

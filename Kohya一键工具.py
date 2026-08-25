@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.6"
+APP_VERSION = "0.10.7"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1983,6 +1983,15 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     train_dir = dataset_train_dir("character", params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
+    # 人物强绑定：trigger + 100% 一致特征固定前缀（musubi 不吃 keep_tokens，靠第一行不 shuffle 保护）
+    if _sub_mode == "character" and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+        try:
+            import preprocess as _pp
+            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
+            for _w in _warns:
+                logf(f"[Krea2] ⚠ {_w}")
+        except Exception as _e:
+            logf(f"[Krea2] 人物强绑定失败（忽略）: {_e}")
     # 数据集配置 + 独立缓存目录
     proj = _sanitize_dirname(params.get("project")) or "krea2"
     cfg_path = os.path.join(KIT_DIR, "configs", "krea2_dataset_config.toml")
@@ -2025,10 +2034,12 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     # 本机实测（4070 8G, 512px, H2D-only swap24）：fp8 ≈138s/it → torch.compile ≈70s/it（2×）→ int8 ≈53s/it（2.6×）→ nf4 待测
     fp8 = vram_gb is None or vram_gb < 24
     _quant, _quant_detail = _resolve_quant_mode(mvpy, logf, vram_gb, label="Krea2",
-                                                requested=params.get("quant_mode", "auto"))
+                                                requested=params.get("quant_mode", "auto"),
+                                                prequantized=_safetensors_is_prequantized(files["raw"]))
     use_nf4 = _quant == "nf4"
     use_int8 = _quant == "int8"
-    if use_nf4 or use_int8:
+    use_none = _quant in ("none", None)
+    if use_nf4 or use_int8 or use_none:
         fp8 = False
     logf(f"[Krea2] 量化: {_quant}（{_quant_detail}）")
     swap = 2
@@ -2075,6 +2086,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         cmd += ["--int8_base", "--int8_scaled"]
     elif fp8:
         cmd += ["--fp8_base", "--fp8_scaled"]
+    # use_none（底模已预量化）→ 不加量化参数
     # torch.compile（可选，默认关）：实测 fp8 + compile ≈2×，int8 + compile 再快 ~8%；
     # Windows triton 首次编译慢、偶发不稳定，故仅当用户显式开启时使用
     _k2_compile = str(params.get("compile") or "").lower() in ("1", "true", "on", "开")
@@ -2155,6 +2167,15 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     train_dir = dataset_train_dir("character", params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
+    # 人物强绑定：trigger + 100% 一致特征固定前缀（musubi 不吃 keep_tokens，靠第一行不 shuffle 保护）
+    if _sub_mode == "character" and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+        try:
+            import preprocess as _pp
+            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
+            for _w in _warns:
+                logf(f"[FLUX.2] ⚠ {_w}")
+        except Exception as _e:
+            logf(f"[FLUX.2] 人物强绑定失败（忽略）: {_e}")
     # 数据集配置 + 独立缓存目录
     proj = _sanitize_dirname(params.get("project")) or "flux2"
     cfg_path = os.path.join(KIT_DIR, "configs", "flux2_dataset_config.toml")
@@ -2237,11 +2258,13 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         "--output_dir", out_dir, "--output_name", output_name,
     ]
     # FLUX.2：<16G 自动 int8（实测同 Krea2 减量化开销）；int8 时文本编码器仍走 fp8
-    _flux2_int8 = (str(params.get("quant_mode") or "auto").lower() == "int8") or (
-        str(params.get("quant_mode") or "auto").lower() == "auto" and vram_gb is not None and vram_gb < 16)
+    # 底模已预量化（fp8/int8）时跳过工具侧量化，避免 musubi "already in fp8 format" 报错
+    _flux2_int8 = not _safetensors_is_prequantized(files["dit"]) and (
+        (str(params.get("quant_mode") or "auto").lower() == "int8") or (
+            str(params.get("quant_mode") or "auto").lower() == "auto" and vram_gb is not None and vram_gb < 16))
     if _flux2_int8:
         cmd += ["--int8_base", "--int8_scaled", "--fp8_text_encoder"]
-    elif fp8:
+    elif fp8 and not _safetensors_is_prequantized(files["dit"]):
         cmd += ["--fp8_base", "--fp8_scaled", "--fp8_text_encoder"]
     if swap > 0:
         cmd += ["--blocks_to_swap", str(swap)]
@@ -3516,6 +3539,15 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     train_dir = dataset_train_dir(mode, params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】或【一键开始训练】")
+    # 人物强绑定：trigger + 100% 一致特征固定前缀（ai-toolkit 支持 keep_tokens 语义较弱，靠第一行前置）
+    if (params.get("at_sub_mode") or "character") == "character" and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+        try:
+            import preprocess as _pp
+            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
+            for _w in _warns:
+                logf(f"[{info['label']}] ⚠ {_w}")
+        except Exception as _e:
+            logf(f"[{info['label']}] 人物强绑定失败（忽略）: {_e}")
     if vram_gb is not None and vram_gb < info["min_vram"]:
         logf(f"[{info['label']}] ⚠ 显存 {vram_gb}GB 低于建议 {info['min_vram']}G：{info['hint']}")
     proj = _sanitize_dirname(params.get("project")) or mode
@@ -3778,7 +3810,12 @@ def _pick_preprocess_python():
 def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
                reg_dir=None, repeats=5, dedup=False, wd14=True,
                square_crop=False, min_size=0, blur_threshold=0.0, report=None,
-               keep_tokens=None, project=None, style_caption="", dataset_mode=None):
+               keep_tokens=None, project=None, style_caption="", dataset_mode=None,
+               strong_bind=True):
+    """strong_bind：人物模式自动强绑定（trigger + 100% 一致特征 → 固定前缀，keep_tokens 覆盖整组）。"""
+    # 旧调用方不传 strong_bind -> 人物模式默认开启（增量功能，不破坏旧流程）
+    if strong_bind is None:
+        strong_bind = True
     """dataset_mode：数据存储目录用的模式（默认跟随 mode）。
 
     Qwen-Image/Z-Image/Krea2 数据统一放 train_character 目录（与训练读取一致），
@@ -3817,6 +3854,8 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         if keep_tokens is None:
             keep_tokens = max(1, len(split_triggers(trigger)))
         cmd += ["--keep-tokens", str(keep_tokens)]
+        if not strong_bind:
+            cmd.append("--no-strong-bind")
         if trigger:
             cmd += ["--trigger", trigger]
         if reg_dir:
@@ -5492,12 +5531,39 @@ def _probe_nf4(vpy, logf=print, timeout=180):
     return False, (lines[-1] if lines else "未知错误")[-200:]
 
 
-def _resolve_quant_mode(mvpy, logf, vram_gb, label="Krea2", requested="auto", allow_nf4=True):
+def _safetensors_is_prequantized(path):
+    """检测 safetensors 底模是否已是预量化（fp8/int8）权重。
+
+    返回 True=已量化。musubi 的 fp8/int8 量化参数（--fp8_scaled/--int8_base）只允许用在
+    bf16/fp32 底模上；底模本身是 fp8/int8（如 Krea2 RAW fp8 版）时再量化会直接报错：
+    "Layer xxx.weight is already in torch.float8_e4m3fn format. --fp8_scaled optimization should not be applied."
+    """
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        import struct as _st
+        with open(path, "rb") as f:
+            n = _st.unpack("<Q", f.read(8))[0]
+            header = json.loads(f.read(n))
+        for k, v in header.items():
+            if k == "__metadata__":
+                continue
+            dt = (v.get("dtype") or "").upper()
+            if dt.startswith("F8_") or dt in ("I8", "INT8", "U8", "UINT8"):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _resolve_quant_mode(mvpy, logf, vram_gb, label="Krea2", requested="auto", allow_nf4=True, prequantized=False):
     """按显存档位 + 用户请求（auto/nf4/int8/fp8）决定量化方式，返回 (quant, detail)。
 
     quant ∈ {"fp8","int8","nf4"}。NF4 需要 bitsandbytes 可用（自动补装 + CUDA 预检），
     失败自动回退 int8（<16G）或 fp8。"""
     req = str(requested or "auto").lower()
+    if prequantized:
+        return "none", "底模已是预量化（fp8/int8），跳过工具侧量化"
     if req == "fp8":
         return "fp8", "用户指定 fp8"
     if req == "int8":
@@ -5817,6 +5883,18 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
                     logf(f"[训练] 已把{_tlabel} trigger「{_trig}」同步到 {_synced} 张标签第一行")
             except Exception as _e:
                 logf(f"[训练] trigger 标签同步失败（忽略）: {_e}")
+            # 人物强绑定：自动把 trigger + 100% 一致身份特征固定到标签开头，
+            # keep_tokens 覆盖整组 → kohya 打乱/丢弃标签时不动前缀，一个词绑定一个人物。
+            if mode == "character" and params.get("strong_bind", True):
+                try:
+                    import preprocess as _pp
+                    _kt, _warns = _pp.apply_strong_binding(train_dir, _trig, logf)
+                    for _w in _warns:
+                        logf(f"[训练] ⚠ {_w}")
+                    if _kt:
+                        keep_tokens = _kt
+                except Exception as _e:
+                    logf(f"[训练] 人物强绑定失败（忽略）: {_e}")
     # 数据集子集：支持秋叶式 repeats_名称 子目录结构（每个子目录独立 repeats）
     try:
         subsets = scan_dataset_subsets(dataset_dir, int(params.get("repeats", 5)))

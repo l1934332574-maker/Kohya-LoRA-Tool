@@ -166,6 +166,197 @@ def insert_trigger(caption: str, trigger: str) -> str:
     return trigger + ", " + text
 
 
+# ============================================================
+# 人物 LoRA 自动强绑定（trigger + 100% 一致特征 → 固定前缀）
+# 2026-08-25：让「一个触发词绑定一个人物」。
+# 原理：统计训练集全部 caption，找出 100% 出现的身份特征词（发色/瞳色/发型等），
+#       把 trigger + 这些特征拼成固定前缀写到每张标签开头，并让 keep_tokens 覆盖整组，
+#       kohya 打乱/丢弃标签时不会动到前缀 → 模型把 trigger 与人物特征强绑定。
+# 支持 ||| 手动分隔符：||| 前为固定区（用户自定义），||| 后为可动区。
+# ============================================================
+
+# 通用/构图/画质类标签：出现在 100% 也不算人物身份特征，不参与自动前缀
+BIND_GENERIC_TAGS = frozenset({
+    "1girl", "1boy", "1other", "2girls", "2boys", "3girls", "solo",
+    "multiple girls", "multiple boys", "no humans", "no human",
+    "character", "original character", "fan art",
+    "looking at viewer", "looking away", "looking back", "looking to the side",
+    "upper body", "lower body", "full body", "portrait", "close-up",
+    "cowboy shot", "medium shot", "long shot", "from above", "from below",
+    "from side", "from behind", "profile", "pov",
+    "masterpiece", "best quality", "high quality", "highres", "absurdres",
+    "new", "newest", "old", "oldest", "very aesthetic",
+    "white background", "simple background", "blurry background",
+    "outdoors", "indoors", "depth of field",
+})
+
+
+def _split_caption_tags(text):
+    """拆 caption 为标签列表（兼容中英文逗号、换行）。"""
+    if not text:
+        return []
+    return [t.strip() for t in re.split(r"[,，\n]", text) if t.strip()]
+
+
+def analyze_caption_features(train_dir, trigger=""):
+    """分析训练集标签：统计每个标签的出现率。
+
+    返回 dict:
+      total        : 有效 caption 数量
+      consistent   : 100% 出现的标签（排除 trigger 与通用标签，按首次出现顺序）
+      near         : [(原标签, 出现次数)] 出现率 50%~99% 的标签（用于一致性警告）
+      has_separator: 是否存在 ||| 手动固定区
+    """
+    from collections import Counter
+    cnt = Counter()
+    first_seen = {}
+    trig = set(_norm_tag(t) for t in _split_caption_tags(trigger))
+    total = 0
+    has_sep = False
+    if not os.path.isdir(train_dir):
+        return {"total": 0, "consistent": [], "near": [], "has_separator": False}
+    for root, _dirs, files in os.walk(train_dir):
+        for fn in files:
+            if not fn.lower().endswith(".txt"):
+                continue
+            fp = os.path.join(root, fn)
+            try:
+                with open(fp, "r", encoding="utf-8-sig") as f:
+                    text = f.read()
+            except Exception:
+                continue
+            if "|||" in text:
+                has_sep = True
+            tags = _split_caption_tags(text)
+            if not tags:
+                continue
+            total += 1
+            for t in tags:
+                n = _norm_tag(t)
+                if not n:
+                    continue
+                if n not in first_seen:
+                    first_seen[n] = t.strip()
+                cnt[n] += 1
+    consistent = []
+    for n, orig in first_seen.items():
+        if n in trig or n in BIND_GENERIC_TAGS:
+            continue
+        if cnt[n] == total:
+            consistent.append(orig)
+    near = [(first_seen[n], cnt[n]) for n in first_seen
+            if n not in trig and n not in BIND_GENERIC_TAGS
+            and total > 0 and total * 0.5 <= cnt[n] < total]
+    near.sort(key=lambda x: -x[1])
+    return {"total": total, "consistent": consistent, "near": near[:10],
+            "has_separator": has_sep}
+
+
+def apply_strong_binding(train_dir, trigger, logf=print):
+    """人物 LoRA 自动强绑定：把 trigger + 100% 一致身份特征拼成固定前缀。
+
+    - 无 trigger / 无标签 -> 返回 (0, [])（不强绑）。
+    - 存在 ||| 分隔符 -> 手动模式：||| 前为固定区（保持用户顺序），||| 后为可动区；
+      keep_tokens = 固定区标签数；写回时去掉 |||。
+    - 否则自动模式：前缀 = trigger + 100% 一致特征；重写每张 caption 使前缀在开头；
+      keep_tokens = 前缀标签数（幂等：已以完整前缀开头则跳过）。
+    - 返回 (keep_tokens, warnings)。
+    """
+    trigger = (trigger or "").strip()
+    if not trigger or not os.path.isdir(train_dir):
+        return 0, []
+    info = analyze_caption_features(train_dir, trigger)
+    total = info["total"]
+    if total == 0:
+        return 0, []
+    warnings = []
+    for tag, c in info["near"]:
+        warnings.append(f"特征「{tag}」只在 {c}/{total} 张出现（{c/total:.0%}），"
+                        "人物一致性不足，建议统一训练集特征或补齐图片后再训")
+    trig_tags = _split_caption_tags(trigger)
+    trig_norm = [_norm_tag(t) for t in trig_tags]
+
+    if info["has_separator"]:
+        # ---- 手动固定区模式（|||）----
+        max_keep = 0
+        for root, _dirs, files in os.walk(train_dir):
+            for fn in files:
+                if not fn.lower().endswith(".txt"):
+                    continue
+                fp = os.path.join(root, fn)
+                try:
+                    with open(fp, "r", encoding="utf-8-sig") as f:
+                        text = f.read()
+                except Exception:
+                    continue
+                if "|||" not in text:
+                    continue
+                fixed, _, flex = text.partition("|||")
+                fixed_tags = _split_caption_tags(fixed)
+                flex_tags = _split_caption_tags(flex)
+                # 保证 trigger 在固定区最前
+                trig_keep = [t for t in trig_tags if _norm_tag(t) not in
+                             {_norm_tag(x) for x in fixed_tags}]
+                fixed_tags = trig_keep + fixed_tags
+                max_keep = max(max_keep, len(fixed_tags))
+                new = ", ".join(fixed_tags + flex_tags)
+                try:
+                    with open(fp, "w", encoding="utf-8") as f:
+                        f.write(new)
+                except Exception:
+                    pass
+        if max_keep:
+            logf(f"[强绑定] 检测到 ||| 手动固定区，keep_tokens={max_keep}"
+                 f"（固定区：{', '.join(trig_tags)} + 自定义特征）")
+        return max_keep, warnings
+
+    # ---- 自动模式 ----
+    prefix = trig_tags + list(info["consistent"])
+    if len(prefix) <= len(trig_tags):
+        return max(1, len(trig_tags)), warnings
+    prefix_norm = [_norm_tag(t) for t in prefix]
+    keep = len(prefix)
+    n = 0
+    for root, _dirs, files in os.walk(train_dir):
+        for fn in files:
+            if not fn.lower().endswith(".txt"):
+                continue
+            fp = os.path.join(root, fn)
+            try:
+                with open(fp, "r", encoding="utf-8-sig") as f:
+                    text = f.read()
+            except Exception:
+                continue
+            tags = _split_caption_tags(text)
+            if not tags:
+                continue
+            head = [_norm_tag(t) for t in tags[:len(prefix)]]
+            if head == prefix_norm:          # 已绑定 -> 跳过（幂等）
+                continue
+            seen = set(prefix_norm)
+            rest = []
+            for t in tags:
+                nrm = _norm_tag(t)
+                if nrm in seen:
+                    continue
+                seen.add(nrm)
+                rest.append(t.strip())
+            new = ", ".join(prefix + rest)
+            try:
+                with open(fp, "w", encoding="utf-8") as f:
+                    f.write(new)
+                n += 1
+            except Exception:
+                pass
+    logf(f"[强绑定] 已把 trigger + {len(info['consistent'])} 个 100% 一致特征拼成固定前缀"
+         f"（keep_tokens={keep}）：{', '.join(prefix)}")
+    if n:
+        logf(f"[强绑定] 已重写 {n} 张标签，固定前缀置顶")
+    return keep, warnings
+
+
+
+
 def _md5_file(path):
     import hashlib
 
@@ -761,6 +952,8 @@ def main():
     parser.add_argument("--repeats", type=int, default=1, help="训练图片重复次数 num_repeats（默认 1）")
     parser.add_argument("--keep-tokens", type=int, default=0,
                         help="caption 开头保留 token 数（人物模式建议 1 以保护 trigger）")
+    parser.add_argument("--no-strong-bind", action="store_true",
+                        help="人物模式关闭自动强绑定（默认开：自动把 trigger + 100% 一致特征词固定到标签开头）")
     parser.add_argument("--dedup", action="store_true", help="按 MD5 跳过重复图片")
     parser.add_argument("--no-wd14", action="store_true", help="人物模式不自动调用 WD14 打标")
     parser.add_argument("--min-size", type=int, default=0,
@@ -1007,6 +1200,16 @@ def main():
                         fh.write(insert_trigger(cur, trigger))
                     n_trig += 1
             print(f"[INFO] 已把 trigger「{trigger}」插入 {n_trig} 张图片的标签第一行")
+        # 人物强绑定：自动把 trigger + 100% 一致身份特征拼成固定前缀（keep_tokens 覆盖整组）
+        if not args.no_strong_bind and trigger:
+            try:
+                _kt, _warns = apply_strong_binding(output_dir, trigger, logf=print)
+                for _w in _warns:
+                    print(f"[WARN] {_w}")
+                if _kt and _kt > args.keep_tokens:
+                    args.keep_tokens = _kt
+            except Exception as _e:
+                print(f"[WARN] 人物强绑定失败（忽略）: {_e}")
 
     # ---- 画风模式：无画风描述词时，用 WD14 打标 + 过滤人物标签（替代写死的动漫 caption） ----
     if mode == "style" and not args.no_caption and (ok + skipped) and not style_caption.strip():

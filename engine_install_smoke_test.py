@@ -1227,6 +1227,82 @@ def test_musubi_int8_weight_dtype_patch(base: Path):
     print("MUSUBI_INT8_WEIGHT_DTYPE_PATCH_OK")
 
 
+def test_prequantized_base_detect(base: Path):
+    """Krea2/FLUX.2 底模已预量化（fp8/int8）时跳过工具侧量化（防 musubi 'already in fp8 format' 报错）。"""
+    import struct as _st, json as _json
+    def fake(p, dtype):
+        hdr = {"blocks.0.attn.q_proj.weight": {"dtype": dtype, "shape": [1, 1], "data_offsets": [0, 2]}}
+        raw = _json.dumps(hdr).encode()
+        with open(p, "wb") as f:
+            f.write(_st.pack("<Q", len(raw))); f.write(raw)
+    p_fp8 = base / "fp8.safetensors"; fake(p_fp8, "F8_E4M3FN")
+    p_int8 = base / "int8.safetensors"; fake(p_int8, "I8")
+    p_bf16 = base / "bf16.safetensors"; fake(p_bf16, "BF16")
+    assert core._safetensors_is_prequantized(str(p_fp8)) is True, "fp8 未识别"
+    assert core._safetensors_is_prequantized(str(p_int8)) is True, "int8 未识别"
+    assert core._safetensors_is_prequantized(str(p_bf16)) is False, "bf16 误判"
+    assert core._safetensors_is_prequantized(str(base / "missing.safetensors")) is False
+    # _resolve_quant_mode prequantized=True → none
+    q, d = core._resolve_quant_mode(None, lambda *a: None, 8, prequantized=True)
+    assert q == "none", (q, d)
+    # 静态断言：train_krea2 / train_flux2 都接入预量化检测
+    src_all = Path(core.__file__).read_text(encoding="utf-8-sig")
+    assert src_all.count('_safetensors_is_prequantized(files["raw"])') >= 1, "train_krea2 未接入"
+    assert src_all.count('_safetensors_is_prequantized(files["dit"])') >= 1, "train_flux2 未接入"
+    print("PREQUANTIZED_BASE_DETECT_OK")
+
+
+def test_strong_binding(base: Path):
+    """人物强绑定：trigger + 100% 一致特征词自动固定前缀 + keep_tokens + 一致性警告 + ||| 分隔符。"""
+    import preprocess as pp
+
+    # ---- 自动模式：3 张标签含 2 个 100% 一致特征 ----
+    td = base / "bind_auto"
+    td.mkdir(parents=True, exist_ok=True)
+    caps = [
+        'bannai11, blue hair, blue eyes, 1girl, solo, smile',
+        'bannai11, blue eyes, blue hair, long hair, 1girl, smile',
+        'blue hair, bannai11, blue eyes, school uniform, 1girl, solo',
+    ]
+    for i, c in enumerate(caps):
+        (td / f"{i}.txt").write_text(c, encoding="utf-8")
+
+    info = pp.analyze_caption_features(str(td), 'bannai11')
+    assert info["total"] == 3, info
+    assert info["consistent"] == ["blue hair", "blue eyes"], info["consistent"]
+    assert any(t == "smile" for t, _ in info["near"]), info["near"]
+
+    logs = []
+    kt, warns = pp.apply_strong_binding(str(td), 'bannai11', logs.append)
+    assert kt == 3, (kt, logs)          # trigger + 2 特征
+    assert warns, "应有 smile 一致性警告"
+    assert "bannai11, blue hair, blue eyes" in (td / "0.txt").read_text(encoding="utf-8"), "前缀未置顶"
+    # 幂等：二次运行不再重写
+    kt2, _ = pp.apply_strong_binding(str(td), 'bannai11', lambda *a: None)
+    assert kt2 == kt, (kt2, kt)
+
+    # ---- 手动 ||| 分隔符 ----
+    td2 = base / "bind_sep"
+    td2.mkdir(parents=True, exist_ok=True)
+    (td2 / "0.txt").write_text("bannai11, blue hair, blue eyes ||| 1girl, solo", encoding="utf-8")
+    (td2 / "1.txt").write_text("bannai11, blue hair, blue eyes ||| 1girl, long hair", encoding="utf-8")
+    kt3, _ = pp.apply_strong_binding(str(td2), 'bannai11', lambda *a: None)
+    assert kt3 == 3, (kt3,)
+    s = (td2 / "0.txt").read_text(encoding="utf-8")
+    assert "|||" not in s and s.startswith("bannai11, blue hair, blue eyes"), s
+
+    # ---- 接入点静态断言 ----
+    src_all = Path(core.__file__).read_text(encoding="utf-8-sig")
+    assert "apply_strong_binding(train_dir" in src_all, "train()/krea2/flux2 未接入强绑定"
+    assert "def preprocess(" in src_all and "strong_bind=True" in src_all[src_all.find("def preprocess("):src_all.find("def preprocess(") + 600], "preprocess() 未接 strong_bind"
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    assert "strong_bind_var" in g, "GUI 未定义 strong_bind_var"
+    i = g.find("def _collect_params")
+    assert i != -1 and "strong_bind" in g[i:i + 1200], "GUI _collect_params 未接 strong_bind"
+    print("STRONG_BINDING_OK")
+
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -1261,6 +1337,8 @@ def main():
         test_project_open_robust(base)
         test_run_stream_default_utf8(base)
         test_musubi_int8_weight_dtype_patch(base)
+        test_prequantized_base_detect(base)
+        test_strong_binding(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

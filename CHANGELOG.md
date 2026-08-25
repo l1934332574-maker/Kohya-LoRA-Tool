@@ -1,3 +1,16 @@
+## v0.10.7（待发布）
+
+### 新增：人物 LoRA 自动强绑定（一个触发词绑定一个人物）
+- **背景**：用户反馈训练出的人物 LoRA 只写 trigger 生图时"完全不相干"——因为人物身份特征（发色/瞳色/发型等）散落在标签里，kohya 打乱/丢弃标签时特征被拆散，trigger 与人物特征绑定弱。
+- **原理**：市面所有工具（kohya/秋叶/OneTrainer）做法一致：trigger 固定写在每张 caption 第一行 + keep_tokens 保护 + 特征词尽量 100% 一致。本工具已有 trigger 自动插入 + keep_tokens 保护，本次补上"自动提取 100% 一致特征词并固定前缀"。
+- **已做**：
+  - preprocess.py 新增 analyze_caption_features() / apply_strong_binding()：统计训练集全部 caption，找出 **100% 出现**的身份特征词（自动排除 trigger 本身与 1girl/solo/构图/画质等通用标签），把 trigger + 特征词 拼成固定前缀写到每张标签开头，并返回建议 keep_tokens（覆盖整组前缀，打乱/丢弃标签时不动它）。
+  - 人物模式下默认开启（GUI 触发词卡片新增「人物强绑定」勾选，默认勾选，可取消）：预处理后标签即为 trigger, blue hair, blue eyes, ... 固定前缀，训练前也会自动同步重写。
+  - **特征一致性检查**：某特征只出现在部分图（如 white hair 只有 22/24）→ 训练前警告"特征只在 x/y 张出现，人物一致性不足"，提醒用户补图/统一特征。
+  - **手动固定区**：标签里可写 ||| 分隔符，||| 前为固定区（用户自定义，保持原顺序）、后为可动区；工具识别后去掉 ||| 并按固定区标签数设 keep_tokens（进阶用法，普通用户无需理会）。
+  - 接入 kohya 引擎（SD1.5/SDXL/FLUX/Anima）、第二引擎（Krea2/FLUX.2）、第三引擎（Qwen-Image/Z-Image）人物/子模式；Krea2/FLUX.2 的 musubi 不吃 keep_tokens，但固定前缀置顶同样增强绑定。
+- **验证**：新增 STRONG_BINDING_OK 冒烟测试（100% 特征提取 + 前缀置顶 + keep_tokens + 一致性警告 + ||| 手动固定区 + 幂等 + 三引擎/GUI 接入断言），engine_install_smoke_test + smoke_test 全过。
+
 ## v0.10.6（2026-08-25）
 
 ### 修复：FLUX.2 低显存 int8 训练启动即断言崩溃（musubi 只处理 fp8 不处理 int8）

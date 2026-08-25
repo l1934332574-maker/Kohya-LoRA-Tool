@@ -4,7 +4,7 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.10.6** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.10.7** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
@@ -34,6 +34,11 @@
 - **FLUX 模型下载改走魔搭国内直链**：DiT / CLIP-L / T5-XXL / AE 全部国内 CDN 直连、支持断点续传，不再直连 HuggingFace（避免 SSL 失败）。
 
 - **修复繁体/英文系统下 Krea2 缓存 latents 打印中文崩溃**：所有子进程默认强制 UTF-8 输出，不再 UnicodeEncodeError。
+
+## 🆕 v0.10.7 更新重点
+
+- **人物 LoRA 自动强绑定**：一个触发词绑定一个人物——自动提取训练集 100% 一致的身份特征并固定为标签前缀（keep_tokens 覆盖整组），特征不一致训练前警告，支持 ||| 手动固定区。
+- **修复 Krea2/FLUX.2 预量化底模（fp8/int8）训练启动报错**：底模本身已量化时不再重复加量化参数。
 
 ## 🆕 v0.10.6 更新重点
 
@@ -71,6 +76,7 @@
 - **坏图自动隔离**：无法读取的图片会移入 `<输出目录>_corrupt`，避免一张坏图中断整批任务。
 - **画风标签过滤**：保留真实画风特征，过滤人物身份、五官和角色类干扰标签。
 - **人物 Trigger**：可将自定义触发词置于标签开头，并在训练时保护对应 token。
+- **人物强绑定（默认开）**：自动提取训练集 100% 一致的身份特征（发色/瞳色/发型等），拼成 trigger + 特征 固定前缀并整体保护（keep_tokens 覆盖整组）——只写一个触发词也能稳定唤出同一个人物。特征不一致（如 white hair 只有 22/24 张）会在训练前提醒；进阶可用 ||| 手动划分固定区/可动区。
 - **标签编辑器**：支持逐图查看、批量删除/替换、Trigger 置顶和标签频率统计。
 - **秋叶式数据集兼容**：支持 `repeats_名称` 子目录结构。
 
