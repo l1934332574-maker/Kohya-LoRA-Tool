@@ -4173,6 +4173,19 @@ class App:
                     os.remove(part)
                 except Exception:
                     pass
+        # 门禁预检：Krea2 Raw/Turbo 是 HuggingFace 门禁模型，hf-mirror 匿名直连必 401/403
+        if kind == "krea2" and key in ("raw", "turbo"):
+            _st = core._http_status(url)
+            if _st in (401, 403):
+                self._log(f"[下载] {fname} 返回 {_st}：Krea 2 Raw/Turbo 是 HuggingFace 门禁模型，镜像无法匿名下载。")
+                messagebox.showwarning(
+                    core.APP_NAME,
+                    f"{fname} 是 HuggingFace 门禁模型（需先接受 Krea 许可），镜像匿名下载被拒（{_st}）。\n\n"
+                    "解决办法（任选）：\n"
+                    "1) 浏览器打开 huggingface.co 搜索 krea/Krea-2-Raw（或 Krea-2-Turbo），接受许可后下载对应 .safetensors，放进 models/krea2/ 文件夹；\n"
+                    "2) 已接受许可的：设置系统环境变量 HF_TOKEN=你的token 后重试应用内下载；\n"
+                    "3) 等维护者提供国内镜像（魔搭）后一键下载。")
+                return
         self._downloading = True
         self._dl_kind = kind
         self._show_dl_ui(fname, desc)

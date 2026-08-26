@@ -1,3 +1,13 @@
+## v0.10.14（2026-08-26）
+
+### 修复：Krea2 Raw/Turbo 下载 401/403（HF 门禁模型）+ 下载器支持 HF_TOKEN
+- **背景**：用户应用内下载 Krea2 raw/turbo 报 `HTTP Error 403`。实测 Krea-2-Raw / Krea-2-Turbo 是 HuggingFace 门禁模型（需接受 Krea 许可 + token），hf-mirror 匿名下载必 401/403；VAE / 文本编码器链接正常。
+- **已修**：
+  - 下载器支持环境变量 `HF_TOKEN`（`Authorization: Bearer` 头），已接受许可的用户可设 token 后应用内下载；
+  - 401/403 失败时给出明确门禁引导（浏览器手动下载 / 设 HF_TOKEN / 等国内镜像）；
+  - Krea2 raw/turbo 下载前预检状态码，401/403 直接弹窗引导，不再无效下载。
+- **验证**：GATED_DOWNLOAD_GUIDANCE_OK，engine_install_smoke_test + smoke_test 全过。
+
 ## v0.10.13（2026-08-26）
 
 ### 修复：Z-Image / Qwen-Image 预下载「HF 缓存存在但本地残缺」仍误判就绪（v0.10.12 漏网）

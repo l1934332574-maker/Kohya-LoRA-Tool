@@ -1570,6 +1570,22 @@ def test_sample_preview(base: Path):
 
 
 
+
+def test_gated_download_guidance(base: Path):
+    """门禁模型（Krea2 Raw/Turbo）下载引导：_http_status 401 探测 + 下载器 HF_TOKEN/提示 + GUI 预检接线。"""
+    import urllib.error
+    def _raise_401(*a, **k):
+        raise urllib.error.HTTPError("http://x", 401, "Unauthorized", {}, None)
+    with patch.object(core.urllib.request, "urlopen", side_effect=_raise_401):
+        assert core._http_status("https://hf-mirror.com/x") == 401
+    md = (ROOT / "model_downloader.py").read_text(encoding="utf-8")
+    assert "HF_TOKEN" in md and "Authorization" in md and "401/403" in md
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    assert 'key in ("raw", "turbo")' in g and "Krea 2 Raw/Turbo 是 HuggingFace 门禁模型" in g
+    print("GATED_DOWNLOAD_GUIDANCE_OK")
+
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -1615,6 +1631,7 @@ def main():
         test_quarantine_input_corrupt(base)
         test_flux2_qwen3_06b_hint(base)
         test_sample_preview(base)
+        test_gated_download_guidance(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

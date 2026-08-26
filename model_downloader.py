@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 模型下载模块（应用内下载基础底模）
 
@@ -12,11 +12,21 @@
 import os
 import threading
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import urlparse
 
 BLOCK = 1 << 16  # 64KB 一块
 _DIRECT_HOSTS = ("modelscope.cn", "hf-mirror.com", "mirrors.aliyun.com", "mirror.sjtu.edu.cn", "pypi.tuna.tsinghua.edu.cn")
+
+
+def _base_headers():
+    """User-Agent + 可选 HF_TOKEN（门禁模型如 Krea-2-Raw/Turbo 需要 Bearer 授权）。"""
+    h = {"User-Agent": "Mozilla/5.0"}
+    tok = os.environ.get("HF_TOKEN", "").strip()
+    if tok:
+        h["Authorization"] = "Bearer " + tok
+    return h
 
 
 def _opener_for(url):
@@ -34,7 +44,7 @@ class DownloadError(Exception):
 def get_remote_size(url, timeout=30):
     """发起一次 Range 请求，读取 Content-Range 拿到总大小。失败返回 None。"""
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Range": "bytes=0-0"})
+        req = urllib.request.Request(url, headers=dict(_base_headers(), Range="bytes=0-0"))
         with _opener_for(url).open(req, timeout=timeout) as r:
             cr = r.headers.get("Content-Range") or ""
             if "/" in cr:
@@ -73,7 +83,11 @@ class ModelDownloader(threading.Thread):
         except Exception as e:
             self.error = e
             if self.logf:
-                self.logf(f"[下载] 失败：{e}")
+                if isinstance(e, urllib.error.HTTPError) and e.code in (401, 403):
+                    self.logf("[下载] 失败：源拒绝访问（401/403）——该文件可能是 HuggingFace 门禁模型（需接受许可/登录）或源已失效。")
+                    self.logf("[下载] 建议：1) 用「🌐 浏览器」手动下载；2) 已接受许可的可在环境变量设置 HF_TOKEN=你的token 后重试；3) 等维护者提供国内镜像。")
+                else:
+                    self.logf(f"[下载] 失败：{e}")
             if self.done_cb:
                 self.done_cb(False, self.dest)
 
@@ -86,7 +100,7 @@ class ModelDownloader(threading.Thread):
         if started:
             if self.logf:
                 self.logf(f"[下载] 检测到断点，从 {started / 1048576:.1f} MB 继续…")
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = _base_headers()
         if started:
             headers["Range"] = f"bytes={started}-"
         req = urllib.request.Request(self.url, headers=headers)

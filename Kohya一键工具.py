@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.13"
+APP_VERSION = "0.10.14"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -4653,6 +4653,18 @@ def _curl_supports_retry_all_errors(curl_path):
     except Exception:
         pass
     return False
+
+
+def _http_status(url, timeout=20):
+    """快速探测 URL 状态码（Range 请求）；网络失败返回 None。"""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Range": "bytes=0-0"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception:
+        return None
 
 
 def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False):
