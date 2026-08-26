@@ -95,6 +95,80 @@ def test_main_engine(base: Path):
     print("MAIN_ENGINE_FULL_FLOW_OK")
 
 
+def test_kohya_coexist_with_other_engines(base: Path):
+    """先装第二/三引擎（musubi/ai-toolkit 已在 kohya_ss 目录内）再装第一引擎：不再误报「目标目录非空且不是 kohya_ss」。"""
+    kdir = base / "coexist" / "kohya_ss"
+    # 模拟第二/三引擎已装进同一个 kdir（真实场景：musubi-venv / ai-toolkit 等子目录）
+    (kdir / "musubi-tuner").mkdir(parents=True, exist_ok=True)
+    (kdir / "musubi-venv").mkdir(parents=True, exist_ok=True)
+    (kdir / "ai-toolkit").mkdir(parents=True, exist_ok=True)
+    (kdir / "ai_toolkit_venv").mkdir(parents=True, exist_ok=True)
+    assert core._kohya_dir_has_foreign_content(str(kdir)) is False, "共存子目录被误判为陌生内容"
+
+    state = {"torch": False, "setup": False, "deps": False}
+    logs = []
+
+    def run_stream(cmd, cwd=None, env=None, logf=print, **kwargs):
+        cmd = [str(x) for x in cmd]
+        if len(cmd) >= 4 and cmd[1:3] == ["-m", "venv"]:
+            target = Path(cwd) / cmd[3] if not os.path.isabs(cmd[3]) else Path(cmd[3])
+            fake_python(target / "Scripts" / "python.exe")
+            return 0
+        if any("setup_windows.py" in x for x in cmd):
+            state["setup"] = True
+            state["deps"] = True
+            return 0
+        return 0
+
+    def subrun(cmd, *args, **kwargs):
+        cmd = [str(x) for x in cmd]
+        code = cmd[2] if len(cmd) > 2 and cmd[1] == "-c" else ""
+        if "print(torch.version.cuda" in code:
+            return result(0, "2.7.0+cu128\n12.8\nTrue\n")
+        if "assert torch.cuda.is_available" in code or "import torch" in code:
+            return result(0 if state["torch"] else 1, "2.7.0+cu128\n" if state["torch"] else "")
+        if "import PIL, numpy" in code:
+            return result(0 if state["deps"] else 1)
+        return result(0)
+
+    def preinstall(*args, **kwargs):
+        state["torch"] = True
+        return True
+
+    patches = common_patches(kdir) + (
+        patch.object(core, "KOHYA_DIR_FILE", str(base / "coexist" / "kohya_dir.txt")),
+        patch.object(core, "_bundled_kohya_zip", return_value=str(ROOT / "installers" / "kohya_ss" / "kohya_ss-master.zip")),
+        patch.object(core, "_bundled_sd_zip", return_value=str(ROOT / "installers" / "kohya_ss" / "sd-scripts-main.zip")),
+        patch.object(core, "run_stream", side_effect=run_stream),
+        patch.object(core.subprocess, "run", side_effect=subrun),
+        patch.object(core, "_upgrade_pip", return_value=True),
+        patch.object(core, "_ensure_venv_pip", return_value=True),
+        patch.object(core, "_preinstall_torch", side_effect=preinstall),
+        patch.object(core, "_ensure_kohya_deps", side_effect=lambda *a, **k: state.__setitem__("deps", True) or True),
+        patch.object(core, "venv_python_version", return_value="3.12"),
+    )
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10], patches[11], patches[12], patches[13], patches[14], patches[15]:
+        out = core.install_kohya(logs.append)
+    assert Path(out) == kdir
+    assert (kdir / "sd-scripts" / "sdxl_train_network.py").is_file()
+    # 其它引擎子目录保留（未被误删）
+    assert (kdir / "ai-toolkit").is_dir() and (kdir / "musubi-tuner").is_dir()
+    print("KOHYA_COEXIST_WITH_OTHER_ENGINES_OK")
+
+
+def test_kohya_foreign_content_still_blocks(base: Path):
+    """kohya_ss 目录里有陌生文件（非 kohya 也非第二/三引擎）时仍应阻止安装（防呆保留）。"""
+    kdir = base / "foreign" / "kohya_ss"
+    kdir.mkdir(parents=True, exist_ok=True)
+    (kdir / "unrelated_file.txt").write_text("x", encoding="utf-8")
+    assert core._kohya_dir_has_foreign_content(str(kdir)) is True, "陌生文件未识别"
+    # 空目录 / 不存在 → False（可安装）
+    assert core._kohya_dir_has_foreign_content(str(base / "empty_dir")) is False
+    print("KOHYA_FOREIGN_CONTENT_STILL_BLOCKS_OK")
+
+
+
+
 def test_second_engine(base: Path):
     kdir = base / "second" / "kohya_ss"
     state = {"torch": False, "editable": False}
@@ -1307,6 +1381,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
         test_main_engine(base)
+        test_kohya_coexist_with_other_engines(base)
+        test_kohya_foreign_content_still_blocks(base)
         test_second_engine(base)
         test_second_engine_without_git(base)
         test_third_engine(base)

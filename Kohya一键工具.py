@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.7"
+APP_VERSION = "0.10.8"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -880,6 +880,35 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
     return True
 
 
+# 与 kohya_ss 可共存的"其它引擎"子目录（先装第二/三引擎、再装第一引擎的场景）
+# 第二引擎=musubi（kdir/musubi-tuner + musubi-venv）；第三引擎=ai-toolkit（kdir/ai-toolkit + ai_toolkit_venv）
+# 这些目录都是 get_kohya_dir() 同一个 kdir 下的子目录，安装 kohya 时不应误判"目录被占用"
+KOHYA_COEXIST_SUBDIRS = frozenset({
+    "musubi-tuner", "musubi-venv", "ai-toolkit", "ai_toolkit_venv",
+    "venv", "venv_broken",  # venv 也可能已存在（部分安装残留），kohya 安装会自行校验/重建
+})
+
+
+def _kohya_dir_has_foreign_content(kdir):
+    """判断 kdir 里是否存在"非 kohya 且非其它引擎"的陌生内容（真·被占用）。
+
+    返回 True 表示有陌生文件/目录（应阻止安装）；False 表示要么为空、
+    要么只含 kohya 可共存的子目录（第二/三引擎 venv/源码），可继续安装。
+    """
+    try:
+        names = os.listdir(kdir)
+    except Exception:
+        return False
+    for n in names:
+        if n.startswith("."):          # 隐藏/临时文件不阻拦
+            continue
+        if n in KOHYA_COEXIST_SUBDIRS:
+            continue
+        # 其它任何东西（包括 kohya 自身的 kohya_gui.py / sd-scripts / .git 等）都算"已占用或已安装"
+        return True
+    return False
+
+
 def install_kohya(logf=print):
     git = find_git()
     py, pyver = find_python()
@@ -907,8 +936,16 @@ def install_kohya(logf=print):
         if kohya_ok:
             logf("[Kohya] 已存在 kohya_ss，跳过解压/克隆")
         else:
+            # 目录非空：仅当含陌生内容（不是 kohya 也不是第二/三引擎子目录）才阻止；
+            # 只含 musubi/ai-toolkit 等共存子目录时放行（先装其它引擎再装 kohya 的场景）。
             if os.path.exists(kdir) and os.listdir(kdir):
-                raise RuntimeError(f"目标目录非空且不是 kohya_ss: {kdir}")
+                if _kohya_dir_has_foreign_content(kdir):
+                    raise RuntimeError(
+                        f"目标目录非空且不是 kohya_ss: {kdir}\n"
+                        "目录里存在无法识别的文件/文件夹。\n"
+                        "若其中是第二/三引擎（musubi-tuner / ai-toolkit 等）请确认版本支持共存；"
+                        "若为无关文件，请备份后清空该目录再重试。")
+                logf("[Kohya] 目录内仅含其它引擎（musubi/ai-toolkit），kohya_ss 将共存安装到同一目录")
             zip_src = _bundled_kohya_zip()
             if zip_src:
                 logf(f"[Kohya] 使用内置源码包解压: {os.path.basename(zip_src)}")

@@ -1,4 +1,12 @@
-## v0.10.7（待发布）
+## v0.10.8（待发布）
+
+### 修复：先装第二/三引擎再装第一引擎报「目标目录非空且不是 kohya_ss」
+- **背景**：用户先装第三引擎（ai-toolkit/H3 视频），再装角色/画风（第一引擎 kohya）时报 `目标目录非空且不是 kohya_ss: .../kohya_ss`。
+- **根因**：第二/三引擎默认装在 `get_kohya_dir()` 同一个目录下（`musubi-tuner/musubi-venv/ai-toolkit/ai_toolkit_venv` 子目录）。先装其它引擎后 `kohya_ss` 目录非空但无 kohya 标记（无 kohya_gui.py / .git），`install_kohya` 一律判为"被占用" → 拒绝安装。
+- **已修**：新增 `_kohya_dir_has_foreign_content()`——仅当目录含"非 kohya 也非第二/三引擎"的陌生内容时才阻止；只含 musubi/ai-toolkit 等共存子目录时放行，kohya 与其它引擎共存安装到同一目录（引擎安装目录本就同源，不冲突）。
+- **验证**：新增 `KOHYA_COEXIST_WITH_OTHER_ENGINES_OK`（预置 musubi/ai-toolkit 子目录后完整跑 install_kohya 成功且其它引擎目录保留）+ `KOHYA_FOREIGN_CONTENT_STILL_BLOCKS_OK`（陌生文件仍阻止，防呆保留），engine_install_smoke_test + smoke_test 全过。
+
+## v0.10.7（2026-08-26）
 
 ### 新增：人物 LoRA 自动强绑定（一个触发词绑定一个人物）
 - **背景**：用户反馈训练出的人物 LoRA 只写 trigger 生图时"完全不相干"——因为人物身份特征（发色/瞳色/发型等）散落在标签里，kohya 打乱/丢弃标签时特征被拆散，trigger 与人物特征绑定弱。
