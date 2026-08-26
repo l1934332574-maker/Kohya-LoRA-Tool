@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.12"
+APP_VERSION = "0.10.13"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -3546,18 +3546,16 @@ def _at_image_download_complete(local):
 
 
 def at_image_model_ready(mode):
-    """检查 AI Toolkit 图像模型是否已下载（本地预下载目录完整 / HF 缓存目录存在）。"""
+    """检查 AI Toolkit 图像模型是否已下载（仅本地预下载目录完整才算就绪）。
+
+    不能把「HF 缓存目录存在」也算就绪：那样本地目录仍残缺时训练会指向残缺目录
+    报 no config.json（D 盘用户 v0.10.12 复现）。本地不完整时重新 snapshot_download
+    （会自动复用 HF 缓存文件，不重复下载 16GB）。
+    """
     info = AT_IMAGE_MODELS.get(mode)
     if not info:
         return False
-    if _at_image_download_complete(at_image_local_dir(mode)):
-        return True
-    try:
-        cache_root = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
-        folder = "models--" + info["model_id"].replace("/", "--")
-        return os.path.isdir(os.path.join(cache_root, folder))
-    except Exception:
-        return False
+    return _at_image_download_complete(at_image_local_dir(mode))
 
 
 def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, logf=print):

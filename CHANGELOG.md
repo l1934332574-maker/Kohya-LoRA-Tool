@@ -1,3 +1,11 @@
+## v0.10.13（2026-08-26）
+
+### 修复：Z-Image / Qwen-Image 预下载「HF 缓存存在但本地残缺」仍误判就绪（v0.10.12 漏网）
+- **背景**：v0.10.12 发布后 D 盘用户 Z-Image 仍报 `no config.json found in .../models/at_image/zimage`。
+- **根因**：`at_image_model_ready` 的「HF 缓存目录存在也算就绪」兜底，本地残缺时误判就绪、训练指向残缺目录。
+- **已修**：去掉 HF 缓存兜底，仅本地预下载目录完整才算就绪；残缺时重新 snapshot_download（自动复用 HF 缓存文件，不重复下载 16GB）。
+- **验证**：回归测试新增「HF 缓存存在但本地残缺→不得判就绪」，engine_install_smoke_test + smoke_test 全过。
+
 ## v0.10.12（2026-08-26）
 
 ### 修复：Krea2 采样预览开启后启动即崩溃（缺 --text_encoder）

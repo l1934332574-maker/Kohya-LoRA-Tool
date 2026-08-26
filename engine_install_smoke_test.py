@@ -1402,8 +1402,11 @@ def test_at_image_model_ready_local(base: Path):
         assert core.at_image_model_ready("zimage") is True
         # 半截场景：删掉一个 transformer 分片 → 未就绪（旧逻辑只看目录会误判就绪）
         os.remove(local / "transformer" / "diffusion_pytorch_model-00002-of-00002.safetensors")
+        # 关键回归：即使 HF 缓存目录存在，本地残缺也绝不能判就绪（v0.10.12 漏网：训练指向残缺目录报 no config.json）
+        hf_cache = base / "fakehome" / ".cache" / "huggingface" / "hub" / "models--Tongyi-MAI--Z-Image"
+        hf_cache.mkdir(parents=True, exist_ok=True)
         with patch.object(core.os.path, "expanduser", return_value=str(base / "fakehome")):
-            assert core.at_image_model_ready("zimage") is False
+            assert core.at_image_model_ready("zimage") is False, "HF 缓存存在但本地残缺不得判就绪"
         # 缺 config.json → 未就绪
         os.remove(local / "transformer" / "config.json")
         with patch.object(core.os.path, "expanduser", return_value=str(base / "fakehome")):
