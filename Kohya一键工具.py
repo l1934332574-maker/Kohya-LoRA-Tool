@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.9"
+APP_VERSION = "0.10.10"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1506,8 +1506,17 @@ def flux2_missing_models():
     for key, (fname, desc, url) in FLUX2_MODEL_LINKS.items():
         if not files.get(key):
             missing.append(f"· {desc}\n  文件: {fname}\n  下载: {url}")
+    # 常见误解：用户把 Anima 的 Qwen3-0.6B 当 FLUX.2 文本编码器放进来。
+    # FLUX.2 需要的是 qwen_3_4b.safetensors（4B），0.6B 不适用；给明确提示。
+    if "te" not in files:
+        try:
+            if _anima_find_qwen3_any()[0]:
+                missing.append(
+                    "· 提示：检测到 Anima 用的 Qwen3-0.6B，但 FLUX.2 文本编码器需要的是\n"
+                    "  文件: qwen_3_4b.safetensors（4B，约 7.5GB）。Qwen3-0.6B 不适用于 FLUX.2，请勿混用。")
+        except Exception:
+            pass
     return missing
-
 
 def write_musubi_dataset_config(image_dir, cache_dir, config_path, resolution=1024,
                                 num_repeats=1, keep_tokens=1, caption_extension=".txt"):
@@ -1748,21 +1757,35 @@ def _patch_krea2_encoder(enc, logf=print):
 
 
 def _check_musubi_krea2_version(kdir, logf=print):
-    """待办：检查 musubi Krea2 是否强制 bf16；旧版（没有）直接提示阻止，避免 float32 傻跑 300s/步。"""
+    """自愈防线：musubi 版本过旧（Krea2/FLUX.2 未强制 bf16/fp8）会以 float32 训练 → 300s/步。
+
+    分别校验 Krea2（krea2_train_network.py 的 dit_dtype/bf16）与 FLUX.2
+    （flux2_utils.py 的 fp8 加载）源码标记；过旧直接提示重装第二引擎，
+    避免用户 float32 傻跑看不到进度。
+    """
+    bad = []
     try:
         enc = os.path.join(kdir, "musubi-tuner", "src", "musubi_tuner", "krea2_train_network.py")
         if os.path.isfile(enc):
             with open(enc, "r", encoding="utf-8", errors="ignore") as f:
                 src = f.read()
             if "args.dit_dtype" not in src or "bfloat16" not in src:
-                raise RuntimeError(
-                    "检测到 musubi 版本过旧（Krea2 未强制 bf16/fp8，会以 float32 训练导致显存爆、极慢）。\n"
-                    "请重跑【② 第二引擎安装】更新 musubi，或更新到最新版软件后重试。")
-    except RuntimeError:
-        raise
+                bad.append("Krea2 未强制 bf16")
     except Exception:
         pass
-
+    try:
+        f2 = os.path.join(kdir, "musubi-tuner", "src", "musubi_tuner", "flux_2", "flux2_utils.py")
+        if os.path.isfile(f2):
+            with open(f2, "r", encoding="utf-8", errors="ignore") as f:
+                src = f.read()
+            if "load_safetensors_with_lora_and_fp8" not in src and "apply_fp8_monkey_patch" not in src:
+                bad.append("FLUX.2 缺 fp8 加载")
+    except Exception:
+        pass
+    if bad:
+        raise RuntimeError(
+            "检测到 musubi 版本过旧（%s），会以 float32 训练导致显存爆、极慢（300s/步）。\n"
+            "请重跑【② 第二引擎安装】更新 musubi，或更新到最新版软件后重试。" % "、".join(bad))
 
 def _patch_musubi_fp8_scaled_mm(kdir, logf=print):
     """回退 v0.9.23 的错误补丁：Krea2/FLUX.2 的 fp8 量化是 per-channel，不兼容
@@ -2188,6 +2211,8 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         raise RuntimeError("第二训练引擎未安装，请先在左侧点「②' 第二引擎(可选)」安装。\n" + detail)
     kdir = get_kohya_dir()
     mt_dir = os.path.join(kdir, "musubi-tuner")
+    # 自愈防线：musubi 版本过旧会以 float32 训练（300s/步），阻止并提示重装第二引擎
+    _check_musubi_krea2_version(kdir, logf)
     accel = _accelerate_launch_cmd(mvpy, logf=logf)
     if not _ensure_torchvision_deps(mvpy, logf, label="FLUX.2", cwd=mt_dir):
         raise RuntimeError("FLUX.2 引擎（第二引擎）venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第二引擎。")
@@ -3462,11 +3487,21 @@ AT_IMAGE_MODELS = {
 }
 
 
+def at_image_local_dir(mode):
+    """AI Toolkit 图像模型预下载目录（数据目录，整仓 snapshot_download，hf-mirror 国内直连）。"""
+    return data_sub("models", "at_image", mode)
+
+
 def at_image_model_ready(mode):
-    """检查 AI Toolkit 图像模型是否已下载（HF 缓存目录存在）。"""
+    """检查 AI Toolkit 图像模型是否已下载（本地预下载目录 / HF 缓存目录）。"""
     info = AT_IMAGE_MODELS.get(mode)
     if not info:
         return False
+    local = at_image_local_dir(mode)
+    if (os.path.isfile(os.path.join(local, "model_index.json"))
+            and os.path.isdir(os.path.join(local, "transformer"))
+            and os.path.isdir(os.path.join(local, "text_encoder"))):
+        return True
     try:
         cache_root = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
         folder = "models--" + info["model_id"].replace("/", "--")
@@ -3594,6 +3629,24 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     proj = _sanitize_dirname(params.get("project")) or mode
     out_dir = data_sub("output", proj)
     os.makedirs(out_dir, exist_ok=True)
+    # 五十五：底模预下载到本地（hf-mirror 国内直连 + 断点续传 + 可手动停止），
+    # 避免训练时 huggingface_hub 在线拉取 16~40GB（Xet 401/超时/卡 0.00B）。
+    # 下载完成或已存在时，训练 yaml 的 name_or_path 指向本地目录，离线加载。
+    _model_ok = at_image_model_ready(mode)
+    if not _model_ok:
+        logf(f"[{info['label']}] 底模未下载，开始预下载 {info['model_id']}（约 {info['size']}，走 hf-mirror 国内镜像，可随时停止；中断后自动续传）…")
+        try:
+            _at_vpy = _at_dirs()[0]
+            _hf_download(info["model_id"], at_image_local_dir(mode), logf, vpy=_at_vpy)
+            _model_ok = at_image_model_ready(mode)
+            if _model_ok:
+                logf(f"[{info['label']}] 底模预下载完成：{at_image_local_dir(mode)}")
+        except Exception as e:
+            logf(f"[{info['label']}] ⚠ 底模预下载失败（{e}），将尝试训练时在线加载")
+    if _model_ok:
+        info = dict(info)
+        info["model_id"] = at_image_local_dir(mode).replace("\\", "/")
+
     cfg_path = os.path.join(KIT_DIR, "configs", mode + "_train.yaml")
     write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=vpy, logf=logf)
     steps = int(params.get("video_steps", 2000))
@@ -6711,16 +6764,16 @@ def find_flux_components(base_model):
     return clip_l, t5xxl, ae
 
 
-def _hf_download(repo, local_dir, logf=print, allow_patterns=None):
-    """用 kohya venv 的 huggingface_hub 走 hf-mirror 下载仓库到 local_dir。
+def _hf_download(repo, local_dir, logf=print, allow_patterns=None, vpy=None):
+    """用指定 venv（默认 kohya venv）的 huggingface_hub 走 hf-mirror 下载仓库到 local_dir。
 
     GUI 进程（含打包版）不带 huggingface_hub 依赖，这里改用训练环境的
     venv python 执行 snapshot_download（该环境必然有 huggingface_hub），
     顺带支持进度日志与手动停止。
     """
-    vpy = venv_python()
+    vpy = vpy or venv_python()
     if not os.path.isfile(vpy):
-        raise RuntimeError("Kohya 尚未安装，无法下载模型组件，请先安装训练内核。")
+        raise RuntimeError("训练环境尚未安装，无法下载模型组件，请先安装对应训练引擎。")
     os.makedirs(local_dir, exist_ok=True)
     # 预检 huggingface_hub：venv Python 与依赖版本错配（如 3.10 venv 混入 cp312 扩展）时
     # import 会崩（python312.dll conflicts），这里给出明确提示而不是晦涩的 ImportError；

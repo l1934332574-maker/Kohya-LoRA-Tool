@@ -1,6 +1,6 @@
 {
-  "version": "v0.10.9",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.10.9/Setup.exe",
+  "version": "v0.10.10",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.10.10/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.10.9：修复第三引擎 ai-toolkit 依赖安装 ResolutionImpossible（numpy 2.5.x 无 cp310/cp311 轮子），改用 numpy 2.1.3 + scipy 1.15.3（cp310/311/312 通用）。"
+  "notes": "v0.10.10：修复训练时 HuggingFace Xet 下载 401/卡 0.00B（全局禁用 Xet 走 hf-mirror）；Z-Image/Qwen-Image 底模改为训练前国内直链预下载；另修 WD14 Triton 告警降噪、musubi 版本自愈补全 FLUX.2、损坏图提前隔离。"
 }

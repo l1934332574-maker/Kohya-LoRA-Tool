@@ -408,8 +408,18 @@ def find_wd14_tagger():
 
 
 def _run_cmd(cmd, cwd=None, env=None, logf=print):
-    """运行命令并把 stdout/stderr 实时交给 logf。返回退出码。"""
+    """运行命令并把 stdout/stderr 实时交给 logf。返回退出码。
+
+    WD14 打标子进程（onnxruntime）缺 Triton 时会打印大段非致命告警 /
+    traceback（"No module named triton" 等），容易被用户误认成打标失败；
+    这里把含 triton 的告警行（及紧邻的 traceback 头）折叠成一行友好提示。
+    """
     import subprocess
+    _triton_noise = re.compile(
+        r"no module named ['\"]?triton|triton not found|detected no triton|without triton|"
+        r"failed to import triton|import triton failed|cannot import name ['\"]?triton", re.I)
+    _noted = [False]
+    _tb = []  # 缓存可能的 traceback 头（最长 8 行），遇到 triton 行则整段吞掉
 
     logf("$ " + " ".join(str(x) for x in cmd))
     try:
@@ -420,11 +430,33 @@ def _run_cmd(cmd, cwd=None, env=None, logf=print):
     except Exception as e:
         logf(f"[ERROR] 无法启动进程: {e}")
         return 1
+
+    def _flush_tb():
+        if _tb:
+            for _l in _tb:
+                logf(_l)
+            _tb.clear()
+
     for line in proc.stdout:
-        logf(line.rstrip("\n").rstrip("\r"))
+        raw = line.rstrip("\n").rstrip("\r")
+        if _triton_noise.search(raw):
+            if _tb:
+                _tb.clear()
+            if not _noted[0]:
+                _noted[0] = True
+                logf("[WD14] 提示：未检测到 Triton（仅可选加速不可用），不影响打标")
+            continue
+        if raw.strip() == "Traceback (most recent call last):" or (
+                _tb and (raw.startswith("  File ") or raw.startswith("    ") or raw.strip() == "")):
+            _tb.append(raw)
+            if len(_tb) > 8:
+                _flush_tb()
+            continue
+        _flush_tb()
+        logf(raw)
+    _flush_tb()
     proc.wait()
     return proc.returncode
-
 
 def _system_proxy():
     """读取 Windows 系统代理设置，返回代理地址或 None（供 WD14 模型下载使用）。"""
@@ -598,6 +630,36 @@ def _quarantine_corrupt_images(output_dir, logf=print):
     return moved
 
 
+
+def _quarantine_input_corrupt(input_dir, files, logf=print):
+    """预处理前扫描输入图片，损坏/截断的提前隔离到 <输入目录>_corrupt。
+
+    返回被隔离的文件名列表（相对路径）。避免坏图在打标/处理阶段才暴露裸 PIL
+    traceback；同时让用户一眼看到是哪张图坏了（对应待办：预处理前提前扫描隔离）。
+    """
+    moved = []
+    corrupt_dir = input_dir.rstrip("\\/") + "_corrupt"
+    for name in files:
+        p = os.path.join(input_dir, name.replace("/", os.sep))
+        try:
+            with load_image(p):
+                pass
+        except Exception as e:
+            try:
+                os.makedirs(corrupt_dir, exist_ok=True)
+                _flat = name.replace("/", "__").replace("\\", "__")
+                shutil.move(p, os.path.join(corrupt_dir, _flat))
+                _t = os.path.join(input_dir, os.path.splitext(name.replace("/", os.sep))[0] + ".txt")
+                if os.path.isfile(_t):
+                    shutil.move(_t, os.path.join(corrupt_dir, os.path.splitext(_flat)[0] + ".txt"))
+                moved.append(name)
+                logf(f"[隔离损坏图片] {name}（{e}）→ {corrupt_dir}")
+            except Exception:
+                pass
+    if moved:
+        logf(f"[INFO] 已隔离 {len(moved)} 张损坏图片到 {corrupt_dir}（可从原图重新下载/修复后再放回）")
+    return moved
+
 def _has_wd14_deps(py):
     """检查解释器能否 import torch + onnxruntime（WD14 打标必需）。"""
     code = ("import sys, importlib.util;" +
@@ -697,6 +759,7 @@ def load_image(path):
     from PIL import Image, ImageOps
 
     with Image.open(path) as im:
+        im.load()  # 立即校验像素完整性（PIL 懒加载，损坏/截断的 PNG 在此刻抛错）
         im = ImageOps.exif_transpose(im)
         if im.mode in ("RGBA", "LA", "PA") or (
             im.mode == "P" and "transparency" in im.info
@@ -1040,6 +1103,11 @@ def main():
         return
 
     print(f"[INFO] 找到 {len(files)} 张图片")
+    # 预处理前提前扫描隔离损坏图片（待办四十八）：明确提示是哪张图坏，避免裸 PIL traceback
+    _removed = _quarantine_input_corrupt(input_dir, files, print)
+    if _removed:
+        _rs = set(_removed)
+        files = [f for f in files if f not in _rs]
     print(f"[INFO] 缩放目标: 长边 {args.size}px（取整到 {args.multiple} 的倍数）")
     print(f"[INFO] 去黑边: {'开' if not args.no_remove_black_borders else '关'}")
     print(f"[INFO] 去水印: {'开(' + args.wm_corner + ')' if not args.no_remove_watermark else '关'}")

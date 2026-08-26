@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Kohya-LoRA 一键训练工具 · 新版 CustomTkinter UI（kohya_gui.py）
 业务逻辑全部复用 Kohya一键工具.py，本文件只负责界面。
 入口：python kohya_gui.py
@@ -2838,7 +2838,7 @@ class App:
             if not ok_e:
                 self.at_model_var.set(f"{label}：第三引擎未装（点⚙安装） · 模型：未下载")
             elif not ok_m:
-                self.at_model_var.set(f"{label}：模型未下载（首次训练自动下载 {info.get('size','')}，国内镜像）")
+                self.at_model_var.set(f"{label}：模型未下载（开始训练前自动预下载 {info.get('size','')}，hf-mirror，可续传）")
             else:
                 self.at_model_var.set(f"{label}：模型已就绪 ✓")
         except Exception:
@@ -2852,14 +2852,14 @@ class App:
             f"📖 {info.get('label', '')} 说明\n\n"
             f"· 模型：{info.get('model_id', '')}（{info.get('size', '')}）\n"
             f"· 显存：{info.get('hint', '')}\n\n"
-            "· 模型会自动下载到 HuggingFace 缓存目录（国内镜像 hf-mirror），首次训练时自动完成，无需手动下载。\n"
+            "· 模型会在开始训练前自动预下载到数据目录（hf-mirror 国内直连、断点续传），无需手动下载。\n"
             "· 训练用基础版模型；出图可配合 Turbo 等加速版使用。\n\n"
             "· 训练数据：选 15~30 张同一人物/风格的图片，自动过滤/裁切/打标签。"
         )
         messagebox.showinfo(core.APP_NAME, msg)
 
     def _ensure_at_image_ready(self):
-        """Qwen-Image / Z-Image 模式训练前检查：第三引擎已装 + 数据集有图。模型首次训练自动下载。"""
+        """Qwen-Image / Z-Image 模式训练前检查：第三引擎已装 + 数据集有图。模型开始训练前自动预下载（hf-mirror 可续传）。"""
         try:
             ok, detail, _ = core.ai_toolkit_engine_status()
         except Exception as e:

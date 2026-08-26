@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """通用工具函数（渐进式拆分，从 Kohya一键工具.py 迁出）。
 原文件通过 `from kohya_core.utils import *` 使用。
 """
@@ -138,6 +138,10 @@ def build_env(extra_dirs=()):
     # UnicodeEncodeError（accelerator.print 输出含中文项目名/trigger/caption 时崩溃）。
     # setdefault 不覆盖用户已有的 PYTHONIOENCODING；run_stream 父进程本就按 utf-8 解码。
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    # huggingface_hub 1.x 默认走 Xet 协议（直连 cas-server.xethub.hf.co），国内常报
+    # 401/超时且绕过 hf-mirror 镜像（如第三引擎下载 12GB+ 模型失败）；全局禁用，
+    # 回退经典 HTTP 下载（走 HF_ENDPOINT 镜像）。
+    env.setdefault("HF_HUB_DISABLE_XET", "1")
     return env
 
 

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """三引擎安装流程回归测试（不下载数 GB PyTorch，不修改真实训练环境）。
 
 覆盖源码解压、venv 创建/损坏重建、pip 自愈调用、Torch 版本锁定、
@@ -1224,6 +1224,7 @@ def test_build_env_utf8_output(base: Path):
     # 2) 修复：build_env 必须带 PYTHONIOENCODING=utf-8
     env = core.build_env()
     assert env.get("PYTHONIOENCODING") == "utf-8", env
+    assert env.get("HF_HUB_DISABLE_XET") == "1", env  # huggingface_hub Xet 401（直连 xethub 绕过镜像）禁用
     # 3) 用 build_env 跑同样的打印 → 成功
     r2 = subprocess.run([sys.executable, "-c", "print('中文测试')"],
                         capture_output=True, text=True, encoding="utf-8", timeout=60, env=env)
@@ -1380,6 +1381,156 @@ def test_strong_binding(base: Path):
 
 
 
+
+def test_at_image_model_ready_local(base: Path):
+    """at_image_model_ready：本地预下载目录齐全→就绪；缺 text_encoder→未就绪（不依赖真实 HF 缓存）。"""
+    local = base / "models" / "at_image" / "zimage"
+    (local / "transformer").mkdir(parents=True, exist_ok=True)
+    (local / "text_encoder").mkdir(parents=True, exist_ok=True)
+    open(local / "model_index.json", "w", encoding="utf-8").write("{}")
+    with patch.object(core, "data_sub", side_effect=lambda *p: str(base.joinpath(*p))):
+        assert core.at_image_model_ready("zimage") is True
+        import shutil
+        shutil.rmtree(str(local / "text_encoder"))
+        with patch.object(core.os.path, "expanduser", return_value=str(base / "fakehome")):
+            assert core.at_image_model_ready("zimage") is False
+    print("AT_IMAGE_MODEL_READY_LOCAL_OK")
+
+
+def test_at_image_pre_download(base: Path):
+    """Z-Image/Qwen-Image 底模预下载：未下载→自动 _hf_download（第三引擎 venv）→yaml 指向本地目录。"""
+    state = {"downloaded": False, "hf_call": None, "yaml_info": None, "launched": False}
+    vpy = str(base / "third" / "kohya_ss" / "ai_toolkit_venv" / "Scripts" / "python.exe")
+    at_dir = str(base / "third" / "kohya_ss" / "ai-toolkit")
+    os.makedirs(at_dir, exist_ok=True)
+    open(os.path.join(at_dir, "run.py"), "w", encoding="utf-8").write("print('ok')\n")
+
+    def fake_ready(mode):
+        return state["downloaded"]
+
+    def fake_hf_download(repo, local_dir, logf=print, allow_patterns=None, vpy=None):
+        state["hf_call"] = (repo, local_dir, vpy)
+        state["downloaded"] = True
+
+    def fake_status():
+        return True, "ok", vpy
+
+    def fake_write_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, logf=print):
+        state["yaml_info"] = dict(info)
+
+    def fake_run_stream(cmd, cwd=None, env=None, logf=print, collect=None, **kwargs):
+        state["launched"] = True
+        return 0
+
+    def fake_find_latest(out_dir):
+        return os.path.join(out_dir, "lora.safetensors")
+
+    patches = (
+        patch.object(core, "data_sub", side_effect=lambda *p: str(base.joinpath(*p))),
+        patch.object(core, "at_image_model_ready", side_effect=fake_ready),
+        patch.object(core, "_hf_download", side_effect=fake_hf_download),
+        patch.object(core, "ai_toolkit_engine_status", side_effect=fake_status),
+        patch.object(core, "write_at_image_yaml", side_effect=fake_write_yaml),
+        patch.object(core, "run_stream", side_effect=fake_run_stream),
+        patch.object(core, "_at_dirs", return_value=(vpy, at_dir)),
+        patch.object(core, "count_images", return_value=1),
+        patch.object(core, "_ensure_torchvision_deps", return_value=True),
+        patch.object(core, "_find_latest_safetensors", side_effect=fake_find_latest),
+        patch.object(core, "_write_at_image_template", return_value=None),
+        patch.object(core, "write_params_report", return_value=None),
+    )
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10], patches[11]:
+        out = core.train_at_image(lambda _: None, mode="zimage", params={"project": "at_t1"})
+    assert state["hf_call"] is not None, "未触发底模预下载"
+    repo, local_dir, dl_vpy = state["hf_call"]
+    assert repo == "Tongyi-MAI/Z-Image", repo
+    assert dl_vpy == vpy, dl_vpy
+    assert state["yaml_info"]["model_id"] == local_dir.replace("\\", "/"), state["yaml_info"]
+    assert state["launched"], "未启动训练"
+    assert str(out).endswith("lora.safetensors"), out
+    print("AT_IMAGE_PRE_DOWNLOAD_OK")
+
+
+
+
+def test_wd14_triton_noise_collapse(base: Path):
+    """WD14 无 Triton 告警/traceback 折叠成一行友好提示，不吞正常输出。"""
+    import preprocess as pp
+    seen = []
+    code = (
+        "import sys\n"
+        "print('Traceback (most recent call last):')\n"
+        "print('  File \"x.py\", line 1, in <module>')\n"
+        "print(\"ModuleNotFoundError: No module named 'triton'\")\n"
+        "print('WARNING:torchao.kernel.intmm: Detected no triton, certain kernels will not work')\n"
+        "print('normal line 1')\n"
+        "print('normal line 2')\n"
+    )
+    code_file = base / "triton_noise.py"
+    code_file.write_text(code, encoding="utf-8")
+    rc = pp._run_cmd([sys.executable, str(code_file)], logf=seen.append)
+    assert rc == 0
+    text = "\n".join(seen)
+    assert "Traceback" not in text, text
+    assert "ModuleNotFoundError" not in text, text
+    assert "torchao" not in text, text
+    assert "未检测到 Triton" in text, text
+    assert "normal line 1" in text and "normal line 2" in text, text
+    print("WD14_TRITON_NOISE_COLLAPSE_OK")
+
+
+def test_musubi_version_check(base: Path):
+    """_check_musubi_krea2_version：旧版 musubi（Krea2/FLUX.2 缺标记）阻止；新版通过。"""
+    enc = base / "musubi" / "musubi-tuner" / "src" / "musubi_tuner"
+    (enc / "flux_2").mkdir(parents=True, exist_ok=True)
+    (enc / "krea2_train_network.py").write_text("print('old')\n", encoding="utf-8")
+    (enc / "flux_2" / "flux2_utils.py").write_text("print('old')\n", encoding="utf-8")
+    raised = False
+    try:
+        core._check_musubi_krea2_version(str(base / "musubi"), lambda *a: None)
+    except RuntimeError as e:
+        raised = True
+        assert "musubi 版本过旧" in str(e) and "FLUX.2" in str(e), e
+    assert raised, "旧版 musubi 应被阻止"
+    (enc / "krea2_train_network.py").write_text("args.dit_dtype\nbfloat16\n", encoding="utf-8")
+    (enc / "flux_2" / "flux2_utils.py").write_text("load_safetensors_with_lora_and_fp8\n", encoding="utf-8")
+    core._check_musubi_krea2_version(str(base / "musubi"), lambda *a: None)
+    print("MUSUBI_VERSION_CHECK_OK")
+
+
+def test_quarantine_input_corrupt(base: Path):
+    """预处理前损坏图片提前隔离：截断 PNG 移到 <输入目录>_corrupt，正常图保留。"""
+    import preprocess as pp
+    inp = base / "inp"
+    inp.mkdir(parents=True, exist_ok=True)
+    from PIL import Image as _PIL
+    good = inp / "good.png"
+    _PIL.new("RGB", (2, 2), (255, 0, 0)).save(str(good), format="PNG")
+    bad = inp / "bad.png"
+    bad.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 40)
+    (inp / "bad.txt").write_text("tag", encoding="utf-8")
+    removed = pp._quarantine_input_corrupt(str(inp), ["good.png", "bad.png"], print)
+    assert removed == ["bad.png"], removed
+    assert not bad.exists()
+    corrupt_dir = Path(str(inp) + "_corrupt")
+    assert corrupt_dir.is_dir() and (corrupt_dir / "bad.png").exists()
+    assert (corrupt_dir / "bad.txt").exists()
+    assert good.exists()
+    print("QUARANTINE_INPUT_CORRUPT_OK")
+
+
+def test_flux2_qwen3_06b_hint(base: Path):
+    """FLUX.2 缺 4B 文本编码器且检测到 Anima 的 Qwen3-0.6B 时，缺失提示明确说明不适用。"""
+    with patch.object(core, "flux2_model_files", return_value={}), \
+            patch.object(core, "_anima_find_qwen3_any", return_value=("C:/fake/Qwen3-0.6B", "base")):
+        missing = core.flux2_missing_models()
+    joined = "\n".join(missing)
+    assert "qwen_3_4b.safetensors" in joined, joined
+    assert "Qwen3-0.6B" in joined and "不适用于 FLUX.2" in joined, joined
+    print("FLUX2_QWEN3_06B_HINT_OK")
+
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -1418,6 +1569,12 @@ def main():
         test_musubi_int8_weight_dtype_patch(base)
         test_prequantized_base_detect(base)
         test_strong_binding(base)
+        test_at_image_model_ready_local(base)
+        test_at_image_pre_download(base)
+        test_wd14_triton_noise_collapse(base)
+        test_musubi_version_check(base)
+        test_quarantine_input_corrupt(base)
+        test_flux2_qwen3_06b_hint(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

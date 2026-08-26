@@ -1,3 +1,23 @@
+## v0.10.10（2026-08-26）
+
+### 修复：训练时 huggingface_hub Xet 下载 401 / 卡 0.00B（第三引擎 H3、Z-Image、Qwen-Image）
+- **背景**：用户第三引擎训练启动时在线下载模型（H3 ~12.3GB、Z-Image ~16GB）失败：`CAS Client Error: HTTP 401 Unauthorized (cas-server.xethub.hf.co)`，或卡在 `Downloading bytes: 0.00B / Fetching 2 files: 0/2`。
+- **根因**：huggingface_hub 1.x 对 Xet 存储仓库默认走 Xet 协议，直连 `cas-server.xethub.hf.co`，绕过 `HF_ENDPOINT=hf-mirror.com` 镜像；该通道对部分国内网络返回 401 / 卡死。
+- **已修**：`kohya_core/utils.py` 的 `build_env()`（所有子进程统一环境）新增 `HF_HUB_DISABLE_XET=1`，全局禁用 Xet，回退经典 HTTP 走 hf-mirror 镜像。
+
+### 新增：第三引擎 Z-Image / Qwen-Image 底模国内直链预下载
+- 训练前自动用 snapshot_download（hf-mirror + 断点续传 + 可手动停止）把 diffusers 整仓预下载到数据目录 `models/at_image/<mode>`，训练 yaml 的 `name_or_path` 指向本地目录离线加载，不再训练时在线拉 16~40GB。
+- 下载失败自动回退原在线加载路径，不阻断。
+
+### 修复 / 优化（小件批量）
+- **WD14 无 Triton 告警降噪**：打标输出里 `No module named triton` / `Detected no triton` 等整段 traceback 折叠成一行友好提示，不再误认打标失败。
+- **Krea2/FLUX.2 float32 自愈防线补全**：musubi 版本检查泛化（Krea2 + FLUX.2 双标记），并补上 train_flux2 的接入——旧版 musubi 会以 float32 训练（300s/步）时直接阻止并提示重装第二引擎。
+- **预处理损坏图片提前隔离**：`load_image` 立即 `im.load()` 校验像素；主流程前扫描输入图，损坏图（含同名 .txt）提前移到 `<输入目录>_corrupt` 并明确提示是哪张图，避免裸 PIL traceback。
+- **FLUX.2 缺文本编码器提示优化**：检测到 Anima 的 Qwen3-0.6B 时明确说明「FLUX.2 需要 4B 的 qwen_3_4b.safetensors，0.6B 不适用」。
+
+### 验证
+- 新增 6 条回归测试（预下载流程 / 本地就绪判定 / Triton 降噪 / musubi 版本检查 / 坏图隔离 / 0.6B 提示），engine_install_smoke_test + smoke_test 全过。
+
 ## v0.10.9（2026-08-26）
 
 ### 修复：第三引擎（ai-toolkit）依赖安装报 ResolutionImpossible（numpy 2.5.x 无 cp310/cp311 轮子）
