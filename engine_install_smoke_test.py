@@ -1572,7 +1572,7 @@ def test_sample_preview(base: Path):
 
 
 def test_gated_download_guidance(base: Path):
-    """门禁模型（Krea2 Raw/Turbo）下载引导：_http_status 401 探测 + 下载器 HF_TOKEN/提示 + GUI 预检接线。"""
+    """门禁模型下载兜底引导：_http_status 401 探测 + 下载器 HF_TOKEN/提示 + GUI 预检接线。"""
     import urllib.error
     def _raise_401(*a, **k):
         raise urllib.error.HTTPError("http://x", 401, "Unauthorized", {}, None)
@@ -1581,8 +1581,24 @@ def test_gated_download_guidance(base: Path):
     md = (ROOT / "model_downloader.py").read_text(encoding="utf-8")
     assert "HF_TOKEN" in md and "Authorization" in md and "401/403" in md
     g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
-    assert 'key in ("raw", "turbo")' in g and "Krea 2 Raw/Turbo 是 HuggingFace 门禁模型" in g
+    assert 'key in ("raw", "turbo")' in g and "魔搭（ModelScope）官方转存直链" in g
     print("GATED_DOWNLOAD_GUIDANCE_OK")
+
+
+def test_krea2_modelscope_mirror(base: Path):
+    """Krea2 Raw/Turbo 已改走魔搭官方转存（免许可直链），文件名与识别逻辑不变。"""
+    links = core.KREA2_MODEL_LINKS
+    assert links["raw"][0] == "raw.safetensors"
+    assert links["turbo"][0] == "turbo.safetensors"
+    assert links["raw"][2].startswith("https://modelscope.cn/models/krea/Krea-2-Raw/resolve/master/raw.safetensors")
+    assert links["turbo"][2].startswith("https://modelscope.cn/models/krea/Krea-2-Turbo/resolve/master/turbo.safetensors")
+    assert "hf-mirror.com" not in links["raw"][2] and "hf-mirror.com" not in links["turbo"][2]
+    # VAE / 文本编码器不是门禁，继续用 hf-mirror 直链
+    assert "hf-mirror.com" in links["vae"][2] and "hf-mirror.com" in links["te"][2]
+    # 下载器需把 modelscope.cn 当作国内直连域名（不套系统代理）
+    md = (ROOT / "model_downloader.py").read_text(encoding="utf-8")
+    assert "modelscope.cn" in md
+    print("KREA2_MODELSCOPE_MIRROR_OK")
 
 
 
@@ -1632,6 +1648,7 @@ def main():
         test_flux2_qwen3_06b_hint(base)
         test_sample_preview(base)
         test_gated_download_guidance(base)
+        test_krea2_modelscope_mirror(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

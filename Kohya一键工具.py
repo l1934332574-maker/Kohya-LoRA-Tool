@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.14"
+APP_VERSION = "0.10.15"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1420,10 +1420,10 @@ KREA2_MAX_STEPS = 6000          # Krea2 自动约束最大总步数（防过拟�
 
 # Krea2 模型文件（放 models/krea2/，不内置；国内镜像直链）
 KREA2_MODEL_LINKS = {
-    "raw": ("raw.safetensors", "Krea 2 RAW 底模（约 13~26GB，训练必需）",
-            "https://hf-mirror.com/krea/Krea-2-Raw/resolve/main/raw.safetensors"),
+    "raw": ("raw.safetensors", "Krea 2 RAW 底模（约 26GB，训练必需）",
+            "https://modelscope.cn/models/krea/Krea-2-Raw/resolve/master/raw.safetensors"),
     "turbo": ("turbo.safetensors", "Krea 2 Turbo（可选，推理/训练采样用）",
-              "https://hf-mirror.com/krea/Krea-2-Turbo/resolve/main/turbo.safetensors"),
+              "https://modelscope.cn/models/krea/Krea-2-Turbo/resolve/master/turbo.safetensors"),
     "vae": ("qwen_image_vae.safetensors", "Qwen-Image VAE（约 0.3GB）",
             "https://hf-mirror.com/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors"),
     "te": ("qwen3vl_4b_bf16.safetensors", "Qwen3-VL-4B 文本编码器（约 8GB）",

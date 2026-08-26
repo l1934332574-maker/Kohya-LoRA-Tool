@@ -1,4 +1,17 @@
+## v0.10.15（2026-08-26）
+
+### 修复：Krea2 Raw/Turbo 下载 403 根治——改走魔搭官方转存（免许可一键下载）
+- **背景**：v0.10.14 加入门禁引导后，Krea-2-Raw / Krea-2-Turbo 仍是 HuggingFace 门禁模型，hf-mirror 匿名直连必 401/403，用户仍需手动接受许可或配 HF_TOKEN。
+- **已修（根治）**：
+  - Krea2 raw / turbo 下载源改走魔搭（ModelScope）官方转存直链：`krea/Krea-2-Raw`、`krea/Krea-2-Turbo`（`resolve/master/raw.safetensors` / `turbo.safetensors`），无需接受许可、无需代理、国内 CDN 直连；
+  - 文件名不变（`raw.safetensors` / `turbo.safetensors`），模型识别 / 训练命令零改动；
+  - 应用内下载器（model_downloader）本就对 modelscope.cn 直连（不套系统代理）+ 断点续传，可直接复用；
+  - VAE / Qwen3-VL 文本编码器链接非门禁，继续走 hf-mirror（实测 206 正常）；
+  - 下载前预检保留为兜底：仅当源仍返回 401/403 时弹窗提示（改为说明已内置魔搭直链）。
+- **验证**：`_http_status` 四链接均 206；`get_remote_size` 正确解析 26.2GB；ModelDownloader 实测下载约 24MB/s、断点续传正常；engine_install_smoke_test（新增 KREA2_MODELSCOPE_MIRROR_OK）+ smoke_test 全过。
+
 ## v0.10.14（2026-08-26）
+
 
 ### 修复：Krea2 Raw/Turbo 下载 401/403（HF 门禁模型）+ 下载器支持 HF_TOKEN
 - **背景**：用户应用内下载 Krea2 raw/turbo 报 `HTTP Error 403`。实测 Krea-2-Raw / Krea-2-Turbo 是 HuggingFace 门禁模型（需接受 Krea 许可 + token），hf-mirror 匿名下载必 401/403；VAE / 文本编码器链接正常。

@@ -4,12 +4,13 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.10.7** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.10.15** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
 ---
 
+- **Krea2 Raw/Turbo 下载 403 根治**：改走魔搭官方转存直链，免许可、免代理一键下载（原为 HuggingFace 门禁模型，hf-mirror 匿名必 401/403）。
 - **修复「人物模式 + 正则数据集」训练必崩**：`is_reg` 写错 TOML 层级（应写在子集层），现按 sd-scripts schema 修正。
 - **修复失败误诊**：训练失败不再被误报为 bitsandbytes 8-bit 问题，优先报告真实原因（配置校验 / OOM / 优化器）。
 - **RDNA2（RX 6000）Anima 训练加官方 `--no_half_vae`**：VAE 全程 fp32（含缓存阶段），根治 latent NaN / 第一步 loss=nan。
@@ -34,6 +35,10 @@
 - **FLUX 模型下载改走魔搭国内直链**：DiT / CLIP-L / T5-XXL / AE 全部国内 CDN 直连、支持断点续传，不再直连 HuggingFace（避免 SSL 失败）。
 
 - **修复繁体/英文系统下 Krea2 缓存 latents 打印中文崩溃**：所有子进程默认强制 UTF-8 输出，不再 UnicodeEncodeError。
+
+## 🆕 v0.10.15 更新重点
+
+- **Krea2 Raw/Turbo 下载 403 根治**：下载源改走魔搭（ModelScope）官方转存 `krea/Krea-2-Raw` / `krea/Krea-2-Turbo`，无需接受 Krea 许可、无需代理、国内 CDN 直连 + 断点续传，一键下载；文件名不变，训练零改动。
 
 ## 🆕 v0.10.7 更新重点
 
