@@ -1,4 +1,12 @@
-## v0.10.8（待发布）
+## v0.10.9（2026-08-26）
+
+### 修复：第三引擎（ai-toolkit）依赖安装报 ResolutionImpossible（numpy 2.5.x 无 cp310/cp311 轮子）
+- **背景**：用户（Python 3.10 venv）第三引擎装到「ai-toolkit 依赖」步骤报 `ERROR: Cannot install numpy==2.5.2 ... ResolutionImpossible`，日志提示 `no matching distributions available for your environment: numpy`。
+- **根因**：安装器在生成的 requirements 与约束文件里硬编码 `numpy==2.5.2 + scipy==1.18.0`，但 numpy 2.3/2.4/2.5 只有 cp312 轮子（cp310 最高 2.2.6、cp311 最高 2.4.6）→ Python 3.10/3.11 下 pip 找不到匹配版本 → 解析失败。
+- **已修**：两处硬编码改为 `numpy==2.1.3 + scipy==1.15.3`（cp310/311/312 三版本均有轮子，与 kohya 训练环境同一配对），并加注释防止回退到 2.5.x。
+- **验证**：Python 3.10 venv 完整复现用户报错 → 修复后解析成功（cp310 / cp312 双版本实测）；engine_install_smoke_test 的 test_third_engine 断言同步更新（含「不得含 2.5.2/1.18.0」反向断言），全过。
+
+## v0.10.8（2026-08-26）
 
 ### 修复：先装第二/三引擎再装第一引擎报「目标目录非空且不是 kohya_ss」
 - **背景**：用户先装第三引擎（ai-toolkit/H3 视频），再装角色/画风（第一引擎 kohya）时报 `目标目录非空且不是 kohya_ss: .../kohya_ss`。

@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.8"
+APP_VERSION = "0.10.9"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2804,12 +2804,16 @@ def _write_engine_requirements(at_dir, dest):
             # AI Toolkit 当前 requirements 固定 scipy==1.12.0，但该版本要求
             # numpy<1.29，与 Python 3.12 下默认解析到的 NumPy 2.x 冲突；由
             # 安装器统一提供经过验证的 NumPy/SciPy 配对。
+            # 注意：不得锁 numpy==2.5.x —— 只有 cp312 有轮子，cp310/cp311 下
+            # pip 报 ResolutionImpossible「no matching distributions ... numpy」
+            # （用户 74061 实测复现）。统一用 numpy==2.1.3 + scipy==1.15.3
+            # （cp310/311/312 三版本均有轮子，与 kohya 环境同一配对）。
             if re.match(r"^(numpy|scipy)([<>=!~].*)?$", low):
                 continue
             output.append(line)
 
     visit(os.path.join(at_dir, "requirements.txt"))
-    output.extend(("numpy==2.5.2", "scipy==1.18.0"))
+    output.extend(("numpy==2.1.3", "scipy==1.15.3"))
     if not output:
         raise RuntimeError("ai-toolkit requirements.txt 为空或源码不完整")
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -2958,7 +2962,7 @@ def install_ai_toolkit_engine(logf=print):
         _constraints = os.path.join(_engine_source_cache_dir(), "ai-toolkit-constraints.txt")
         with open(_constraints, "w", encoding="utf-8") as _cf:
             _cf.write("torch==2.13.0\ntorchvision==0.28.0\ntorchaudio==2.11.0\n"
-                      "numpy==2.5.2\nscipy==1.18.0\n")
+                      "numpy==2.1.3\nscipy==1.15.3\n")
         logf("[第三引擎] 安装 ai-toolkit 依赖（清华/阿里国内 PyPI，不访问 GitHub，锁定兼容版本）…")
         if run_stream([vpy, "-m", "pip", "install", "--upgrade", "--no-input", "--retries", "10", "--timeout", "120",
                        "--index-url", "https://mirrors.aliyun.com/pypi/simple/",

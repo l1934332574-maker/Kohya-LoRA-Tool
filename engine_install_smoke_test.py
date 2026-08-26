@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """三引擎安装流程回归测试（不下载数 GB PyTorch，不修改真实训练环境）。
 
 覆盖源码解压、venv 创建/损坏重建、pip 自愈调用、Torch 版本锁定、
@@ -306,8 +306,11 @@ def test_third_engine(base: Path):
             req = Path(cmd[cmd.index("-r") + 1]).read_text(encoding="utf-8")
             constraints = Path(cmd[cmd.index("-c") + 1]).read_text(encoding="utf-8")
             assert "scipy==1.12.0" not in req and "git+https://" not in req
-            assert "numpy==2.5.2" in req and "scipy==1.18.0" in req
-            for wanted in ("torch==2.13.0", "torchvision==0.28.0", "torchaudio==2.11.0", "numpy==2.5.2", "scipy==1.18.0"):
+            assert "numpy==2.1.3" in req and "scipy==1.15.3" in req
+            assert "2.5.2" not in req and "1.18.0" not in req  # numpy 2.5.x 只有 cp312 轮子
+            assert "numpy==2.1.3" in constraints and "scipy==1.15.3" in constraints
+            assert "2.5.2" not in constraints and "1.18.0" not in constraints
+            for wanted in ("torch==2.13.0", "torchvision==0.28.0", "torchaudio==2.11.0", "numpy==2.1.3", "scipy==1.15.3"):
                 assert wanted in constraints
             state["deps"] = True
             return 0

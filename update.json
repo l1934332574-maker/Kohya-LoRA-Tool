@@ -1,6 +1,6 @@
 {
-  "version": "v0.10.8",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.10.8/Setup.exe",
+  "version": "v0.10.9",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.10.9/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.10.8：修复先装第二/三引擎再装第一引擎报「目标目录非空且不是 kohya_ss」。"
+  "notes": "v0.10.9：修复第三引擎 ai-toolkit 依赖安装 ResolutionImpossible（numpy 2.5.x 无 cp310/cp311 轮子），改用 numpy 2.1.3 + scipy 1.15.3（cp310/311/312 通用）。"
 }
