@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Kohya-LoRA 一键训练工具 · 新版 CustomTkinter UI（kohya_gui.py）
 业务逻辑全部复用 Kohya一键工具.py，本文件只负责界面。
 入口：python kohya_gui.py
@@ -267,6 +267,8 @@ class App:
         self.trigger_var = tk.StringVar()
         # 人物强绑定（默认开）：自动把 trigger + 100% 一致特征词固定到标签开头，一个词绑定一个人物
         self.strong_bind_var = tk.BooleanVar(value=True)
+        # 训练中采样出图预览（默认开；低显存 <10G 训练时自动关闭）
+        self.sample_preview_var = tk.BooleanVar(value=True)
         # Qwen-Image / Z-Image 的画风/人物子模式（AT_SUB_LABELS 见类级常量）
         self.at_sub_var = tk.StringVar(value="人物（保留全部标签）")
         self.reg_var = tk.StringVar()
@@ -462,6 +464,13 @@ class App:
         self.mon_canvas = tk.Canvas(self.mon, height=70, bg="#14161c", highlightthickness=0)
         self.mon_canvas.pack(fill="x", padx=26, pady=(0, 10))
         self.mon_canvas.create_text(10, 10, text="等待训练数据…", anchor="nw", fill="#7c8290", font=("Microsoft YaHei", 10))
+        # 采样预览（训练中每 N 步出图后显示最新一张）
+        self.mon_sample_txt = tk.StringVar(value="采样预览：--")
+        ctk.CTkLabel(self.mon, textvariable=self.mon_sample_txt, font=ui_font(FONT_HINT),
+                     text_color=SUB).pack(anchor="w", padx=26, pady=(4, 2))
+        self.mon_sample_lbl = ctk.CTkLabel(self.mon, text="（训练中每 100 步出一张预览图）",
+                                           font=ui_font(FONT_HINT), text_color="#7c8290")
+        self.mon_sample_lbl.pack(anchor="w", padx=26, pady=(0, 10))
         self._mon_visible = False
 
     def _show_monitor(self, v):
@@ -535,8 +544,52 @@ class App:
                 except Exception:
                     pass
             self._draw_loss_curve(snap.get("loss_history") or [])
+            self._refresh_sample_preview()
         except Exception:
             pass
+
+    def _is_sample_file(self, fname, dirname):
+        """判断是否训练采样图：ai-toolkit sample_xxx.png / kohya·musubi sample/ 子目录 + <name>_<step>_...png。"""
+        low = fname.lower()
+        if not low.endswith((".png", ".jpg", ".jpeg", ".webp")):
+            return False
+        if "sample" in low:
+            return True
+        if dirname.lower() in ("sample", "samples"):
+            return True
+        if re.search(r"_\d{4,}_", low) or re.search(r"-\d+\.", low):
+            return True
+        return False
+
+    def _refresh_sample_preview(self):
+        """轮询当前项目输出目录（含 sample/ 子目录），显示最新一张训练采样预览图（2 秒节流，只读不干扰训练）。"""
+        now = time.time()
+        if now - getattr(self, "_sample_last", 0) < 2.0:
+            return
+        self._sample_last = now
+        try:
+            proj = (self.current_project or "").strip()
+            out_dir = core.data_sub("output", proj if proj else "_")
+            newest = None
+            for root, _dirs, files in os.walk(out_dir):
+                for f in files:
+                    if not self._is_sample_file(f, os.path.basename(root)):
+                        continue
+                    p = os.path.join(root, f)
+                    if newest is None or os.path.getmtime(p) > os.path.getmtime(newest):
+                        newest = p
+            if newest is None or newest == getattr(self, "_sample_shown", None):
+                return
+            self._sample_shown = newest
+            img = Image.open(newest).convert("RGB")
+            img.thumbnail((220, 220))
+            photo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+            self.mon_sample_lbl.configure(image=photo, text="")
+            self.mon_sample_lbl.image = photo
+            self.mon_sample_txt.set(f"采样预览：{os.path.basename(newest)}")
+        except Exception:
+            pass
+
 
     def _draw_loss_curve(self, hist):
         try:
@@ -1562,6 +1615,14 @@ class App:
             text_color=TXT, font=ui_font(FONT_BODY))
         self.chk_strong_bind.pack(side="left")
         self.strong_bind_row.pack_forget()
+        # 训练中采样预览（所有模式显示）
+        self.sample_preview_row = ctk.CTkFrame(card2, fg_color="transparent")
+        self.chk_sample_preview = ctk.CTkCheckBox(
+            self.sample_preview_row, text="训练中采样预览（每 100 步用当前 LoRA 出一张预览图，低显存自动关闭）",
+            variable=self.sample_preview_var, fg_color=ACC, hover_color=ACC_H,
+            text_color=TXT, font=ui_font(FONT_BODY))
+        self.chk_sample_preview.pack(side="left")
+        self.sample_preview_row.pack(fill="x", pady=(10, 0))
         # 画风描述词（画风模式专用，默认隐藏）
         self.style_caption_var = tk.StringVar()
         self.style_caption_row = ctk.CTkFrame(card2, fg_color="transparent")
@@ -2509,6 +2570,7 @@ class App:
             "at_sub_mode": self._at_sub_label(),
             "trigger": self.trigger_var.get().strip(),
             "strong_bind": bool(self.strong_bind_var.get()),
+            "sample_preview": bool(self.sample_preview_var.get()),
             "reg_dir": self.reg_var.get().strip() or None,
             "raw_dir": self.raw_dir_var.get().strip(),
             "base_model": self.base_model_var.get().strip() or None,

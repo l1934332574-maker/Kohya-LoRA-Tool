@@ -1,3 +1,20 @@
+## v0.10.11（2026-08-26）
+
+### 新增：训练中采样出图预览（三个引擎全覆盖）
+- **kohya（SD1.5/SDXL/FLUX/Anima）**：训练命令加 `--sample_every_n_steps=100` + `--sample_prompts`（提示词文件自动生成：trigger + 质量词）。
+- **musubi（Krea2 / FLUX.2）**：同样加 `--sample_every_n_steps=100` + `--sample_prompts`（musubi 原生支持）。
+- **ai-toolkit（H3 视频 / Qwen-Image / Z-Image）**：yaml 原生 `sample:` 块已有，无需改动。
+- **预览展示**：训练监控面板新增「采样预览」区，每 2 秒轮询输出目录最新的 `*sample*.png` 并显示；不解析训练日志、不写文件、不影响训练进程。
+- **显存门控**：默认开启；显存 <10G 不再硬关，改为打印 OOM 警告（8G 卡 512/768 + block swap 通常能扛住采样）；GUI 提供「训练中采样预览」勾选，取消勾选即完全关闭。
+
+
+### 修复：Z-Image / Qwen-Image 预下载半截缓存误判就绪（用户报 no config.json found）
+- **背景**：用户 Z-Image 训练报 `Error no file named config.json found in directory .../models/at_image/zimage`——预下载中断留下半截目录，旧就绪判定只查"目录存在"就误判下载完成，训练指向不完整本地目录。
+- **已修**：新增 `_at_image_download_complete()` 严格校验（必需 config.json + 按 `.safetensors.index.json` 校验全部分片/单文件权重齐全）；不完整自动续传，仍不完整则提示删除半截缓存并回退在线加载。
+
+### 验证
+- 新增 SAMPLE_PREVIEW_OK 回归测试（提示词文件生成 / 显存门控 / 三引擎命令接线 / GUI 预览组件断言），engine_install_smoke_test + smoke_test 全过。
+
 ## v0.10.10（2026-08-26）
 
 ### 修复：训练时 huggingface_hub Xet 下载 401 / 卡 0.00B（第三引擎 H3、Z-Image、Qwen-Image）
@@ -14,6 +31,11 @@
 - **Krea2/FLUX.2 float32 自愈防线补全**：musubi 版本检查泛化（Krea2 + FLUX.2 双标记），并补上 train_flux2 的接入——旧版 musubi 会以 float32 训练（300s/步）时直接阻止并提示重装第二引擎。
 - **预处理损坏图片提前隔离**：`load_image` 立即 `im.load()` 校验像素；主流程前扫描输入图，损坏图（含同名 .txt）提前移到 `<输入目录>_corrupt` 并明确提示是哪张图，避免裸 PIL traceback。
 - **FLUX.2 缺文本编码器提示优化**：检测到 Anima 的 Qwen3-0.6B 时明确说明「FLUX.2 需要 4B 的 qwen_3_4b.safetensors，0.6B 不适用」。
+
+
+### 修复：Z-Image / Qwen-Image 预下载半截缓存误判就绪（用户报 no config.json found）
+- **背景**：用户 Z-Image 训练报 `Error no file named config.json found in directory .../models/at_image/zimage`——预下载中断留下半截目录，旧就绪判定只查"目录存在"就误判下载完成，训练指向不完整本地目录。
+- **已修**：新增 `_at_image_download_complete()` 严格校验（必需 config.json + 按 `.safetensors.index.json` 校验全部分片/单文件权重齐全）；不完整自动续传，仍不完整则提示删除半截缓存并回退在线加载。
 
 ### 验证
 - 新增 6 条回归测试（预下载流程 / 本地就绪判定 / Triton 降噪 / musubi 版本检查 / 坏图隔离 / 0.6B 提示），engine_install_smoke_test + smoke_test 全过。
@@ -111,6 +133,11 @@
 - **背景**：视频模式点「数据预处理」→ 扫描后 AUTO_CONFIRM 自动进入训练确认（含重装 torch 弹窗）→ 误触发训练。
 - **已做**：视频模式点「数据预处理」只扫描并提示「视频数据已就绪，请直接点【一键训练】」，不再自动进入训练流程。
 
+
+### 修复：Z-Image / Qwen-Image 预下载半截缓存误判就绪（用户报 no config.json found）
+- **背景**：用户 Z-Image 训练报 `Error no file named config.json found in directory .../models/at_image/zimage`——预下载中断留下半截目录，旧就绪判定只查"目录存在"就误判下载完成，训练指向不完整本地目录。
+- **已修**：新增 `_at_image_download_complete()` 严格校验（必需 config.json + 按 `.safetensors.index.json` 校验全部分片/单文件权重齐全）；不完整自动续传，仍不完整则提示删除半截缓存并回退在线加载。
+
 ### 验证
 - 新增 `H3_INTEGRITY_AND_NVFP4_REQUIRED_OK`、`VIDEO_PREPROCESS_NO_AUTO_TRAIN_OK`、`PREPROCESS_PYTHON_FALLBACK_OK` 冒烟测试；engine_install_smoke_test + smoke_test 全过。
 
@@ -161,6 +188,11 @@
 - **已修**：子进程强制 -X utf8 + PYTHONIOENCODING=utf-8，中文路径正确回传；路径比较改用 
 ealpath + normcase 容错；**真实环境不一致仍保留硬报错**（不掩盖 venv 损坏，引导重装内核）。
 
+
+### 修复：Z-Image / Qwen-Image 预下载半截缓存误判就绪（用户报 no config.json found）
+- **背景**：用户 Z-Image 训练报 `Error no file named config.json found in directory .../models/at_image/zimage`——预下载中断留下半截目录，旧就绪判定只查"目录存在"就误判下载完成，训练指向不完整本地目录。
+- **已修**：新增 `_at_image_download_complete()` 严格校验（必需 config.json + 按 `.safetensors.index.json` 校验全部分片/单文件权重齐全）；不完整自动续传，仍不完整则提示删除半截缓存并回退在线加载。
+
 ### 验证
 - 新增 curl 版本解析 7 场景 + 下载命令构造 3 场景（旧/新 curl × direct/代理）；engine_install_smoke_test（20+ 项）+ smoke_test（5 项）全过。
 
@@ -178,6 +210,11 @@ ealpath + normcase 容错；**真实环境不一致仍保留硬报错**（不掩
 - **根因**：上一版只改了 `load_target_model` 的 `vae.to(weight_dtype)`，但 sd-scripts 的 `cache_latents` 阶段会 `vae.to(device, dtype=vae_dtype)`，`vae_dtype = torch.float32 if args.no_half_vae else weight_dtype` → VAE 被转回 fp16 编码 → latent 仍 NaN（用户实测：补丁生效但缓存阶段 watcher 仍报 10 个 npz NaN）。
 - **已修**：RDNA2 + Anima 时训练命令自动加官方 **`--no_half_vae`**，VAE 在 load / cache_latents / 采样全流程保持 fp32；保留原有 load 补丁双保险。NVIDIA / RDNA3+ 不受影响。
 - 说明：自动停止（loss=NaN 检测）只是保护动作，不是问题来源。
+
+
+### 修复：Z-Image / Qwen-Image 预下载半截缓存误判就绪（用户报 no config.json found）
+- **背景**：用户 Z-Image 训练报 `Error no file named config.json found in directory .../models/at_image/zimage`——预下载中断留下半截目录，旧就绪判定只查"目录存在"就误判下载完成，训练指向不完整本地目录。
+- **已修**：新增 `_at_image_download_complete()` 严格校验（必需 config.json + 按 `.safetensors.index.json` 校验全部分片/单文件权重齐全）；不完整自动续传，仍不完整则提示删除半截缓存并回退在线加载。
 
 ### 验证
 - 新增冒烟测试：`DATASET_CONFIG_IS_REG_SUBSET_OK`、`DIAGNOSE_OPTIMIZER_FAILURE_SCENARIOS_OK`（4 场景）、`ANIMA_RDNA2_NO_HALF_VAE_OK`；engine_install_smoke_test + smoke_test 全过。

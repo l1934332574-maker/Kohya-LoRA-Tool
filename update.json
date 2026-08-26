@@ -1,6 +1,6 @@
 {
-  "version": "v0.10.10",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.10.10/Setup.exe",
+  "version": "v0.10.11",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.10.11/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.10.10：修复训练时 HuggingFace Xet 下载 401/卡 0.00B（全局禁用 Xet 走 hf-mirror）；Z-Image/Qwen-Image 底模改为训练前国内直链预下载；另修 WD14 Triton 告警降噪、musubi 版本自愈补全 FLUX.2、损坏图提前隔离。"
+  "notes": "v0.10.11：新增训练中采样出图预览（kohya/musubi/ai-toolkit 三引擎全覆盖 + 监控面板实时预览）；修复 Z-Image/Qwen-Image 预下载半截缓存误判就绪；Xet 下载 401 修复；WD14 Triton 降噪、musubi 自愈补全 FLUX.2、损坏图提前隔离。"
 }

@@ -1383,15 +1383,29 @@ def test_strong_binding(base: Path):
 
 
 def test_at_image_model_ready_local(base: Path):
-    """at_image_model_ready：本地预下载目录齐全→就绪；缺 text_encoder→未就绪（不依赖真实 HF 缓存）。"""
+    """at_image_model_ready：完整本地仓库→就绪；半截（缺 config.json/分片）→未就绪（不依赖真实 HF 缓存）。"""
     local = base / "models" / "at_image" / "zimage"
     (local / "transformer").mkdir(parents=True, exist_ok=True)
     (local / "text_encoder").mkdir(parents=True, exist_ok=True)
     open(local / "model_index.json", "w", encoding="utf-8").write("{}")
+    open(local / "transformer" / "config.json", "w", encoding="utf-8").write("{}")
+    open(local / "text_encoder" / "config.json", "w", encoding="utf-8").write("{}")
+    # 分片：transformer 用 index + 分片；text_encoder 用单文件
+    (local / "transformer" / "diffusion_pytorch_model.safetensors.index.json").write_text(
+        '{"weight_map": {"a": "diffusion_pytorch_model-00001-of-00002.safetensors", "b": "diffusion_pytorch_model-00002-of-00002.safetensors"}}',
+        encoding="utf-8")
+    (local / "transformer" / "diffusion_pytorch_model-00001-of-00002.safetensors").write_bytes(b"x" * (1024 * 1024 + 1))
+    (local / "transformer" / "diffusion_pytorch_model-00002-of-00002.safetensors").write_bytes(b"x" * (1024 * 1024 + 1))
+    (local / "text_encoder" / "diffusion_pytorch_model.safetensors").write_bytes(b"x" * (1024 * 1024 + 1))
     with patch.object(core, "data_sub", side_effect=lambda *p: str(base.joinpath(*p))):
+        assert core._at_image_download_complete(str(local)) is True
         assert core.at_image_model_ready("zimage") is True
-        import shutil
-        shutil.rmtree(str(local / "text_encoder"))
+        # 半截场景：删掉一个 transformer 分片 → 未就绪（旧逻辑只看目录会误判就绪）
+        os.remove(local / "transformer" / "diffusion_pytorch_model-00002-of-00002.safetensors")
+        with patch.object(core.os.path, "expanduser", return_value=str(base / "fakehome")):
+            assert core.at_image_model_ready("zimage") is False
+        # 缺 config.json → 未就绪
+        os.remove(local / "transformer" / "config.json")
         with patch.object(core.os.path, "expanduser", return_value=str(base / "fakehome")):
             assert core.at_image_model_ready("zimage") is False
     print("AT_IMAGE_MODEL_READY_LOCAL_OK")
@@ -1531,6 +1545,27 @@ def test_flux2_qwen3_06b_hint(base: Path):
 
 
 
+
+def test_sample_preview(base: Path):
+    """训练中采样出图预览：提示词文件生成 + 显存门控 + 三引擎命令接线 + GUI 预览。"""
+    with patch.object(core, "data_sub", side_effect=lambda *p: str(base.joinpath(*p))):
+        p1 = core._write_sample_prompts("out1", {"sample_preview": True, "trigger": "bannai11"}, "character")
+        assert p1 and os.path.isfile(p1)
+        p1txt = open(p1, encoding="utf-8").read()
+        assert "bannai11" in p1txt and "portrait" in p1txt and "1girl" not in p1txt, p1txt
+        assert core._write_sample_prompts("out2", {"sample_preview": False}, "style") is None
+    assert core._sample_preview_enabled({"sample_preview": True}, 12) is True
+    assert core._sample_preview_enabled({"sample_preview": True}, 8) is True  # 勾选框说了算，低显存只警告不硬关
+    assert core._sample_preview_enabled({"sample_preview": False}, 24) is False
+    src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    assert src.count("--sample_every_n_steps=100") >= 3, "train/krea2/flux2 应都接线采样"
+    assert "--sample_prompts=" in src
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    assert "sample_preview_var" in g and "_refresh_sample_preview" in g and "mon_sample_lbl" in g and "_is_sample_file" in g
+    print("SAMPLE_PREVIEW_OK")
+
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -1575,6 +1610,7 @@ def main():
         test_musubi_version_check(base)
         test_quarantine_input_corrupt(base)
         test_flux2_qwen3_06b_hint(base)
+        test_sample_preview(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.10"
+APP_VERSION = "0.10.11"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2162,6 +2162,16 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     logf(f"[Krea2] 底模(RAW): {files['raw']}")
     logf(f"[Krea2] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 5)}")
     logf(f"[Krea2] 量化={_quant} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 梯度检查点={'开' if gc_on else '关'} | torch.compile={'开' if _k2_compile else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
+    # 训练中采样出图预览（musubi 原生 --sample_every_n_steps + --sample_prompts；低显存只警告不硬关）
+    if _sample_preview_enabled(params, vram_gb):
+        _sp = _write_sample_prompts(output_name, params, mode)
+        if _sp:
+            cmd += ["--sample_every_n_steps=100", f"--sample_prompts={_sp}"]
+            if vram_gb is not None and vram_gb < 10:
+                logf("[Krea2] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
+            else:
+                logf("[Krea2] 采样预览：每 100 步出一张预览图（输出目录）")
+
     rc = run_stream(cmd, cwd=mt_dir, logf=logf, collect=_log_tail)
     if rc != 0:
         _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
@@ -2338,6 +2348,16 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     logf(f"[FLUX.2] 底模: {files['dit']}")
     logf(f"[FLUX.2] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 2)}")
     logf(f"[FLUX.2] 量化={'int8' if _flux2_int8 else 'fp8'} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 梯度检查点={'开' if gc_on else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
+    # 训练中采样出图预览（musubi 原生 --sample_every_n_steps + --sample_prompts；低显存只警告不硬关）
+    if _sample_preview_enabled(params, vram_gb):
+        _sp = _write_sample_prompts(output_name, params, mode)
+        if _sp:
+            cmd += ["--sample_every_n_steps=100", f"--sample_prompts={_sp}"]
+            if vram_gb is not None and vram_gb < 10:
+                logf("[FLUX.2] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
+            else:
+                logf("[FLUX.2] 采样预览：每 100 步出一张预览图（输出目录）")
+
     rc = run_stream(cmd, cwd=mt_dir, logf=logf, collect=_log_tail)
     if rc != 0:
         _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
@@ -3492,15 +3512,45 @@ def at_image_local_dir(mode):
     return data_sub("models", "at_image", mode)
 
 
+def _at_image_download_complete(local):
+    """严格校验本地 at_image 模型完整性：必需文件在 + 权重分片齐全。
+
+    只查目录存在的旧逻辑会在"下载中断留半截"时误判就绪，导致训练时缺
+    config.json/分片（用户 Z-Image 报 "no config.json found"）。
+    """
+    if not os.path.isfile(os.path.join(local, "model_index.json")):
+        return False
+    for sub in ("transformer", "text_encoder"):
+        subdir = os.path.join(local, sub)
+        if not os.path.isfile(os.path.join(subdir, "config.json")):
+            return False
+        try:
+            idxs = [f for f in os.listdir(subdir) if f.endswith(".index.json")]
+        except Exception:
+            return False
+        if idxs:
+            try:
+                import json as _json
+                _data = _json.load(open(os.path.join(subdir, idxs[0]), encoding="utf-8"))
+                for _p in set(_data.get("weight_map", {}).values()):
+                    _fp = os.path.join(subdir, _p)
+                    if not os.path.isfile(_fp) or os.path.getsize(_fp) < 1024 * 1024:
+                        return False
+            except Exception:
+                return False
+        else:
+            _w = os.path.join(subdir, "diffusion_pytorch_model.safetensors")
+            if not os.path.isfile(_w) or os.path.getsize(_w) < 1024 * 1024:
+                return False
+    return True
+
+
 def at_image_model_ready(mode):
-    """检查 AI Toolkit 图像模型是否已下载（本地预下载目录 / HF 缓存目录）。"""
+    """检查 AI Toolkit 图像模型是否已下载（本地预下载目录完整 / HF 缓存目录存在）。"""
     info = AT_IMAGE_MODELS.get(mode)
     if not info:
         return False
-    local = at_image_local_dir(mode)
-    if (os.path.isfile(os.path.join(local, "model_index.json"))
-            and os.path.isdir(os.path.join(local, "transformer"))
-            and os.path.isdir(os.path.join(local, "text_encoder"))):
+    if _at_image_download_complete(at_image_local_dir(mode)):
         return True
     try:
         cache_root = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
@@ -3641,6 +3691,9 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
             _model_ok = at_image_model_ready(mode)
             if _model_ok:
                 logf(f"[{info['label']}] 底模预下载完成：{at_image_local_dir(mode)}")
+            else:
+                logf(f"[{info['label']}] ⚠ 底模仍不完整（可能上次下载中断留下半截缓存）；"
+                     f"如持续失败请删除 {at_image_local_dir(mode)} 后重试，本次将尝试在线加载")
         except Exception as e:
             logf(f"[{info['label']}] ⚠ 底模预下载失败（{e}），将尝试训练时在线加载")
     if _model_ok:
@@ -5864,6 +5917,33 @@ def fix_cpu_torch(vpy, kdir, logf=print):
     return False, "cu128 PyTorch 重装后 CUDA 仍不可用：请更新 NVIDIA 驱动，或重跑【② 安装训练内核】重建环境。"
 
 
+def _write_sample_prompts(output_name, params, mode):
+    """生成 kohya/musubi 训练采样提示词文件；返回路径或 None（未开启/失败）。"""
+    if not params.get("sample_preview", True):
+        return None
+    trig = (params.get("trigger") or "").strip()
+    # 采样提示词：用 portrait 偏向面部（降低早期未训练好的全身/不雅出图概率）；
+    # 不写死 1girl/solo（角色可能是男性/非人，写死会误导底模）。
+    prompt = (f"{trig}, portrait, masterpiece, best quality" if trig else "masterpiece, best quality")
+    d = data_sub("cache", "sample_prompts")
+    try:
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, (output_name or "sample") + "_prompts.txt")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(prompt + "\n")
+        return p
+    except Exception:
+        return None
+
+
+def _sample_preview_enabled(params, vram_gb):
+    """采样预览开关：以用户勾选为准（默认开）。
+
+    低显存（<10G）不再硬关，只由训练函数打印 OOM 警告——
+    8G 卡在 512/768 + block swap 下通常能扛住采样，扛不住用户取消勾选即可。
+    """
+    return bool(params.get("sample_preview", True))
+
 def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, resume_from=None, progress=None):
     params = params or {}
     amd_mode = bool(params.get("amd_mode", False))
@@ -6195,6 +6275,16 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     # Anima：后台扫描 latent 缓存，第一步 loss=nan 时定位是哪些图（只提示不自动停止）
     if family == "anima":
         _start_anima_latent_nan_watcher(dataset_dir, vpy, logf)
+    # 训练中采样出图预览（kohya 引擎原生 --sample_every_n_steps + --sample_prompts；低显存只警告不硬关）
+    if _sample_preview_enabled(params, vram_gb):
+        _sp = _write_sample_prompts(output_name, params, mode)
+        if _sp:
+            cmd += ["--sample_every_n_steps=100", f"--sample_prompts={_sp}"]
+            if vram_gb is not None and vram_gb < 10:
+                logf("[训练] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
+            else:
+                logf("[训练] 采样预览：每 100 步用当前 LoRA 出一张预览图（输出目录）")
+
     try:
         rc = run_stream(cmd, cwd=sds, env=env, logf=logf, collect=_log_tail)
     except StopRequested:
