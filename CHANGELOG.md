@@ -1,3 +1,11 @@
+## v0.10.12（2026-08-26）
+
+### 修复：Krea2 采样预览开启后启动即崩溃（缺 --text_encoder）
+- **背景**：用户 Krea2 训练开采样预览，启动崩：`AssertionError: --text_encoder is required for sample generation during training`。
+- **根因**：train_krea2 训练命令原本不传 `--text_encoder`（TE 只用于缓存，训练脚本不需要）；加采样后 musubi 需要 TE 编码采样提示词 → assert。
+- **已修**：采样开启时追加 `--text_encoder <路径>`（FLUX.2 本来就有，未受影响）。
+- **验证**：SAMPLE_PREVIEW_OK 新增断言，engine_install_smoke_test + smoke_test 全过。
+
 ## v0.10.11（2026-08-26）
 
 ### 新增：训练中采样出图预览（三个引擎全覆盖）

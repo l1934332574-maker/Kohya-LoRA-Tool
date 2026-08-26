@@ -1560,6 +1560,7 @@ def test_sample_preview(base: Path):
     src = Path(core.__file__).read_text(encoding="utf-8-sig")
     assert src.count("--sample_every_n_steps=100") >= 3, "train/krea2/flux2 应都接线采样"
     assert "--sample_prompts=" in src
+    assert '"--text_encoder", files["te"]' in src  # Krea2 采样必须带 text_encoder（musubi assert）
     g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
     assert "sample_preview_var" in g and "_refresh_sample_preview" in g and "mon_sample_lbl" in g and "_is_sample_file" in g
     print("SAMPLE_PREVIEW_OK")

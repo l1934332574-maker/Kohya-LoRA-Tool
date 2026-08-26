@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.11"
+APP_VERSION = "0.10.12"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2166,7 +2166,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     if _sample_preview_enabled(params, vram_gb):
         _sp = _write_sample_prompts(output_name, params, mode)
         if _sp:
-            cmd += ["--sample_every_n_steps=100", f"--sample_prompts={_sp}"]
+            cmd += ["--sample_every_n_steps=100", f"--sample_prompts={_sp}", "--text_encoder", files["te"]]
             if vram_gb is not None and vram_gb < 10:
                 logf("[Krea2] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
             else:
