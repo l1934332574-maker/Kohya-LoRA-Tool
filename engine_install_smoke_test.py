@@ -898,6 +898,86 @@ def test_main_engine_accel_always_defined(base: Path):
 
 
 
+def test_safetensors_complete_check(base):
+    """_safetensors_complete：截断/损坏的 safetensors 能被识别（训练前拦截，避免 reshape 英文错）。"""
+    import struct
+    import json as _json
+    # 完整文件：header 声明 4 元素 + 16 字节数据
+    p = base / "ok.safetensors"
+    header = {"t": {"dtype": "F32", "shape": [4], "data_offsets": [0, 16]}}
+    hb = _json.dumps(header, separators=(",", ":")).encode("utf-8")
+    p.write_bytes(struct.pack("<Q", len(hb)) + hb + b"\x00" * 16)
+    assert core._safetensors_complete(str(p)) is True
+    # 截断：头部声明 3981312 元素（15925248 字节）但实际只有 8 字节 → 不完整
+    p2 = base / "trunc.safetensors"
+    header2 = {"t": {"dtype": "F32", "shape": [384, 384, 3, 3, 3], "data_offsets": [0, 15925248]}}
+    hb2 = _json.dumps(header2, separators=(",", ":")).encode("utf-8")
+    p2.write_bytes(struct.pack("<Q", len(hb2)) + hb2 + b"\x00" * 8)
+    assert core._safetensors_complete(str(p2)) is False
+    assert core._safetensors_complete(str(base / "nonexistent.safetensors")) is False
+    print("SAFETENSORS_COMPLETE_CHECK_OK")
+
+
+def test_modelscope_mirror_urls(base):
+    """Krea2/FLUX.2 模型链接与 AT_IMAGE 下载全部魔搭化（hf-mirror 故障/被污染后不再依赖）。"""
+    for key in ("vae", "te"):
+        _f, _d, u = core.KREA2_MODEL_LINKS[key]
+        assert "modelscope.cn" in u and "hf-mirror.com" not in u, (key, u)
+    for key in ("dit", "te", "vae"):
+        _f, _d, u = core.FLUX2_MODEL_LINKS[key]
+        assert "modelscope.cn" in u and "hf-mirror.com" not in u, (key, u)
+    # AT_IMAGE 魔搭仓库覆盖全部模式
+    for mode in core.AT_IMAGE_MODELS:
+        assert mode in core.AT_IMAGE_MS_REPOS, mode
+    # 文件清单函数对非法仓库返回 None（不抛异常）
+    assert core._at_image_ms_file_list("NoSuch/Repo_0000") is None
+    print("MODELSCOPE_MIRROR_URLS_OK")
+
+
+def test_train_monitor_krea2_parsing(base):
+    """TrainMonitor 解析 Krea2 tqdm（avr_loss=）与缓存→训练阶段切换（监控面板数据来源）。"""
+    mon = core.TrainMonitor()
+    mon.start(total=696)
+    # 缓存阶段：不应更新训练步数
+    mon.on_line("INFO:musubi_tuner.dataset.cache_io:caching latents...")
+    assert mon.snapshot().get("phase") == "cache", mon.snapshot()
+    # Krea2 训练 tqdm：1/696 [.., 30.88s/it, avr_loss=0.0582]
+    mon.on_line("steps:   1%|\u258f         | 4/696 [02:03<5:56:05, 30.88s/it, avr_loss=0.0582]")
+    s = mon.snapshot()
+    assert s.get("phase") == "train", s
+    assert s.get("step") == 4, s
+    assert s.get("total") == 696, s
+    assert abs(s.get("loss") - 0.0582) < 1e-6, s
+    assert abs(s.get("speed") - 1.0 / 30.88) < 1e-6, s
+    # 包装函数：日志行喂给 monitor
+    calls = []
+    def _lf(x): calls.append(x)
+    m2 = core.TrainMonitor()
+    wrapped = core._attach_train_monitor(_lf, m2, lr=1e-4)
+    m2.set_total(696)   # 真实流程：接线后训练函数会 set_total
+    wrapped("steps:   2%|\u258e | 8/696 [.., 10.0s/it, avr_loss=0.05]")
+    assert m2.snapshot().get("step") == 8 and calls == ["steps:   2%|\u258e | 8/696 [.., 10.0s/it, avr_loss=0.05]"]
+    assert abs(m2.snapshot().get("lr") - 1e-4) < 1e-12, m2.snapshot()
+    print("TRAIN_MONITOR_KREA2_PARSING_OK")
+
+
+def test_prequantized_krea2_raw_detected(base):
+    """Krea2 预量化 fp8/int8 底模必须被识别（训练前拦截，musubi 0.3.4 不支持预量化 Krea2 训练）。"""
+    import struct
+    import json as _json
+    p = base / "prequant_raw.safetensors"
+    header = {"__metadata__": {}, "blocks.0.attn.wq.weight": {"dtype": "F8_E4M3", "shape": [4, 4], "data_offsets": [0, 16]}}
+    hb = _json.dumps(header, separators=(",", ":")).encode("utf-8")
+    p.write_bytes(struct.pack("<Q", len(hb)) + hb + b"\x00" * 16)
+    assert core._safetensors_is_prequantized(str(p)) is True, "fp8 预量化底模应判为 prequantized"
+    p2 = base / "bf16_raw.safetensors"
+    header2 = {"__metadata__": {}, "blocks.0.attn.wq.weight": {"dtype": "BF16", "shape": [4, 4], "data_offsets": [0, 32]}}
+    hb2 = _json.dumps(header2, separators=(",", ":")).encode("utf-8")
+    p2.write_bytes(struct.pack("<Q", len(hb2)) + hb2 + b"\x00" * 32)
+    assert core._safetensors_is_prequantized(str(p2)) is False, "bf16 原版底模不应判为 prequantized"
+    print("PREQUANTIZED_KREA2_RAW_DETECTED_OK")
+
+
 def test_swap_tier_resolution(base):
     """Krea2/FLUX.2 块交换档位：16G 卡（DXGI 报告 15.6~15.9）取整后走 16-24G 档，不再误判 12G 档。
 
@@ -907,13 +987,13 @@ def test_swap_tier_resolution(base):
     # Krea2
     assert core._resolve_krea2_swap(8) == (24, True)
     assert core._resolve_krea2_swap(12) == (12, True)
-    assert core._resolve_krea2_swap(15.67) == (10, True)    # 4080S 16G：swap=10 留显存余量防换页卡死
-    assert core._resolve_krea2_swap(16) == (10, True)
-    assert core._resolve_krea2_swap(18) == (10, False)   # 18G>16，H2D-only 关闭（与旧行为一致）
+    assert core._resolve_krea2_swap(15.67) == (12, True)    # 4080S 16G：int8+swap12 实测 7s/it 最快最稳
+    assert core._resolve_krea2_swap(16) == (12, True)
+    assert core._resolve_krea2_swap(18) == (12, False)   # 18G>16，H2D-only 关闭（与旧行为一致）
     assert core._resolve_krea2_swap(20) == (6, False)       # 20G 档 swap=6，H2D-only 关闭（与旧行为一致）
     assert core._resolve_krea2_swap(24) == (2, False)
     assert core._resolve_krea2_swap(None) == (24, True)
-    assert core._resolve_krea2_swap(15.67, gc_on=False) == (10, False)
+    assert core._resolve_krea2_swap(15.67, gc_on=False) == (12, False)
     # FLUX.2
     assert core._resolve_flux2_swap(8) == (10, True)
     assert core._resolve_flux2_swap(12) == (6, True)
@@ -935,8 +1015,8 @@ def test_quant_mode_resolution(base):
         core._probe_nf4 = lambda vpy, logf=print, timeout=180: (True, "ok")
         cases = [
             ((None, "auto"), "fp8"), ((8, "auto"), "int8"), ((12, "auto"), "int8"),
-            ((14, "auto"), "int8"), ((15.67, "auto"), "fp8"),   # 4080S 16G：取整后走 fp8（社区 16G 主流）
-            ((16, "auto"), "fp8"), ((24, "auto"), "fp8"),
+            ((14, "auto"), "int8"), ((15.67, "auto"), "int8"),  # 4080S 16G：实测 int8+swap12=7s/it，fp8 反而慢
+            ((16, "auto"), "int8"), ((24, "auto"), "fp8"),
             ((8, "fp8"), "fp8"), ((8, "int8"), "int8"),
             ((8, "nf4"), "nf4"), ((24, "nf4"), "nf4"),
         ]
@@ -1444,8 +1524,8 @@ def test_at_image_model_ready_local(base: Path):
 
 
 def test_at_image_pre_download(base: Path):
-    """Z-Image/Qwen-Image 底模预下载：未下载→自动 _hf_download（第三引擎 venv）→yaml 指向本地目录。"""
-    state = {"downloaded": False, "hf_call": None, "yaml_info": None, "launched": False}
+    """Z-Image/Qwen-Image 底模预下载：未下载→自动魔搭直链下载（_at_image_ms_download）→yaml 指向本地目录。"""
+    state = {"downloaded": False, "ms_call": None, "yaml_info": None, "launched": False}
     vpy = str(base / "third" / "kohya_ss" / "ai_toolkit_venv" / "Scripts" / "python.exe")
     at_dir = str(base / "third" / "kohya_ss" / "ai-toolkit")
     os.makedirs(at_dir, exist_ok=True)
@@ -1454,9 +1534,10 @@ def test_at_image_pre_download(base: Path):
     def fake_ready(mode):
         return state["downloaded"]
 
-    def fake_hf_download(repo, local_dir, logf=print, allow_patterns=None, vpy=None):
-        state["hf_call"] = (repo, local_dir, vpy)
+    def fake_ms_download(mode, logf=print):
+        state["ms_call"] = mode
         state["downloaded"] = True
+        return True
 
     def fake_status():
         return True, "ok", vpy
@@ -1474,7 +1555,7 @@ def test_at_image_pre_download(base: Path):
     patches = (
         patch.object(core, "data_sub", side_effect=lambda *p: str(base.joinpath(*p))),
         patch.object(core, "at_image_model_ready", side_effect=fake_ready),
-        patch.object(core, "_hf_download", side_effect=fake_hf_download),
+        patch.object(core, "_at_image_ms_download", side_effect=fake_ms_download),
         patch.object(core, "ai_toolkit_engine_status", side_effect=fake_status),
         patch.object(core, "write_at_image_yaml", side_effect=fake_write_yaml),
         patch.object(core, "run_stream", side_effect=fake_run_stream),
@@ -1487,11 +1568,8 @@ def test_at_image_pre_download(base: Path):
     )
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10], patches[11]:
         out = core.train_at_image(lambda _: None, mode="zimage", params={"project": "at_t1"})
-    assert state["hf_call"] is not None, "未触发底模预下载"
-    repo, local_dir, dl_vpy = state["hf_call"]
-    assert repo == "Tongyi-MAI/Z-Image", repo
-    assert dl_vpy == vpy, dl_vpy
-    assert state["yaml_info"]["model_id"] == local_dir.replace("\\", "/"), state["yaml_info"]
+    assert state["ms_call"] == "zimage", "未触发魔搭底模预下载"
+    assert state["yaml_info"]["model_id"].replace("\\", "/").endswith("models/at_image/zimage"), state["yaml_info"]
     assert state["launched"], "未启动训练"
     assert str(out).endswith("lora.safetensors"), out
     print("AT_IMAGE_PRE_DOWNLOAD_OK")
@@ -1684,8 +1762,8 @@ def test_krea2_modelscope_mirror(base: Path):
     assert links["raw"][2].startswith("https://modelscope.cn/models/krea/Krea-2-Raw/resolve/master/raw.safetensors")
     assert links["turbo"][2].startswith("https://modelscope.cn/models/krea/Krea-2-Turbo/resolve/master/turbo.safetensors")
     assert "hf-mirror.com" not in links["raw"][2] and "hf-mirror.com" not in links["turbo"][2]
-    # VAE / 文本编码器不是门禁，继续用 hf-mirror 直链
-    assert "hf-mirror.com" in links["vae"][2] and "hf-mirror.com" in links["te"][2]
+    # VAE / 文本编码器也已魔搭化（2026-08-28：hf-mirror 故障/被污染后不再依赖）
+    assert "modelscope.cn" in links["vae"][2] and "modelscope.cn" in links["te"][2]
     # 下载器需把 modelscope.cn 当作国内直连域名（不套系统代理）
     md = (ROOT / "model_downloader.py").read_text(encoding="utf-8")
     assert "modelscope.cn" in md
@@ -1714,6 +1792,10 @@ def main():
         test_main_engine_accel_always_defined(base)
         test_quant_mode_resolution(base)
         test_swap_tier_resolution(base)
+        test_prequantized_krea2_raw_detected(base)
+        test_train_monitor_krea2_parsing(base)
+        test_modelscope_mirror_urls(base)
+        test_safetensors_complete_check(base)
         test_musubi_quant_patch(base)
         test_accelerate_cpu_config_self_heal(base)
         test_anima_vae_fp32_patch(base)

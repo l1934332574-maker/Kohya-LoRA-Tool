@@ -1,3 +1,25 @@
+## v0.10.20（2026-08-28）
+
+### 修复：Z-Image / Qwen-Image 底模预下载改走魔搭直链（hf-mirror 故障/被污染后不再依赖）
+- **背景**：4060 Ti 用户第三引擎 Z-Image 训练，底模预下载从 hf-mirror 反复失败——先是 Xet CDN SSL 超时，后是 **hf-mirror.com 整体不可达**（`httpcore.ConnectTimeout: WinError 10060`，DNS 解析到不可达 IP）→ 16GB 模型下不了 → 训练失败。
+- **已修（根治）**：AT_IMAGE（Z-Image / Qwen-Image-2512）底模预下载改走**魔搭（ModelScope）直链**：ModelScope API 拉文件清单 + curl 断点续传 + 保持仓库目录结构，彻底不依赖 hf-mirror；Krea2 VAE/文本编码器、FLUX.2 三件套下载链接也全部改魔搭直链。
+- **验证**：魔搭上 Tongyi-MAI/Z-Image（26 文件）/ Qwen/Qwen-Image-2512（36 文件）/ Comfy-Org/Qwen3-VL / Comfy-Org/Qwen-Image_ComfyUI / Comfy-Org/flux2-klein-4B 全部存在；实测下载 config.json 成功；新增 MODELSCOPE_MIRROR_URLS_OK，更新 AT_IMAGE_PRE_DOWNLOAD_OK / KREA2_MODELSCOPE_MIRROR_OK，全过。
+
+### 修复：Krea2/FLUX.2 16G 卡默认配置调优（int8 + swap12，4080S 实测 7s/it）
+- 4080S 16G 用户实测链路收敛：**int8 + swap=12 + pinned = 7s/it**（696 步约 1 小时 20 分，最稳最快），而 fp8 + swap10 + pinned = 30~40s/it。16G 档默认量化改回 **int8**、Krea2 swap 改 **12**（pinned 保留）——用户无需再手动调高级参数。
+
+### 修复：训练监控面板"只有日志在动"（Krea2/FLUX.2/AI-Image 漏接进度解析）
+- 根因：`TrainMonitor.on_line` 只接在第一引擎 kohya，musubi/ai-toolkit 三个训练函数（train_krea2 / train_flux2 / train_at_image）漏接 → 监控收不到步数/loss，只有日志滚动。已用 `_attach_train_monitor` 接入，缓存阶段显示「正在缓存数据集…」，训练阶段正常更新步数/loss/速度/曲线（含 Krea2 `avr_loss=` tqdm 格式）。
+
+### 修复：Krea2 用预量化 fp8/int8 底模训练报 weight_scale 错误（训练前拦截）
+- 把 ComfyUI 用的预量化 fp8 raw.safetensors 放进 models/krea2/ 再训练会报 `Unexpected key(s): weight_scale`（musubi 0.3.4 的 Krea2 训练不支持预量化文件）；现训练前检测并明确提示换 bf16 原版（约 26GB，软件内「下载Krea2模型」或魔搭 krea/Krea-2-Raw）。
+
+### 修复：Anima 模型文件损坏/截断训练报 reshape 英文错（训练前完整性校验）
+- **背景**：3060 12G 用户 Anima 训练（人物 LoRA，1024px）报 `RuntimeError: shape '[384, 384, 3, 3, 3]' is invalid for input of size 1138221`。
+- **根因**：Anima VAE（qwen_image_vae.safetensors）文件损坏/下载截断——safetensors 头部声明张量 3,981,312 元素，实际数据只有 1,138,221 → 加载时 reshape 崩溃。
+- **已修**：新增 `_safetensors_complete()` 完整性校验（头部声明的数据区是否超出文件实际大小），训练前检查 Anima VAE/Qwen3 权重与 Krea2 的 raw/vae/te——损坏文件直接中文提示「删除后重新下载」，不再爆英文 reshape 错；Anima VAE 下载链接同步改走魔搭直链（hf-mirror 故障期间也能重下）。
+- **验证**：新增 SAFETENSORS_COMPLETE_CHECK_OK（完整/截断/不存在三态），engine_install_smoke_test + smoke_test 全过。
+
 ## v0.10.19（2026-08-27）
 
 ### 修复：Krea2 16G 卡「换页卡死 / 越跑越慢」——swap=10 + pinned memory 加速搬运，新增「块交换数」可调

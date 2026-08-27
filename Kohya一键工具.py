@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.19"
+APP_VERSION = "0.10.20"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1425,9 +1425,9 @@ KREA2_MODEL_LINKS = {
     "turbo": ("turbo.safetensors", "Krea 2 Turbo（可选，推理/训练采样用）",
               "https://modelscope.cn/models/krea/Krea-2-Turbo/resolve/master/turbo.safetensors"),
     "vae": ("qwen_image_vae.safetensors", "Qwen-Image VAE（约 0.3GB）",
-            "https://hf-mirror.com/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors"),
+            "https://modelscope.cn/models/Comfy-Org/Qwen-Image_ComfyUI/resolve/master/split_files/vae/qwen_image_vae.safetensors"),
     "te": ("qwen3vl_4b_bf16.safetensors", "Qwen3-VL-4B 文本编码器（约 8GB）",
-           "https://hf-mirror.com/Comfy-Org/Qwen3-VL/resolve/main/text_encoders/qwen3vl_4b_bf16.safetensors"),
+           "https://modelscope.cn/models/Comfy-Org/Qwen3-VL/resolve/master/text_encoders/qwen3vl_4b_bf16.safetensors"),
 }
 
 
@@ -1476,11 +1476,11 @@ FLUX2_MAX_STEPS = 6000               # FLUX.2 自动约束最大总步数（防�
 # FLUX.2 klein 4B 模型文件（放 models/flux2/，不内置；Comfy-Org 非门禁 repack，国内镜像直链）
 FLUX2_MODEL_LINKS = {
     "dit": ("flux-2-klein-base-4b.safetensors", "FLUX.2 klein 4B DiT 底模（base 版，约 7.2GB，训练必需）",
-            "https://hf-mirror.com/Comfy-Org/flux2-klein-4B/resolve/main/split_files/diffusion_models/flux-2-klein-base-4b.safetensors"),
+            "https://modelscope.cn/models/Comfy-Org/flux2-klein-4B/resolve/master/split_files/diffusion_models/flux-2-klein-base-4b.safetensors"),
     "te": ("qwen_3_4b.safetensors", "Qwen3 4B 文本编码器（约 7.5GB，训练必需）",
-           "https://hf-mirror.com/Comfy-Org/flux2-klein-4B/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors"),
+           "https://modelscope.cn/models/Comfy-Org/flux2-klein-4B/resolve/master/split_files/text_encoders/qwen_3_4b.safetensors"),
     "vae": ("flux2-vae.safetensors", "FLUX.2 klein VAE（约 320MB，训练必需）",
-            "https://hf-mirror.com/Comfy-Org/flux2-klein-4B/resolve/main/split_files/vae/flux2-vae.safetensors"),
+            "https://modelscope.cn/models/Comfy-Org/flux2-klein-4B/resolve/master/split_files/vae/flux2-vae.safetensors"),
 }
 
 
@@ -2030,8 +2030,8 @@ def _resolve_krea2_swap(vram_gb, gc_on=True):
     elif tier < 16:
         swap = 12          # 12G 档
     elif tier < 20:
-        swap = 10          # 16G 档：12.9B 模型 int8/fp8 权重 ~12.9GB，22 块驻留会顶满 16G 触发换页卡死
-                           # （4080S 实测 15.5/16GB、64~176s/it 且越来越慢）；swap=10 留足余量保证稳定
+        swap = 12          # 16G 档：4080S 实测「int8+swap12+pinned」= 7s/it 最快最稳（2026-08-27）
+                           # swap=10 时 fp8 仍 30~40s/it；swap=12 留足显存余量防换页
     elif tier < 24:
         swap = 6           # 20-24G 档
     swap = min(swap, 26)   # Krea2 上限 26
@@ -2058,6 +2058,34 @@ def _resolve_flux2_swap(vram_gb, gc_on=True):
     return swap, h2d_only
 
 
+def _attach_train_monitor(logf, progress, lr=None):
+    """把训练子进程日志接入 TrainMonitor（步数/loss/曲线）。
+
+    kohya 第一引擎 train() 早已接线；musubi/ai-toolkit 训练（Krea2/FLUX.2/AT）
+    此前漏接 → 监控面板只有日志在动、曲线/参数是摆设（2026-08-27 4080S 用户反馈）。
+    返回包装后的 logf（每行先喂给 progress.on_line 再打日志）。
+    """
+    if progress is None:
+        return logf
+    _orig = logf
+    def _wrapped(line):
+        try:
+            progress.on_line(str(line))
+        except Exception:
+            pass
+        _orig(line)
+    try:
+        progress.start()
+    except Exception:
+        pass
+    if lr is not None:
+        try:
+            progress.set_lr(float(lr))
+        except Exception:
+            pass
+    return _wrapped
+
+
 def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from=None, progress=None):
     """Krea2 图像 LoRA 训练（第二引擎 musubi-tuner）。
 
@@ -2066,6 +2094,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     """
     params = params or {}
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
+    logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
     ok, detail, mvpy = musubi_engine_status()
     if not ok:
         raise RuntimeError("第二训练引擎未安装，请先在左侧点「②' 第二引擎(可选)」安装。\n" + detail)
@@ -2081,6 +2110,25 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         raise RuntimeError(
             "Krea2 训练缺少模型文件，请下载放入 models/krea2/ 文件夹：\n\n" + "\n".join(missing) +
             "\n\n（在软件里点「打开 Krea2 模型文件夹」，用浏览器打开上面的国内镜像直链下载后放进去）")
+    # 完整性校验：模型文件损坏/截断（下载中断但被当成成品）会在加载时爆 reshape 错，
+    # 训练前拦截并引导重下（2026-08-28 T-strap 用户 Anima VAE 同类问题）
+    for _k, _desc in (("raw", "RAW 底模"), ("vae", "VAE"), ("te", "文本编码器")):
+        _p = files.get(_k)
+        if _p and not _safetensors_complete(_p):
+            raise RuntimeError(
+                f"检测到 Krea2 {_desc} 文件损坏/不完整：{_p}\n"
+                "（safetensors 头部与数据不一致，常见于下载中断）\n\n"
+                "请删除该文件后重新下载（软件内「下载Krea2模型」，魔搭国内直链 + 断点续传）。")
+    # 预量化 fp8/int8 底模（如 ComfyUI 推理用的 Krea2_FP8，带 weight_scale 键）：
+    # musubi 0.3.4 的 Krea2 训练不支持预量化文件（strict 加载报 "Unexpected key(s): weight_scale"），
+    # 训练必须用 bf16 原版 raw（约 26GB）。提前拦截给出明确指引，避免训练时才报英文错。
+    if _safetensors_is_prequantized(files.get("raw")):
+        raise RuntimeError(
+            "检测到 Krea2 底模 raw.safetensors 是「预量化 fp8/int8」文件（只能用于 ComfyUI 推理出图，\n"
+            "musubi 训练不支持，会报 weight_scale 加载错误）。\n\n"
+            "Krea2 训练必须使用 bf16 原版底模（约 26GB）：\n"
+            "· 在软件里点「下载 Krea2 模型」重新下载 bf16 原版（自动覆盖）；\n"
+            "· 或到魔搭 https://modelscope.cn/models/krea/Krea-2-Raw 下载 raw.safetensors，替换 models/krea2/raw.safetensors。")
     # 画风/人物子模式：画风=train 目录，人物=train_character 目录（与预处理一致）
     _sub_mode = params.get("at_sub_mode") or "character"
     # Krea2/Qwen-Image/Z-Image 数据统一放 train_character（与预处理 dataset_mode="character" 一致），
@@ -2263,6 +2311,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     """
     params = params or {}
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
+    logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
     ok, detail, mvpy = musubi_engine_status()
     if not ok:
         raise RuntimeError("第二训练引擎未安装，请先在左侧点「②' 第二引擎(可选)」安装。\n" + detail)
@@ -3696,10 +3745,75 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
     return cfg_path
 
 
+# AT_IMAGE 在魔搭（ModelScope）的仓库名（与 HF 同名，已验证存在）：
+#   Z-Image -> Tongyi-MAI/Z-Image（26 文件）；Qwen-Image-2512 -> Qwen/Qwen-Image-2512（36 文件）
+# 2026-08-28：hf-mirror.com 故障/被污染（DNS 解析到不可达 IP），原 hf-mirror snapshot_download 必失败，
+# 故 AT_IMAGE 底模预下载改走魔搭直链（国内 CDN 直连 + curl 断点续传），彻底不依赖 hf-mirror。
+AT_IMAGE_MS_REPOS = {
+    "qwen_image": "Qwen/Qwen-Image-2512",
+    "zimage": "Tongyi-MAI/Z-Image",
+}
+
+
+def _at_image_ms_file_list(repo):
+    """从 ModelScope API 拉取仓库文件清单（跳过目录项）。失败返回 None。"""
+    import urllib.request
+    url = "https://modelscope.cn/api/v1/models/%s/repo/files?Revision=master&Recursive=true" % repo
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=30) as r:
+            d = json.load(r)
+        files = []
+        for f in ((d.get("Data") or {}).get("Files") or []):
+            path = (f.get("Path") or "").strip()
+            if not path or path.endswith("/"):
+                continue
+            # 跳过非必要的小文件（保持目录干净，只下模型/配置）
+            low = path.lower()
+            if low in (".gitattributes", "readme.md", "teaser.jpg", ".gitignore", "license", "license.md"):
+                continue
+            files.append(path)
+        return files or None
+    except Exception:
+        return None
+
+
+def _at_image_ms_download(mode, logf):
+    """AT_IMAGE（Z-Image / Qwen-Image）底模从魔搭直链下载到 models/at_image/<mode>/（保持目录结构）。
+
+    每个文件 curl 断点续传（可手动停止/中断后续传）；已存在的完整文件跳过。
+    返回 True=下载完整（at_image_model_ready 通过）；False=失败（调用方回退在线加载）。
+    """
+    info = AT_IMAGE_MODELS.get(mode)
+    if not info:
+        return False
+    repo = AT_IMAGE_MS_REPOS.get(mode)
+    if not repo:
+        logf(f"[{info['label']}] 魔搭仓库未配置，无法直连下载")
+        return False
+    files = _at_image_ms_file_list(repo)
+    if not files:
+        logf(f"[{info['label']}] 魔搭文件清单获取失败，稍后重试或手动下载")
+        return False
+    local = at_image_local_dir(mode)
+    os.makedirs(local, exist_ok=True)
+    logf(f"[{info['label']}] 从魔搭下载 {info['model_id']}（{len(files)} 个文件，国内直连 + 断点续传）…")
+    for idx, path in enumerate(files, 1):
+        dest = os.path.join(local, path.replace("/", os.sep))
+        if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+            continue
+        url = "https://modelscope.cn/models/%s/resolve/master/%s" % (repo, path)
+        logf(f"[{info['label']}] 下载 {idx}/{len(files)}: {path}")
+        if not _download_with_resume(url, dest, logf, direct=True):
+            logf(f"[{info['label']}] ⚠ 文件下载失败：{path}（可重试，断点续传）")
+            return False
+    return at_image_model_ready(mode)
+
+
 def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, resume_from=None, progress=None):
     """AI Toolkit 图像 LoRA 训练（Qwen-Image / Z-Image，第三引擎）。"""
     params = params or {}
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
+    logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
     info = AT_IMAGE_MODELS.get(mode)
     if not info:
         raise RuntimeError(f"未知模式: {mode}")
@@ -3735,11 +3849,9 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     # 下载完成或已存在时，训练 yaml 的 name_or_path 指向本地目录，离线加载。
     _model_ok = at_image_model_ready(mode)
     if not _model_ok:
-        logf(f"[{info['label']}] 底模未下载，开始预下载 {info['model_id']}（约 {info['size']}，走 hf-mirror 国内镜像，可随时停止；中断后自动续传）…")
+        logf(f"[{info['label']}] 底模未下载，开始预下载 {info['model_id']}（约 {info['size']}，魔搭国内直连 + 断点续传，可随时停止）…")
         try:
-            _at_vpy = _at_dirs()[0]
-            _hf_download(info["model_id"], at_image_local_dir(mode), logf, vpy=_at_vpy)
-            _model_ok = at_image_model_ready(mode)
+            _model_ok = _at_image_ms_download(mode, logf)
             if _model_ok:
                 logf(f"[{info['label']}] 底模预下载完成：{at_image_local_dir(mode)}")
             else:
@@ -5741,6 +5853,35 @@ def _probe_nf4(vpy, logf=print, timeout=180):
     return False, (lines[-1] if lines else "未知错误")[-200:]
 
 
+def _safetensors_complete(path):
+    """校验 safetensors 文件是否完整（头部声明的数据区不超过文件实际大小）。
+
+    损坏/截断文件（下载中断但 .part 被改名、磁盘写坏等）头部声明的张量尺寸与实际数据
+    不符，加载时爆 "shape [...] is invalid for input of size ..."（如 T-strap 用户 Anima VAE，
+    2026-08-28）。返回 True=完整；False=损坏/不存在。
+    """
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        import struct as _st
+        with open(path, "rb") as f:
+            head_len = _st.unpack("<Q", f.read(8))[0]
+            if head_len <= 0 or head_len > 64 * 1024 * 1024:
+                return False
+            header = json.loads(f.read(head_len))
+        max_end = 0
+        for _k, _v in header.items():
+            if _k == "__metadata__" or not isinstance(_v, dict):
+                continue
+            _o = _v.get("data_offsets")
+            if isinstance(_o, (list, tuple)) and len(_o) == 2:
+                max_end = max(max_end, int(_o[1]))
+        need = 8 + head_len + max_end
+        return os.path.getsize(path) >= need
+    except Exception:
+        return False
+
+
 def _safetensors_is_prequantized(path):
     """检测 safetensors 底模是否已是预量化（fp8/int8）权重。
 
@@ -5780,14 +5921,14 @@ def _resolve_quant_mode(mvpy, logf, vram_gb, label="Krea2", requested="auto", al
         return "int8", "用户指定 int8（W8A8 对称量化）"
     # 本机实测（4070 8G, 512px, H2D-only swap24）：
     #   fp8 ≈138s/it → torch.compile ≈70s/it（2.0×）→ int8 ≈53s/it（2.6×）→ nf4(swap0) ≈97s/it
-    # 结论：int8 的 2.6× 优势是在 8G + 大块交换的【带宽瓶颈】场景下测出的（int8 省带宽）。
-    # 16G 卡带宽不是瓶颈（PCIe gen4 x16 + GPU 满负荷），照搬社区 16G 主流 = fp8（musubi 官方
-    # 推荐路径，Tensor Core 效率高；SECourses 的 int8 快是因为他们自编译内核，无法照搬）。
-    # 故 <16G（取整）默认 int8，16G+ 默认 fp8；NF4 因 bnb 反量化开销 + 与块交换冲突，仅显式指定时启用。
+    # 结论：int8 的 2.6× 优势在 8G 大块交换（带宽瓶颈）场景；16G 实测（4080S，2026-08-27）：
+    #   int8+swap12+pinned = 7s/it，fp8+swap10+pinned = 30~40s/it —— stock musubi 下 16G 同样 int8 更快
+    #   （社区 fp8 优势是其自编译内核，无法照搬）。故 <=16G（取整）默认 int8，20G+ 默认 fp8；
+    #   NF4 因 bnb 反量化开销 + 与块交换冲突，仅显式指定时启用。
     _tier = round(vram_gb) if vram_gb is not None else None
-    want_int8 = (req == "auto" and _tier is not None and _tier < 16)
+    want_int8 = (req == "auto" and _tier is not None and _tier <= 16)
     if want_int8:
-        return "int8", "8~12G 档自动 int8（W8A8，带宽瓶颈场景实测比 fp8 快约 2.6×）"
+        return "int8", "8~16G 档自动 int8（W8A8；4080S 实测 int8+swap12=7s/it，fp8 反而慢）"
     if req == "nf4" and allow_nf4:
         if _ensure_musubi_bnb(mvpy, logf, label=label):
             ok, detail = _probe_nf4(mvpy, logf)
@@ -7139,8 +7280,8 @@ def _ensure_anima_components(logf=print):
     if not vae_file:
         # 用国内直链直接下载（与 Krea2/FLUX2 模型下载一致），不依赖 huggingface_hub 的
         # snapshot_download（snapshot_download 对 allow_patterns 匹配/repo 结构敏感，易失败）
-        logf("[Anima] 首次使用需要下载 Qwen-Image VAE（约 0.3GB，国内直链）…")
-        vae_url = "https://hf-mirror.com/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors"
+        logf("[Anima] 首次使用需要下载 Qwen-Image VAE（约 0.3GB，魔搭国内直链）…")
+        vae_url = "https://modelscope.cn/models/Comfy-Org/Qwen-Image_ComfyUI/resolve/master/split_files/vae/qwen_image_vae.safetensors"
         vae_dest = os.path.join(vae_dir, "qwen_image_vae.safetensors")
         try:
             os.makedirs(vae_dir, exist_ok=True)
@@ -7160,6 +7301,19 @@ def _ensure_anima_components(logf=print):
                     break
     if not vae_file:
         raise RuntimeError(f"未找到 Qwen-Image VAE 文件，请手动下载后放到：{vae_dir}")
+    # 完整性校验：VAE 损坏/截断（safetensors 头部与数据不一致）会在加载时爆
+    # "shape [...] is invalid for input of size ..."，训练前拦截并引导重下（2026-08-28 T-strap 用户）
+    if not _safetensors_complete(vae_file):
+        raise RuntimeError(
+            f"检测到 Anima VAE 文件损坏/不完整：{vae_file}\n"
+            "（safetensors 头部与数据不一致，常见于下载中断/磁盘写坏）\n\n"
+            "请删除该文件后重新点「一键训练」自动下载（魔搭国内直链），"
+            f"或手动下载放到：{vae_dir}\n"
+            "下载：https://modelscope.cn/models/Comfy-Org/Qwen-Image_ComfyUI/resolve/master/split_files/vae/qwen_image_vae.safetensors")
+    if qwen3_path and qwen3_path.lower().endswith(".safetensors") and not _safetensors_complete(qwen3_path):
+        raise RuntimeError(
+            f"检测到 Anima 文本编码器 Qwen3 权重文件损坏/不完整：{qwen3_path}\n"
+            "请删除后重新下载（一键训练会自动重下）。")
     logf(f"[Anima] Qwen3: {qwen3_path}")
     logf(f"[Anima] VAE: {vae_file}")
     return qwen3_path, vae_file

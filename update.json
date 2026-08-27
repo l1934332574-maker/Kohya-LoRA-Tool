@@ -1,6 +1,6 @@
 {
-  "version": "v0.10.19",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.10.19/Setup.exe",
+  "version": "v0.10.20",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.10.20/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.10.19：修复 Krea2 16G 卡换页卡死/越跑越慢：16G 档块交换 6→10（显存留余量防换页）+ 16G+ 自动开 pinned memory 加速搬运；新增高级参数「块交换数」可手动调速度。"
+  "notes": "v0.10.20：Z-Image/Qwen-Image 下载改走魔搭直链；Krea2 16G 默认 int8+块交换12（实测 7s/it）；修复训练监控面板；Anima/Krea2 模型文件完整性校验 + 预量化底模拦截。"
 }
