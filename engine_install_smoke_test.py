@@ -898,6 +898,32 @@ def test_main_engine_accel_always_defined(base: Path):
 
 
 
+def test_swap_tier_resolution(base):
+    """Krea2/FLUX.2 块交换档位：16G 卡（DXGI 报告 15.6~15.9）取整后走 16-24G 档，不再误判 12G 档。
+
+    2026-08-27 4080S 用户实测：15.67GB 被误判 <16 → swap=12（每步搬 12 个块）→ 11~17s/it。
+    修复后 15.67 → 取整 16 → Krea2 swap=6 / FLUX.2 swap=2，H2D-only 保持开启。
+    """
+    # Krea2
+    assert core._resolve_krea2_swap(8) == (24, True)
+    assert core._resolve_krea2_swap(12) == (12, True)
+    assert core._resolve_krea2_swap(15.67) == (6, True)     # 4080S 16G：修复核心
+    assert core._resolve_krea2_swap(16) == (6, True)
+    assert core._resolve_krea2_swap(20) == (6, False)   # 20G 与旧行为一致，H2D-only 关闭
+    assert core._resolve_krea2_swap(24) == (2, False)
+    assert core._resolve_krea2_swap(None) == (24, True)
+    assert core._resolve_krea2_swap(15.67, gc_on=False) == (6, False)
+    # FLUX.2
+    assert core._resolve_flux2_swap(8) == (10, True)
+    assert core._resolve_flux2_swap(12) == (6, True)
+    assert core._resolve_flux2_swap(15.67) == (2, True)     # 4080S 16G
+    assert core._resolve_flux2_swap(16) == (2, True)
+    assert core._resolve_flux2_swap(20) == (2, False)   # 20G 与旧行为一致，H2D-only 关闭
+    assert core._resolve_flux2_swap(24) == (0, False)   # 24G 全驻留，无需交换（原逻辑）
+    assert core._resolve_flux2_swap(None) == (10, True)
+    print("SWAP_TIER_RESOLUTION_OK")
+
+
 def test_quant_mode_resolution(base):
     """_resolve_quant_mode：档位默认 / 显式指定 / NF4 回退。"""
     fake_vpy = object()
@@ -1684,6 +1710,7 @@ def main():
         test_accelerate_module_launcher(base)
         test_main_engine_accel_always_defined(base)
         test_quant_mode_resolution(base)
+        test_swap_tier_resolution(base)
         test_musubi_quant_patch(base)
         test_accelerate_cpu_config_self_heal(base)
         test_anima_vae_fp32_patch(base)

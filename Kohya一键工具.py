@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.16"
+APP_VERSION = "0.10.17"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2014,6 +2014,47 @@ def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
     return _tk_dir
 
 
+def _resolve_krea2_swap(vram_gb, gc_on=True):
+    """Krea2 blocks_to_swap / H2D-only 档位（显存取整判断）。
+
+    16G 卡 DXGI 常报告 15.6~15.9GB，直接用 vram_gb < 16 判断会误判成 12G 档
+    （swap=12，每步搬 12 个块），4080S 用户实测 11~17s/it（2026-08-27）。
+    取整后 16G 走 16-24G 档 swap=6；H2D-only（LoRA 冻结底模单向交换，
+    Fizgig 实测块交换快 ~6.4x）对 16G 档同样保持开启。
+    返回 (blocks_to_swap, h2d_only)。
+    """
+    tier = round(vram_gb) if vram_gb is not None else None
+    swap = 2
+    if tier is None or tier < 12:
+        swap = 24          # 8G 档接近上限（Krea2 上限 26），减少 GPU 驻留块
+    elif tier < 16:
+        swap = 12          # 12G 档
+    elif tier < 24:
+        swap = 6           # 16-24G 档
+    swap = min(swap, 26)   # Krea2 上限 26
+    h2d_only = swap > 0 and (tier is None or tier <= 16) and gc_on
+    return swap, h2d_only
+
+
+def _resolve_flux2_swap(vram_gb, gc_on=True):
+    """FLUX.2 blocks_to_swap / H2D-only 档位（显存取整判断，klein-4b 上限 13）。
+
+    与 Krea2 同理：16G 卡（DXGI 报告 15.6~15.9）取整后走 16-24G 档 swap=2，
+    避免误判 12G 档 swap=6。返回 (blocks_to_swap, h2d_only)。
+    """
+    tier = round(vram_gb) if vram_gb is not None else None
+    swap = 0
+    if tier is None or tier < 12:
+        swap = 10
+    elif tier < 16:
+        swap = 6
+    elif tier < 24:
+        swap = 2
+    swap = min(swap, 13)
+    h2d_only = swap > 0 and (tier is None or tier <= 16) and gc_on
+    return swap, h2d_only
+
+
 def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from=None, progress=None):
     """Krea2 图像 LoRA 训练（第二引擎 musubi-tuner）。
 
@@ -2103,16 +2144,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     if use_nf4 or use_int8 or use_none:
         fp8 = False
     logf(f"[Krea2] 量化: {_quant}（{_quant_detail}）")
-    swap = 2
-    if vram_gb is None or vram_gb < 12:
-        swap = 24          # 8G 档接近上限（Krea2 上限 26），减少 GPU 驻留块
-    elif vram_gb < 16:
-        swap = 12
-    elif vram_gb < 24:
-        swap = 6
-    swap = min(swap, 26)   # Krea2 上限 26
-    # H2D-only 单向块交换：LoRA 冻结底模专用，只 Host→Device 不再回传（Fizgig 实测块交换快 ~6.4×）
-    h2d_only = (vram_gb is None or vram_gb < 16) and gc_on
+    swap, h2d_only = _resolve_krea2_swap(vram_gb, gc_on)
     # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
     per_epoch = int(params.get("repeats", 5)) * count_images(train_dir)
     if per_epoch * epochs > KREA2_MAX_STEPS:
@@ -2294,16 +2326,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     gc_on = decide_gradient_checkpointing(params.get("gc", "自动"), vram_gb)
     # 显存适配：fp8（DiT+文本编码器）+ blocks_to_swap（klein-4b 上限 13）
     fp8 = vram_gb is None or vram_gb < 24
-    swap = 0
-    if vram_gb is None or vram_gb < 12:
-        swap = 10
-    elif vram_gb < 16:
-        swap = 6
-    elif vram_gb < 24:
-        swap = 2
-    swap = min(swap, 13)
-    # H2D-only 单向块交换：LoRA 冻结底模专用，只 Host→Device 不再回传（仅低显存开启，行为最小变化）
-    h2d_only = (vram_gb is None or vram_gb < 16) and gc_on
+    swap, h2d_only = _resolve_flux2_swap(vram_gb, gc_on)
     # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
     per_epoch = int(params.get("repeats", 2)) * count_images(train_dir)
     if per_epoch * epochs > FLUX2_MAX_STEPS:

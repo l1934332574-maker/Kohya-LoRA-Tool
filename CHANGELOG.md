@@ -1,3 +1,11 @@
+## v0.10.17（2026-08-27）
+
+### 修复：Krea2/FLUX.2 16G 显存被误判成 12G 档，RTX 4080 SUPER 训练慢 4~5 倍
+- **背景**：用户 RTX 4080 SUPER（16G）Krea2 人物 LoRA（768px，29 图 × 2 repeats × 16 epochs = 928 步）实测 11~17s/it、ETA 3~4 小时，手动停止。社区同档 16G 卡实测约 2~4s/it（如 5060 Ti 16G 在 OneTrainer 跑 Krea 为 2.x s/it）。
+- **根因**：工具显存自适应用 `vram_gb < 16` 判断档位，而 Windows DXGI 检测 16G 卡常报告 15.6~15.9GB（4080 SUPER 实测 15.67GB）→ 被误判成 12G 档，Krea2 自动 `blocks_to_swap=12`（每步在 CPU↔GPU 搬运 12 个 DiT 块，瓶颈在 PCIe 搬运而非显卡算力）。
+- **已修**：Krea2/FLUX.2 的 blocks_to_swap 档位改用**显存取整判断**（15.67→16），16G 卡走 16-24G 档——Krea2 swap 12→6、FLUX.2 swap 6→2；H2D-only 单向交换对 16G 档保持开启（LoRA 冻结底模，Fizgig 实测块交换快 ~6.4×）。量化维持 int8（社区确认更快）；8G/12G/20G/24G/未知档位行为不变。
+- **验证**：新增 SWAP_TIER_RESOLUTION_OK 单元测试（15.67→Krea2 (6, True) / FLUX.2 (2, True)，并锁死 8/12/16/20/24/未知档位），engine_install_smoke_test + smoke_test 全过。
+
 ## v0.10.16（2026-08-27）
 
 ### 修复：Krea2/FLUX.2 开「训练中采样预览」后启动即崩（tokenizer 在线拉取 SSL 失败）
