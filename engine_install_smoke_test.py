@@ -933,8 +933,10 @@ def test_quant_mode_resolution(base):
         core._ensure_musubi_bnb = lambda mvpy, logf=print, label="X": True
         core._probe_nf4 = lambda vpy, logf=print, timeout=180: (True, "ok")
         cases = [
-            ((None, "auto"), "fp8"), ((8, "auto"), "int8"), ((14, "auto"), "int8"),
-            ((24, "auto"), "fp8"), ((8, "fp8"), "fp8"), ((8, "int8"), "int8"),
+            ((None, "auto"), "fp8"), ((8, "auto"), "int8"), ((12, "auto"), "int8"),
+            ((14, "auto"), "int8"), ((15.67, "auto"), "fp8"),   # 4080S 16G：取整后走 fp8（社区 16G 主流）
+            ((16, "auto"), "fp8"), ((24, "auto"), "fp8"),
+            ((8, "fp8"), "fp8"), ((8, "int8"), "int8"),
             ((8, "nf4"), "nf4"), ((24, "nf4"), "nf4"),
         ]
         for (vram, req), expect in cases:

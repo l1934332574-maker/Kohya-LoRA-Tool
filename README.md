@@ -4,7 +4,7 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.10.17** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.10.18** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
@@ -36,6 +36,11 @@
 - **FLUX 模型下载改走魔搭国内直链**：DiT / CLIP-L / T5-XXL / AE 全部国内 CDN 直连、支持断点续传，不再直连 HuggingFace（避免 SSL 失败）。
 
 - **修复繁体/英文系统下 Krea2 缓存 latents 打印中文崩溃**：所有子进程默认强制 UTF-8 输出，不再 UnicodeEncodeError。
+
+## 🆕 v0.10.18 更新重点
+
+- **Krea2/FLUX.2 16G 卡默认量化照搬社区改 fp8**：16G 卡带宽不是瓶颈，int8 的省带宽优势用不上反而算子低效（4080S 实测 100% 利用率功耗仅 80W）；现 16G+ 自动默认 fp8_scaled（musubi 官方 + 社区 16G 主流），int8 只留给 8~12G 带宽瓶颈档。
+- **高级参数新增「量化方式」下拉**（Krea2/FLUX.2）：自动 / fp8 / int8 / nf4 可自行对比，选择随项目保存。
 
 ## 🆕 v0.10.17 更新重点
 

@@ -110,6 +110,8 @@ _MAIN_BTN_TIPS = {
 
 # GUI 显示 → 训练参数 optimizer 映射（resolve_optimizer 接受小写）
 _OPT_GUI_MAP = {"自动": "auto", "AdamW": "adamw", "Lion": "lion", "AdamW8bit": "adamw8bit"}
+# GUI 显示 → Krea2/FLUX.2 底模量化方式（auto=按显存档位自动选 fp8/int8）
+_QUANT_GUI_MAP = {"自动": "auto", "fp8": "fp8", "int8": "int8", "nf4": "nf4"}
 
 
 class Tooltip:
@@ -1579,8 +1581,13 @@ class App:
                 self.optimizer_var.set(_opt_gui)
             except Exception:
                 pass
+            _quant_gui = {v: k for k, v in _QUANT_GUI_MAP.items()}.get((p.get("quant_mode") or "auto"), "自动")
+            try:
+                self.quant_var.set(_quant_gui)
+            except Exception:
+                pass
             for k, v in p.items():
-                if k == "optimizer":
+                if k in ("optimizer", "quant_mode"):
                     continue
                 if k == "strong_bind":
                     try:
@@ -2588,6 +2595,22 @@ class App:
         self.optimizer_menu.pack(side="left", padx=(10, 0))
         ctk.CTkLabel(ow, text="（自动=按环境预检选 AdamW8bit 或降级；若报 bitsandbytes 崩溃，改选 AdamW/Lion）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
+        qw = ctk.CTkFrame(self.adv_body, fg_color="transparent"); qw.pack(anchor="w", pady=(6, 0))
+        ctk.CTkLabel(qw, text="量化方式（Krea2/FLUX.2）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        self.quant_var = tk.StringVar(value="自动")
+        try:
+            self.quant_var.trace_add("write", lambda *a: self._schedule_autosave())
+        except Exception:
+            pass
+        self.quant_menu = ctk.CTkOptionMenu(
+            qw, variable=self.quant_var,
+            values=["自动", "fp8", "int8", "nf4"], width=130, height=26,
+            fg_color=CARD2, button_color=CARD2, button_hover_color="#3a4150",
+            text_color=SUB, font=ui_font(FONT_HINT), dropdown_font=ui_font(FONT_HINT),
+            dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150")
+        self.quant_menu.pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(qw, text="（自动=16G 及以上 fp8、8~12G int8；fp8 为 musubi 官方/社区 16G 主流，int8 适合带宽紧张的低显存）",
+                     font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         self.global_frame = ctk.CTkFrame(self.adv_body, fg_color="transparent")
         self.global_frame.pack(fill="x", pady=(10, 0))
         ctk.CTkLabel(self.global_frame, text="附加全局提示词（可选，训练时自动加到标签最前面，不写入图片 txt）",
@@ -2730,6 +2753,7 @@ class App:
             "amd_mode": bool(self.amd_var.get()),
             "train_env": self.train_env_var.get().strip() or None,
             "optimizer": (_OPT_GUI_MAP.get(self.optimizer_var.get()) if hasattr(self, "optimizer_var") else "auto"),
+            "quant_mode": (_QUANT_GUI_MAP.get(self.quant_var.get()) if hasattr(self, "quant_var") else "auto"),
         }
 
     def _maybe_migrate_legacy_dataset(self, name):

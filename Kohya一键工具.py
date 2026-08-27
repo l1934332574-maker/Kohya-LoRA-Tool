@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.17"
+APP_VERSION = "0.10.18"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2360,7 +2360,8 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     # 底模已预量化（fp8/int8）时跳过工具侧量化，避免 musubi "already in fp8 format" 报错
     _flux2_int8 = not _safetensors_is_prequantized(files["dit"]) and (
         (str(params.get("quant_mode") or "auto").lower() == "int8") or (
-            str(params.get("quant_mode") or "auto").lower() == "auto" and vram_gb is not None and vram_gb < 16))
+            str(params.get("quant_mode") or "auto").lower() == "auto"
+            and vram_gb is not None and round(vram_gb) < 16))
     if _flux2_int8:
         cmd += ["--int8_base", "--int8_scaled", "--fp8_text_encoder"]
     elif fp8 and not _safetensors_is_prequantized(files["dit"]):
@@ -5758,10 +5759,14 @@ def _resolve_quant_mode(mvpy, logf, vram_gb, label="Krea2", requested="auto", al
         return "int8", "用户指定 int8（W8A8 对称量化）"
     # 本机实测（4070 8G, 512px, H2D-only swap24）：
     #   fp8 ≈138s/it → torch.compile ≈70s/it（2.0×）→ int8 ≈53s/it（2.6×）→ nf4(swap0) ≈97s/it
-    # 结论：8~16G 默认 int8（最快且无额外依赖）；NF4 因 bnb 反量化开销 + 与块交换冲突，仅显式指定时启用。
-    want_int8 = (req == "auto" and vram_gb is not None and vram_gb < 16)
+    # 结论：int8 的 2.6× 优势是在 8G + 大块交换的【带宽瓶颈】场景下测出的（int8 省带宽）。
+    # 16G 卡带宽不是瓶颈（PCIe gen4 x16 + GPU 满负荷），照搬社区 16G 主流 = fp8（musubi 官方
+    # 推荐路径，Tensor Core 效率高；SECourses 的 int8 快是因为他们自编译内核，无法照搬）。
+    # 故 <16G（取整）默认 int8，16G+ 默认 fp8；NF4 因 bnb 反量化开销 + 与块交换冲突，仅显式指定时启用。
+    _tier = round(vram_gb) if vram_gb is not None else None
+    want_int8 = (req == "auto" and _tier is not None and _tier < 16)
     if want_int8:
-        return "int8", "8~16G 档自动 int8（W8A8，实测比 fp8 快约 2.6×）"
+        return "int8", "8~12G 档自动 int8（W8A8，带宽瓶颈场景实测比 fp8 快约 2.6×）"
     if req == "nf4" and allow_nf4:
         if _ensure_musubi_bnb(mvpy, logf, label=label):
             ok, detail = _probe_nf4(mvpy, logf)
@@ -5771,7 +5776,7 @@ def _resolve_quant_mode(mvpy, logf, vram_gb, label="Krea2", requested="auto", al
         else:
             logf(f"[{label}] bitsandbytes 不可用，自动回退 fp8")
         return "fp8", "自动回退 fp8"
-    return "fp8", "显存充足/自动档保持 fp8"
+    return "fp8", "16G+/自动档 fp8（musubi 官方 + 社区 16G 主流，Tensor Core 效率高）"
 
 
 def _probe_lion(vpy, logf=print, timeout=180):
