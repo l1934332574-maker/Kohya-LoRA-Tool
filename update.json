@@ -2,5 +2,5 @@
   "version": "v0.10.18",
   "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.10.18/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.10.18：修复 16G 显卡（如 RTX 4080 SUPER）Krea2/FLUX.2 训练异常慢：16G 卡被检测为 15.6~15.9GB 误判成 12G 档、每步搬运 12 个模型块（实测 11~17s/it）；现按显存取整走 16-24G 档，回到社区正常速度。"
+  "notes": "v0.10.18：修复 Krea2/FLUX.2 16G 卡训练仍慢：16G 档默认量化照搬社区改 fp8（int8 只留 8~12G 带宽瓶颈档），新增高级参数「量化方式」下拉可自选 fp8/int8/nf4。"
 }
