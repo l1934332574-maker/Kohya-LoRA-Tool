@@ -228,6 +228,76 @@ def create_soft_shadow_card(parent, corner_radius=8, pad=10, offset=(1, 2),
     inner.bind("<Configure>", _layout)
     canvas.bind("<Configure>", _layout)
     return canvas, inner
+
+
+# ---------- 一键导出日志（反馈/求助时直接发这个 txt，含环境信息） ----------
+def _collect_env_lines():
+    """收集环境信息文本行（导出日志用；任一步失败不阻塞，只跳过该行）。"""
+    out = []
+    try:
+        out.append("操作系统: %s" % platform.platform())
+    except Exception:
+        pass
+    try:
+        _py, _ver = core.find_python()
+        out.append("检测到 Python: %s (%s)" % (_py, _ver or "?"))
+    except Exception:
+        pass
+    try:
+        _git = core.find_git()
+        out.append("Git: %s" % (_git or "未找到"))
+    except Exception:
+        pass
+    try:
+        _gi = core.detect_gpu_info()
+        out.append("显卡: %s（厂商 %s，显存 %sGB）" % (_gi.get("name") or "?", _gi.get("vendor") or "?", _gi.get("vram_gb") or "?"))
+    except Exception:
+        pass
+    try:
+        _r = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                            capture_output=True, text=True, timeout=6)
+        if _r.returncode == 0 and (_r.stdout or "").strip():
+            out.append("NVIDIA 驱动: %s" % _r.stdout.strip().splitlines()[0].strip())
+    except Exception:
+        pass
+    out.append("安装目录: %s" % core.KIT_DIR)
+    out.append("数据目录: %s" % core.data_dir())
+    try:
+        _st = core.system_status()
+        out.append("第一引擎(kohya): %s" % ("已安装" if _st.get("kohya_ok") else "未安装"))
+        out.append("第二引擎(musubi): %s" % ("已安装" if _st.get("musubi_ok") else "未安装"))
+        out.append("第三引擎(ai-toolkit): %s" % ("已安装" if _st.get("at_ok") else "未安装"))
+    except Exception:
+        pass
+    try:
+        _vpy = core.venv_python(core.get_kohya_dir())
+        if _vpy and os.path.isfile(_vpy):
+            out.append("训练环境 torch 后端: %s" % (core.detect_torch_backend(_vpy) or "无法检测"))
+    except Exception:
+        pass
+    return out
+
+
+def _export_log_text(log_text, project, env_lines=None):
+    """组装导出日志全文（纯函数，便于测试；env_lines 为空时自动收集环境信息）。"""
+    if env_lines is None:
+        env_lines = _collect_env_lines()
+    L = []
+    L.append("=" * 58)
+    L.append("Kohya-LoRA 一键训练工具 · 运行日志")
+    L.append("=" * 58)
+    L.append("导出时间: %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
+    L.append("软件版本: v%s" % core.APP_VERSION)
+    L.append("项目: %s" % (project or "（未打开项目）"))
+    L.append("")
+    L.append("【环境信息】")
+    L.extend(env_lines or [])
+    L.append("")
+    L.append("【运行日志】")
+    L.append(log_text if log_text else "（暂无日志）")
+    return "\n".join(L)
+
+
 class App:
     def __init__(self):
         self.q = queue.Queue()
@@ -449,6 +519,9 @@ class App:
         self.mon_step_var = tk.StringVar(value="步数 0 / 0（0%）")
         ctk.CTkLabel(self.mon_row1, textvariable=self.mon_step_var, font=ui_font(FONT_BODY),
                      text_color=SUB).pack(side="left", padx=(18, 0))
+        ctk.CTkButton(self.mon_row1, text="📤 导出日志", width=100, height=26, fg_color="transparent",
+                      hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
+                      corner_radius=6, font=ui_font(FONT_HINT), command=self.cmd_export_log).pack(side="right")
         self.mon_progress = ctk.CTkProgressBar(self.mon, height=10, corner_radius=5,
                                                fg_color="#2b303a", progress_color="#7AA2F7")
         self.mon_progress.set(0)
@@ -877,7 +950,12 @@ class App:
         logbar = ctk.CTkFrame(right, fg_color="#16181e", corner_radius=0)
         self.logbar_ref = logbar
         logbar.pack(fill="x", side="bottom", pady=(8, 0))
-        ctk.CTkLabel(logbar, text="运行日志", font=ui_font(FONT_TITLE), text_color=TITLE_C).pack(anchor="w", padx=26, pady=(8, 2))
+        log_hdr = ctk.CTkFrame(logbar, fg_color="transparent")
+        log_hdr.pack(fill="x", padx=26, pady=(8, 2))
+        ctk.CTkLabel(log_hdr, text="运行日志", font=ui_font(FONT_TITLE), text_color=TITLE_C).pack(side="left")
+        ctk.CTkButton(log_hdr, text="📤 导出日志", width=120, height=28, fg_color="transparent",
+                      hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
+                      corner_radius=6, font=ui_font(FONT_HINT), command=self.cmd_export_log).pack(side="right")
         self.log = ctk.CTkTextbox(logbar, height=150, fg_color="#14161c", text_color="#b6bcc9", corner_radius=6,
                                   border_width=1, border_color=BORDER, font=ui_font(FONT_LOG))
         self.log.pack(fill="x", padx=26, pady=(0, 14))
@@ -2168,6 +2246,69 @@ class App:
 
     def cmd_readme(self):
         self._show_help_window()
+
+    def cmd_export_log(self):
+        """一键导出运行日志 + 环境信息（反馈/求助时直接把 txt 发给维护者）。"""
+        log_text = ""
+        try:
+            log_text = self.log.get("1.0", "end").strip()
+        except Exception:
+            pass
+        project = (self.current_project or "").strip() or "tool"
+        self._log("[导出] 正在收集运行日志与环境信息…")
+        def work():
+            try:
+                text = _export_log_text(log_text, project)
+                fname = "KohyaLoRA_%s_%s.txt" % (
+                    re.sub(r'[\\/:*?"<>|\r\n\t ]+', "_", project)[:40] or "日志",
+                    time.strftime("%Y%m%d_%H%M%S"))
+                dest = None
+                try:
+                    _d = os.path.join(os.path.expanduser("~"), "Desktop", fname)
+                    with open(_d, "w", encoding="utf-8") as f:
+                        f.write(text)
+                    dest = _d
+                except Exception:
+                    _d = os.path.join(core.data_sub("logs"), fname)
+                    os.makedirs(os.path.dirname(_d), exist_ok=True)
+                    with open(_d, "w", encoding="utf-8") as f:
+                        f.write(text)
+                    dest = _d
+                self.root.after(0, lambda: self._log("[导出] 日志已导出：" + dest))
+                self.root.after(0, lambda: self._show_export_dialog(dest))
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror(core.APP_NAME, "导出日志失败：\n%s" % e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_export_dialog(self, dest):
+        """导出成功弹窗：打开文件 / 打开所在文件夹 / 复制路径。"""
+        try:
+            w = ctk.CTkToplevel(self.root)
+            w.title("导出日志")
+            w.geometry("620x235")
+            w.transient(self.root)
+            ctk.CTkLabel(w, text="✅ 运行日志已导出", font=ui_font(FONT_TITLE), text_color=TITLE_C).pack(anchor="w", padx=18, pady=(16, 4))
+            ctk.CTkLabel(w, text="把这个 txt 发给维护者 / 贴到评论区即可完整定位问题（已自动附带环境信息）。",
+                         font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w", padx=18)
+            var = tk.StringVar(value=dest)
+            ctk.CTkEntry(w, width=580, height=30, textvariable=var, state="readonly").pack(padx=18, pady=(10, 4))
+            btn_row = ctk.CTkFrame(w, fg_color="transparent"); btn_row.pack(fill="x", padx=18, pady=(4, 12))
+            ctk.CTkButton(btn_row, text="📄 打开文件", width=120, height=34, fg_color=ACC, hover_color=ACC_H,
+                          corner_radius=6, font=ui_font(FONT_BODY),
+                          command=lambda: os.startfile(dest)).pack(side="left")
+            ctk.CTkButton(btn_row, text="📂 打开所在文件夹", width=150, height=34, fg_color="transparent",
+                          hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
+                          corner_radius=6, font=ui_font(FONT_BODY),
+                          command=lambda: subprocess.Popen(["explorer", "/select," + dest])).pack(side="left", padx=(10, 0))
+            ctk.CTkButton(btn_row, text="📋 复制路径", width=110, height=34, fg_color="transparent",
+                          hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
+                          corner_radius=6, font=ui_font(FONT_BODY),
+                          command=lambda: (w.clipboard_clear(), w.clipboard_append(dest))).pack(side="left", padx=(10, 0))
+            ctk.CTkButton(btn_row, text="关闭", width=80, height=34, fg_color="transparent",
+                          hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
+                          corner_radius=6, font=ui_font(FONT_BODY), command=w.destroy).pack(side="right")
+        except Exception:
+            messagebox.showinfo(core.APP_NAME, "运行日志已导出：\n" + dest)
 
     def cmd_data_dir(self):
         """数据 / 引擎目录管理：查看占用，迁移到其他盘（解决 C 盘占用）。"""

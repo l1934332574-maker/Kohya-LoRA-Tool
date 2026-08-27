@@ -1,4 +1,29 @@
+## v0.10.16（2026-08-27）
+
+### 修复：Krea2/FLUX.2 开「训练中采样预览」后启动即崩（tokenizer 在线拉取 SSL 失败）
+- **背景**：用户 Krea2 人物 LoRA 训练（29 图）一键训练，latents/文本编码器缓存都正常，但训练一启动就报：
+  `HTTPSConnectionPool(host='huggingface.co' ... /Qwen/Qwen3-VL-4B-Instruct/resolve/main/tokenizer_config.json ... SSLCertVerificationError)`，训练直接退出码 1。
+- **根因**：v0.10.11 加采样预览后，训练命令带 `--sample_every_n_steps=100 + --text_encoder`，训练子进程加载文本编码器做采样提示词编码时需要 tokenizer。`train_krea2`/`train_flux2` 的**缓存步骤**都传了 `env=_k2env`（含 `KREA2_TOKENIZER_DIR` 本地 tokenizer + `HF_ENDPOINT=hf-mirror`），但**训练步骤的 run_stream 漏传 env** → 子进程读不到本地 tokenizer，回退在线拉 `Qwen/Qwen3-VL-4B-Instruct`，国内直连 HF 必崩。采样预览默认开启，所以 v0.10.11 之后该问题必现。
+- **已修**：`train_krea2`/`train_flux2` 训练命令补传 `env=_k2env`（与缓存步骤一致）；同时顺带修复 RDNA2 训练步骤漏传 `KREA2_FP16`（此前 fp16 只在缓存生效，训练仍是 bf16 → 潜在黑图）。
+- **验证**：新增 KREA2_TRAINING_ENV_PROPAGATION_OK 回归测试（4 处 run_stream 均传 env=_k2env），engine_install_smoke_test + smoke_test 全过。
+
+### 新增：一键导出日志（反馈/求助时把 txt 直接发给维护者）
+- **背景**：用户反馈问题常只贴半截日志 / B 站有字数限制 / 截图超大小，维护者来回追问环境信息成本高。
+- **已做**：
+  - 日志面板标题栏新增「📤 导出日志」按钮（训练监控栏也有同款小按钮，训练中随时可导）；
+  - 一键导出为 `KohyaLoRA_<项目>_<时间>.txt`（默认存桌面，桌面不可写自动落到数据目录 logs/），内容含：软件版本 / 项目 / 操作系统 / Python / Git / 显卡（厂商+显存）/ NVIDIA 驱动 / 安装目录 / 数据目录 / 三引擎安装状态 / 训练环境 torch 后端（cuda/rocm/cpu）+ 完整运行日志；
+  - 导出完成弹窗：打开文件 / 打开所在文件夹（定位到文件）/ 复制路径；
+  - 导出在后台线程执行（torch 后端检测不卡界面），失败不阻断。
+- **验证**：新增 EXPORT_LOG_OK（纯函数组装 + GUI 接线断言），engine_install_smoke_test + smoke_test 全过。
+
+### 修复：第三引擎（ai-toolkit）大模型下载走 Xet CDN 卡死（peer closed / read timed out）
+- **背景**：用户第三引擎训练（Qwen-Image/Z-Image），模型下载卡在 `Fetching 30 files`（57%→87% 反复重试 20+ 分钟），日志大量 `us.aws.cdn.hf.co/xet-bridge-us/... peer closed connection without sending complete message body` / `The read operation timed out`。
+- **根因**：huggingface_hub 的 `HF_HUB_DISABLE_XET` 是 **import 时读进常量**（constants.py）；ai-toolkit run.py 内部自己 spawn 的 snapshot_download 若没带上工具构造的 env，就会走 Xet CDN（AWS 海外），国内大文件下载极易断连/超时卡死。
+- **已修（根治）**：新增 `_ensure_venv_hf_sitecustomize()`——向三个训练环境（kohya venv / musubi-venv / ai_toolkit_venv）的 site-packages 注入 `sitecustomize.py`（Python 启动时在任何 import 前自动执行），强制 `HF_ENDPOINT=https://hf-mirror.com` + `HF_HUB_DISABLE_XET=1`。任何用该 venv 启动的进程/线程/子进程都被覆盖，不再可能走 Xet；幂等（已注入跳过），已有自定义 sitecustomize 追加不覆盖。五个训练入口（kohya / Krea2 / FLUX.2 / Qwen-Image·Z-Image / H3 视频）+ AMD 自定义环境均已接线。
+- **验证**：本地实测注入后 `constants.HF_HUB_DISABLE_XET = True`（Xet 关闭、走 hf-mirror）；新增 VENV_HF_SITECUSTOMIZE_OK（注入/幂等/追加不覆盖/5 入口接线），engine_install_smoke_test + smoke_test 全过。
+
 ## v0.10.15（2026-08-26）
+
 
 ### 修复：Krea2 Raw/Turbo 下载 403 根治——改走魔搭官方转存（免许可一键下载）
 - **背景**：v0.10.14 加入门禁引导后，Krea-2-Raw / Krea-2-Turbo 仍是 HuggingFace 门禁模型，hf-mirror 匿名直连必 401/403，用户仍需手动接受许可或配 HF_TOKEN。

@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.15"
+APP_VERSION = "0.10.16"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2027,6 +2027,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         raise RuntimeError("第二训练引擎未安装，请先在左侧点「②' 第二引擎(可选)」安装。\n" + detail)
     kdir = get_kohya_dir()
     mt_dir = os.path.join(kdir, "musubi-tuner")
+    _ensure_venv_hf_sitecustomize(os.path.dirname(os.path.dirname(mvpy)), logf)
     accel = _accelerate_launch_cmd(mvpy, logf=logf)
     if not _ensure_torchvision_deps(mvpy, logf, label="Krea2", cwd=mt_dir):
         raise RuntimeError("Krea2 引擎（第二引擎）venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第二引擎。")
@@ -2172,7 +2173,9 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
             else:
                 logf("[Krea2] 采样预览：每 100 步出一张预览图（输出目录）")
 
-    rc = run_stream(cmd, cwd=mt_dir, logf=logf, collect=_log_tail)
+    # 训练命令同样带 KREA2_TOKENIZER_DIR/HF_ENDPOINT/RDNA2 FP16 环境（缓存步骤已带；
+    # 采样预览加载文本编码器时必须用本地 tokenizer，否则国内直连 HF 拉 tokenizer 会 SSL 失败）
+    rc = run_stream(cmd, cwd=mt_dir, env=_k2env, logf=logf, collect=_log_tail)
     if rc != 0:
         _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError(f"Krea2 训练结束，退出码 {rc}，请查看上方日志")
@@ -2221,6 +2224,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         raise RuntimeError("第二训练引擎未安装，请先在左侧点「②' 第二引擎(可选)」安装。\n" + detail)
     kdir = get_kohya_dir()
     mt_dir = os.path.join(kdir, "musubi-tuner")
+    _ensure_venv_hf_sitecustomize(os.path.dirname(os.path.dirname(mvpy)), logf)
     # 自愈防线：musubi 版本过旧会以 float32 训练（300s/步），阻止并提示重装第二引擎
     _check_musubi_krea2_version(kdir, logf)
     accel = _accelerate_launch_cmd(mvpy, logf=logf)
@@ -2358,7 +2362,9 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
             else:
                 logf("[FLUX.2] 采样预览：每 100 步出一张预览图（输出目录）")
 
-    rc = run_stream(cmd, cwd=mt_dir, logf=logf, collect=_log_tail)
+    # 训练命令同样带 KREA2_TOKENIZER_DIR/HF_ENDPOINT/RDNA2 FP16 环境（缓存步骤已带；
+    # 采样预览加载文本编码器时必须用本地 tokenizer，否则国内直连 HF 拉 tokenizer 会 SSL 失败）
+    rc = run_stream(cmd, cwd=mt_dir, env=_k2env, logf=logf, collect=_log_tail)
     if rc != 0:
         _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError(f"FLUX.2 训练结束，退出码 {rc}，请查看上方日志")
@@ -3389,6 +3395,7 @@ def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from
         raise RuntimeError("第三训练引擎未安装，请点顶部「⚙ 安装第三引擎」安装。\n" + detail)
     kdir = get_kohya_dir()
     at_dir = _at_dirs()[1]
+    _ensure_venv_hf_sitecustomize(os.path.dirname(os.path.dirname(vpy)), logf)
     if not os.path.isfile(os.path.join(at_dir, "run.py")):
         raise RuntimeError("ai-toolkit 源码缺失，请重装第三引擎")
     if not _ensure_torchvision_deps(vpy, logf, label="第三引擎", cwd=at_dir):
@@ -3656,6 +3663,7 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
         raise RuntimeError("第三训练引擎未安装，请点顶部「⚙ 安装第三引擎」安装。\n" + detail)
     kdir = get_kohya_dir()
     at_dir = _at_dirs()[1]
+    _ensure_venv_hf_sitecustomize(os.path.dirname(os.path.dirname(vpy)), logf)
     if not os.path.isfile(os.path.join(at_dir, "run.py")):
         raise RuntimeError("ai-toolkit 源码缺失，请重装第三引擎")
     if not _ensure_torchvision_deps(vpy, logf, label="第三引擎", cwd=at_dir):
@@ -5974,11 +5982,13 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     vpy = venv_python(kdir)
     if not os.path.isfile(vpy):
         raise RuntimeError("Kohya 尚未安装，请先点击【一键安装】")
+    _ensure_venv_hf_sitecustomize(os.path.dirname(os.path.dirname(vpy)), logf)
     if amd_mode:
         _env_dir = (params.get("train_env") or "").strip()
         if _env_dir and os.path.isfile(os.path.join(_env_dir, "Scripts", "python.exe")):
             vpy = os.path.join(_env_dir, "Scripts", "python.exe")
             logf(f"[训练] AMD 兼容模式：使用自定义训练环境 {_env_dir}")
+            _ensure_venv_hf_sitecustomize(_env_dir, logf)
         _bk = detect_torch_backend(vpy)
         if _bk not in ("rocm", "zluda"):
             raise RuntimeError(
@@ -6862,6 +6872,50 @@ def find_flux_components(base_model):
     t5xxl = _pick_sibling(base_model, _t5)
     ae = _pick_sibling(base_model, _ae)
     return clip_l, t5xxl, ae
+
+
+def _ensure_venv_hf_sitecustomize(venv_dir, logf=print):
+    """向训练环境 site-packages 注入 sitecustomize.py：强制 hf-mirror + 禁用 HF Xet。
+
+    背景：huggingface_hub 的 HF_HUB_DISABLE_XET / HF_ENDPOINT 在 import 时读进常量
+    （constants.py: HF_HUB_DISABLE_XET = _is_true(os.environ.get(...))）。若某条下载路径
+    （如 ai-toolkit run.py 内部自己 spawn 的 snapshot_download）没带上工具构造的 env，
+    就会走 Xet CDN（us.aws.cdn.hf.co/xet-bridge-us）大文件下载，国内经常
+    "peer closed connection / read operation timed out" 卡死（Fetching 30 files 停在 ~60%）。
+    sitecustomize.py 会在 Python 启动、任何 import 之前自动执行：先设好 HF_ENDPOINT 与
+    HF_HUB_DISABLE_XET，再 import huggingface_hub 即生效——任何进程/线程/子进程都被覆盖。
+
+    幂等：已注入则跳过；已有自定义 sitecustomize 则追加不覆盖。
+    """
+    if not venv_dir or not os.path.isdir(venv_dir):
+        return False
+    sp = os.path.join(venv_dir, "Lib", "site-packages")
+    if not os.path.isdir(sp):
+        sp = os.path.join(venv_dir, "lib", "site-packages")
+    if not os.path.isdir(sp):
+        return False
+    target = os.path.join(sp, "sitecustomize.py")
+    marker = "KohyaLoRA_HF_MIRROR"
+    block = (
+        "# === %s ===\n"
+        "import os as _k2hf_os\n"
+        "_k2hf_os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')\n"
+        "_k2hf_os.environ.setdefault('HF_HUB_DISABLE_XET', '1')\n"
+        "# === /%s ===\n" % (marker, marker)
+    )
+    try:
+        exist = ""
+        if os.path.isfile(target):
+            exist = open(target, encoding="utf-8", errors="ignore").read()
+            if marker in exist:
+                return True
+        with open(target, "w", encoding="utf-8") as f:
+            f.write((exist.rstrip() + "\n" + block) if exist else block)
+        logf(f"[环境] 已注入训练环境 HF 国内镜像/禁用 Xet 配置（{venv_dir}）")
+        return True
+    except Exception as e:
+        logf(f"[环境] HF 镜像注入失败（忽略，仍用进程级 env 兜底）: {e}")
+        return False
 
 
 def _hf_download(repo, local_dir, logf=print, allow_patterns=None, vpy=None):

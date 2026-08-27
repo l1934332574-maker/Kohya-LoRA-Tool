@@ -1585,6 +1585,68 @@ def test_gated_download_guidance(base: Path):
     print("GATED_DOWNLOAD_GUIDANCE_OK")
 
 
+def test_venv_hf_sitecustomize(base: Path):
+    """训练环境注入 sitecustomize.py：强制 hf-mirror + 禁用 Xet（幂等、不覆盖用户自定义）。"""
+    venv = base / "venv"
+    sp = venv / "Lib" / "site-packages"
+    sp.mkdir(parents=True, exist_ok=True)
+    logs = []
+    assert core._ensure_venv_hf_sitecustomize(str(venv), logs.append) is True
+    t = sp / "sitecustomize.py"
+    content = t.read_text(encoding="utf-8")
+    assert "KohyaLoRA_HF_MIRROR" in content
+    assert "HF_ENDPOINT" in content and "hf-mirror.com" in content
+    assert "HF_HUB_DISABLE_XET" in content
+    # 幂等：二次调用不重复写
+    first = content
+    core._ensure_venv_hf_sitecustomize(str(venv), logs.append)
+    assert t.read_text(encoding="utf-8") == first
+    # 已有自定义 sitecustomize → 追加不覆盖
+    t.write_text("# user custom\nimport sys\n", encoding="utf-8")
+    core._ensure_venv_hf_sitecustomize(str(venv), logs.append)
+    merged = t.read_text(encoding="utf-8")
+    assert "# user custom" in merged and "import sys" in merged and "KohyaLoRA_HF_MIRROR" in merged
+    # 五个训练入口都接线了
+    src_main = Path(core.__file__).read_text(encoding="utf-8-sig")
+    assert src_main.count("_ensure_venv_hf_sitecustomize(") >= 7  # helper def + 5 train + amd 分支
+    print("VENV_HF_SITECUSTOMIZE_OK")
+
+
+def test_export_log(base: Path):
+    """一键导出日志：纯函数组装含版本/环境/日志内容 + GUI 按钮/弹窗接线。"""
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    assert "cmd_export_log" in g and "_show_export_dialog" in g
+    assert "_export_log_text" in g and "_collect_env_lines" in g
+    assert "导出日志" in g and "explorer" in g
+    import kohya_gui as gui
+    env = ["操作系统: Windows-11", "显卡: NVIDIA RTX 4060（厂商 nvidia，显存 8GB）",
+           "第一引擎(kohya): 已安装", "第二引擎(musubi): 已安装", "第三引擎(ai-toolkit): 未安装"]
+    text = gui._export_log_text("step 1/10 loss=0.5", "testproj", env_lines=env)
+    assert "Kohya-LoRA 一键训练工具" in text
+    assert "软件版本: v" in text and "项目: testproj" in text
+    assert "操作系统: Windows-11" in text and "NVIDIA RTX 4060" in text
+    assert "step 1/10 loss=0.5" in text
+    # 无日志时给占位提示
+    text2 = gui._export_log_text("", "p2", env_lines=[])
+    assert "（暂无日志）" in text2
+    print("EXPORT_LOG_OK")
+
+
+def test_krea2_training_env_propagation(base: Path):
+    """Krea2/FLUX.2 训练命令必须带 KREA2_TOKENIZER_DIR 环境（采样加载文本编码器用本地 tokenizer）。
+
+    背景：v0.10.11 加采样预览后，训练命令带 --sample_every_n_steps + --text_encoder，
+    训练子进程加载文本编码器时 musubi 会拉 Qwen3-VL-4B tokenizer；若 KREA2_TOKENIZER_DIR
+    只传给缓存步骤而漏传给训练步骤，国内直连 huggingface.co 会 SSL 失败 → 训练秒崩。
+    """
+    src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    # krea2 缓存 TE + 训练 + flux2 缓存 TE + 训练：4 处 run_stream 都要传 _k2env
+    assert src.count("env=_k2env") == 4, "krea2/flux2 缓存+训练 4 处 run_stream 都应传 env=_k2env"
+    assert src.count('_k2env["KREA2_TOKENIZER_DIR"]') == 2
+    assert src.count("run_stream(cmd, cwd=mt_dir, env=_k2env, logf=logf, collect=_log_tail)") == 2
+    print("KREA2_TRAINING_ENV_PROPAGATION_OK")
+
+
 def test_krea2_modelscope_mirror(base: Path):
     """Krea2 Raw/Turbo 已改走魔搭官方转存（免许可直链），文件名与识别逻辑不变。"""
     links = core.KREA2_MODEL_LINKS
@@ -1649,6 +1711,9 @@ def main():
         test_sample_preview(base)
         test_gated_download_guidance(base)
         test_krea2_modelscope_mirror(base)
+        test_krea2_training_env_propagation(base)
+        test_export_log(base)
+        test_venv_hf_sitecustomize(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

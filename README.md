@@ -4,13 +4,14 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.10.15** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.10.16** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
 ---
 
 - **Krea2 Raw/Turbo 下载 403 根治**：改走魔搭官方转存直链，免许可、免代理一键下载（原为 HuggingFace 门禁模型，hf-mirror 匿名必 401/403）。
+- **修复 Krea2/FLUX.2 开采样预览训练秒崩**：训练子进程漏传本地 tokenizer/hf-mirror 环境，采样加载文本编码器时在线拉 HF tokenizer 失败；已与缓存步骤一致化，顺带修复 RDNA2 训练漏传 fp16。
 - **修复「人物模式 + 正则数据集」训练必崩**：`is_reg` 写错 TOML 层级（应写在子集层），现按 sd-scripts schema 修正。
 - **修复失败误诊**：训练失败不再被误报为 bitsandbytes 8-bit 问题，优先报告真实原因（配置校验 / OOM / 优化器）。
 - **RDNA2（RX 6000）Anima 训练加官方 `--no_half_vae`**：VAE 全程 fp32（含缓存阶段），根治 latent NaN / 第一步 loss=nan。
@@ -35,6 +36,12 @@
 - **FLUX 模型下载改走魔搭国内直链**：DiT / CLIP-L / T5-XXL / AE 全部国内 CDN 直连、支持断点续传，不再直连 HuggingFace（避免 SSL 失败）。
 
 - **修复繁体/英文系统下 Krea2 缓存 latents 打印中文崩溃**：所有子进程默认强制 UTF-8 输出，不再 UnicodeEncodeError。
+
+## 🆕 v0.10.16 更新重点
+
+- **新增「一键导出日志」**：日志面板/训练监控一键导出 `KohyaLoRA_<项目>_<时间>.txt`（桌面），自动附带软件版本、操作系统、显卡/驱动、Python/Git、三引擎状态、torch 后端等环境信息 + 完整运行日志；出问题直接把 txt 发给维护者即可定位，不用再截图/手抄半截日志。
+- **修复第三引擎模型下载卡死（Xet CDN）**：向三个训练环境注入 sitecustomize，强制走 hf-mirror + 禁用 HF Xet（大文件下载不再 peer closed / 超时卡在 Fetching files）。
+- **修复 Krea2/FLUX.2 开「训练中采样预览」训练秒崩**：采样加载文本编码器时 tokenizer 走了在线拉取（国内直连 HF SSL 失败）；现训练子进程与缓存步骤一致使用本地 tokenizer + hf-mirror，顺带修复 RDNA2 训练步骤漏传 fp16。
 
 ## 🆕 v0.10.15 更新重点
 
