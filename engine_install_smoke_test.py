@@ -907,12 +907,13 @@ def test_swap_tier_resolution(base):
     # Krea2
     assert core._resolve_krea2_swap(8) == (24, True)
     assert core._resolve_krea2_swap(12) == (12, True)
-    assert core._resolve_krea2_swap(15.67) == (6, True)     # 4080S 16G：修复核心
-    assert core._resolve_krea2_swap(16) == (6, True)
-    assert core._resolve_krea2_swap(20) == (6, False)   # 20G 与旧行为一致，H2D-only 关闭
+    assert core._resolve_krea2_swap(15.67) == (10, True)    # 4080S 16G：swap=10 留显存余量防换页卡死
+    assert core._resolve_krea2_swap(16) == (10, True)
+    assert core._resolve_krea2_swap(18) == (10, False)   # 18G>16，H2D-only 关闭（与旧行为一致）
+    assert core._resolve_krea2_swap(20) == (6, False)       # 20G 档 swap=6，H2D-only 关闭（与旧行为一致）
     assert core._resolve_krea2_swap(24) == (2, False)
     assert core._resolve_krea2_swap(None) == (24, True)
-    assert core._resolve_krea2_swap(15.67, gc_on=False) == (6, False)
+    assert core._resolve_krea2_swap(15.67, gc_on=False) == (10, False)
     # FLUX.2
     assert core._resolve_flux2_swap(8) == (10, True)
     assert core._resolve_flux2_swap(12) == (6, True)

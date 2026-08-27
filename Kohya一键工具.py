@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.18"
+APP_VERSION = "0.10.19"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2029,8 +2029,11 @@ def _resolve_krea2_swap(vram_gb, gc_on=True):
         swap = 24          # 8G 档接近上限（Krea2 上限 26），减少 GPU 驻留块
     elif tier < 16:
         swap = 12          # 12G 档
+    elif tier < 20:
+        swap = 10          # 16G 档：12.9B 模型 int8/fp8 权重 ~12.9GB，22 块驻留会顶满 16G 触发换页卡死
+                           # （4080S 实测 15.5/16GB、64~176s/it 且越来越慢）；swap=10 留足余量保证稳定
     elif tier < 24:
-        swap = 6           # 16-24G 档
+        swap = 6           # 20-24G 档
     swap = min(swap, 26)   # Krea2 上限 26
     h2d_only = swap > 0 and (tier is None or tier <= 16) and gc_on
     return swap, h2d_only
@@ -2145,6 +2148,11 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         fp8 = False
     logf(f"[Krea2] 量化: {_quant}（{_quant_detail}）")
     swap, h2d_only = _resolve_krea2_swap(vram_gb, gc_on)
+    _manual_swap = str(params.get("blocks_to_swap") or "").strip()
+    if _manual_swap.isdigit():
+        swap = min(int(_manual_swap), 26)
+        h2d_only = swap > 0 and gc_on
+        logf(f"[Krea2] 高级参数手动指定 blocks_to_swap={swap}")
     # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
     per_epoch = int(params.get("repeats", 5)) * count_images(train_dir)
     if per_epoch * epochs > KREA2_MAX_STEPS:
@@ -2189,12 +2197,16 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         cmd += ["--blocks_to_swap", str(swap)]
     if h2d_only:
         # 不用 --use_pinned_memory_for_block_swap：8G 低显存实测 pin_memory OOM（2026-08-22 本机验证）
+        # 16G+ 显存余量足够：pinned memory 加速块交换搬运（musubi 官方实测更快），16G 档开启
+        use_pinned = vram_gb is not None and vram_gb >= 15.5
         cmd += ["--block_swap_h2d_only", "--block_swap_ring_size", "2"]
+        if use_pinned:
+            cmd += ["--use_pinned_memory_for_block_swap"]
     if gc_on:
         cmd += ["--gradient_checkpointing"]
     logf(f"[Krea2] 底模(RAW): {files['raw']}")
     logf(f"[Krea2] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 5)}")
-    logf(f"[Krea2] 量化={_quant} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 梯度检查点={'开' if gc_on else '关'} | torch.compile={'开' if _k2_compile else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
+    logf(f"[Krea2] 量化={_quant} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 搬运加速(pinned)={'开' if (h2d_only and vram_gb is not None and vram_gb >= 15.5) else '关'} | 梯度检查点={'开' if gc_on else '关'} | torch.compile={'开' if _k2_compile else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
     # 训练中采样出图预览（musubi 原生 --sample_every_n_steps + --sample_prompts；低显存只警告不硬关）
     if _sample_preview_enabled(params, vram_gb):
         _sp = _write_sample_prompts(output_name, params, mode)
@@ -2327,6 +2339,11 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     # 显存适配：fp8（DiT+文本编码器）+ blocks_to_swap（klein-4b 上限 13）
     fp8 = vram_gb is None or vram_gb < 24
     swap, h2d_only = _resolve_flux2_swap(vram_gb, gc_on)
+    _manual_swap = str(params.get("blocks_to_swap") or "").strip()
+    if _manual_swap.isdigit():
+        swap = min(int(_manual_swap), 13)
+        h2d_only = swap > 0 and gc_on
+        logf(f"[FLUX.2] 高级参数手动指定 blocks_to_swap={swap}")
     # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
     per_epoch = int(params.get("repeats", 2)) * count_images(train_dir)
     if per_epoch * epochs > FLUX2_MAX_STEPS:
@@ -2370,12 +2387,16 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         cmd += ["--blocks_to_swap", str(swap)]
     if h2d_only:
         # 不用 --use_pinned_memory_for_block_swap：8G 低显存实测 pin_memory OOM（2026-08-22 本机验证）
+        # 16G+ 显存余量足够：pinned memory 加速块交换搬运（musubi 官方实测更快），16G 档开启
+        use_pinned = vram_gb is not None and vram_gb >= 15.5
         cmd += ["--block_swap_h2d_only", "--block_swap_ring_size", "2"]
+        if use_pinned:
+            cmd += ["--use_pinned_memory_for_block_swap"]
     if gc_on:
         cmd += ["--gradient_checkpointing"]
     logf(f"[FLUX.2] 底模: {files['dit']}")
     logf(f"[FLUX.2] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 2)}")
-    logf(f"[FLUX.2] 量化={'int8' if _flux2_int8 else 'fp8'} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 梯度检查点={'开' if gc_on else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
+    logf(f"[FLUX.2] 量化={'int8' if _flux2_int8 else 'fp8'} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 搬运加速(pinned)={'开' if (h2d_only and vram_gb is not None and vram_gb >= 15.5) else '关'} | 梯度检查点={'开' if gc_on else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
     # 训练中采样出图预览（musubi 原生 --sample_every_n_steps + --sample_prompts；低显存只警告不硬关）
     if _sample_preview_enabled(params, vram_gb):
         _sp = _write_sample_prompts(output_name, params, mode)
