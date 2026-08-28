@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.11.1"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2274,6 +2274,8 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
             cmd += ["--sample_every_n_steps=100", f"--sample_prompts={_sp}", "--text_encoder", files["te"]]
             if vram_gb is not None and vram_gb < 10:
                 logf("[Krea2] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
+            elif vram_gb is not None and vram_gb <= 16.5:
+                logf("[Krea2] ⚠ 16G 显存开采样预览：每 100 步采样会残留显存、训练越跑越慢（4080S 实测 13.9→54s/it）；强烈建议取消勾选「训练中采样预览」")
             else:
                 logf("[Krea2] 采样预览：每 100 步出一张预览图（输出目录）")
 
@@ -2465,6 +2467,8 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
             cmd += ["--sample_every_n_steps=100", f"--sample_prompts={_sp}"]
             if vram_gb is not None and vram_gb < 10:
                 logf("[FLUX.2] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
+            elif vram_gb is not None and vram_gb <= 16.5:
+                logf("[FLUX.2] ⚠ 16G 显存开采样预览：每 100 步采样会残留显存、训练越跑越慢（4080S 实测 13.9→54s/it）；强烈建议取消勾选「训练中采样预览」")
             else:
                 logf("[FLUX.2] 采样预览：每 100 步出一张预览图（输出目录）")
 
@@ -6167,11 +6171,17 @@ def _write_sample_prompts(output_name, params, mode):
 
 
 def _sample_preview_enabled(params, vram_gb):
-    """采样预览开关：以用户勾选为准（默认开）。
+    """采样预览开关：以用户勾选为准（20G+ 默认开；16G 档默认关）。
 
     低显存（<10G）不再硬关，只由训练函数打印 OOM 警告——
     8G 卡在 512/768 + block swap 下通常能扛住采样，扛不住用户取消勾选即可。
+
+    16G 档（<=16.5G）跑 Krea2/FLUX.2（模型本身 ~13GB 占满显存）时，每 N 步采样会加载
+    文本编码器出图，采样后残留显存 → 后续训练换页、越跑越慢（4080S 实测第 100 步后
+    13.9→54s/it，2026-08-28）。故 16G 档默认关；用户可手动勾选开启，接受变慢。
     """
+    if vram_gb is not None and vram_gb <= 16.5:
+        return bool(params.get("sample_preview", False))
     return bool(params.get("sample_preview", True))
 
 def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, resume_from=None, progress=None):

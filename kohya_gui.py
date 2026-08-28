@@ -1616,8 +1616,12 @@ class App:
                 self.swap_var.set(_swap_gui if str(_swap_gui).isdigit() else "自动")
             except Exception:
                 pass
+            try:
+                self.compile_var.set(bool(p.get("compile")))
+            except Exception:
+                pass
             for k, v in p.items():
-                if k in ("optimizer", "quant_mode", "blocks_to_swap"):
+                if k in ("optimizer", "quant_mode", "blocks_to_swap", "compile"):
                     continue
                 if k == "strong_bind":
                     try:
@@ -2690,7 +2694,19 @@ class App:
             text_color=SUB, font=ui_font(FONT_HINT), dropdown_font=ui_font(FONT_HINT),
             dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150")
         self.swap_menu.pack(side="left", padx=(10, 0))
-        ctk.CTkLabel(bw, text="（自动=16G 用 10 留显存余量防换页卡死；块越少越快但越吃显存，跑稳后可手动往下调试速度）",
+        ctk.CTkLabel(bw, text="（自动=按显存档位；块越少越快但越吃显存，跑稳后可手动往下调试速度）",
+                     font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
+        cc = ctk.CTkFrame(self.adv_body, fg_color="transparent"); cc.pack(anchor="w", pady=(4, 0))
+        self.compile_var = tk.BooleanVar(value=False)
+        try:
+            self.compile_var.trace_add("write", lambda *a: self._schedule_autosave())
+        except Exception:
+            pass
+        self.chk_compile = ctk.CTkCheckBox(cc, text="torch.compile 加速（实验性，Krea2/FLUX.2）",
+                                           variable=self.compile_var, fg_color=ACC, hover_color=ACC_H,
+                                           text_color=TXT, font=ui_font(FONT_HINT))
+        self.chk_compile.pack(side="left")
+        ctk.CTkLabel(cc, text="（musubi 编译 28 个块提速；16G 卡建议配合关闭采样预览；Windows 下可能编译失败，慎开）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         self.global_frame = ctk.CTkFrame(self.adv_body, fg_color="transparent")
         self.global_frame.pack(fill="x", pady=(10, 0))
@@ -2836,6 +2852,7 @@ class App:
             "optimizer": (_OPT_GUI_MAP.get(self.optimizer_var.get()) if hasattr(self, "optimizer_var") else "auto"),
             "quant_mode": (_QUANT_GUI_MAP.get(self.quant_var.get()) if hasattr(self, "quant_var") else "auto"),
             "blocks_to_swap": (self.swap_var.get() if (hasattr(self, "swap_var") and str(self.swap_var.get()).isdigit()) else ""),
+            "compile": ("1" if (hasattr(self, "compile_var") and self.compile_var.get()) else ""),
         }
 
     def _maybe_migrate_legacy_dataset(self, name):

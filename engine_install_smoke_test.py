@@ -898,6 +898,17 @@ def test_main_engine_accel_always_defined(base: Path):
 
 
 
+def test_sample_preview_16g_default_off(base):
+    """16G 档采样预览默认关（Krea2/FLUX.2 显存紧，采样残留显存导致越跑越慢）；20G+ 默认开；显式开启被尊重。"""
+    assert core._sample_preview_enabled({}, 16) is False, "16G 默认关"
+    assert core._sample_preview_enabled({}, 15.67) is False, "4080S 16G 默认关"
+    assert core._sample_preview_enabled({}, 24) is True, "24G 默认开"
+    assert core._sample_preview_enabled({}, None) is True, "未知显存默认开（兼容旧行为）"
+    assert core._sample_preview_enabled({"sample_preview": True}, 16) is True, "用户显式开启被尊重"
+    assert core._sample_preview_enabled({"sample_preview": False}, 24) is False, "用户显式关闭被尊重"
+    print("SAMPLE_PREVIEW_16G_DEFAULT_OFF_OK")
+
+
 def test_preset_for_fallback(base):
     """preset_for：底模类型与模式不匹配（style+flux2）时回退默认档，不抛 KeyError（UI 卡死 bug 修复）。"""
     import io as _io
@@ -1832,6 +1843,7 @@ def main():
         test_safetensors_complete_check(base)
         test_at_image_ms_parse_skips_dirs(base)
         test_preset_for_fallback(base)
+        test_sample_preview_16g_default_off(base)
         test_musubi_quant_patch(base)
         test_accelerate_cpu_config_self_heal(base)
         test_anima_vae_fp32_patch(base)
