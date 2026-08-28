@@ -1,6 +1,6 @@
 {
-  "version": "v0.10.21",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.10.21/Setup.exe",
+  "version": "v0.11.0",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.11.0/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.10.21：修复 Z-Image/Qwen-Image 魔搭下载把目录当文件下（WinError 183），现正常断点续传下载 16GB 模型。"
+  "notes": "v0.11.0：界面重做——侧边栏引擎导航（第一/第二/第三引擎分组、模式按钮高亮切换）；修复模式切换 UI 卡死；修复 Z-Image 魔搭下载 WinError 183。"
 }

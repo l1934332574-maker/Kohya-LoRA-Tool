@@ -898,6 +898,22 @@ def test_main_engine_accel_always_defined(base: Path):
 
 
 
+def test_preset_for_fallback(base):
+    """preset_for：底模类型与模式不匹配（style+flux2）时回退默认档，不抛 KeyError（UI 卡死 bug 修复）。"""
+    import io as _io
+    assert core.preset_for("style", "sd15").get("rank"), "正常档"
+    p = core.preset_for("style", "flux2")     # style 无 flux2 档 → 回退 sd15，不崩
+    assert p.get("rank") and p == core.preset_for("style", "sd15"), p
+    assert core.preset_for("krea2", "flux2").get("rank"), "krea2 也无 flux2 档应回退"
+    assert core.preset_for("nope", "x") == {}, "未知模式返回空"
+    # 引擎导航覆盖全部 MODE_KEYS（GUI 常量，从源文件断言）
+    gsrc = _io.open(ROOT / "kohya_gui.py", encoding="utf-8").read()
+    assert "ENGINE_GROUPS" in gsrc and "SHORT_MODE_LABELS" in gsrc
+    for mk in core.MODE_KEYS:
+        assert ('"%s"' % mk) in gsrc, "引擎导航缺少模式 " + mk
+    print("PRESET_FOR_FALLBACK_OK")
+
+
 def test_at_image_ms_parse_skips_dirs(base):
     """_parse_at_image_ms_files：只取文件（Type=blob），跳过目录（Type=tree）与非必要文件。"""
     d = {"Data": {"Files": [
@@ -1815,6 +1831,7 @@ def main():
         test_modelscope_mirror_urls(base)
         test_safetensors_complete_check(base)
         test_at_image_ms_parse_skips_dirs(base)
+        test_preset_for_fallback(base)
         test_musubi_quant_patch(base)
         test_accelerate_cpu_config_self_heal(base)
         test_anima_vae_fp32_patch(base)

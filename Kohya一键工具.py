@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.21"
+APP_VERSION = "0.11.0"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2012,6 +2012,18 @@ def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
         except Exception:
             pass
     return _tk_dir
+
+
+def preset_for(mode, base_type):
+    """取模式预设；底模类型与模式不匹配（如 style+flux2，2026-08-28 UI 卡死 bug 根因）时
+    回退该模式默认档，避免 KeyError 中断界面刷新。"""
+    pres = PRESETS.get(mode) or {}
+    if base_type in pres:
+        return pres[base_type]
+    for _k in ("sd15", "sdxl", "flux", "anima"):
+        if _k in pres:
+            return pres[_k]
+    return {}
 
 
 def _resolve_krea2_swap(vram_gb, gc_on=True):

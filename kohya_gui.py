@@ -112,6 +112,16 @@ _MAIN_BTN_TIPS = {
 _OPT_GUI_MAP = {"自动": "auto", "AdamW": "adamw", "Lion": "lion", "AdamW8bit": "adamw8bit"}
 # GUI 显示 → Krea2/FLUX.2 底模量化方式（auto=按显存档位自动选 fp8/int8）
 _QUANT_GUI_MAP = {"自动": "auto", "fp8": "fp8", "int8": "int8", "nf4": "nf4"}
+# 方案A：侧边栏引擎导航（引擎 → 模式；模式选择替代顶部训练模式下拉）
+ENGINE_GROUPS = [
+    ("第一引擎 · kohya", ("style", "character")),
+    ("第二引擎 · musubi", ("krea2", "flux2")),
+    ("第三引擎 · ai-toolkit", ("video", "qwen_image", "zimage")),
+]
+SHORT_MODE_LABELS = {
+    "style": "画风", "character": "人物", "krea2": "Krea2", "flux2": "FLUX.2",
+    "video": "视频H3", "qwen_image": "Qwen", "zimage": "Z-Image",
+}
 
 
 class Tooltip:
@@ -718,6 +728,21 @@ class App:
         logo.pack(fill="x", padx=16, pady=(20, 12))
         ctk.CTkFrame(logo, width=26, height=26, fg_color="#4a5568", corner_radius=5).pack(side="left")
         ctk.CTkLabel(logo, text="Kohya-LoRA", font=ui_font(FONT_BODY), text_color=TXT).pack(side="left", padx=(9, 0))
+        # 方案A：引擎导航（模式一级入口，替代顶部训练模式下拉）
+        self.engine_nav = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.engine_nav.pack(fill="x", padx=10, pady=(10, 2))
+        self._nav_mode_btns = {}
+        for _gi, (_gname, _modes) in enumerate(ENGINE_GROUPS):
+            ctk.CTkLabel(self.engine_nav, text="▍" + _gname, font=ui_font(FONT_HINT),
+                         text_color=SUB, anchor="w").pack(fill="x", padx=(2, 0), pady=(8 if _gi else 0, 2))
+            _rf = ctk.CTkFrame(self.engine_nav, fg_color="transparent"); _rf.pack(fill="x")
+            for _mk in _modes:
+                _btn = ctk.CTkButton(_rf, text=SHORT_MODE_LABELS.get(_mk, _mk), width=64, height=26,
+                                     fg_color=CARD2, hover_color="#3a4150", corner_radius=6,
+                                     font=ui_font(FONT_HINT), text_color=TXT,
+                                     command=lambda m=_mk: self._nav_select_mode(m))
+                _btn.pack(side="left", padx=(2, 4), pady=2)
+                self._nav_mode_btns[_mk] = _btn
         self._guide_dots = {}
         self._guide_btns = {}
         self._guide_vars = {}
@@ -775,13 +800,13 @@ class App:
         self.badge_frame = st
 
         row2 = ctk.CTkFrame(top, fg_color="transparent"); row2.pack(fill="x", pady=(10, 0))
-        ctk.CTkLabel(row2, text="训练模式", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
+        # 训练模式改由侧边栏「引擎导航」选择（方案A）；下拉保留供程序内部同步、不再显示
         self.mode_combo = ctk.CTkComboBox(row2, values=[core.MODE_LABELS[k] for k in core.MODE_KEYS], width=180, height=30,
                                           fg_color=CARD2, border_color=BORDER, button_color=CARD2, button_hover_color="#3a4150",
                                           text_color=TXT, font=ui_font(FONT_BODY), dropdown_font=ui_font(FONT_BODY),
                                           dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150",
                                           command=lambda _e: self._on_mode_change())
-        self.mode_combo.pack(side="left", padx=(10, 22))
+        # 不 pack：隐藏（侧边栏导航是唯一入口）
         self.base_label = ctk.CTkLabel(row2, text="基础底模", font=ui_font(FONT_BODY), text_color=SUB)
         self.base_label.pack(side="left")
         self.base_combo = ctk.CTkComboBox(row2, values=[], width=200, height=30,
@@ -1870,7 +1895,7 @@ class App:
 
     def _refresh_preset_summary(self):
         try:
-            pre = core.PRESETS[self.mode][self.base_type]
+            pre = core.preset_for(self.mode, self.base_type)
             te = "仅UNet" if self.unet_only_var.get() else "UNet+文本编码器"
             if self.mode == "video":
                 self.preset_summary.configure(
@@ -1888,7 +1913,7 @@ class App:
     def _apply_presets(self):
         self._applying_preset = True
         try:
-            pre = core.PRESETS[self.mode][self.base_type]
+            pre = core.preset_for(self.mode, self.base_type)
             for k, v in pre.items():
                 if k not in self._manual_override:
                     self.param_vars.setdefault(k, tk.StringVar()).set(v)
@@ -1916,8 +1941,42 @@ class App:
             pass
         self._schedule_autosave()
 
+    def _nav_select_mode(self, mk):
+        """方案A：侧边栏引擎导航点击模式 → 同步下拉并走统一切换流程。"""
+        if mk not in core.MODE_KEYS:
+            return
+        try:
+            self.mode_combo.set(core.MODE_LABELS[mk])
+        except Exception:
+            pass
+        self._on_mode_change()
+        self._refresh_nav_highlight()
+
+    def _refresh_nav_highlight(self):
+        """高亮当前模式对应的导航按钮。"""
+        cur = getattr(self, "mode", None)
+        for _mk, _btn in getattr(self, "_nav_mode_btns", {}).items():
+            try:
+                if _mk == cur:
+                    _btn.configure(fg_color=ACC, text_color="#ffffff", hover_color=ACC_H)
+                else:
+                    _btn.configure(fg_color=CARD2, text_color=TXT, hover_color="#3a4150")
+            except Exception:
+                pass
+
     def _on_mode_change(self):
         self.mode = self._current_mode()
+        # 模式切换：底模类型与新模式不匹配（如 style+flux2）→ 回该模式默认档，避免预设查表 KeyError 卡死界面
+        try:
+            _pres = core.PRESETS.get(self.mode) or {}
+            if self.base_type not in _pres and _pres:
+                self._set_base_type("sd15")
+                try:
+                    self.base_combo.set(core.BASE_TYPE_LABELS.get("sd15", "SD1.5"))
+                except Exception:
+                    pass
+        except Exception:
+            pass
         self._apply_presets()
         self._update_mode_ui()
         try:
@@ -1927,6 +1986,7 @@ class App:
         self._schedule_autosave()
 
     def _update_mode_ui(self):
+        self._refresh_nav_highlight()
         try:
             self.home_title.configure(text=core.MODE_LABELS.get(self.mode, self.mode) + " 训练")
         except Exception:
