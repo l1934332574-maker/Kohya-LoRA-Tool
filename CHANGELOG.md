@@ -1,3 +1,17 @@
+## v0.11.3（2026-08-28）
+
+### 修复：AI 图像（Qwen-Image/Z-Image）训练慢 —— low_vram 显存感知
+- **背景**：A6000 48G 用户跑 Qwen-Image 20B（第三引擎 ai-toolkit）1024px，全程 **9.76s/it**（2000 步 ≈ 5.5 小时）。日志 yaml 里 `low_vram: true` 被写死，48G 卡也被强制「模型放 CPU、每步搬显存」。
+- **根因**：`write_at_image_yaml` 硬编码 `low_vram: true` + `qfloat8`，不看显存；且第三引擎 venv 缺 Triton，torchao 量化矩阵内核走慢速回退。
+- **已修**：
+  1. `low_vram` 按显存自动判断（Qwen-Image 20B 需 ≥28G、Z-Image 8B 需 ≥14G 才关）——高显存全驻留提速，低显存保持官方默认省显存；
+  2. 第三引擎缺 Triton 自动补装 triton-windows（阿里云/清华国内镜像，装不上只警告不中断）。
+- **验证**：AT_IMAGE_LOW_VRAM_VRAM_AWARE_OK / THIRD_ENGINE_TRITON_AND_LAPTOP_WARNING_OK，engine_install_smoke_test + smoke_test 全过。
+
+### 新增：笔记本低显存跑重型模型强警告
+- **背景**：本机 4070 Laptop 8G 跑 Krea2 训练直接断电关机（事件日志 Kernel-Power 41 + WHEA PCIe 供电错误，功耗/散热保护跳闸，非软件崩溃）。
+- **已做**：检测到笔记本显卡（名称含 Laptop/Mobile）且显存 <12G 跑 Krea2/FLUX.2/Qwen-Image 时，训练前打印醒目警告（插电源/高性能电源计划/降分辨率/换轻模型）。
+
 ## v0.11.2（2026-08-28）
 
 ### 修复：勾选「torch.compile 加速」直接崩溃（TritonMissing）

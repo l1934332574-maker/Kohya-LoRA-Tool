@@ -1587,7 +1587,7 @@ def test_at_image_pre_download(base: Path):
     def fake_status():
         return True, "ok", vpy
 
-    def fake_write_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, logf=print):
+    def fake_write_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, logf=print, vram_gb=None):
         state["yaml_info"] = dict(info)
 
     def fake_run_stream(cmd, cwd=None, env=None, logf=print, collect=None, **kwargs):
@@ -1735,6 +1735,46 @@ def test_gated_download_guidance(base: Path):
     g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
     assert 'key in ("raw", "turbo")' in g and "魔搭（ModelScope）官方转存直链" in g
     print("GATED_DOWNLOAD_GUIDANCE_OK")
+
+
+def test_at_image_low_vram_vram_aware(base: Path):
+    """AI 图像 low_vram 显存感知（v0.11.3）：显存充足关掉提速（A6000 48G Qwen-Image 9.76s/it 主因），低显存/未知保持开。"""
+    info = core.AT_IMAGE_MODELS["qwen_image"]
+    out = base / "out"
+    out.mkdir(parents=True, exist_ok=True)
+    params = {"project": "t", "rank": 16, "alpha": 16, "unet_lr": 1e-4, "video_steps": 100,
+              "trigger": "x", "resolution": 1024, "optimizer": "AdamW"}
+    def _gen(vram):
+        p = base / ("q_%s.yaml" % str(vram))
+        core.write_at_image_yaml(params, info, str(base), str(out), str(p), vram_gb=vram)
+        return p.read_text(encoding="utf-8")
+    assert "low_vram: false" in _gen(44), "48G 高显存应关 low_vram（A6000 提速主因）"
+    assert "low_vram: true" in _gen(8), "低显存应保持开"
+    assert "low_vram: true" in _gen(None), "显存未知应保守开"
+    print("AT_IMAGE_LOW_VRAM_VRAM_AWARE_OK")
+
+
+def test_third_engine_triton_and_laptop_warning(base: Path):
+    """v0.11.3：第三引擎缺 Triton 自动补装 + 笔记本低显存重型模型强警告。"""
+    src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    assert "def _ensure_ai_toolkit_triton" in src, "缺第三引擎 triton 补装"
+    assert "_ensure_ai_toolkit_triton(vpy, logf)" in src, "train_at_image 缺 triton 接线"
+    assert "def _warn_laptop_heavy_load" in src, "缺笔记本强警告"
+    for fn in ("train_krea2", "train_flux2", "train_at_image"):
+        i = src.find("def %s(" % fn)
+        j = src.find("\ndef ", i + 1)
+        seg = src[i:j]
+        assert "_warn_laptop_heavy_load(logf, vram_gb" in seg, "%s 缺笔记本警告接线" % fn
+    # 行为验证：笔记本 + 低显存触发警告；台式机不触发
+    logs = []
+    with patch.object(core, "detect_gpu_name", return_value="NVIDIA GeForce RTX 4070 Laptop GPU"):
+        core._warn_laptop_heavy_load(logs.append, 8, "Krea2")
+    assert any("笔记本" in x for x in logs), logs
+    logs.clear()
+    with patch.object(core, "detect_gpu_name", return_value="NVIDIA GeForce RTX 4090"):
+        core._warn_laptop_heavy_load(logs.append, 24, "Krea2")
+    assert not logs, logs
+    print("THIRD_ENGINE_TRITON_AND_LAPTOP_WARNING_OK")
 
 
 def test_swap_zero_option(base: Path):
@@ -1928,6 +1968,8 @@ def main():
         test_venv_hf_sitecustomize(base)
         test_torch_compile_safe_fallback(base)
         test_swap_zero_option(base)
+        test_at_image_low_vram_vram_aware(base)
+        test_third_engine_triton_and_laptop_warning(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

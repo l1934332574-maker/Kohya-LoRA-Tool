@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.11.2"
+APP_VERSION = "0.11.3"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2083,6 +2083,27 @@ def _ensure_compile_ready(mvpy, logf=print):
 
 TRITON_WINDOWS_PIN = "3.3.0.post19"   # 匹配 torch 2.7.x（本地实测版本）
 
+def _warn_laptop_heavy_load(logf, vram_gb, label):
+    """笔记本显卡（名称含 Laptop/Mobile）+ 低显存跑重型模型（Krea2/FLUX.2/Qwen-Image）前强警告。
+
+    长时间满载会触发笔记本功耗/散热保护直接断电关机（2026-08-28 本机 4070 Laptop 8G 跑 Krea2 实测
+    事件日志 Kernel-Power 41 意外断电 + WHEA PCIe 供电错误）。
+    """
+    try:
+        _gname = detect_gpu_name() or ""
+    except Exception:
+        _gname = ""
+    if not _gname:
+        return
+    _lg = _gname.lower()
+    _is_laptop = ("laptop" in _lg) or ("mobile" in _lg)
+    if _is_laptop and vram_gb is not None and vram_gb < 12:
+        logf(f"[{label}] ⚠ 检测到笔记本显卡（{_gname}，{vram_gb}G）且显存较低：本模式训练会让 CPU/GPU/内存/PCIe 长时间满载，"
+             f"笔记本功耗/散热保护可能直接断电关机（已有 4070 Laptop 用户实测触发）。")
+        logf(f"[{label}]    建议：① 插电源 ② 电源计划选高性能 ③ 降低分辨率/关采样预览；若仍断电，改用 Anima / Z-Image 等轻模型。")
+
+
+
 def preset_for(mode, base_type):
     """取模式预设；底模类型与模式不匹配（如 style+flux2，2026-08-28 UI 卡死 bug 根因）时
     回退该模式默认档，避免 KeyError 中断界面刷新。"""
@@ -2185,6 +2206,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     accel = _accelerate_launch_cmd(mvpy, logf=logf)
     if not _ensure_torchvision_deps(mvpy, logf, label="Krea2", cwd=mt_dir):
         raise RuntimeError("Krea2 引擎（第二引擎）venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第二引擎。")
+    _warn_laptop_heavy_load(logf, vram_gb, "Krea2")
     files = krea2_model_files()
     missing = krea2_missing_models()
     if missing:
@@ -2417,6 +2439,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     accel = _accelerate_launch_cmd(mvpy, logf=logf)
     if not _ensure_torchvision_deps(mvpy, logf, label="FLUX.2", cwd=mt_dir):
         raise RuntimeError("FLUX.2 引擎（第二引擎）venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第二引擎。")
+    _warn_laptop_heavy_load(logf, vram_gb, "FLUX.2")
     files = flux2_model_files()
     missing = flux2_missing_models()
     if missing:
@@ -3704,6 +3727,7 @@ AT_IMAGE_MODELS = {
         "arch": "qwen_image",
         "model_id": "Qwen/Qwen-Image-2512",
         "min_vram": 16, "rec_vram": 24,
+        "resident_vram": 28,   # 关闭 low_vram（模型全驻留）所需显存（fp8 20G + 激活 + 余量）
         "size": "约 40GB",
         "hint": "Qwen-Image 是 20B 大模型：16G 显存起步、24G 舒服（推荐）。首次训练自动下载模型（约 40GB，国内镜像）。",
     },
@@ -3712,6 +3736,7 @@ AT_IMAGE_MODELS = {
         "arch": "zimage",
         "model_id": "Tongyi-MAI/Z-Image",
         "min_vram": 12, "rec_vram": 16,
+        "resident_vram": 14,   # 关闭 low_vram（模型全驻留）所需显存（fp8 8G + 激活 + 余量）
         "size": "约 16GB",
         "hint": "Z-Image 是 8B 轻量模型：12G 显存起步、16G 舒服。首次训练自动下载模型（约 16GB，国内镜像）。训练用基础版，出图可配合 Turbo 加速。",
     },
@@ -3769,7 +3794,42 @@ def at_image_model_ready(mode):
     return _at_image_download_complete(at_image_local_dir(mode))
 
 
-def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, logf=print):
+def _ensure_ai_toolkit_triton(vpy, logf=print):
+    """第三引擎 venv 缺 Triton 时自动补装 triton-windows（torchao 量化矩阵内核依赖）。
+
+    缺 triton 时 torchao 的量化 matmul 会回退慢速内核（日志开头常见
+    `Detected no triton ... certain kernels will not work`），Qwen-Image/Z-Image 训练明显变慢。
+    尽力而为，装不上只警告不中断训练。
+    """
+    if not vpy or not os.path.isfile(vpy):
+        return False
+    try:
+        r = subprocess.run([vpy, "-c", "import triton; print(triton.__version__)"],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            return True
+    except Exception:
+        pass
+    logf("[第三引擎] ⚠ 未检测到 Triton（torchao 量化内核会走慢速回退），自动补装 triton-windows==%s（国内镜像）…" % TRITON_WINDOWS_PIN)
+    try:
+        _venv = os.path.dirname(os.path.dirname(vpy))
+        if run_pip_in_venv(_venv, ["triton-windows==%s" % TRITON_WINDOWS_PIN], logf) != 0:
+            logf("[第三引擎] triton-windows 补装失败（网络/镜像问题），训练继续但可能偏慢")
+            return False
+    except Exception as e:
+        logf("[第三引擎] triton-windows 自动补装异常（忽略，训练继续）: %s" % e)
+        return False
+    try:
+        r = subprocess.run([vpy, "-c", "import triton"], capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            logf("[第三引擎] triton-windows 补装完成")
+            return True
+    except Exception:
+        pass
+    logf("[第三引擎] ⚠ triton-windows 补装后仍不可用（训练继续）")
+    return False
+
+def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, logf=print, vram_gb=None):
     """生成 AI Toolkit 图像 LoRA 训练 yaml（Qwen-Image / Z-Image 共用）。"""
     name = _sanitize_dirname(params.get("project")) or "at_lora"
     rank = int(params.get("rank", 16))
@@ -3789,6 +3849,15 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
         _opt_k = "AdamW"
     _opt_yaml = _optimizer_yaml_name(_opt_k)
     sample_prompt = (trig + ", ") if trig else ""
+    # low_vram 显存感知（v0.11.3）：官方默认开（模型放 CPU 按需搬显存，省显存但每步有搬运开销）。
+    # 显存足够装下量化模型+激活时关掉提速（2026-08-28 A6000 48G 跑 Qwen-Image 20B 实测：
+    # 硬开 low_vram 9.76s/it，关掉后预计回到 5~7s/it）。
+    _low_vram = True
+    _need = float(info.get("resident_vram") or 26)
+    if vram_gb is not None and vram_gb >= _need:
+        _low_vram = False
+    logf(f"[{info.get('label', 'AI 图像')}] low_vram={'开' if _low_vram else '关'}"
+          f"（显存 {vram_gb if vram_gb is not None else '未知'}G" + ("，驻留需 %.0fG" % _need if vram_gb is not None else "，默认开保险") + "）")
     text = (
         "job: extension\n"
         "config:\n"
@@ -3832,7 +3901,7 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
         "        arch: '" + info["arch"] + "'\n"
         "        quantize: true\n"
         "        qtype: \"qfloat8\"\n"
-        "        low_vram: true\n"
+        "        low_vram: " + ("true" if _low_vram else "false") + "\n"
         "      sample:\n"
         "        sampler: \"flowmatch\"\n"
         "        sample_every: 250\n"
@@ -3947,6 +4016,7 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
         raise RuntimeError("ai-toolkit 源码缺失，请重装第三引擎")
     if not _ensure_torchvision_deps(vpy, logf, label="第三引擎", cwd=at_dir):
         raise RuntimeError("第三引擎 venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第三引擎。")
+    _ensure_ai_toolkit_triton(vpy, logf)   # v0.11.3：缺 Triton 自动补装（torchao 量化内核加速）
     train_dir = dataset_train_dir(mode, params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】或【一键开始训练】")
@@ -3961,6 +4031,7 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
             logf(f"[{info['label']}] 人物强绑定失败（忽略）: {_e}")
     if vram_gb is not None and vram_gb < info["min_vram"]:
         logf(f"[{info['label']}] ⚠ 显存 {vram_gb}GB 低于建议 {info['min_vram']}G：{info['hint']}")
+    _warn_laptop_heavy_load(logf, vram_gb, info["label"])
     proj = _sanitize_dirname(params.get("project")) or mode
     out_dir = data_sub("output", proj)
     os.makedirs(out_dir, exist_ok=True)
@@ -3984,7 +4055,7 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
         info["model_id"] = at_image_local_dir(mode).replace("\\", "/")
 
     cfg_path = os.path.join(KIT_DIR, "configs", mode + "_train.yaml")
-    write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=vpy, logf=logf)
+    write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=vpy, logf=logf, vram_gb=vram_gb)
     steps = int(params.get("video_steps", 2000))
     logf(f"[{info['label']}] 数据集: {train_dir}（{count_images(train_dir)} 张）")
     logf(f"[{info['label']}] 模型: {info['model_id']}（首次训练自动下载 {info['size']}，国内镜像）")
