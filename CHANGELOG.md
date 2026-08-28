@@ -1,3 +1,11 @@
+## v0.10.21（2026-08-28）
+
+### 修复：Z-Image / Qwen-Image 魔搭下载把「目录」当文件下，报 WinError 183 导致预下载失败
+- **背景**：v0.10.20 魔搭化上线后，4060 Ti 用户 Z-Image 预下载仍失败：`[WinError 183] 当文件已存在时，无法创建该文件。: '...\models\at_image\zimage\vae'` → 预下载中断 → 回退在线加载（hf-mirror 仍不可达）→ 训练失败。
+- **根因**：ModelScope repo/files API 返回的**目录项**（vae / transformer / tokenizer 等，`Type=tree`、Size=0）被当成文件下载，curl 写文件到已存在的同名目录时 Windows 报 WinError 183。
+- **已修**：`_at_image_ms_file_list` 只取文件（`Type=blob`），跳过目录（`Type=tree`）与非必要小文件；抽出 `_parse_at_image_ms_files` 纯函数便于单测。
+- **验证**：Z-Image 魔搭文件清单实测 18 个文件、无目录残留；新增 AT_IMAGE_MS_PARSE_SKIPS_DIRS_OK，engine_install_smoke_test + smoke_test 全过。
+
 ## v0.10.20（2026-08-28）
 
 ### 修复：Z-Image / Qwen-Image 底模预下载改走魔搭直链（hf-mirror 故障/被污染后不再依赖）

@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.10.20"
+APP_VERSION = "0.10.21"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -3756,25 +3756,35 @@ AT_IMAGE_MS_REPOS = {
 
 
 def _at_image_ms_file_list(repo):
-    """从 ModelScope API 拉取仓库文件清单（跳过目录项）。失败返回 None。"""
+    """从 ModelScope API 拉取仓库文件清单。失败返回 None。"""
     import urllib.request
     url = "https://modelscope.cn/api/v1/models/%s/repo/files?Revision=master&Recursive=true" % repo
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=30) as r:
             d = json.load(r)
-        files = []
-        for f in ((d.get("Data") or {}).get("Files") or []):
-            path = (f.get("Path") or "").strip()
-            if not path or path.endswith("/"):
-                continue
-            # 跳过非必要的小文件（保持目录干净，只下模型/配置）
-            low = path.lower()
-            if low in (".gitattributes", "readme.md", "teaser.jpg", ".gitignore", "license", "license.md"):
-                continue
-            files.append(path)
-        return files or None
+        return _parse_at_image_ms_files(d)
     except Exception:
         return None
+
+
+def _parse_at_image_ms_files(d):
+    """从 ModelScope repo/files API 的 JSON 提取文件路径列表。
+
+    只取文件（Type=blob），跳过目录（Type=tree，如 vae/transformer 等——2026-08-28 曾因
+    把 tree 目录当文件下载，报 WinError 183 "当文件已存在时，无法创建该文件"）与非必要小文件。
+    """
+    out = []
+    for f in ((d.get("Data") or {}).get("Files") or []):
+        if (str(f.get("Type") or "")).lower() == "tree":
+            continue
+        path = (f.get("Path") or "").strip()
+        if not path or path.endswith("/"):
+            continue
+        low = path.lower()
+        if low in (".gitattributes", "readme.md", "teaser.jpg", ".gitignore", "license", "license.md"):
+            continue
+        out.append(path)
+    return out
 
 
 def _at_image_ms_download(mode, logf):

@@ -898,6 +898,24 @@ def test_main_engine_accel_always_defined(base: Path):
 
 
 
+def test_at_image_ms_parse_skips_dirs(base):
+    """_parse_at_image_ms_files：只取文件（Type=blob），跳过目录（Type=tree）与非必要文件。"""
+    d = {"Data": {"Files": [
+        {"Path": "vae", "Type": "tree", "Size": 0},
+        {"Path": "transformer", "Type": "tree", "Size": 0},
+        {"Path": "vae/config.json", "Type": "blob", "Size": 820},
+        {"Path": "vae/diffusion_pytorch_model.safetensors", "Type": "blob", "Size": 167666902},
+        {"Path": "transformer/config.json", "Type": "blob", "Size": 500},
+        {"Path": ".gitattributes", "Type": "blob", "Size": 3027},
+        {"Path": "README.md", "Type": "blob", "Size": 6015},
+    ]}}
+    files = core._parse_at_image_ms_files(d)
+    assert "vae" not in files and "transformer" not in files, files      # 目录必须跳过
+    assert "vae/config.json" in files and "vae/diffusion_pytorch_model.safetensors" in files, files
+    assert ".gitattributes" not in files and "README.md" not in files, files  # 非必要文件跳过
+    print("AT_IMAGE_MS_PARSE_SKIPS_DIRS_OK")
+
+
 def test_safetensors_complete_check(base):
     """_safetensors_complete：截断/损坏的 safetensors 能被识别（训练前拦截，避免 reshape 英文错）。"""
     import struct
@@ -1796,6 +1814,7 @@ def main():
         test_train_monitor_krea2_parsing(base)
         test_modelscope_mirror_urls(base)
         test_safetensors_complete_check(base)
+        test_at_image_ms_parse_skips_dirs(base)
         test_musubi_quant_patch(base)
         test_accelerate_cpu_config_self_heal(base)
         test_anima_vae_fp32_patch(base)

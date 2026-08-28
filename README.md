@@ -4,7 +4,7 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.10.20** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.10.21** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
@@ -36,6 +36,10 @@
 - **FLUX 模型下载改走魔搭国内直链**：DiT / CLIP-L / T5-XXL / AE 全部国内 CDN 直连、支持断点续传，不再直连 HuggingFace（避免 SSL 失败）。
 
 - **修复繁体/英文系统下 Krea2 缓存 latents 打印中文崩溃**：所有子进程默认强制 UTF-8 输出，不再 UnicodeEncodeError。
+
+## 🆕 v0.10.21 更新重点
+
+- **修复 Z-Image/Qwen-Image 魔搭下载报 WinError 183**：魔搭文件清单里的目录项被误当文件下载导致中断；现只下载文件（跳过目录），16GB 模型可正常断点续传下载。
 
 ## 🆕 v0.10.20 更新重点
 
