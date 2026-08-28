@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.11.1"
+APP_VERSION = "0.11.2"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2014,6 +2014,75 @@ def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
     return _tk_dir
 
 
+def _log_mentions_compile_failure(tail):
+    """训练子进程日志是否出现 torch.compile / Triton 编译类致命错误（用于自动去掉 --compile 重试）。"""
+    blob = "\n".join(tail or [])
+    return any(m in blob for m in (
+        "TritonMissing", "Cannot find a working triton", "cannot find a working triton",
+        "TritonError", "TritonAssertionError", "torch._inductor.exc",
+        "CompilationError", "InductorError",
+    ))
+
+
+def _compile_probe_code():
+    """musubi venv 内跑的 torch.compile 自检脚本：真实 CUDA forward+backward，探测 Triton/inductor 是否可用。
+
+    解决 v0.11.1「勾选 torch.compile 直接 TritonMissing 崩溃」：缺失时自动补装 triton-windows，
+    装不上/自检不过则自动回退标准 SDPA，不再硬崩。
+    """
+    return (
+        "import sys, traceback\n"
+        "try:\n"
+        "    import torch\n"
+        "    if not torch.cuda.is_available():\n"
+        "        print('COMPILE_PROBE_NO_CUDA')\n"
+        "        sys.exit(2)\n"
+        "    torch.manual_seed(0)\n"
+        "    m = torch.nn.Linear(64, 64, bias=False).cuda().to(torch.bfloat16)\n"
+        "    x = torch.randn(2, 64, device='cuda', dtype=torch.bfloat16)\n"
+        "    mc = torch.compile(m)\n"
+        "    y = mc(x)\n"
+        "    y.sum().backward()\n"
+        "    torch.cuda.synchronize()\n"
+        "    print('COMPILE_PROBE_OK')\n"
+        "except Exception:\n"
+        "    traceback.print_exc()\n"
+        "    sys.exit(1)\n"
+    )
+
+
+def _ensure_compile_ready(mvpy, logf=print):
+    """torch.compile 开启前的安全自检（v0.11.2）。
+
+    返回 (ok, note)。ok=True 才允许给训练命令加 --compile；否则调用方应回退标准 SDPA。
+    - 探针：在 musubi venv 里跑真实 CUDA forward+backward（torch.compile 小图），
+      TritonMissing / inductor 不可用会在此暴露；
+    - 自检失败 → 自动补装 triton-windows（阿里云/清华国内镜像）→ 再自检；
+    - 仍失败 → 返回 False，调用方去掉 --compile 继续训练，绝不中断。
+    """
+    if not mvpy or not os.path.isfile(mvpy):
+        return False, "musubi venv 不存在"
+    _probe = _compile_probe_code()
+
+    def _run():
+        return run_stream([mvpy, "-c", _probe], env=build_direct_env(), logf=logf)
+
+    if _run() == 0:
+        return True, "Triton 自检通过（真实 forward+backward 成功）"
+    logf("[Krea2] ⚠ torch.compile 自检失败（可能缺 Triton），自动补装 triton-windows==%s（国内镜像）…" % TRITON_WINDOWS_PIN)
+    try:
+        _venv = os.path.dirname(os.path.dirname(mvpy))
+        if run_pip_in_venv(_venv, ["triton-windows==%s" % TRITON_WINDOWS_PIN], logf) != 0:
+            return False, "triton-windows 安装失败（网络/镜像问题），已回退 SDPA"
+    except Exception as e:
+        return False, "triton-windows 自动安装异常：%s" % e
+    if _run() == 0:
+        return True, "已自动补装 triton-windows 并通过自检"
+    return False, "补装后 Triton 自检仍失败（已回退 SDPA，可查看上方日志）"
+
+
+TRITON_WINDOWS_PIN = "3.3.0.post19"   # 匹配 torch 2.7.x（本地实测版本）
+
 def preset_for(mode, base_type):
     """取模式预设；底模类型与模式不匹配（如 style+flux2，2026-08-28 UI 卡死 bug 根因）时
     回退该模式默认档，避免 KeyError 中断界面刷新。"""
@@ -2251,8 +2320,14 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     # torch.compile（可选，默认关）：实测 fp8 + compile ≈2×，int8 + compile 再快 ~8%；
     # Windows triton 首次编译慢、偶发不稳定，故仅当用户显式开启时使用
     _k2_compile = str(params.get("compile") or "").lower() in ("1", "true", "on", "开")
+    _compile_ok = False
     if _k2_compile:
-        cmd += ["--compile"]
+        # v0.11.2：自检 Triton/inductor，缺失自动补装 triton-windows；装不上自动回退 SDPA，不再硬崩
+        _compile_ok, _compile_note = _ensure_compile_ready(mvpy, logf)
+        if _compile_ok:
+            cmd += ["--compile"]
+        else:
+            logf(f"[Krea2] ⚠ torch.compile 已自动禁用（{_compile_note}），本次用标准 SDPA 继续训练，不会中断。")
     if swap > 0:
         cmd += ["--blocks_to_swap", str(swap)]
     if h2d_only:
@@ -2266,7 +2341,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         cmd += ["--gradient_checkpointing"]
     logf(f"[Krea2] 底模(RAW): {files['raw']}")
     logf(f"[Krea2] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 5)}")
-    logf(f"[Krea2] 量化={_quant} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 搬运加速(pinned)={'开' if (h2d_only and vram_gb is not None and vram_gb >= 15.5) else '关'} | 梯度检查点={'开' if gc_on else '关'} | torch.compile={'开' if _k2_compile else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
+    logf(f"[Krea2] 量化={_quant} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 搬运加速(pinned)={'开' if (h2d_only and vram_gb is not None and vram_gb >= 15.5) else '关'} | 梯度检查点={'开' if gc_on else '关'} | torch.compile={'开' if _compile_ok else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
     # 训练中采样出图预览（musubi 原生 --sample_every_n_steps + --sample_prompts；低显存只警告不硬关）
     if _sample_preview_enabled(params, vram_gb):
         _sp = _write_sample_prompts(output_name, params, mode)
@@ -2282,6 +2357,11 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     # 训练命令同样带 KREA2_TOKENIZER_DIR/HF_ENDPOINT/RDNA2 FP16 环境（缓存步骤已带；
     # 采样预览加载文本编码器时必须用本地 tokenizer，否则国内直连 HF 拉 tokenizer 会 SSL 失败）
     rc = run_stream(cmd, cwd=mt_dir, env=_k2env, logf=logf, collect=_log_tail)
+    if rc != 0 and _compile_ok and _log_mentions_compile_failure(_log_tail):
+        # v0.11.2：运行期编译崩溃（TritonMissing 等）→ 自动去掉 --compile 用 SDPA 重试一次（latents 已缓存，重试快）
+        logf("[Krea2] ⚠ torch.compile 运行期编译失败（Triton/inductor 异常），自动去掉 --compile 用标准 SDPA 重试一次…")
+        _log_tail.clear()
+        rc = run_stream([a for a in cmd if a != "--compile"], cwd=mt_dir, env=_k2env, logf=logf, collect=_log_tail)
     if rc != 0:
         _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError(f"Krea2 训练结束，退出码 {rc}，请查看上方日志")
@@ -2446,6 +2526,15 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         cmd += ["--int8_base", "--int8_scaled", "--fp8_text_encoder"]
     elif fp8 and not _safetensors_is_prequantized(files["dit"]):
         cmd += ["--fp8_base", "--fp8_scaled", "--fp8_text_encoder"]
+    # torch.compile（与 Krea2 同款安全门控，v0.11.2）：自检 Triton/inductor，缺失自动补装；装不上自动回退 SDPA
+    _flux2_compile = str(params.get("compile") or "").lower() in ("1", "true", "on", "开")
+    _flux2_compile_ok = False
+    if _flux2_compile:
+        _flux2_compile_ok, _flux2_compile_note = _ensure_compile_ready(mvpy, logf)
+        if _flux2_compile_ok:
+            cmd += ["--compile"]
+        else:
+            logf(f"[FLUX.2] ⚠ torch.compile 已自动禁用（{_flux2_compile_note}），本次用标准 SDPA 继续训练，不会中断。")
     if swap > 0:
         cmd += ["--blocks_to_swap", str(swap)]
     if h2d_only:
@@ -2459,7 +2548,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         cmd += ["--gradient_checkpointing"]
     logf(f"[FLUX.2] 底模: {files['dit']}")
     logf(f"[FLUX.2] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 2)}")
-    logf(f"[FLUX.2] 量化={'int8' if _flux2_int8 else 'fp8'} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 搬运加速(pinned)={'开' if (h2d_only and vram_gb is not None and vram_gb >= 15.5) else '关'} | 梯度检查点={'开' if gc_on else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
+    logf(f"[FLUX.2] 量化={'int8' if _flux2_int8 else 'fp8'} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 搬运加速(pinned)={'开' if (h2d_only and vram_gb is not None and vram_gb >= 15.5) else '关'} | 梯度检查点={'开' if gc_on else '关'} | torch.compile={'开' if _flux2_compile_ok else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
     # 训练中采样出图预览（musubi 原生 --sample_every_n_steps + --sample_prompts；低显存只警告不硬关）
     if _sample_preview_enabled(params, vram_gb):
         _sp = _write_sample_prompts(output_name, params, mode)
@@ -2475,6 +2564,11 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     # 训练命令同样带 KREA2_TOKENIZER_DIR/HF_ENDPOINT/RDNA2 FP16 环境（缓存步骤已带；
     # 采样预览加载文本编码器时必须用本地 tokenizer，否则国内直连 HF 拉 tokenizer 会 SSL 失败）
     rc = run_stream(cmd, cwd=mt_dir, env=_k2env, logf=logf, collect=_log_tail)
+    if rc != 0 and _flux2_compile_ok and _log_mentions_compile_failure(_log_tail):
+        # v0.11.2：运行期编译崩溃（TritonMissing 等）→ 自动去掉 --compile 用 SDPA 重试一次（latents 已缓存，重试快）
+        logf("[FLUX.2] ⚠ torch.compile 运行期编译失败（Triton/inductor 异常），自动去掉 --compile 用标准 SDPA 重试一次…")
+        _log_tail.clear()
+        rc = run_stream([a for a in cmd if a != "--compile"], cwd=mt_dir, env=_k2env, logf=logf, collect=_log_tail)
     if rc != 0:
         _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError(f"FLUX.2 训练结束，退出码 {rc}，请查看上方日志")

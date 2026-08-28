@@ -1737,6 +1737,58 @@ def test_gated_download_guidance(base: Path):
     print("GATED_DOWNLOAD_GUIDANCE_OK")
 
 
+def test_swap_zero_option(base: Path):
+    """块交换数下拉应可选 0（全驻留显存不搬）：GUI 可选 + 后端手动分支正确生成无 swap 命令。"""
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8-sig")
+    # 1) 下拉值含 "0"
+    assert '"自动", "0", "2", "4", "6", "8", "10", "12"' in g, "块交换数下拉缺 0（全驻留）选项"
+    # 2) 保存/恢复：0 是纯数字，走 isdigit 分支（不回退成自动）
+    assert 'str(self.swap_var.get()).isdigit()' in g, "保存逻辑缺 isdigit"
+    assert 'str(_swap_gui).isdigit()' in g, "恢复逻辑缺 isdigit"
+    # 3) 后端：手动 0 → swap=0 且不追加 --blocks_to_swap（全部驻留）
+    c = Path(core.__file__).read_text(encoding="utf-8-sig")
+    for fn in ("train_krea2", "train_flux2"):
+        i = c.find("def %s" % fn)
+        j = c.find("\ndef ", i + 1)
+        seg = c[i:j]
+        assert "_manual_swap.isdigit()" in seg, "%s 缺手动 swap 分支" % fn
+        assert "swap = min(int(_manual_swap), " in seg, "%s 缺 swap 上限收敛" % fn
+        assert "if swap > 0:" in seg, "%s 缺 swap>0 才追加参数" % fn
+    print("SWAP_ZERO_OPTION_OK")
+
+
+def test_torch_compile_safe_fallback(base: Path):
+    """v0.11.1「勾选 torch.compile 直接 TritonMissing 崩溃」修复：自检/自动补装/失败自动回退，不再硬崩。"""
+    src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    # 1) 自检函数 + 探针：必须真实 CUDA forward+backward（能暴露 TritonMissing）
+    assert "def _ensure_compile_ready" in src, "缺 _ensure_compile_ready"
+    assert "def _compile_probe_code" in src, "缺 _compile_probe_code"
+    assert "def _log_mentions_compile_failure" in src, "缺 _log_mentions_compile_failure"
+    assert "torch.compile(m)" in src and "backward()" in src and "COMPILE_PROBE_OK" in src, "探针必须真实 forward+backward"
+    assert 'TRITON_WINDOWS_PIN = "3.3.0.post19"' in src, "缺 triton-windows 固定版本"
+    assert "triton-windows==%s" in src, "应自动补装 triton-windows"
+    # 2) 失败标记检测：TritonMissing/inductor 命中；正常日志与 OOM 不误报
+    assert core._log_mentions_compile_failure(["torch._inductor.exc.TritonMissing: Cannot find a working triton installation"])
+    assert core._log_mentions_compile_failure(["Traceback", "TritonError: abc"])
+    assert not core._log_mentions_compile_failure(["steps: 1/696, avr_loss=0.07"])
+    assert not core._log_mentions_compile_failure(["CUDA out of memory."])
+    # 3) Krea2：--compile 仅在自检通过时追加；失败回退 SDPA 不中断；运行期崩溃自动去掉 --compile 重试
+    i = src.find("def train_krea2")
+    j = src.find("\ndef ", i + 1)
+    k = src[i:j]
+    assert "_compile_ok, _compile_note = _ensure_compile_ready(mvpy, logf)" in k, "Krea2 缺自检接线"
+    assert "已自动禁用" in k, "Krea2 缺回退提示文案"
+    assert "自动去掉 --compile" in k, "Krea2 缺运行期自动重试"
+    # 4) FLUX.2 同样接线（GUI 勾选文案 Krea2/FLUX.2 现在名副其实）
+    i2 = src.find("def train_flux2")
+    j2 = src.find("\ndef ", i2 + 1)
+    f = src[i2:j2]
+    assert "_flux2_compile_ok, _flux2_compile_note = _ensure_compile_ready(mvpy, logf)" in f, "FLUX.2 缺自检接线"
+    assert "已自动禁用" in f, "FLUX.2 缺回退提示文案"
+    assert "自动去掉 --compile" in f, "FLUX.2 缺运行期自动重试"
+    print("TORCH_COMPILE_SAFE_FALLBACK_OK")
+
+
 def test_venv_hf_sitecustomize(base: Path):
     """训练环境注入 sitecustomize.py：强制 hf-mirror + 禁用 Xet（幂等、不覆盖用户自定义）。"""
     venv = base / "venv"
@@ -1793,7 +1845,7 @@ def test_krea2_training_env_propagation(base: Path):
     """
     src = Path(core.__file__).read_text(encoding="utf-8-sig")
     # krea2 缓存 TE + 训练 + flux2 缓存 TE + 训练：4 处 run_stream 都要传 _k2env
-    assert src.count("env=_k2env") == 4, "krea2/flux2 缓存+训练 4 处 run_stream 都应传 env=_k2env"
+    assert src.count("env=_k2env") >= 4, "krea2/flux2 缓存+训练（含 compile 自动重试）run_stream 都应传 env=_k2env"
     assert src.count('_k2env["KREA2_TOKENIZER_DIR"]') == 2
     assert src.count("run_stream(cmd, cwd=mt_dir, env=_k2env, logf=logf, collect=_log_tail)") == 2
     print("KREA2_TRAINING_ENV_PROPAGATION_OK")
@@ -1874,6 +1926,8 @@ def main():
         test_krea2_training_env_propagation(base)
         test_export_log(base)
         test_venv_hf_sitecustomize(base)
+        test_torch_compile_safe_fallback(base)
+        test_swap_zero_option(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 

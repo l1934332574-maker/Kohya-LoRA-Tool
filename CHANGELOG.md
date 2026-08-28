@@ -1,3 +1,14 @@
+## v0.11.2（2026-08-28）
+
+### 修复：勾选「torch.compile 加速」直接崩溃（TritonMissing）
+- **背景**：v0.11.1 新增的「torch.compile 加速」勾选，在没装 Triton 的机器上（musubi venv 默认不含 triton）第一步编译就崩：`torch._inductor.exc.TritonMissing: Cannot find a working triton installation`，整个训练失败。
+- **已修**：开启加速前先自检（真实 CUDA forward+backward 探针）→ 缺 Triton 自动补装 triton-windows==3.3.0.post19（阿里云/清华国内镜像）→ 装不上/自检不过自动回退标准 SDPA 继续训练，绝不中断；训练中若仍出现编译崩溃自动去掉 --compile 重试一次（latents 已缓存，重试快）。Krea2/FLUX.2 都接上。
+- **验证**：TORCH_COMPILE_SAFE_FALLBACK_OK，engine_install_smoke_test + smoke_test 全过。
+
+### 新增：块交换数可选 0（全部驻留显存）
+- 高级参数「块交换数」下拉新增 0：全部驻留显存不搬块（最快但最吃显存，16G 以下慎用）；int8 底模约 13GB，16G 卡可尝试 0 提速（无每步 CPU↔GPU 搬运）。
+- **验证**：SWAP_ZERO_OPTION_OK。
+
 ## v0.11.1（2026-08-28）
 
 ### 修复：16G 卡训练「越跑越慢」（训练中采样预览残留显存）

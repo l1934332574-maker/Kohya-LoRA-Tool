@@ -2689,12 +2689,12 @@ class App:
             pass
         self.swap_menu = ctk.CTkOptionMenu(
             bw, variable=self.swap_var,
-            values=["自动", "2", "4", "6", "8", "10", "12"], width=130, height=26,
+            values=["自动", "0", "2", "4", "6", "8", "10", "12"], width=130, height=26,
             fg_color=CARD2, button_color=CARD2, button_hover_color="#3a4150",
             text_color=SUB, font=ui_font(FONT_HINT), dropdown_font=ui_font(FONT_HINT),
             dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150")
         self.swap_menu.pack(side="left", padx=(10, 0))
-        ctk.CTkLabel(bw, text="（自动=按显存档位；块越少越快但越吃显存，跑稳后可手动往下调试速度）",
+        ctk.CTkLabel(bw, text="（自动=按显存档位；0=全部驻留显存；块越少越快但越吃显存）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         cc = ctk.CTkFrame(self.adv_body, fg_color="transparent"); cc.pack(anchor="w", pady=(4, 0))
         self.compile_var = tk.BooleanVar(value=False)
