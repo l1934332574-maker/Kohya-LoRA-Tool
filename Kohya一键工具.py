@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.11.6"
+APP_VERSION = "0.11.7"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -4337,6 +4337,17 @@ def _pick_preprocess_python():
         if os.path.isfile(c):
             return c
     return ""
+
+
+def preprocess_mode(mode, at_sub_mode=None):
+    """训练模式 -> 预处理模式：preprocess.py 只接受 style/character。
+
+    其余模式（krea2/flux2/qwen_image/zimage/video）数据统一走 train_character，
+    预处理用画风/人物子模式，默认人物（保留全部标签）。
+    """
+    if mode in ("style", "character"):
+        return mode
+    return at_sub_mode or "character"
 
 
 def normalize_crop_ratio(s):
@@ -9116,7 +9127,7 @@ class App:
             preprocess(
                 self._log, input_dir=params["raw_dir"],
                 size=RESOLUTIONS.get(params["base_type"], 512),
-                mode=params["mode"], trigger=params["trigger"],
+                mode=preprocess_mode(params["mode"], params.get("at_sub_mode")), trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=bool(params.get("square_crop", False)),
                 crop_ratio=params.get("crop_ratio") or "",

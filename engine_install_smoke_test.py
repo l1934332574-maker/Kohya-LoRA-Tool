@@ -645,6 +645,26 @@ def test_preprocess_crop_ratio(base: Path):
     print("PREPROCESS_CROP_RATIO_OK")
 
 
+def test_preprocess_mode_mapping(base: Path):
+    """训练模式 -> 预处理模式映射：FLUX.2 等第二/三引擎不能再把 flux2 当 --mode 传（preprocess 只收 style/character）。"""
+    # 单测 preprocess_mode
+    assert core.preprocess_mode("style") == "style"
+    assert core.preprocess_mode("character") == "character"
+    assert core.preprocess_mode("flux2") == "character"          # 修复点：FLUX.2 默认人物
+    assert core.preprocess_mode("flux2", "style") == "style"     # 画风子模式
+    assert core.preprocess_mode("krea2") == "character"
+    assert core.preprocess_mode("qwen_image", "style") == "style"
+    assert core.preprocess_mode("zimage") == "character"
+    assert core.preprocess_mode("video") == "character"          # 兜底不崩
+    # 静态断言：GUI 两个预处理入口不再用缺 FLUX.2 的旧元组，统一走 core.preprocess_mode
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    assert 'core.preprocess_mode(params.get("mode"), params.get("at_sub_mode"))' in g
+    assert 'params.get("mode") in ("krea2", "qwen_image", "zimage")' not in g, "旧元组漏了 flux2"
+    k = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
+    assert 'mode=preprocess_mode(params["mode"], params.get("at_sub_mode"))' in k
+    print("PREPROCESS_MODE_MAPPING_OK")
+
+
 def test_preinstall_torch_mirror_fallback(base: Path):
     """_preinstall_torch 本地安装多镜像回退：清华失败 -> 阿里云成功；全部失败才报明确错误。"""
     kdir = base / "pt" / "kohya_ss"
@@ -2090,6 +2110,7 @@ def main():
         test_tokenizer_cache(base)
         test_preprocess_auto_retry(base)
         test_preprocess_crop_ratio(base)
+        test_preprocess_mode_mapping(base)
         test_external_python_safe_cwd(base)
         test_amd_download_progress(base)
         test_amd_torch_verification(base)

@@ -3403,10 +3403,7 @@ class App:
                     self._log(f"[预处理] 视频数据已就绪：{len(videos)} 个视频，{no_cap} 个缺字幕。"
                               "视频无需图片预处理；字幕请用「AI 视频自动打标」或放同名 .txt，然后直接点【一键训练】。")
                 return
-            if params.get("mode") in ("krea2", "qwen_image", "zimage"):
-                pp_mode = params.get("at_sub_mode") or "character"
-            else:
-                pp_mode = params["mode"]
+            pp_mode = core.preprocess_mode(params.get("mode"), params.get("at_sub_mode"))
             core.preprocess(
                 self._log, input_dir=params["raw_dir"],
                 size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") == "krea2" else core.RESOLUTIONS.get(params["base_type"], 512))),
@@ -3416,7 +3413,7 @@ class App:
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None, project=self.current_project,
                 style_caption=params.get("style_caption") or "",
-                dataset_mode="character" if params.get("mode") in ("krea2", "qwen_image", "zimage") else None,
+                dataset_mode="character" if params.get("mode") != "style" else None,
                 strong_bind=params.get("strong_bind", True))
             self._log("[OK] 预处理完成")
         except core.StopRequested:
@@ -3528,10 +3525,7 @@ class App:
                     os.remove(report)
             except Exception:
                 pass
-            if params.get("mode") in ("krea2", "qwen_image", "zimage"):
-                pp_mode = params.get("at_sub_mode") or "character"
-            else:
-                pp_mode = params["mode"]
+            pp_mode = core.preprocess_mode(params.get("mode"), params.get("at_sub_mode"))
             core.preprocess(
                 self._log, input_dir=params["raw_dir"],
                 size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") == "krea2" else core.RESOLUTIONS.get(params["base_type"], 512))),
@@ -3541,7 +3535,7 @@ class App:
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None, project=self.current_project,
                 style_caption=params.get("style_caption") or "",
-                dataset_mode="character" if params.get("mode") in ("krea2", "qwen_image", "zimage") else None,
+                dataset_mode="character" if params.get("mode") != "style" else None,
                 strong_bind=params.get("strong_bind", True))
             stats = {}
             if os.path.isfile(report):
