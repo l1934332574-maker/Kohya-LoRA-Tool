@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.11.5"
+APP_VERSION = "0.11.6"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -4339,9 +4339,24 @@ def _pick_preprocess_python():
     return ""
 
 
+def normalize_crop_ratio(s):
+    """把用户输入的裁切比例归一化为 'W:H'；不裁切/非法/超范围（1:2~2:1）返回 ''。"""
+    if not s:
+        return ""
+    m = re.match(r"^\s*(\d{1,3})\s*[:：]\s*(\d{1,3})\s*$", str(s).strip())
+    if not m:
+        return ""
+    w, h = int(m.group(1)), int(m.group(2))
+    if w <= 0 or h <= 0:
+        return ""
+    if not (0.5 <= w / float(h) <= 2.0):
+        return ""
+    return "%d:%d" % (w, h)
+
+
 def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
                reg_dir=None, repeats=5, dedup=False, wd14=True,
-               square_crop=False, min_size=0, blur_threshold=0.0, report=None,
+               square_crop=False, crop_ratio=None, min_size=0, blur_threshold=0.0, report=None,
                keep_tokens=None, project=None, style_caption="", dataset_mode=None,
                strong_bind=True):
     """strong_bind：人物模式自动强绑定（trigger + 100% 一致特征 → 固定前缀，keep_tokens 覆盖整组）。"""
@@ -4403,8 +4418,10 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
             cmd += ["--caption", style_caption.strip()]
         if dedup:
             cmd.append("--dedup")
-    if square_crop:
-        cmd.append("--square-crop")
+    # 裁切比例：crop_ratio 优先；旧调用 square_crop=True 等价 --crop-ratio 1:1
+    _cr = normalize_crop_ratio(crop_ratio) or ("1:1" if square_crop else "")
+    if _cr:
+        cmd += ["--crop-ratio", _cr]
     if min_size:
         cmd += ["--min-size", str(min_size)]
     if blur_threshold:
@@ -9102,6 +9119,7 @@ class App:
                 mode=params["mode"], trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=bool(params.get("square_crop", False)),
+                crop_ratio=params.get("crop_ratio") or "",
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None,
             )

@@ -587,8 +587,20 @@ def test_preprocess_auto_retry(base: Path):
 
 
 
-def test_preprocess_square_crop_default_off(base: Path):
-    """预处理裁切默认保比例：不传 --square-crop；用户显式开启才居中正方形裁切（2026-08-29 方案一）。"""
+def test_preprocess_crop_ratio(base: Path):
+    """预处理裁切比例：默认保比例不传参；square_crop 旧接口等价 1:1；crop_ratio 支持任意 W:H。"""
+    # normalize_crop_ratio 单测
+    assert core.normalize_crop_ratio("") == ""
+    assert core.normalize_crop_ratio("不裁切") == ""
+    assert core.normalize_crop_ratio("3:4") == "3:4"
+    assert core.normalize_crop_ratio("3：4") == "3:4"   # 全角冒号兼容
+    assert core.normalize_crop_ratio("9:16") == "9:16"
+    assert core.normalize_crop_ratio("2:3") == "2:3"
+    assert core.normalize_crop_ratio("abc") == ""
+    assert core.normalize_crop_ratio("1:9") == ""       # 超范围 1:2~2:1
+    assert core.normalize_crop_ratio("9:1") == ""
+    assert core.normalize_crop_ratio("0:4") == ""
+
     kdir = base / "ppc" / "kohya_ss"
     kdir.mkdir(parents=True, exist_ok=True)
     vpy = kdir / "venv" / "Scripts" / "python.exe"
@@ -603,7 +615,7 @@ def test_preprocess_square_crop_default_off(base: Path):
         captured.append([str(x) for x in cmd])
         return 0
 
-    def _do(square_crop):
+    def _do(**kw):
         captured.clear()
         with patch.object(core, "venv_python", return_value=str(vpy)), \
              patch.object(core, "_venv_python_ok", return_value=(True, "ok")), \
@@ -611,22 +623,26 @@ def test_preprocess_square_crop_default_off(base: Path):
              patch.object(core, "get_kohya_dir", return_value=str(kdir)), \
              patch.object(core, "dataset_train_dir", return_value=str(out_dir)), \
              patch.object(core, "run_stream", side_effect=run_stream):
-            core.preprocess(lambda *a: None, input_dir=str(in_dir), mode="style", square_crop=square_crop)
+            core.preprocess(lambda *a: None, input_dir=str(in_dir), mode="style", **kw)
         assert captured, "应调用一次 preprocess 子进程"
         return captured[0]
 
-    cmd_off = _do(False)
-    assert "--square-crop" not in cmd_off, cmd_off
-    cmd_on = _do(True)
-    assert "--square-crop" in cmd_on, cmd_on
-    # 静态断言：三个自动流水线调用点不再写死 square_crop=True，均读 params 开关；GUI 有开关
+    cmd_def = _do()
+    assert "--crop-ratio" not in cmd_def and "--square-crop" not in cmd_def, cmd_def
+    cmd_sq = _do(square_crop=True)
+    assert "--crop-ratio" in cmd_sq and cmd_sq[cmd_sq.index("--crop-ratio") + 1] == "1:1", cmd_sq
+    cmd_34 = _do(crop_ratio="3:4")
+    assert "--crop-ratio" in cmd_34 and cmd_34[cmd_34.index("--crop-ratio") + 1] == "3:4", cmd_34
+    cmd_bad = _do(crop_ratio="abc")
+    assert "--crop-ratio" not in cmd_bad, cmd_bad
+    # 静态断言：GUI 有裁切比例下拉；流水线入口读 params.crop_ratio，不再写死 square_crop=True
     src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
     g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
-    assert "square_crop=True," not in src and "square_crop=True," not in g, "自动流水线不应再写死居中裁切"
-    assert 'params.get("square_crop"' in src, "Kohya一键工具.py 一键训练应读 params 开关"
-    assert 'params.get("square_crop"' in g, "kohya_gui.py 预处理应读 params 开关"
-    assert "square_crop_var" in g and "chk_square_crop" in g, "GUI 应有正方形裁切开关"
-    print("PREPROCESS_SQUARE_CROP_DEFAULT_OFF_OK")
+    assert "square_crop=True," not in src and "square_crop=True," not in g, "流水线不应再写死居中裁切"
+    assert 'crop_ratio=params.get("crop_ratio")' in src, "Kohya一键工具.py 一键训练应读 crop_ratio"
+    assert 'crop_ratio=params.get("crop_ratio")' in g, "kohya_gui.py 预处理应读 crop_ratio"
+    assert "crop_ratio_var" in g and "crop_ratio_combo" in g, "GUI 应有裁切比例下拉"
+    print("PREPROCESS_CROP_RATIO_OK")
 
 
 def test_preinstall_torch_mirror_fallback(base: Path):
@@ -2073,7 +2089,7 @@ def main():
         test_preinstall_torch_mirror_fallback(base)
         test_tokenizer_cache(base)
         test_preprocess_auto_retry(base)
-        test_preprocess_square_crop_default_off(base)
+        test_preprocess_crop_ratio(base)
         test_external_python_safe_cwd(base)
         test_amd_download_progress(base)
         test_amd_torch_verification(base)

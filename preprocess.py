@@ -878,6 +878,29 @@ def square_center_crop(img):
     return img.crop((left, top, left + side, top + side))
 
 
+def crop_to_ratio(img, ratio_str):
+    """按 宽:高 比例居中裁切；非法/超范围（1:2~2:1）返回原图不裁。"""
+    m = re.match(r"^\s*(\d{1,3})\s*[:：]\s*(\d{1,3})\s*$", ratio_str)
+    if not m:
+        return img
+    rw, rh = int(m.group(1)), int(m.group(2))
+    if rw <= 0 or rh <= 0:
+        return img
+    ratio = rw / float(rh)
+    if not (0.5 <= ratio <= 2.0):
+        return img
+    w, h = img.size
+    if w / float(h) > ratio:   # 太宽 → 裁左右
+        new_w = max(1, min(w, int(round(h * ratio / 2.0) * 2)))
+        left = (w - new_w) // 2
+        box = (left, 0, left + new_w, h)
+    else:                       # 太高 → 裁上下
+        new_h = max(1, min(h, int(round(w / ratio / 2.0) * 2)))
+        top = (h - new_h) // 2
+        box = (0, top, w, top + new_h)
+    return img.crop(box)
+
+
 def is_blurry(img, threshold):
     """用拉普拉斯方差判断是否模糊；方差 < threshold 视为模糊。"""
     try:
@@ -1023,7 +1046,9 @@ def main():
                         help="过滤过小图片：长边小于该像素则跳过（0=不过滤）")
     parser.add_argument("--blur-threshold", type=float, default=0,
                         help="过滤模糊图片：拉普拉斯方差小于该值则跳过（0=不过滤）")
-    parser.add_argument("--square-crop", action="store_true", help="居中正方形裁剪后再缩放")
+    parser.add_argument("--square-crop", action="store_true", help="居中正方形裁剪后再缩放（等价 --crop-ratio 1:1）")
+    parser.add_argument("--crop-ratio", default="",
+                        help="按 宽:高 比例居中裁切后再缩放，如 3:4 / 9:16 / 1:1（默认不裁切，长边缩放保比例；范围 1:2~2:1）")
     parser.add_argument("--report", default=None,
                         help="JSON 报告输出路径（含 ok/重复/模糊/过小/损坏 计数）")
     args = parser.parse_args()
@@ -1113,8 +1138,9 @@ def main():
     print(f"[INFO] 去水印: {'开(' + args.wm_corner + ')' if not args.no_remove_watermark else '关'}")
     if args.dedup:
         print("[INFO] 去重: 开（MD5 完全相同视为重复）")
-    if args.square_crop:
-        print(f"[INFO] 正方形裁剪: 开（居中裁剪为正方形）")
+    _crop_ratio = args.crop_ratio or ("1:1" if args.square_crop else "")
+    if _crop_ratio:
+        print(f"[INFO] 按比例裁切: 开（居中裁剪为 {_crop_ratio}）")
     if args.min_size:
         print(f"[INFO] 过小过滤: 开（长边 < {args.min_size}px 跳过）")
     if args.blur_threshold:
@@ -1192,8 +1218,8 @@ def main():
                 if c:
                     cropped += 1
 
-            if args.square_crop:
-                img = square_center_crop(img)
+            if _crop_ratio:
+                img = crop_to_ratio(img, _crop_ratio)
             img = resize_to_multiple(
                 img, target=args.size, multiple=args.multiple,
                 allow_upscale=not args.no_upscale,

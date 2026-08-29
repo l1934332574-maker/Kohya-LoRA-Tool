@@ -1,6 +1,6 @@
 {
-  "version": "v0.11.5",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.11.5/Setup.exe",
+  "version": "v0.11.6",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.11.6/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.11.5：采样预览出图修复（第二引擎按训练分辨率出图，不再 256x256 怪物图）；预处理默认改长边缩放保比例（人脸不易被切）+ 新增强制正方形裁切开关。"
+  "notes": "v0.11.6：预处理支持任意裁切比例（默认不裁切保比例；可选手动 1:1/3:4/4:3/9:16/16:9 或自定义 宽:高，范围 1:2~2:1）。"
 }

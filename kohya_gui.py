@@ -112,6 +112,34 @@ _MAIN_BTN_TIPS = {
 _OPT_GUI_MAP = {"自动": "auto", "AdamW": "adamw", "Lion": "lion", "AdamW8bit": "adamw8bit"}
 # GUI 显示 → Krea2/FLUX.2 底模量化方式（auto=按显存档位自动选 fp8/int8）
 _QUANT_GUI_MAP = {"自动": "auto", "fp8": "fp8", "int8": "int8", "nf4": "nf4"}
+# 预处理裁切比例：显示文本 -> 宽:高（"" = 不裁切保比例）
+_CROP_RATIO_PRESETS = {
+    "不裁切（保比例）": "",
+    "1:1 正方形": "1:1",
+    "3:4 竖图": "3:4",
+    "4:3 横图": "4:3",
+    "9:16 竖图": "9:16",
+    "16:9 横图": "16:9",
+}
+_CROP_RATIO_LABELS = {v: k for k, v in _CROP_RATIO_PRESETS.items()}
+
+
+def _crop_ratio_parse(text):
+    """界面显示文本 -> 宽:高 比例（"" = 不裁切）；预设之外支持自定义输入（如 2:3）。"""
+    text = (text or "").strip()
+    if text in _CROP_RATIO_PRESETS:
+        return _CROP_RATIO_PRESETS[text]
+    return core.normalize_crop_ratio(text)
+
+
+def _crop_ratio_label(ratio):
+    """宽:高 比例 -> 界面显示文本（自定义比例原样回填）。"""
+    ratio = (ratio or "").strip()
+    if ratio in _CROP_RATIO_LABELS:
+        return _CROP_RATIO_LABELS[ratio]
+    return ratio or "不裁切（保比例）"
+
+
 # 方案A：侧边栏引擎导航（引擎 → 模式；模式选择替代顶部训练模式下拉）
 ENGINE_GROUPS = [
     ("第一引擎 · kohya", ("style", "character")),
@@ -356,8 +384,8 @@ class App:
         self.strong_bind_var = tk.BooleanVar(value=True)
         # 训练中采样出图预览（默认开；低显存 <10G 训练时自动关闭）
         self.sample_preview_var = tk.BooleanVar(value=True)
-        # 预处理裁切（默认关）：关=长边缩放保比例，训练自动按比例分桶，人脸不易被切；开=强制居中正方形裁切（旧行为）
-        self.square_crop_var = tk.BooleanVar(value=False)
+        # 预处理裁切比例（默认不裁切保比例）：可选手动 1:1/3:4/9:16 等，或直接输入自定义 宽:高（如 2:3）
+        self.crop_ratio_var = tk.StringVar(value="不裁切（保比例）")
         # Qwen-Image / Z-Image 的画风/人物子模式（AT_SUB_LABELS 见类级常量）
         self.at_sub_var = tk.StringVar(value="人物（保留全部标签）")
         self.reg_var = tk.StringVar()
@@ -1553,7 +1581,7 @@ class App:
                 "max_epochs": params.get("max_epochs"),
                 "optimizer": params.get("optimizer") or "auto",
                 "strong_bind": bool(params.get("strong_bind", True)),
-                "square_crop": bool(params.get("square_crop", False)),
+                "crop_ratio": params.get("crop_ratio") or "",
             },
         }
 
@@ -1637,9 +1665,9 @@ class App:
                     except Exception:
                         pass
                     continue
-                if k == "square_crop":
+                if k == "crop_ratio":
                     try:
-                        self.square_crop_var.set(bool(v))
+                        self.crop_ratio_var.set(_crop_ratio_label(v))
                     except Exception:
                         pass
                     continue
@@ -1756,14 +1784,18 @@ class App:
             text_color=TXT, font=ui_font(FONT_BODY))
         self.chk_sample_preview.pack(side="left")
         self.sample_preview_row.pack(fill="x", pady=(10, 0))
-        # 预处理裁切方式（所有模式显示）：默认保比例缩放，训练自动分桶，人脸不易被切掉
-        self.square_crop_row = ctk.CTkFrame(card2, fg_color="transparent")
-        self.chk_square_crop = ctk.CTkCheckBox(
-            self.square_crop_row, text="预处理强制正方形裁切（默认关：保比例缩放，人脸不易被切掉）",
-            variable=self.square_crop_var, fg_color=ACC, hover_color=ACC_H,
-            text_color=TXT, font=ui_font(FONT_BODY))
-        self.chk_square_crop.pack(side="left")
-        self.square_crop_row.pack(fill="x", pady=(10, 0))
+        # 预处理裁切比例（所有模式显示）：默认不裁切保比例；下拉可选 1:1/3:4/9:16 等，或直接输入自定义 宽:高（如 2:3）
+        self.crop_ratio_row = ctk.CTkFrame(card2, fg_color="transparent")
+        ctk.CTkLabel(self.crop_ratio_row, text="预处理裁切比例", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
+        self.crop_ratio_combo = ctk.CTkComboBox(
+            self.crop_ratio_row, variable=self.crop_ratio_var,
+            values=list(_CROP_RATIO_PRESETS.keys()), width=200, height=30,
+            fg_color=CARD2, border_color=BORDER, button_color=CARD2, button_hover_color="#3a4150",
+            text_color=TXT, font=ui_font(FONT_BODY), dropdown_font=ui_font(FONT_BODY),
+            dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150")
+        self.crop_ratio_combo.pack(side="left", padx=(12, 8))
+        ctk.CTkLabel(self.crop_ratio_row, text="默认不裁切（保比例，人脸不易被切）；可输入自定义如 2:3", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        self.crop_ratio_row.pack(fill="x", pady=(10, 0))
         # 画风描述词（画风模式专用，默认隐藏）
         self.style_caption_var = tk.StringVar()
         self.style_caption_row = ctk.CTkFrame(card2, fg_color="transparent")
@@ -2867,7 +2899,7 @@ class App:
             "trigger": self.trigger_var.get().strip(),
             "strong_bind": bool(self.strong_bind_var.get()),
             "sample_preview": bool(self.sample_preview_var.get()),
-            "square_crop": bool(self.square_crop_var.get()),
+            "crop_ratio": _crop_ratio_parse(self.crop_ratio_var.get()),
             "reg_dir": self.reg_var.get().strip() or None,
             "raw_dir": self.raw_dir_var.get().strip(),
             "base_model": self.base_model_var.get().strip() or None,
@@ -3380,7 +3412,7 @@ class App:
                 size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") == "krea2" else core.RESOLUTIONS.get(params["base_type"], 512))),
                 mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
-                dedup=True, wd14=True, square_crop=bool(params.get("square_crop", False)),
+                dedup=True, wd14=True, square_crop=False, crop_ratio=params.get("crop_ratio") or "",
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None, project=self.current_project,
                 style_caption=params.get("style_caption") or "",
@@ -3505,7 +3537,7 @@ class App:
                 size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") == "krea2" else core.RESOLUTIONS.get(params["base_type"], 512))),
                 mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
-                dedup=True, wd14=True, square_crop=bool(params.get("square_crop", False)),
+                dedup=True, wd14=True, square_crop=False, crop_ratio=params.get("crop_ratio") or "",
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None, project=self.current_project,
                 style_caption=params.get("style_caption") or "",
