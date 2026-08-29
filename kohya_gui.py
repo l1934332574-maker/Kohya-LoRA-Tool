@@ -266,6 +266,11 @@ def _collect_env_lines():
     except Exception:
         pass
     try:
+        _ram = core.detect_ram_gb()
+        out.append("系统内存: %sGB" % ("%.1f" % _ram if _ram else "?"))
+    except Exception:
+        pass
+    try:
         _r = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
                             capture_output=True, text=True, timeout=6)
         if _r.returncode == 0 and (_r.stdout or "").strip():
@@ -2197,6 +2202,10 @@ class App:
         self._base_models = models or []
         items, self._base_items, self._base_labels = [], [], []
         for bt in core.BASE_TYPE_KEYS:
+            # 第一引擎（画风/人物）不支持 FLUX.2：底模下拉不列出，避免误选后报
+            # 「sd-scripts 缺失 flux_2_train_network.py」（2026-08-29 六十九待办）
+            if self.mode in ("style", "character") and bt == "flux2":
+                continue
             items.append(core.BASE_TYPE_LABELS[bt])
             self._base_items.append(("type", bt))
             self._base_labels.append(core.BASE_TYPE_LABELS[bt])
@@ -2207,7 +2216,10 @@ class App:
             self._base_labels.append(label)
         try:
             self.base_combo.configure(values=items)
-            self.base_combo.set(core.BASE_TYPE_LABELS.get(self.base_type, items[0]))
+            _cur = core.BASE_TYPE_LABELS.get(self.base_type)
+            if _cur not in items:
+                _cur = items[0]
+            self.base_combo.set(_cur)
         except Exception:
             pass
 
@@ -2235,10 +2247,16 @@ class App:
             self.base_model_var.set(payload)
             bt = core.detect_base_type(payload)
             if bt in core.BASE_TYPE_KEYS:
-                self._set_base_type(bt)
-                self._log(f"[底模] 已选择 {os.path.basename(payload)}（{core.BASE_TYPE_LABELS[bt]}）")
+                if self.mode in ("style", "character") and bt == "flux2":
+                    self._log(f"[底模] ⚠ 检测到 FLUX.2 底模 {os.path.basename(payload)}：FLUX.2 训练请用第二引擎的「FLUX.2 图像LoRA」模式（需先装第二引擎），模型放 models/flux2/。第一引擎不支持 FLUX.2。")
+                else:
+                    self._set_base_type(bt)
+                    self._log(f"[底模] 已选择 {os.path.basename(payload)}（{core.BASE_TYPE_LABELS[bt]}）")
             else:
-                self._log(f"[底模] 已选择 {os.path.basename(payload)}（类型待确认）")
+                if core._looks_like_krea2(payload):
+                    self._log(f"[底模] ⚠ 检测到 Krea2 底模 {os.path.basename(payload)}：Krea2 训练请用第二引擎的「Krea2」模式（需先装第二引擎），模型放 models/krea2/raw.safetensors；第一引擎不支持 Krea2。")
+                else:
+                    self._log(f"[底模] 已选择 {os.path.basename(payload)}（类型待确认）")
 
     def _set_base_type(self, bt):
         if bt not in core.BASE_TYPE_KEYS:

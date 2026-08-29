@@ -1,3 +1,29 @@
+## v0.11.4（2026-08-29）
+
+### 修复：第一引擎误选 FLUX.2 / Krea2 底模直接报错（自动拦截引导）
+- **背景**：第一引擎（画风/人物）底模下拉里误出现了「FLUX.2 klein」选项；把 FLUX.2 底模（或 Krea2 底模）放进第一引擎训练，会报「sd-scripts 缺失 flux_2_train_network.py」或按 FLUX 加载直接崩。
+- **已修**：
+  1. 第一引擎底模下拉不再列出 FLUX.2 klein（画风/人物模式）；
+  2. 选到 FLUX.2 / Krea2 底模文件时给出明确提示（去第二引擎对应模式）；
+  3. `train()` 新增 `_looks_like_flux2` 拦截（同 v0.11.4 Krea2 拦截逻辑），训练前直接引导，不再报英文错。
+
+### 修复：底模类型二次校验（Anima 模式放 SDXL 底模）
+- 训练前自动识别底模实际类型，与当前模式声明不一致（如 Anima 模式放 SDXL 底模 animagine-3.1）直接中文拦截，不再启动即崩。
+
+### 修复：AMD 平台优先识别到核显
+- `detect_gpu_name()` 原来用 WMI `-First 1`，AMD 核显通常排第一、且禁用核显后 WMI 仍会列出 → 一直取到核显。
+- 已修：新增 `_is_igpu_name()`（覆盖 Radeon Graphics/Vega/610M~890M、Intel HD/UHD/Iris、Microsoft Basic），显卡名称改用 DXGI 取「专用显存最大的适配器」（天然跳过核显），显存检测统一过滤核显，不误杀独显（RX 6800M 等）。
+
+### 修复：Krea2/FLUX.2 低内存「卡在第一步」（自动降块交换）
+- **背景**：3060 12G + 16G 物理内存用户，Krea2 无论 1024px 还是 768px 都卡在第一步 0/708（无报错无 OOM）——48G 虚拟内存只是页面文件，16G 物理内存 + swap12 每步搬运 ~2.8GB，Windows 疯狂读写页面文件导致看起来像卡死。
+- **已修**：新增系统内存检测（`detect_ram_gb`）；内存 <32G 时 Krea2 12G/16G 档块交换 12→6、FLUX.2 12G 档 6→4，并打印警告；日志导出「环境信息」新增「系统内存: xxGB」。
+
+### 修复：Krea2 训练前补齐 musubi 版本自检
+- `_check_musubi_krea2_version` 原来只接安装流程和 FLUX.2，现补到 train_krea2——旧版 musubi 会以 float32 训练（300s/步），训练前直接提示重装第二引擎。
+
+### 验证
+- 新增 LOW_RAM_SWAP_AUTO_OK / FLUX2_FIRST_ENGINE_GUARD_OK / GPU_IGPU_FILTER_OK；engine_install_smoke_test + smoke_test 全过。
+
 ## v0.11.3（2026-08-28）
 
 ### 修复：AI 图像（Qwen-Image/Z-Image）训练慢 —— low_vram 显存感知

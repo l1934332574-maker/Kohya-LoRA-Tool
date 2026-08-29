@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.11.3"
+APP_VERSION = "0.11.4"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2116,13 +2116,29 @@ def preset_for(mode, base_type):
     return {}
 
 
-def _resolve_krea2_swap(vram_gb, gc_on=True):
+def _warn_low_ram(logf, ram_gb, label):
+    """Krea2/FLUX.2 等大块交换训练：系统物理内存 <32G 时警告（官方/社区建议 32G）。
+
+    16G 物理内存 + 大块交换会读写磁盘页面文件，表现为「卡在第一步/极慢」
+    （2026-08-29 3060 12G 用户实测：48G 虚拟内存只是页面文件，物理内存 16G 照样卡第一步）。
+    """
+    if not ram_gb:
+        return
+    if ram_gb < 32:
+        logf(f"[{label}] ⚠ 检测到系统内存仅 {ram_gb:.0f}G：{label} 训练建议 32G 内存。"
+             "内存不足时块交换会读写硬盘页面文件，表现为「卡在第一步/极慢」。"
+             "已自动降低块交换数以减少内存压力（可手动调回）。")
+
+
+def _resolve_krea2_swap(vram_gb, gc_on=True, ram_gb=None):
     """Krea2 blocks_to_swap / H2D-only 档位（显存取整判断）。
 
     16G 卡 DXGI 常报告 15.6~15.9GB，直接用 vram_gb < 16 判断会误判成 12G 档
     （swap=12，每步搬 12 个块），4080S 用户实测 11~17s/it（2026-08-27）。
     取整后 16G 走 16-24G 档 swap=6；H2D-only（LoRA 冻结底模单向交换，
     Fizgig 实测块交换快 ~6.4x）对 16G 档同样保持开启。
+    系统内存 <32G 时（Krea2 官方建议 32G）把 12G/16G 档 swap 12→6，
+    减少每步 CPU↔GPU 搬运量，避免 16G 内存被页面文件拖死（2026-08-29 3060 用户）。
     返回 (blocks_to_swap, h2d_only)。
     """
     tier = round(vram_gb) if vram_gb is not None else None
@@ -2136,16 +2152,19 @@ def _resolve_krea2_swap(vram_gb, gc_on=True):
                            # swap=10 时 fp8 仍 30~40s/it；swap=12 留足显存余量防换页
     elif tier < 24:
         swap = 6           # 20-24G 档
+    if ram_gb is not None and ram_gb < 32 and tier is not None and tier >= 12:
+        swap = min(swap, 6)   # 低内存（<32G）：减少每步搬运，防页面文件拖死
     swap = min(swap, 26)   # Krea2 上限 26
     h2d_only = swap > 0 and (tier is None or tier <= 16) and gc_on
     return swap, h2d_only
 
 
-def _resolve_flux2_swap(vram_gb, gc_on=True):
+def _resolve_flux2_swap(vram_gb, gc_on=True, ram_gb=None):
     """FLUX.2 blocks_to_swap / H2D-only 档位（显存取整判断，klein-4b 上限 13）。
 
     与 Krea2 同理：16G 卡（DXGI 报告 15.6~15.9）取整后走 16-24G 档 swap=2，
-    避免误判 12G 档 swap=6。返回 (blocks_to_swap, h2d_only)。
+    避免误判 12G 档 swap=6。系统内存 <32G 时 12G 档 swap 6→4（低内存防卡第一步）。
+    返回 (blocks_to_swap, h2d_only)。
     """
     tier = round(vram_gb) if vram_gb is not None else None
     swap = 0
@@ -2155,6 +2174,8 @@ def _resolve_flux2_swap(vram_gb, gc_on=True):
         swap = 6
     elif tier < 24:
         swap = 2
+    if ram_gb is not None and ram_gb < 32 and tier is not None and tier >= 12:
+        swap = min(swap, 4)   # 低内存：12G 档 6→4，减少每步搬运
     swap = min(swap, 13)
     h2d_only = swap > 0 and (tier is None or tier <= 16) and gc_on
     return swap, h2d_only
@@ -2203,10 +2224,16 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     kdir = get_kohya_dir()
     mt_dir = os.path.join(kdir, "musubi-tuner")
     _ensure_venv_hf_sitecustomize(os.path.dirname(os.path.dirname(mvpy)), logf)
+    # 自愈防线：musubi 版本过旧会以 float32 训练（300s/步），阻止并提示重装第二引擎
+    _check_musubi_krea2_version(kdir, logf)
     accel = _accelerate_launch_cmd(mvpy, logf=logf)
     if not _ensure_torchvision_deps(mvpy, logf, label="Krea2", cwd=mt_dir):
         raise RuntimeError("Krea2 引擎（第二引擎）venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第二引擎。")
     _warn_laptop_heavy_load(logf, vram_gb, "Krea2")
+    _ram_gb = detect_ram_gb()
+    if _ram_gb:
+        logf(f"[Krea2] 系统内存: {_ram_gb:.0f}G")
+    _warn_low_ram(logf, _ram_gb, "Krea2")
     files = krea2_model_files()
     missing = krea2_missing_models()
     if missing:
@@ -2298,7 +2325,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     if use_nf4 or use_int8 or use_none:
         fp8 = False
     logf(f"[Krea2] 量化: {_quant}（{_quant_detail}）")
-    swap, h2d_only = _resolve_krea2_swap(vram_gb, gc_on)
+    swap, h2d_only = _resolve_krea2_swap(vram_gb, gc_on, ram_gb=_ram_gb)
     _manual_swap = str(params.get("blocks_to_swap") or "").strip()
     if _manual_swap.isdigit():
         swap = min(int(_manual_swap), 26)
@@ -2440,6 +2467,10 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     if not _ensure_torchvision_deps(mvpy, logf, label="FLUX.2", cwd=mt_dir):
         raise RuntimeError("FLUX.2 引擎（第二引擎）venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第二引擎。")
     _warn_laptop_heavy_load(logf, vram_gb, "FLUX.2")
+    _ram_gb = detect_ram_gb()
+    if _ram_gb:
+        logf(f"[FLUX.2] 系统内存: {_ram_gb:.0f}G")
+    _warn_low_ram(logf, _ram_gb, "FLUX.2")
     files = flux2_model_files()
     missing = flux2_missing_models()
     if missing:
@@ -2504,7 +2535,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     gc_on = decide_gradient_checkpointing(params.get("gc", "自动"), vram_gb)
     # 显存适配：fp8（DiT+文本编码器）+ blocks_to_swap（klein-4b 上限 13）
     fp8 = vram_gb is None or vram_gb < 24
-    swap, h2d_only = _resolve_flux2_swap(vram_gb, gc_on)
+    swap, h2d_only = _resolve_flux2_swap(vram_gb, gc_on, ram_gb=_ram_gb)
     _manual_swap = str(params.get("blocks_to_swap") or "").strip()
     if _manual_swap.isdigit():
         swap = min(int(_manual_swap), 13)
@@ -6351,6 +6382,24 @@ def _sample_preview_enabled(params, vram_gb):
 
 def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, resume_from=None, progress=None):
     params = params or {}
+    # v0.11.4：Krea2 底模不能在第一引擎（kohya 画风/人物）训练——误选会按 FLUX 加载导致架构错误/OOM，提前拦截并引导
+    _k2base = base_model or str(params.get("base_model") or "")
+    if _k2base and _looks_like_krea2(_k2base):
+        raise RuntimeError(
+            "检测到 Krea2 底模：{}\n\n".format(_k2base) +
+            "Krea2 训练必须用「第二引擎(musubi)」的 Krea2 模式，第一引擎（kohya）不支持 Krea2：\n"
+            "· 左侧点「② 第二引擎(可选)」安装第二引擎；\n"
+            "· 切换到「Krea2」模式；\n"
+            "· 模型放 models/krea2/raw.safetensors（软件内「下载 Krea2 模型」自动下载，约 26GB）。\n\n"
+            "（在第一引擎误选 Krea2 底模会按 FLUX 加载导致 OOM/架构错误，已自动拦截）")
+    # v0.11.4：FLUX.2 底模同样不能在第一引擎训练——kohya sd-scripts 没有 flux_2_train_network.py
+    if _k2base and _looks_like_flux2(_k2base):
+        raise RuntimeError(
+            "检测到 FLUX.2 底模：{}\n\n".format(_k2base) +
+            "FLUX.2 训练必须用「第二引擎(musubi)」的 FLUX.2 模式，第一引擎（kohya）不支持 FLUX.2：\n"
+            "· 左侧点「② 第二引擎(可选)」安装第二引擎；\n"
+            "· 切换到「FLUX.2 图像LoRA」模式；\n"
+            "· 模型放 models/flux2/（DiT + Qwen3 4B 文本编码器 + VAE 三个文件，软件内「下载 FLUX.2 模型」自动下载）。")
     amd_mode = bool(params.get("amd_mode", False))
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     if progress is not None:
@@ -6419,6 +6468,19 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     arch_info = ARCH_INFO.get(base_type, ARCH_INFO["sd15"])
     script = arch_info["script"]
     family = arch_info["family"]
+    # 底模类型二次校验：自动识别结果与当前模式声明的底模类型不一致时拦截
+    # （2026-08-22 用户 Anima 模式加载 SDXL 底模 animagine-3.1-base 启动即崩）
+    _det_bt = None
+    try:
+        _det_bt = detect_base_type(base_model)
+    except Exception:
+        _det_bt = None
+    if _det_bt and _det_bt in ARCH_INFO and _det_bt != base_type:
+        raise RuntimeError(
+            "底模与当前训练模式不匹配：\n\n"
+            f"· 当前模式底模类型：{BASE_TYPE_LABELS.get(base_type, base_type)}\n"
+            f"· 实际识别底模类型：{BASE_TYPE_LABELS.get(_det_bt, _det_bt)}\n\n"
+            "请先在上方「底模」下拉选择与实际底模一致的模型类型（或切换训练模式），再开始训练。")
     if not os.path.isfile(os.path.join(sds, script)):
         raise RuntimeError(f"sd-scripts 缺失 {script}（当前架构 {BASE_TYPE_LABELS.get(base_type, base_type)}），请重跑【一键安装】")
     if not base_model or not os.path.isfile(base_model):
@@ -7186,6 +7248,9 @@ def _ckpt_keys(path):
 
 def _classify_base_keys(keys):
     joined = "\n".join(keys or [])
+    # Krea2：SingleStreamDiT + txtfusion 文本融合适配器（第一引擎 kohya 不支持，训练需第二引擎 musubi）
+    if "txtfusion." in joined:
+        return "krea2"
     # FLUX.2：4B DiT（double/single stream modulation 是 FLUX.2 特有，须在 FLUX.1 判断之前）
     if ("double_stream_modulation_img." in joined or "double_stream_modulation_txt." in joined
             or "single_stream_modulation." in joined):
@@ -7209,7 +7274,7 @@ def _classify_base_keys(keys):
 
 
 def detect_base_type(model_path):
-    """自动识别底模类型：返回 'sd15' / 'sdxl' / 'flux' / 'anima' / None（无法识别）。"""
+    """自动识别底模类型：返回 'sd15' / 'sdxl' / 'flux' / 'anima' / 'krea2' / None（无法识别）。"""
     try:
         ext = os.path.splitext(model_path or "")[1].lower()
         if ext == ".safetensors":
@@ -7224,6 +7289,48 @@ def detect_base_type(model_path):
 
 
 # ---------- FLUX / Anima 组件 ----------
+
+def _looks_like_krea2(model_path):
+    """Krea2 底模识别：safetensors 键含 txtfusion（DiT 文本融合）或文件名含 krea2。
+
+    用于第一引擎（kohya 画风/人物）误选 Krea2 底模时拦截——Krea2 训练必须走第二引擎
+    （musubi）的 Krea2 模式，否则会按 FLUX 加载导致架构错误/CUDA OOM。
+    """
+    try:
+        if detect_base_type(model_path) == "krea2":
+            return True
+    except Exception:
+        pass
+    try:
+        low = os.path.basename(model_path or "").lower()
+        if "krea2" in low or "krea_2" in low:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _looks_like_flux2(model_path):
+    """FLUX.2 底模识别：safetensors 键含 double/single_stream_modulation（FLUX.2 特有）
+    或文件名含 flux2/flux_2。
+
+    用于第一引擎（kohya 画风/人物）误选 FLUX.2 底模时拦截——kohya sd-scripts 没有
+    flux_2_train_network.py（那是 musubi 脚本），误选会报「sd-scripts 缺失」。
+    """
+    try:
+        if detect_base_type(model_path) == "flux2":
+            return True
+    except Exception:
+        pass
+    try:
+        low = os.path.basename(model_path or "").lower()
+        # 覆盖 flux2 / flux-2 / flux_2 / flux 2 等命名（FLUX.2 官方文件 flux-2-klein-base-4b）
+        if re.search(r"flux[^a-z0-9]*2", low):
+            return True
+    except Exception:
+        pass
+    return False
+
 
 def _pick_sibling(base_model, predicate):
     """在底模同目录找一个符合条件的配套文件。"""
@@ -8260,7 +8367,10 @@ class App:
                 self._set_base_type(bt)
                 self._log(f"[底模] 已选择 {os.path.basename(path)}（{BASE_TYPE_LABELS[bt]}）")
             else:
-                self._log(f"[底模] 已选择 {os.path.basename(path)}（类型待确认，可点「选择底模文件」重新识别）")
+                if _looks_like_krea2(path):
+                    self._log(f"[底模] ⚠ 检测到 Krea2 底模 {os.path.basename(path)}：Krea2 训练请用第二引擎的「Krea2」模式（需先装第二引擎），模型放 models/krea2/raw.safetensors；第一引擎不支持 Krea2，误用会按 FLUX 加载报错。")
+                else:
+                    self._log(f"[底模] 已选择 {os.path.basename(path)}（类型待确认，可点「选择底模文件」重新识别）")
         self._refresh_guide()
 
     def _set_base_type(self, bt):

@@ -7,7 +7,7 @@ import subprocess
 __all__ = [
     "detect_nvidia_gpu", "nvidia_driver_version", "_dxgi_adapters", "detect_vram_gb",
     "_registry_vram_gb", "detect_gpu_vendor", "detect_gpu_name", "detect_gpu_info",
-    "detect_torch_backend",
+    "detect_torch_backend", "detect_ram_gb",
 ]
 
 def detect_nvidia_gpu():
@@ -93,6 +93,41 @@ def _dxgi_adapters():
     except Exception:
         return []
 
+def _is_igpu_name(name):
+    """判断显卡名称是否为核显/基础显示适配器。
+
+    AMD 平台的核显在 DXGI/WMI 里常排第一，且「设备管理器禁用核显」后 WMI 仍会列出
+    （禁用不卸载设备），必须靠名称特征跳过，否则 detect_gpu_name() 会优先取到核显。
+    覆盖：
+    - Microsoft Basic Display / Basic Render（基础显示适配器）
+    - Intel 核显：HD/UHD/Iris Graphics（如 "Intel(R) UHD Graphics"）
+    - AMD 核显：Radeon(TM) Graphics / Radeon Graphics / Radeon Vega（APU）
+      / Radeon 6xxM~8xxM（610M/680M/780M/880M/890M 等新命名）
+    不误杀独显：Radeon RX / Radeon PRO / Intel Arc A 系列。
+    """
+    if not name:
+        return False
+    d = str(name).lower()
+    if "microsoft basic" in d or "basic display" in d or "basic render" in d:
+        return True
+    if "intel" in d:
+        # Intel Arc 独显（A310/A380/A580/A750/A770 等）不是核显
+        if "arc" in d and re.search(r"\ba\d{3}\b", d):
+            return False
+        if "graphics" in d or "hd graphics" in d or "uhd" in d or "iris" in d:
+            return True
+        return False
+    if "radeon" in d:
+        if "graphics" in d:
+            return True
+        # APU 核显新命名：Radeon 610M/660M/680M/740M/760M/780M/880M/890M 等
+        # （独显笔记本是 RX 6600M/6800M 等 4 位数 + M，靠 3 位数 + M 且前后非数字区分）
+        if re.search(r"radeon[^0-9]*?(?<![0-9])\d{3}m(?![0-9])", d):
+            return True
+        return False
+    return False
+
+
 def detect_vram_gb():
     """检测显卡显存（GB）。优先 DXGI（各品牌权威）；失败回退 nvidia-smi（N 卡）/注册表。返回 None=未知。"""
     try:
@@ -100,10 +135,8 @@ def detect_vram_gb():
         if adapters:
             best = None
             for _d, _mem in adapters:
-                d = (_d or "").lower()
-                # 排除核显/基础显示适配器
-                if ("basic display" in d or ("intel" in d and "graphics" in d)
-                        or "radeon(tm) graphics" in d or ("radeon" in d and "graphics" in d and "rx" not in d)):
+                # 排除核显/基础显示适配器（AMD 核显常排第一，靠名称特征跳过）
+                if _is_igpu_name(_d):
                     continue
                 gb = float(_mem) / (1024.0 ** 3)
                 if gb > 0:
@@ -128,6 +161,44 @@ def detect_vram_gb():
     except Exception:
         pass
     return _registry_vram_gb()
+
+def detect_ram_gb():
+    """检测系统物理内存总量（GB）。Windows 用 GlobalMemoryStatusEx（权威），失败回退 WMI。返回 None=未知。"""
+    try:
+        import ctypes
+
+        class _MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        ms = _MEMORYSTATUSEX()
+        ms.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+            gb = float(ms.ullTotalPhys) / (1024.0 ** 3)
+            if gb > 0:
+                return gb
+    except Exception:
+        pass
+    try:
+        ps = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+              "[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 2)"]
+        r = subprocess.run(ps, capture_output=True, text=True, timeout=30)
+        val = (r.stdout or "").strip()
+        if val:
+            return float(val)
+    except Exception:
+        pass
+    return None
+
 
 def _registry_vram_gb():
     """从显卡注册表读取真实显存（HardwareInformation.qwMemorySize，QWORD，单位字节）。
@@ -174,19 +245,7 @@ def _registry_vram_gb():
         if not adapters:
             return None
 
-        def _is_igpu(d):
-            if not d:
-                return False
-            d = d.lower()
-            if "microsoft basic display" in d or "basic display" in d:
-                return True
-            if "intel(r)" in d and "graphics" in d:
-                return True
-            if "radeon(tm) graphics" in d or ("radeon" in d and "graphics" in d and "rx" not in d):
-                return True
-            return False
-
-        discrete = [g for d, g in adapters if not _is_igpu(d)]
+        discrete = [g for d, g in adapters if not _is_igpu_name(d)]
         pool = discrete if discrete else [g for _, g in adapters]
         return max(pool)
     except Exception:
@@ -215,7 +274,9 @@ def detect_gpu_vendor():
     return "unknown"
 
 def detect_gpu_name():
-    """返回显卡名称（N 卡走 nvidia-smi；其他走 WMI）。失败返回 None。"""
+    """返回独显名称（N 卡走 nvidia-smi；AMD/Intel 用 DXGI 取专用显存最大的适配器，
+    天然跳过核显——AMD 核显常排第一，禁用后 WMI 仍会列出；DXGI 失败回退 WMI 遍历过滤核显）。
+    失败返回 None。"""
     try:
         r = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
                            capture_output=True, text=True, timeout=20)
@@ -226,12 +287,29 @@ def detect_gpu_name():
     except Exception:
         pass
     try:
+        adapters = _dxgi_adapters()
+        if adapters:
+            best = None
+            for _d, _mem in adapters:
+                if _is_igpu_name(_d):
+                    continue
+                gb = float(_mem) / (1024.0 ** 3)
+                if best is None or gb > best[1]:
+                    best = (_d, gb)
+            if best and best[1] > 0:
+                return best[0]
+    except Exception:
+        pass
+    try:
         ps = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-              "Get-CimInstance Win32_VideoController | Select-Object -First 1 -ExpandProperty Name"]
+              "(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) -join '|'"]
         r = subprocess.run(ps, capture_output=True, text=True, timeout=30)
-        name = (r.stdout or "").strip()
-        if name:
-            return name
+        names = [n.strip() for n in (r.stdout or "").split("|") if n.strip()]
+        for n in names:
+            if not _is_igpu_name(n):
+                return n
+        if names:
+            return names[0]
     except Exception:
         pass
     return None

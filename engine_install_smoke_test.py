@@ -1023,6 +1023,84 @@ def test_prequantized_krea2_raw_detected(base):
     print("PREQUANTIZED_KREA2_RAW_DETECTED_OK")
 
 
+
+
+def test_low_ram_swap(base):
+    """低内存（<32G）自动降 swap：Krea2 12/16G 档 12→6、FLUX.2 12G 档 6→4；
+    ≥32G / 8G 档 / 高显存档不受影响（2026-08-29 3060 12G + 16G 内存卡第一步待办）。"""
+    # Krea2
+    assert core._resolve_krea2_swap(12, ram_gb=16) == (6, True)
+    assert core._resolve_krea2_swap(16, ram_gb=16) == (6, True)
+    assert core._resolve_krea2_swap(20, ram_gb=16) == (6, False)   # 本已是 6
+    assert core._resolve_krea2_swap(24, ram_gb=16) == (2, False)   # 本已是 2
+    assert core._resolve_krea2_swap(12, ram_gb=32) == (12, True)   # >=32G 不降
+    assert core._resolve_krea2_swap(12) == (12, True)              # ram_gb 缺省不降
+    assert core._resolve_krea2_swap(8, ram_gb=16) == (24, True)    # 8G 档不降（显存受限）
+    # FLUX.2
+    assert core._resolve_flux2_swap(12, ram_gb=16) == (4, True)
+    assert core._resolve_flux2_swap(12, ram_gb=32) == (6, True)
+    assert core._resolve_flux2_swap(8, ram_gb=16) == (10, True)    # 8G 档不降
+    assert core._resolve_flux2_swap(16, ram_gb=16) == (2, True)
+    # _warn_low_ram：<32G 打印警告；>=32G / None 静默
+    out = []
+    core._warn_low_ram(out.append, 16, "Krea2")
+    assert any("建议 32G" in x for x in out), "低内存应警告"
+    out2 = []
+    core._warn_low_ram(out2.append, 32, "Krea2")
+    core._warn_low_ram(out2.append, None, "Krea2")
+    assert out2 == [], ">=32G / None 不应警告"
+    print("LOW_RAM_SWAP_AUTO_OK")
+
+
+def test_flux2_first_engine_guard(base):
+    """FLUX.2 底模不能在第一引擎训练：_looks_like_flux2 识别 + train() 拦截。"""
+    # 文件名识别
+    assert core._looks_like_flux2(r"I:\models\flux2\flux-2-klein-base-4b.safetensors") is True
+    assert core._looks_like_flux2(r"I:\models\krea2\raw.safetensors") is False
+    assert core._looks_like_flux2(r"I:\models\base\flux1-dev.safetensors") is False
+    # 第一引擎 train() 拦截（Krea2 同款逻辑，直接用 _looks_like_flux2 短路验证）
+    import unittest.mock as _m
+    with _m.patch.object(core, "_looks_like_flux2", return_value=True):
+        try:
+            core.train(logf=lambda *a: None, base_model=r"I:\models\flux2\flux-2-klein-base-4b.safetensors",
+                       mode="character", params={"base_model": r"I:\models\flux2\flux-2-klein-base-4b.safetensors"})
+            raise AssertionError("应拦截 FLUX.2 底模在第一引擎训练")
+        except RuntimeError as e:
+            assert "FLUX.2" in str(e) and "第二引擎" in str(e), "拦截文案应引导去第二引擎"
+    print("FLUX2_FIRST_ENGINE_GUARD_OK")
+
+def test_igpu_filter(base):
+    """AMD 平台优先识别到核显的回归测试：核显名称必须被过滤，独显名称不能误杀。
+
+    背景：AMD 核显在 DXGI/WMI 里常排第一，且设备管理器禁用核显后 WMI 仍会列出，
+    detect_gpu_name() 之前用 `Select-Object -First 1` 会优先取到核显（2026-08-29 用户反馈）。
+    """
+    from kohya_core import gpu as _gpu
+    igpu = [
+        "AMD Radeon(TM) Graphics", "AMD Radeon Graphics", "AMD Radeon(TM) Radeon Graphics",
+        "AMD Radeon 780M", "AMD Radeon(TM) 680M", "AMD Radeon 610M", "AMD Radeon(TM) 890M",
+        "AMD Radeon(TM) Vega 8 Graphics",
+        "Intel(R) UHD Graphics", "Intel(R) Iris(R) Xe Graphics",
+        "Microsoft Basic Display Adapter", "Microsoft Basic Render Driver",
+    ]
+    dgpu = [
+        "AMD Radeon RX 6800 XT", "AMD Radeon RX 6600", "AMD Radeon RX Vega 56",
+        "AMD Radeon PRO W6800", "AMD Radeon RX 6800M", "AMD Radeon RX 6600M", "AMD Radeon VII",
+        "NVIDIA GeForce RTX 4070", "NVIDIA GeForce GTX 1080",
+        "Intel(R) Arc(TM) A770 Graphics", "Intel(R) Arc(TM) A750",
+    ]
+    for n in igpu:
+        assert _gpu._is_igpu_name(n), "核显应判为 iGPU: %s" % n
+    for n in dgpu:
+        assert not _gpu._is_igpu_name(n), "独显不应判为 iGPU: %s" % n
+    # detect_gpu_name / detect_vram_gb 在本机可正常调用（不抛异常）
+    try:
+        core.detect_gpu_name()
+        core.detect_vram_gb()
+    except Exception as e:
+        raise AssertionError("detect_gpu_name/detect_vram_gb 调用异常: %s" % e)
+    print("GPU_IGPU_FILTER_OK")
+
 def test_swap_tier_resolution(base):
     """Krea2/FLUX.2 块交换档位：16G 卡（DXGI 报告 15.6~15.9）取整后走 16-24G 档，不再误判 12G 档。
 
@@ -1754,6 +1832,29 @@ def test_at_image_low_vram_vram_aware(base: Path):
     print("AT_IMAGE_LOW_VRAM_VRAM_AWARE_OK")
 
 
+def test_krea2_first_engine_guard(base: Path):
+    """Krea2 底模不能在第一引擎（kohya）训练：识别 + 拦截 + 引导（否则按 FLUX 加载 OOM）。"""
+    # 1) 键识别：txtfusion → krea2；不误判 FLUX/Anima
+    assert core._classify_base_keys(["txtfusion.0.attn.wq.weight", "blocks.0.attn.wq.weight"]) == "krea2"
+    assert core._classify_base_keys(["double_blocks.0.attn.qkv.weight"]) == "flux"
+    assert core._classify_base_keys(["llm_adapter.0.weight", "adaln_modulation.0.weight", "x_embedder.weight"]) == "anima"
+    # 2) 文件名兜底（用户把 Krea2raw.safetensors 放 models/base 的场景）
+    assert core._looks_like_krea2(r"I:\Documents\KohyaLoraTool\models\base\Krea2raw.safetensors") is True
+    assert core._looks_like_krea2(r"I:\models\base\flux1-dev.safetensors") is False
+    # 3) train() 第一引擎入口有拦截 + 引导文案
+    src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    i = src.find("def train(logf=print, base_model=None")
+    j = src.find("\ndef ", i + 1)
+    seg = src[i:j]
+    assert "_looks_like_krea2(_k2base)" in seg, "train() 缺 Krea2 拦截"
+    assert "Krea2 训练必须用「第二引擎(musubi)」的 Krea2 模式" in seg, "缺引导文案"
+    # 4) GUI 选底模：识别到 Krea2 有明确提示（不再是笼统的「类型待确认」）
+    g = src[src.find("def _on_base_change"):src.find("def _set_base_type")]
+    assert "_looks_like_krea2(path)" in g, "GUI 缺 Krea2 提示分支"
+    assert "Krea2 训练请用第二引擎" in g, "GUI 缺 Krea2 提示文案"
+    print("KREA2_FIRST_ENGINE_GUARD_OK")
+
+
 def test_third_engine_triton_and_laptop_warning(base: Path):
     """v0.11.3：第三引擎缺 Triton 自动补装 + 笔记本低显存重型模型强警告。"""
     src = Path(core.__file__).read_text(encoding="utf-8-sig")
@@ -1929,6 +2030,9 @@ def main():
         test_main_engine_accel_always_defined(base)
         test_quant_mode_resolution(base)
         test_swap_tier_resolution(base)
+        test_igpu_filter(base)
+        test_low_ram_swap(base)
+        test_flux2_first_engine_guard(base)
         test_prequantized_krea2_raw_detected(base)
         test_train_monitor_krea2_parsing(base)
         test_modelscope_mirror_urls(base)
@@ -1970,6 +2074,7 @@ def main():
         test_swap_zero_option(base)
         test_at_image_low_vram_vram_aware(base)
         test_third_engine_triton_and_laptop_warning(base)
+        test_krea2_first_engine_guard(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 
