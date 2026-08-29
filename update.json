@@ -1,6 +1,6 @@
 {
-  "version": "v0.11.4",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.11.4/Setup.exe",
+  "version": "v0.11.5",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.11.5/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.11.4：第一引擎误选 FLUX.2/Krea2 底模自动拦截引导；底模类型二次校验；AMD 核显识别修复；低内存自动降块交换（防卡第一步）；日志导出加系统内存。"
+  "notes": "v0.11.5：采样预览出图修复（第二引擎按训练分辨率出图，不再 256x256 怪物图）；预处理默认改长边缩放保比例（人脸不易被切）+ 新增强制正方形裁切开关。"
 }

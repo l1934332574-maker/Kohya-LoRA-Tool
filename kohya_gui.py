@@ -356,6 +356,8 @@ class App:
         self.strong_bind_var = tk.BooleanVar(value=True)
         # 训练中采样出图预览（默认开；低显存 <10G 训练时自动关闭）
         self.sample_preview_var = tk.BooleanVar(value=True)
+        # 预处理裁切（默认关）：关=长边缩放保比例，训练自动按比例分桶，人脸不易被切；开=强制居中正方形裁切（旧行为）
+        self.square_crop_var = tk.BooleanVar(value=False)
         # Qwen-Image / Z-Image 的画风/人物子模式（AT_SUB_LABELS 见类级常量）
         self.at_sub_var = tk.StringVar(value="人物（保留全部标签）")
         self.reg_var = tk.StringVar()
@@ -1551,6 +1553,7 @@ class App:
                 "max_epochs": params.get("max_epochs"),
                 "optimizer": params.get("optimizer") or "auto",
                 "strong_bind": bool(params.get("strong_bind", True)),
+                "square_crop": bool(params.get("square_crop", False)),
             },
         }
 
@@ -1631,6 +1634,12 @@ class App:
                 if k == "strong_bind":
                     try:
                         self.strong_bind_var.set(bool(v))
+                    except Exception:
+                        pass
+                    continue
+                if k == "square_crop":
+                    try:
+                        self.square_crop_var.set(bool(v))
                     except Exception:
                         pass
                     continue
@@ -1747,6 +1756,14 @@ class App:
             text_color=TXT, font=ui_font(FONT_BODY))
         self.chk_sample_preview.pack(side="left")
         self.sample_preview_row.pack(fill="x", pady=(10, 0))
+        # 预处理裁切方式（所有模式显示）：默认保比例缩放，训练自动分桶，人脸不易被切掉
+        self.square_crop_row = ctk.CTkFrame(card2, fg_color="transparent")
+        self.chk_square_crop = ctk.CTkCheckBox(
+            self.square_crop_row, text="预处理强制正方形裁切（默认关：保比例缩放，人脸不易被切掉）",
+            variable=self.square_crop_var, fg_color=ACC, hover_color=ACC_H,
+            text_color=TXT, font=ui_font(FONT_BODY))
+        self.chk_square_crop.pack(side="left")
+        self.square_crop_row.pack(fill="x", pady=(10, 0))
         # 画风描述词（画风模式专用，默认隐藏）
         self.style_caption_var = tk.StringVar()
         self.style_caption_row = ctk.CTkFrame(card2, fg_color="transparent")
@@ -2850,6 +2867,7 @@ class App:
             "trigger": self.trigger_var.get().strip(),
             "strong_bind": bool(self.strong_bind_var.get()),
             "sample_preview": bool(self.sample_preview_var.get()),
+            "square_crop": bool(self.square_crop_var.get()),
             "reg_dir": self.reg_var.get().strip() or None,
             "raw_dir": self.raw_dir_var.get().strip(),
             "base_model": self.base_model_var.get().strip() or None,
@@ -3362,7 +3380,7 @@ class App:
                 size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") == "krea2" else core.RESOLUTIONS.get(params["base_type"], 512))),
                 mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
-                dedup=True, wd14=True, square_crop=True,
+                dedup=True, wd14=True, square_crop=bool(params.get("square_crop", False)),
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None, project=self.current_project,
                 style_caption=params.get("style_caption") or "",
@@ -3487,7 +3505,7 @@ class App:
                 size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") == "krea2" else core.RESOLUTIONS.get(params["base_type"], 512))),
                 mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
-                dedup=True, wd14=True, square_crop=True,
+                dedup=True, wd14=True, square_crop=bool(params.get("square_crop", False)),
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None, project=self.current_project,
                 style_caption=params.get("style_caption") or "",

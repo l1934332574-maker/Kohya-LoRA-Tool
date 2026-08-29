@@ -154,7 +154,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.11.4"
+APP_VERSION = "0.11.5"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2393,7 +2393,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     logf(f"[Krea2] 量化={_quant} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 搬运加速(pinned)={'开' if (h2d_only and vram_gb is not None and vram_gb >= 15.5) else '关'} | 梯度检查点={'开' if gc_on else '关'} | torch.compile={'开' if _compile_ok else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
     # 训练中采样出图预览（musubi 原生 --sample_every_n_steps + --sample_prompts；低显存只警告不硬关）
     if _sample_preview_enabled(params, vram_gb):
-        _sp = _write_sample_prompts(output_name, params, mode)
+        _sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="musubi")
         if _sp:
             cmd += ["--sample_every_n_steps=100", f"--sample_prompts={_sp}", "--text_encoder", files["te"]]
             if vram_gb is not None and vram_gb < 10:
@@ -2605,7 +2605,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     logf(f"[FLUX.2] 量化={'int8' if _flux2_int8 else 'fp8'} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 搬运加速(pinned)={'开' if (h2d_only and vram_gb is not None and vram_gb >= 15.5) else '关'} | 梯度检查点={'开' if gc_on else '关'} | torch.compile={'开' if _flux2_compile_ok else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
     # 训练中采样出图预览（musubi 原生 --sample_every_n_steps + --sample_prompts；低显存只警告不硬关）
     if _sample_preview_enabled(params, vram_gb):
-        _sp = _write_sample_prompts(output_name, params, mode)
+        _sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="musubi")
         if _sp:
             cmd += ["--sample_every_n_steps=100", f"--sample_prompts={_sp}"]
             if vram_gb is not None and vram_gb < 10:
@@ -6347,14 +6347,22 @@ def fix_cpu_torch(vpy, kdir, logf=print):
     return False, "cu128 PyTorch 重装后 CUDA 仍不可用：请更新 NVIDIA 驱动，或重跑【② 安装训练内核】重建环境。"
 
 
-def _write_sample_prompts(output_name, params, mode):
-    """生成 kohya/musubi 训练采样提示词文件；返回路径或 None（未开启/失败）。"""
+def _write_sample_prompts(output_name, params, mode, resolution=None, engine="kohya"):
+    """生成 kohya/musubi 训练采样提示词文件；返回路径或 None（未开启/失败）。
+
+    engine="musubi" 时追加 musubi 采样专属参数 --w/--h（kohya 引擎不支持该后缀）：
+    musubi 官方默认采样分辨率 256x256，不指定时出图又小又糊、像"怪物"（2026-08-29 用户反馈），
+    故按训练分辨率出图；--s 20 与 musubi 默认采样步数一致，显式写出便于后续调整。
+    """
     if not params.get("sample_preview", True):
         return None
     trig = (params.get("trigger") or "").strip()
     # 采样提示词：用 portrait 偏向面部（降低早期未训练好的全身/不雅出图概率）；
     # 不写死 1girl/solo（角色可能是男性/非人，写死会误导底模）。
     prompt = (f"{trig}, portrait, masterpiece, best quality" if trig else "masterpiece, best quality")
+    if engine == "musubi":
+        res = int(resolution or 1024)
+        prompt += f" --w {res} --h {res} --s 20"
     d = data_sub("cache", "sample_prompts")
     try:
         os.makedirs(d, exist_ok=True)
@@ -6364,7 +6372,6 @@ def _write_sample_prompts(output_name, params, mode):
         return p
     except Exception:
         return None
-
 
 def _sample_preview_enabled(params, vram_gb):
     """采样预览开关：以用户勾选为准（20G+ 默认开；16G 档默认关）。
@@ -9094,7 +9101,7 @@ class App:
                 size=RESOLUTIONS.get(params["base_type"], 512),
                 mode=params["mode"], trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
-                dedup=True, wd14=True, square_crop=True,
+                dedup=True, wd14=True, square_crop=bool(params.get("square_crop", False)),
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None,
             )

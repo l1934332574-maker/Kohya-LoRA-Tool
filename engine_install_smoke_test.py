@@ -587,6 +587,48 @@ def test_preprocess_auto_retry(base: Path):
 
 
 
+def test_preprocess_square_crop_default_off(base: Path):
+    """预处理裁切默认保比例：不传 --square-crop；用户显式开启才居中正方形裁切（2026-08-29 方案一）。"""
+    kdir = base / "ppc" / "kohya_ss"
+    kdir.mkdir(parents=True, exist_ok=True)
+    vpy = kdir / "venv" / "Scripts" / "python.exe"
+    fake_python(vpy)
+    in_dir = base / "ppc" / "images"
+    in_dir.mkdir(parents=True, exist_ok=True)
+    (in_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    out_dir = base / "ppc" / "out"
+    captured = []
+
+    def run_stream(cmd, cwd=None, env=None, logf=print, **kwargs):
+        captured.append([str(x) for x in cmd])
+        return 0
+
+    def _do(square_crop):
+        captured.clear()
+        with patch.object(core, "venv_python", return_value=str(vpy)), \
+             patch.object(core, "_venv_python_ok", return_value=(True, "ok")), \
+             patch.object(core, "_ensure_preprocess_deps", return_value=True), \
+             patch.object(core, "get_kohya_dir", return_value=str(kdir)), \
+             patch.object(core, "dataset_train_dir", return_value=str(out_dir)), \
+             patch.object(core, "run_stream", side_effect=run_stream):
+            core.preprocess(lambda *a: None, input_dir=str(in_dir), mode="style", square_crop=square_crop)
+        assert captured, "应调用一次 preprocess 子进程"
+        return captured[0]
+
+    cmd_off = _do(False)
+    assert "--square-crop" not in cmd_off, cmd_off
+    cmd_on = _do(True)
+    assert "--square-crop" in cmd_on, cmd_on
+    # 静态断言：三个自动流水线调用点不再写死 square_crop=True，均读 params 开关；GUI 有开关
+    src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    assert "square_crop=True," not in src and "square_crop=True," not in g, "自动流水线不应再写死居中裁切"
+    assert 'params.get("square_crop"' in src, "Kohya一键工具.py 一键训练应读 params 开关"
+    assert 'params.get("square_crop"' in g, "kohya_gui.py 预处理应读 params 开关"
+    assert "square_crop_var" in g and "chk_square_crop" in g, "GUI 应有正方形裁切开关"
+    print("PREPROCESS_SQUARE_CROP_DEFAULT_OFF_OK")
+
+
 def test_preinstall_torch_mirror_fallback(base: Path):
     """_preinstall_torch 本地安装多镜像回退：清华失败 -> 阿里云成功；全部失败才报明确错误。"""
     kdir = base / "pt" / "kohya_ss"
@@ -1786,6 +1828,14 @@ def test_sample_preview(base: Path):
         assert p1 and os.path.isfile(p1)
         p1txt = open(p1, encoding="utf-8").read()
         assert "bannai11" in p1txt and "portrait" in p1txt and "1girl" not in p1txt, p1txt
+        # kohya 引擎默认不带 musubi 的 --w/--h 后缀
+        assert "--w " not in p1txt and "--h " not in p1txt, p1txt
+        # musubi 引擎按训练分辨率出图，避免默认 256x256 出图又小又糊像"怪物"
+        pm = core._write_sample_prompts("outm", {"sample_preview": True, "trigger": "bannai11"}, "style",
+                                        resolution=512, engine="musubi")
+        assert pm and os.path.isfile(pm)
+        pmtxt = open(pm, encoding="utf-8").read()
+        assert "--w 512 --h 512 --s 20" in pmtxt, pmtxt
         assert core._write_sample_prompts("out2", {"sample_preview": False}, "style") is None
     assert core._sample_preview_enabled({"sample_preview": True}, 12) is True
     assert core._sample_preview_enabled({"sample_preview": True}, 8) is True  # 勾选框说了算，低显存只警告不硬关
@@ -2023,6 +2073,7 @@ def main():
         test_preinstall_torch_mirror_fallback(base)
         test_tokenizer_cache(base)
         test_preprocess_auto_retry(base)
+        test_preprocess_square_crop_default_off(base)
         test_external_python_safe_cwd(base)
         test_amd_download_progress(base)
         test_amd_torch_verification(base)
