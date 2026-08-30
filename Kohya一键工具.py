@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.12.1"
+APP_VERSION = "0.12.2"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2403,9 +2403,13 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         "--network_module", "networks.lora_krea2", "--network_dim", str(rank), "--network_alpha", str(alpha),
         "--max_train_epochs", str(epochs),
         "--save_every_n_epochs", str(_resolve_save_every_epochs(params)),
+        "--save_state",
         "--seed", "42",
         "--output_dir", out_dir, "--output_name", output_name,
     ]
+    if resume_from:
+        cmd.append(f"--resume={resume_from}")
+        logf(f"[Krea2] 断点续训：从 {resume_from} 继续")
     if use_nf4:
         cmd += ["--nf4_base"]
     elif use_int8:
@@ -2617,9 +2621,13 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         "--network_module", "networks.lora_flux_2", "--network_dim", str(rank), "--network_alpha", str(alpha),
         "--max_train_epochs", str(epochs),
         "--save_every_n_epochs", str(_resolve_save_every_epochs(params)),
+        "--save_state",
         "--seed", "42",
         "--output_dir", out_dir, "--output_name", output_name,
     ]
+    if resume_from:
+        cmd.append(f"--resume={resume_from}")
+        logf(f"[FLUX.2] 断点续训：从 {resume_from} 继续")
     # FLUX.2：<16G 自动 int8（实测同 Krea2 减量化开销）；int8 时文本编码器仍走 fp8
     # 底模已预量化（fp8/int8）时跳过工具侧量化，避免 musubi "already in fp8 format" 报错
     _flux2_int8 = not _safetensors_is_prequantized(files["dit"]) and (

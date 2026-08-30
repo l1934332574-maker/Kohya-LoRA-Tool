@@ -1,6 +1,6 @@
 {
-  "version": "v0.12.1",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.12.1/Setup.exe",
+  "version": "v0.12.2",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.12.2/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.12.1：采样预览提示词可编辑（不再被覆盖）；模型保存间隔可设置（画风/人物每N步、Krea2/FLUX.2每N轮）；第二引擎 musubi 源码一开始就走国内源（jsDelivr 直链，GitHub 仅兜底）。"
+  "notes": "v0.12.2：修复 Krea2/FLUX.2 断点续训完全不可用（此前缺 --save_state 也不接 --resume，中断后只能从头训）；现每轮保存训练状态并支持从断点继续。"
 }

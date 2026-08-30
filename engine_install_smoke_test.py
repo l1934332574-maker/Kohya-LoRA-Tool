@@ -673,6 +673,11 @@ def test_next_features(base: Path):
     assert 'params.get("save_every")' in k
     g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
     assert "模型保存间隔" in g and "sample_prompt" in g and "save_every" in g
+    # ④ Krea2/FLUX.2 断点续训：--save_state + --resume 已接线（此前完全没传）
+    k2 = k[k.find("def train_krea2("):k.find("def train_video(")]
+    assert k2.count("--save_state") >= 2, "krea2/flux2 都应带 --save_state"
+    assert k.count('cmd.append(f"--resume={resume_from}")') >= 2, "krea2/flux2 都应接线 --resume"
+    assert "断点续训：从" in k2
     print("NEXT_FEATURES_OK")
 
 
