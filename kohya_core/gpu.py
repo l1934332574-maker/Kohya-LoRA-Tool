@@ -7,33 +7,86 @@ import subprocess
 __all__ = [
     "detect_nvidia_gpu", "nvidia_driver_version", "_dxgi_adapters", "detect_vram_gb",
     "_registry_vram_gb", "detect_gpu_vendor", "detect_gpu_name", "detect_gpu_info",
-    "detect_torch_backend", "detect_ram_gb",
+    "detect_torch_backend", "detect_ram_gb", "safe_nvidia_smi", "nvidia_smi_broken",
 ]
 
-def detect_nvidia_gpu():
-    """检测是否有 NVIDIA 显卡（调用 nvidia-smi）。返回 bool。"""
+# ---------- nvidia-smi 安全封装 ----------
+# 重装系统未装 NVIDIA 驱动时，nvidia-smi.exe 启动即崩（0xc0000142），Windows 会弹
+# 「应用程序错误」窗口；若反复调用会弹窗刷屏 + 每次最多卡 20 秒（表现=电脑卡死）。
+# 因此：nvidia-smi 只在「DXGI 已检测到 NVIDIA 独显」时才调用，且失败后本进程内不再调用。
+_NV_SMI_STATE = {"ok": None}   # None=未探测, True=可用, False=损坏/缺失
+
+
+def nvidia_smi_broken():
+    """nvidia-smi 是否已探测到不可用（驱动缺失/损坏）。返回 bool。"""
+    return _NV_SMI_STATE["ok"] is False
+
+
+def _nvidia_smi(args, timeout=20):
+    """调用 nvidia-smi 并缓存结果；首次失败后不再重复调用（避免弹窗刷屏/卡死）。"""
+    if _NV_SMI_STATE["ok"] is False:
+        return None
     try:
-        r = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                           capture_output=True, text=True, timeout=20)
-        return r.returncode == 0 and bool((r.stdout or "").strip())
+        r = subprocess.run(["nvidia-smi"] + list(args), capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            _NV_SMI_STATE["ok"] = False
+            return None
+        _NV_SMI_STATE["ok"] = True
+        return r
     except Exception:
-        return False
+        _NV_SMI_STATE["ok"] = False
+        return None
+
+
+def safe_nvidia_smi(args, timeout=20):
+    """公开的 nvidia-smi 安全调用：驱动缺失/损坏时首次失败后不再重复调用（避免弹窗刷屏/卡死）。失败返回 None。"""
+    return _nvidia_smi(args, timeout=timeout)
+
+
+def _dxgi_discrete_gpu():
+    """DXGI 枚举出的独显（名称, 显存GB，取显存最大者）；无独显/驱动缺失（只剩基础显示适配器）返回 None。"""
+    best = None
+    try:
+        for _d, _mem in _dxgi_adapters():
+            if _is_igpu_name(_d):
+                continue
+            gb = float(_mem) / (1024.0 ** 3)
+            if gb > 0 and (best is None or gb > best[1]):
+                best = (_d, gb)
+    except Exception:
+        pass
+    return best
+
+
+def _nvidia_present():
+    """是否检测到 NVIDIA 独显：True=是；False=其他独显；None=未检测到任何独显（驱动可能缺失）。"""
+    d = _dxgi_discrete_gpu()
+    if d is None:
+        return None
+    low = d[0].lower()
+    return any(k in low for k in ("nvidia", "geforce", "rtx", "gtx", "quadro", "tesla"))
+
+
+def detect_nvidia_gpu():
+    """检测是否有 NVIDIA 显卡（DXGI 名称判断，不依赖 nvidia-smi，驱动缺失也不弹窗）。返回 bool。"""
+    return _nvidia_present() is True
 
 def nvidia_driver_version():
     """读取 NVIDIA 驱动主版本号（nvidia-smi 的 Driver Version，如 572.xx -> 572）。失败返回 None。"""
-    try:
-        r = subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=20)
-        for line in (r.stdout or "").splitlines():
-            if "Driver Version" in line:
-                m = re.search(r"Driver Version:\s*([\d.]+)", line)
-                if m:
-                    try:
-                        return int(m.group(1).split(".")[0])
-                    except Exception:
-                        return None
+    if _nvidia_present() is not True:
         return None
-    except Exception:
+    r = _nvidia_smi([])
+    if not r:
         return None
+    for line in (r.stdout or "").splitlines():
+        if "Driver Version" in line:
+            m = re.search(r"Driver Version:\s*([\d.]+)", line)
+            if m:
+                try:
+                    return int(m.group(1).split(".")[0])
+                except Exception:
+                    return None
+    return None
 
 def _dxgi_adapters():
     """用 DXGI 枚举显卡，返回 [(名称, 独显显存字节数)]。
@@ -145,21 +198,19 @@ def detect_vram_gb():
                 return best
     except Exception:
         pass
-    try:
-        r = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=20,
-        )
-        if r.returncode == 0:
-            vals = []
-            for line in r.stdout.strip().splitlines():
-                line = line.strip()
-                if line.replace(".", "").isdigit():
-                    vals.append(float(line))
-            if vals:
-                return vals[0] / 1024.0
-    except Exception:
-        pass
+    if _nvidia_present() is True:
+        try:
+            r = _nvidia_smi(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+            if r and r.returncode == 0:
+                vals = []
+                for line in r.stdout.strip().splitlines():
+                    line = line.strip()
+                    if line.replace(".", "").isdigit():
+                        vals.append(float(line))
+                if vals:
+                    return vals[0] / 1024.0
+        except Exception:
+            pass
     return _registry_vram_gb()
 
 def detect_ram_gb():
@@ -252,14 +303,18 @@ def _registry_vram_gb():
         return None
 
 def detect_gpu_vendor():
-    """检测显卡厂商：'nvidia' | 'amd' | 'intel' | 'unknown'（任何异常都不抛出）。"""
-    try:
-        r = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                           capture_output=True, text=True, timeout=20)
-        if r.returncode == 0 and (r.stdout or "").strip():
+    """检测显卡厂商：'nvidia' | 'amd' | 'intel' | 'unknown'（DXGI 名称判断，不依赖 nvidia-smi）。"""
+    d = _dxgi_discrete_gpu()
+    if d:
+        low = d[0].lower()
+        if _nvidia_present() is True:
             return "nvidia"
-    except Exception:
-        pass
+        if any(k in low for k in ("amd", "radeon", "ati")):
+            return "amd"
+        if "intel" in low:
+            return "intel"
+        return "unknown"
+    # 无独显驱动信息（基础显示适配器）→ WMI 兜底
     try:
         ps = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
               "Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name + '|' + $_.AdapterCompatibility }"]
@@ -274,32 +329,18 @@ def detect_gpu_vendor():
     return "unknown"
 
 def detect_gpu_name():
-    """返回独显名称（N 卡走 nvidia-smi；AMD/Intel 用 DXGI 取专用显存最大的适配器，
-    天然跳过核显——AMD 核显常排第一，禁用后 WMI 仍会列出；DXGI 失败回退 WMI 遍历过滤核显）。
-    失败返回 None。"""
-    try:
-        r = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                           capture_output=True, text=True, timeout=20)
-        if r.returncode == 0:
+    """返回独显名称。N 卡优先 nvidia-smi（驱动权威；DXGI 在某些驱动状态会给出错误名/重复枚举，
+    如 4070 被报成 5070×4）；驱动缺失/损坏时 nvidia-smi 只尝试一次（失败缓存 + 不弹窗），
+    回退 DXGI/WMI。失败返回 None。"""
+    if _nvidia_present() is True:
+        r = _nvidia_smi(["--query-gpu=name", "--format=csv,noheader"])
+        if r and r.returncode == 0:
             lines = [ln.strip() for ln in (r.stdout or "").strip().splitlines() if ln.strip()]
             if lines:
                 return lines[0]
-    except Exception:
-        pass
-    try:
-        adapters = _dxgi_adapters()
-        if adapters:
-            best = None
-            for _d, _mem in adapters:
-                if _is_igpu_name(_d):
-                    continue
-                gb = float(_mem) / (1024.0 ** 3)
-                if best is None or gb > best[1]:
-                    best = (_d, gb)
-            if best and best[1] > 0:
-                return best[0]
-    except Exception:
-        pass
+    d = _dxgi_discrete_gpu()
+    if d:
+        return d[0]
     try:
         ps = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
               "(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) -join '|'"]
@@ -315,8 +356,16 @@ def detect_gpu_name():
     return None
 
 def detect_gpu_info():
-    """统一显卡信息：{'vendor','name','vram_gb'}。任何一步失败都不抛异常。"""
-    return {"vendor": detect_gpu_vendor(), "name": detect_gpu_name(), "vram_gb": detect_vram_gb()}
+    """统一显卡信息：{'vendor','name','vram_gb','gpu_ok','nvidia_smi_broken'}。
+    gpu_ok=是否检测到可用独显驱动；nvidia_smi_broken=驱动缺失/损坏（重装系统未装显卡驱动时常见）。
+    任何一步失败都不抛异常。"""
+    return {
+        "vendor": detect_gpu_vendor(),
+        "name": detect_gpu_name(),
+        "vram_gb": detect_vram_gb(),
+        "gpu_ok": _dxgi_discrete_gpu() is not None,
+        "nvidia_smi_broken": nvidia_smi_broken(),
+    }
 
 def detect_torch_backend(vpy=None):
     """检测训练环境（kohya venv）里 torch 的后端：

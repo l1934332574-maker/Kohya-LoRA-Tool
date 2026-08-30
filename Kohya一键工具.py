@@ -139,6 +139,13 @@ if os.name == "nt":
                 ctypes.windll.kernel32.SetDllDirectoryW(previous)
 
     subprocess.Popen = _popen_no_window
+    # 抑制子进程启动失败时 Windows 弹「应用程序错误」对话框（如重装驱动期间
+    # nvidia-smi 0xc0000142）：错误模式会被子进程继承，失败只体现在退出码/日志，
+    # 不再弹窗刷屏、点确定后系统卡死。SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX|SEM_NOOPENFILEERRORBOX
+    try:
+        ctypes.windll.kernel32.SetErrorMode(0x8003)
+    except Exception:
+        pass
 
 try:
     from model_downloader import ModelDownloader as _ModelDownloader
@@ -154,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.11.7"
+APP_VERSION = "0.12.0"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2218,6 +2225,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     params = params or {}
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
+    _warn_alloc_conf(logf)
     ok, detail, mvpy = musubi_engine_status()
     if not ok:
         raise RuntimeError("第二训练引擎未安装，请先在左侧点「②' 第二引擎(可选)」安装。\n" + detail)
@@ -2455,6 +2463,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     params = params or {}
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
+    _warn_alloc_conf(logf)
     ok, detail, mvpy = musubi_engine_status()
     if not ok:
         raise RuntimeError("第二训练引擎未安装，请先在左侧点「②' 第二引擎(可选)」安装。\n" + detail)
@@ -4339,6 +4348,15 @@ def _pick_preprocess_python():
     return ""
 
 
+def _warn_alloc_conf(logf):
+    """Windows 不支持 expandable_segments：用户若误设了该环境变量，提示删除（训练子进程已自动剥离）。"""
+    cur = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+    if "expandable_segments" in cur.lower():
+        logf("[训练] ⚠ 检测到系统环境变量 PYTORCH_CUDA_ALLOC_CONF 含 expandable_segments"
+             "（Windows 不支持，且可能引发“显存充足却 OOM”的假性爆显存），本次训练已自动忽略。"
+             "建议彻底删除后重启软件：setx PYTORCH_CUDA_ALLOC_CONF \"\"")
+
+
 def preprocess_mode(mode, at_sub_mode=None):
     """训练模式 -> 预处理模式：preprocess.py 只接受 style/character。
 
@@ -4348,6 +4366,254 @@ def preprocess_mode(mode, at_sub_mode=None):
     if mode in ("style", "character"):
         return mode
     return at_sub_mode or "character"
+
+
+# ==================== 小工具：训练前通用操作（主页 🧰 小工具模块） ====================
+
+def _free_ram_mb():
+    """当前空闲物理内存（MB）；失败返回 None。"""
+    try:
+        import ctypes
+        class _MS(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        ms = _MS(); ms.dwLength = ctypes.sizeof(_MS)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+            return int(ms.ullAvailPhys // (1024 * 1024))
+    except Exception:
+        pass
+    return None
+
+
+def _all_pids():
+    """列出全部进程 PID（tasklist）。失败返回 []。"""
+    try:
+        r = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, timeout=30)
+        out = []
+        # 中文系统 tasklist 输出 GBK：按字节读 + errors=replace，避免 text=True 读取线程解码崩溃
+        for ln in (r.stdout or b"").decode("utf-8", errors="replace").splitlines():
+            parts = ln.split('","')
+            if len(parts) >= 2:
+                pid = parts[1].strip('"').strip()
+                if pid.isdigit():
+                    out.append(int(pid))
+        return out
+    except Exception:
+        return []
+
+
+def clear_memory():
+    """小工具·清理内存：对除 system/idle/当前进程外的所有进程执行 EmptyWorkingSet。
+    返回 (before_mb, after_mb, ok_count, skip_count)。"""
+    before = _free_ram_mb()
+    ok = skip = 0
+    cur = os.getpid()
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        psapi = ctypes.windll.psapi
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_uint]
+        psapi.EmptyWorkingSet.restype = ctypes.c_int
+        psapi.EmptyWorkingSet.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        for pid in _all_pids():
+            if pid in (0, 4) or pid == cur:
+                continue
+            try:
+                h = kernel32.OpenProcess(0x0100 | 0x0400, False, pid)  # SET_QUOTA | QUERY_INFORMATION
+                if not h:
+                    skip += 1
+                    continue
+                try:
+                    if psapi.EmptyWorkingSet(h):
+                        ok += 1
+                    else:
+                        skip += 1
+                finally:
+                    kernel32.CloseHandle(h)
+            except Exception:
+                skip += 1
+    except Exception:
+        pass
+    after = _free_ram_mb()
+    return before, after, ok, skip
+
+
+def _is_training_proc_name(name):
+    """进程名是否训练系（python / accelerate / musubi 等）。"""
+    n = (name or "").lower()
+    return ("python" in n) or ("accelerate" in n) or ("musubi" in n)
+
+
+def _nvidia_compute_apps():
+    """nvidia-smi 占用计算显存的进程原始行：[(pid, name, mem_mb)]。失败返回 []。"""
+    r = safe_nvidia_smi(["--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader"])
+    if not r or r.returncode != 0:
+        return []
+    rows = []
+    for ln in (r.stdout or "").strip().splitlines():
+        p = [x.strip() for x in ln.split(",")]
+        if len(p) >= 3 and p[0].isdigit():
+            mem = p[2].replace("MiB", "").strip()
+            try:
+                rows.append((int(p[0]), p[1], int(float(mem))))
+            except Exception:
+                pass
+    return rows
+
+
+def nvidia_vram_used_mb():
+    """当前 N 卡已用显存合计（MB，多卡累加）；不可用返回 None。"""
+    r = safe_nvidia_smi(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+    if not r or r.returncode != 0:
+        return None
+    total = 0
+    for ln in (r.stdout or "").splitlines():
+        ln = ln.strip()
+        if ln.replace(".", "").isdigit():
+            total += int(float(ln))
+    return total
+
+
+def vram_residual_processes():
+    """小工具·清理显存：返回可杀的残留训练进程 [{pid,name,mem_mb}]。
+    规则：占用计算显存 + 进程名训练系 + 非当前程序 + 非当前活跃训练子进程（防一边训练一边误杀）。"""
+    cur = os.getpid()
+    active = set(active_process_pids())
+    out = []
+    for pid, name, mem in _nvidia_compute_apps():
+        if pid == cur or pid in active:
+            continue
+        if _is_training_proc_name(name):
+            out.append({"pid": pid, "name": name, "mem_mb": mem})
+    seen = set()
+    dedup = []
+    for x in out:
+        if x["pid"] not in seen:
+            seen.add(x["pid"])
+            dedup.append(x)
+    return dedup
+
+
+def kill_processes(pids):
+    """结束指定进程（taskkill /F）。返回 (ok_pids, fail_pids)。"""
+    ok, fail = [], []
+    for pid in pids:
+        try:
+            r = subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, timeout=20)
+            (ok if r.returncode == 0 else fail).append(pid)
+        except Exception:
+            fail.append(pid)
+    return ok, fail
+
+
+def gpu_status_text():
+    """小工具·查看：显卡/显存状态文本（多行）。N 卡走 nvidia-smi（多卡明细 + 进程），AMD 走 DXGI。"""
+    lines = []
+    info = {"vendor": "unknown", "name": None, "vram_gb": None}
+    try:
+        info = detect_gpu_info()
+    except Exception:
+        pass
+    lines.append("显卡: %s（厂商 %s，显存 %sGB）" % (info.get("name") or "未知", info.get("vendor") or "unknown", info.get("vram_gb") or "?"))
+    if info.get("vendor") == "nvidia":
+        r = safe_nvidia_smi(["--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu,power.draw",
+                             "--format=csv,noheader,nounits"])
+        if r and r.returncode == 0:
+            tot_u = tot_f = 0
+            gpu_lines = []
+            for ln in (r.stdout or "").splitlines():
+                p = [x.strip() for x in ln.split(",")]
+                if len(p) >= 8:
+                    try:
+                        total_i, used_i, free_i = int(p[2]), int(p[3]), int(p[4])
+                        tot_u += used_i; tot_f += free_i
+                    except Exception:
+                        total_i = used_i = free_i = 0
+                    gpu_lines.append("  GPU%s %s: 显存 %d/%d MiB（空闲 %d）| 利用率 %s%% | 温度 %s℃ | 功耗 %sW"
+                                     % (p[0], p[1], used_i, total_i, free_i, p[5], p[6], p[7]))
+            if len(gpu_lines) > 1:
+                lines.append("  合计: 已用 %d MiB / 空闲 %d MiB" % (tot_u, tot_f))
+            lines.extend(gpu_lines)
+        rows = _nvidia_compute_apps()
+        if rows:
+            lines.append("占用计算显存的进程:")
+            lines.extend("  PID %d | %s | %d MiB" % (pid, name, mem) for pid, name, mem in rows)
+        else:
+            lines.append("占用计算显存的进程: 无")
+    else:
+        try:
+            ad = _dxgi_adapters()
+            if ad:
+                best = max((gb for _n, gb in ad if not _is_igpu_name(_n)), default=0) / (1024.0 ** 3)
+                lines.append("  总显存(约): %.1f GB（AMD/未知平台无法精确到进程级，进程列表仅 N 卡支持）" % best)
+        except Exception:
+            pass
+    return "\n".join(lines) or "（无显卡信息）"
+
+
+def clear_temp_cache():
+    """小工具·清理临时缓存：只清可再生（update 安装包、sample_prompts、系统临时目录工具残留）。
+    返回 [(标签, 路径, 释放MB), ...]；绝不动模型/数据集/输出/断点。"""
+    freed = []
+
+    def _rm_dir_contents(d):
+        if not os.path.isdir(d):
+            return 0
+        total = 0
+        for name in os.listdir(d):
+            p = os.path.join(d, name)
+            try:
+                if os.path.isfile(p):
+                    total += os.path.getsize(p)
+                    os.remove(p)
+                elif os.path.isdir(p):
+                    for dp, _dn, fn in os.walk(p, topdown=False):
+                        for f in fn:
+                            fp = os.path.join(dp, f)
+                            try:
+                                total += os.path.getsize(fp)
+                                os.remove(fp)
+                            except Exception:
+                                pass
+                        for sub in os.listdir(dp):
+                            sp = os.path.join(dp, sub)
+                            try:
+                                if os.path.isdir(sp):
+                                    os.rmdir(sp)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+        return total
+
+    upd = data_sub("cache", "update")
+    if os.path.isdir(upd):
+        mb = _rm_dir_contents(upd) / 1048576.0
+        freed.append(("更新安装包缓存", upd, mb))
+    sp = data_sub("cache", "sample_prompts")
+    if os.path.isdir(sp):
+        mb = _rm_dir_contents(sp) / 1048576.0
+        freed.append(("采样提示词缓存", sp, mb))
+    try:
+        tmp = tempfile.gettempdir()
+        for f in os.listdir(tmp):
+            if f.lower().startswith("kohya"):
+                p = os.path.join(tmp, f)
+                try:
+                    if os.path.isfile(p):
+                        mb = os.path.getsize(p) / 1048576.0
+                        os.remove(p)
+                        freed.append(("系统临时文件", p, mb))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return freed
 
 
 def normalize_crop_ratio(s):
@@ -6437,6 +6703,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
             "· 模型放 models/flux2/（DiT + Qwen3 4B 文本编码器 + VAE 三个文件，软件内「下载 FLUX.2 模型」自动下载）。")
     amd_mode = bool(params.get("amd_mode", False))
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
+    _warn_alloc_conf(logf)
     if progress is not None:
         _orig_logf = logf
         def logf(line):

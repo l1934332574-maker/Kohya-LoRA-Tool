@@ -645,6 +645,146 @@ def test_preprocess_crop_ratio(base: Path):
     print("PREPROCESS_CROP_RATIO_OK")
 
 
+def test_tools_module(base: Path):
+    """主页 🧰 小工具模块：核心函数存在且可调用、训练进程名规则、GUI 静态接线。"""
+    # 核心函数
+    for fn in ("gpu_status_text", "vram_residual_processes", "kill_processes",
+               "clear_memory", "clear_temp_cache", "nvidia_vram_used_mb", "active_process_pids"):
+        assert hasattr(core, fn), fn
+    # 训练进程名规则
+    assert core._is_training_proc_name("python.exe") is True
+    assert core._is_training_proc_name("pythonw.exe") is True
+    assert core._is_training_proc_name("accelerate.exe") is True
+    assert core._is_training_proc_name("chrome.exe") is False
+    assert core._is_training_proc_name("explorer.exe") is False
+    # 查看：返回文本
+    assert isinstance(core.gpu_status_text(), str) and len(core.gpu_status_text()) > 0
+    # 残留进程：nvidia-smi 不可用时返回 []（不抛）
+    from kohya_core import gpu as _gpu
+    _gpu._NV_SMI_STATE["ok"] = None
+    with patch.object(_gpu, "_nvidia_smi", return_value=None):
+        assert core.vram_residual_processes() == []
+    _gpu._NV_SMI_STATE["ok"] = None
+    # 清理内存：返回 4 元组（本机可跑，EmptyWorkingSet 安全）
+    r = core.clear_memory()
+    assert isinstance(r, tuple) and len(r) == 4, r
+    # 清理缓存：返回列表
+    assert isinstance(core.clear_temp_cache(), list)
+    # GUI 静态接线
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    assert 'text="🧰 小工具"' in g and "cmd_open_tools" in g
+    for m in ("_tools_run", "_tools_scan_vram", "_tools_kill_vram", "_tools_oneclick", "_fmt_mem", "_fmt_cache"):
+        assert m in g, m
+    print("TOOLS_MODULE_OK")
+
+
+def test_gui_resource_guard(base: Path):
+    """GUI 资源防护：监控器用安全 nvidia-smi + 节流；日志框限行；缩略图缓存上限（防 Tk 内存/GDI 耗尽弹窗）。"""
+    # safe_nvidia_smi 已从 core 导出（监控器用）
+    assert hasattr(core, "safe_nvidia_smi")
+    from kohya_core import gpu as _gpu
+    _gpu._NV_SMI_STATE["ok"] = None
+    calls = {"n": 0}
+    def fake_run(cmd, *a, **kw):
+        calls["n"] += 1
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+    with patch.object(_gpu.subprocess, "run", side_effect=fake_run):
+        assert core.safe_nvidia_smi(["--query-gpu=name"]) is None
+        assert core.safe_nvidia_smi(["--query-gpu=name"]) is None
+        assert calls["n"] == 1, "失败后不应重复调用"
+    _gpu._NV_SMI_STATE["ok"] = None
+
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    # 监控器显存改用安全封装 + 5s 节流
+    assert "core.safe_nvidia_smi(" in g and "_mon_vram_last" in g
+    assert 'subprocess.run(["nvidia-smi"' not in g, "GUI 不应再直接裸调 nvidia-smi"
+    # 日志框限行（防 Tk 内存/GDI 耗尽）+ 完整日志独立保留（导出不受限行影响）+ 缩略图缓存上限
+    assert "_MAX_LOG_LINES = 3000" in g and 'self.log.delete("1.0"' in g
+    assert "self._full_log" in g and '"\\n".join(getattr(self, "_full_log", None) or [])' in g
+    assert "len(self._thumbs) > 50" in g
+    # 启动时抑制子进程错误弹窗（SetErrorMode）
+    k = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
+    assert "SetErrorMode(0x8003)" in k
+    print("GUI_RESOURCE_GUARD_OK")
+
+
+def test_nvidia_smi_driver_safe(base: Path):
+    """重装系统未装 NVIDIA 驱动（nvidia-smi 0xc0000142）时：不调用 nvidia-smi、不弹窗、不卡死，
+    改用 DXGI/WMI 检测；驱动缺失时 gpu_ok=False。"""
+    from kohya_core import gpu as _gpu
+    _gpu._NV_SMI_STATE["ok"] = None
+
+    # 场景 A：驱动缺失（DXGI 只剩基础显示适配器）→ 绝不调用 nvidia-smi，走 WMI 兜底
+    def fake_run_a(cmd, *a, **kw):
+        c = " ".join(str(x) for x in cmd)
+        assert "nvidia-smi" not in c, "驱动缺失时不应调用 nvidia-smi: %s" % c
+        out = "Microsoft Basic Display Adapter|Microsoft" if "AdapterCompatibility" in c else "Microsoft Basic Display Adapter"
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+    with patch.object(_gpu, "_dxgi_adapters", return_value=[("Microsoft Basic Display Adapter", 0)]), \
+         patch.object(_gpu.subprocess, "run", side_effect=fake_run_a):
+        assert _gpu.detect_nvidia_gpu() is False
+        assert _gpu.detect_gpu_vendor() == "unknown"
+        assert "Basic Display" in (_gpu.detect_gpu_name() or "")
+        assert _gpu.detect_gpu_info()["gpu_ok"] is False
+        assert _gpu.nvidia_smi_broken() is False, "未调用过 nvidia-smi，不应标记损坏"
+
+    # 场景 B：NVIDIA 独显驱动正常（DXGI 可枚举）→ 名字走 nvidia-smi 权威来源（DXGI 可能报错名/重复枚举）
+    def fake_run_b(cmd, *a, **kw):
+        c = " ".join(str(x) for x in cmd)
+        if "nvidia-smi" in c:
+            return subprocess.CompletedProcess(cmd, 0, stdout="NVIDIA GeForce RTX 4070\n", stderr="")
+        raise AssertionError("nvidia-smi 成功时不应再调其他子进程: %s" % c)
+    with patch.object(_gpu, "_dxgi_adapters", return_value=[("NVIDIA GeForce RTX 5070", 8 * 1024 ** 3)]), \
+         patch.object(_gpu.subprocess, "run", side_effect=fake_run_b):
+        assert _gpu.detect_nvidia_gpu() is True
+        # DXGI 名字是错的（5070），nvidia-smi 返回权威的 4070
+        assert _gpu.detect_gpu_name() == "NVIDIA GeForce RTX 4070"
+        assert _gpu.detect_gpu_vendor() == "nvidia"
+        assert _gpu.detect_gpu_info()["gpu_ok"] is True
+
+    # 场景 C：_nvidia_smi 失败后不再重复调用（缓存损坏状态，避免弹窗刷屏/卡死）
+    _gpu._NV_SMI_STATE["ok"] = None
+    calls = {"n": 0}
+    def fake_run_c(cmd, *a, **kw):
+        calls["n"] += 1
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+    with patch.object(_gpu.subprocess, "run", side_effect=fake_run_c):
+        assert _gpu._nvidia_smi(["--query-gpu=name"]) is None
+        assert _gpu.nvidia_smi_broken() is True
+        assert _gpu._nvidia_smi(["--query-gpu=name"]) is None
+        assert calls["n"] == 1, "失败后不应重复调用 nvidia-smi"
+    _gpu._NV_SMI_STATE["ok"] = None
+
+    # 静态断言：GUI 环境信息在驱动缺失时给出提示
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    assert "未检测到可用独立显卡驱动" in g
+    print("NVIDIA_SMI_DRIVER_SAFE_OK")
+
+
+def test_alloc_conf_expandable_stripped(base: Path):
+    """Windows 不支持 expandable_segments：训练子进程环境自动剥离，避免“显存充足却 OOM”假性爆显存。"""
+    import os as _os
+    # build_direct_env 剥离 expandable_segments，保留 max_split_size_mb 等其他有效项
+    with patch.dict(_os.environ, {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True,max_split_size_mb:128"}, clear=False):
+        env = core.build_direct_env()
+        val = env.get("PYTORCH_CUDA_ALLOC_CONF", "")
+        assert "expandable_segments" not in val.lower(), val
+        assert "max_split_size_mb:128" in val, val
+    with patch.dict(_os.environ, {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}, clear=False):
+        env2 = core.build_direct_env()
+        assert "PYTORCH_CUDA_ALLOC_CONF" not in env2, env2.get("PYTORCH_CUDA_ALLOC_CONF")
+    # _warn_alloc_conf 在误设时给出删除提示
+    logs = []
+    with patch.dict(_os.environ, {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}, clear=False):
+        core._warn_alloc_conf(logs.append)
+    assert any("expandable_segments" in ln and "setx" in ln for ln in logs), logs
+    logs2 = []
+    with patch.dict(_os.environ, {}, clear=False):
+        core._warn_alloc_conf(logs2.append)
+    assert logs2 == [], logs2
+    print("ALLOC_CONF_EXPANDABLE_STRIPPED_OK")
+
+
 def test_preprocess_mode_mapping(base: Path):
     """训练模式 -> 预处理模式映射：FLUX.2 等第二/三引擎不能再把 flux2 当 --mode 传（preprocess 只收 style/character）。"""
     # 单测 preprocess_mode
@@ -2111,6 +2251,10 @@ def main():
         test_preprocess_auto_retry(base)
         test_preprocess_crop_ratio(base)
         test_preprocess_mode_mapping(base)
+        test_alloc_conf_expandable_stripped(base)
+        test_nvidia_smi_driver_safe(base)
+        test_gui_resource_guard(base)
+        test_tools_module(base)
         test_external_python_safe_cwd(base)
         test_amd_download_progress(base)
         test_amd_torch_verification(base)

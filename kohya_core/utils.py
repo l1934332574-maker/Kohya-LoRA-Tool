@@ -24,7 +24,7 @@ _ACTIVE_PROC = None
 
 # 显式导出全部名字（含下划线开头），供 `from kohya_core.utils import *` 使用。
 __all__ = [
-    "StopRequested", "format_eta", "_terminate_tree", "stop_active_process", "reset_stop",
+    "StopRequested", "format_eta", "_terminate_tree", "stop_active_process", "reset_stop", "active_process_pids",
     "build_env", "build_direct_env", "clear_proxy_env", "proxy_reachable", "run_stream", "_download", "find_git", "_py_version", "find_python",
     "venv_python", "_yq", "split_triggers", "system_proxy",
 ]
@@ -67,6 +67,33 @@ def stop_active_process():
     if proc is not None and proc.poll() is None:
         _terminate_tree(proc)
     return True
+
+def active_process_pids():
+    """返回当前活跃子进程（训练/预处理/安装等）的 PID + 全部子进程 PID（用于小工具「清理显存」排除，
+    防止一边训练一边点清理把正在跑的训练杀了）。无活跃进程返回空集合。"""
+    with _ACTIVE_LOCK:
+        proc = _ACTIVE_PROC
+    if proc is None or proc.poll() is not None:
+        return set()
+    pids = {proc.pid}
+    try:
+        code = (
+            "$m=@{}; Get-CimInstance Win32_Process | ForEach-Object { $m[$_.ProcessId]=[int]$_.ParentProcessId }; "
+            "$roots=@(%d); $out=New-Object System.Collections.Generic.HashSet[int]; "
+            "$q=New-Object System.Collections.Generic.Queue[int]; foreach($r in $roots){ [void]$q.Enqueue($r) }; "
+            "while($q.Count -gt 0){ $cur=$q.Dequeue(); foreach($k in $m.Keys){ if($m[$k] -eq $cur -and -not $out.Contains($k)){ [void]$out.Add($k); [void]$q.Enqueue($k) } } }; "
+            "$out | ForEach-Object { $_ }" % proc.pid
+        )
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", code],
+                           capture_output=True, timeout=20)
+        for ln in (r.stdout or b"").decode("utf-8", errors="replace").splitlines():
+            ln = ln.strip()
+            if ln.isdigit():
+                pids.add(int(ln))
+    except Exception:
+        pass
+    return pids
+
 
 def reset_stop():
     """开始新任务前调用，清除上一次的停止信号。"""
@@ -142,6 +169,20 @@ def build_env(extra_dirs=()):
     # 401/超时且绕过 hf-mirror 镜像（如第三引擎下载 12GB+ 模型失败）；全局禁用，
     # 回退经典 HTTP 下载（走 HF_ENDPOINT 镜像）。
     env.setdefault("HF_HUB_DISABLE_XET", "1")
+    # Windows 不支持 PYTORCH_CUDA_ALLOC_CONF=expandable_segments（PyTorch 会提示
+    # "expandable_segments not supported on this platform"）。网上流传的 Linux 优化命令
+    # （setx PYTORCH_CUDA_ALLOC_CONF "expandable_segments:True"）在 Windows 无效，
+    # 且会让分配器回退异常，出现「显存剩 14GB 却连 192MB 都分配失败」的假性 OOM
+    # （2026-08-30 RTX 5060 Ti 用户实测，VAE 缓存 latent 阶段 100% 复现）。
+    # 训练子进程剥离该配置，保留其他有效项（如 max_split_size_mb）。
+    _alloc = env.get("PYTORCH_CUDA_ALLOC_CONF")
+    if _alloc:
+        _kept = [p.strip() for p in _alloc.split(",")
+                 if p.strip() and "expandable_segments" not in p.lower()]
+        if _kept:
+            env["PYTORCH_CUDA_ALLOC_CONF"] = ",".join(_kept)
+        else:
+            env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
     return env
 
 
