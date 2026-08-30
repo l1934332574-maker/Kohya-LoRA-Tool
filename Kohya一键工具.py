@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.12.0"
+APP_VERSION = "0.12.1"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -688,6 +688,38 @@ def _bundled_musubi_zip():
         if f.startswith("musubi-tuner-") and f.endswith(".zip"):
             return os.path.join(folder, f)
     return None
+
+
+# musubi-tuner 源码国内直链（工具仓库内已提交的离线包，jsDelivr CDN；GitHub 直连国内慢）
+MUSUBI_CN_ZIP_URL = ("https://cdn.jsdelivr.net/gh/l1934332574-maker/"
+                     "Kohya-LoRA-Tool@main/installers/musubi-tuner/musubi-tuner-main.zip")
+
+
+def _install_musubi_from_domestic(mt_dir, logf=print):
+    """从国内直链（jsDelivr）下载 musubi-tuner 源码 zip 并解压到 mt_dir。
+    成功（解压后含 krea2_train_network.py）返回 True；失败返回 False（调用方再走 git clone 兜底）。"""
+    tmp = os.path.join(tempfile.gettempdir(), "kohya_musubi_dl.zip")
+    try:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        logf("[第二引擎] 未找到内置源码包，从国内直链下载 musubi-tuner（jsDelivr CDN，约 3.2MB）…")
+        _download(MUSUBI_CN_ZIP_URL, tmp, logf)
+        if not os.path.isfile(tmp) or os.path.getsize(tmp) < 100000:
+            logf("[第二引擎] 国内直链下载文件不完整，放弃")
+            return False
+        _extract_zip(tmp, mt_dir)
+        ok = (os.path.isfile(os.path.join(mt_dir, "krea2_train_network.py"))
+              or os.path.isfile(os.path.join(mt_dir, "src", "musubi_tuner", "krea2_train_network.py")))
+        return ok
+    except Exception as e:
+        logf(f"[第二引擎] 国内直链下载失败：{e}")
+        return False
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
 
 
 def _extract_zip(zip_path, dest):
@@ -1303,12 +1335,17 @@ def install_musubi_engine(logf=print):
                 logf(f"[第二引擎] 解压内置 musubi-tuner 源码: {os.path.basename(zip_src)}")
                 _extract_zip(zip_src, mt_dir)
             else:
-                if not git:
-                    raise RuntimeError("未找到内置 musubi-tuner 源码包，且未检测到 Git；请先点击【环境准备】安装 Git，或补齐安装包内源码缓存")
-                logf("[第二引擎] 未找到内置源码包，改用 git 克隆（需联网）…")
-                os.makedirs(mt_dir, exist_ok=True)
-                if _git_clone(git, "https://github.com/kohya-ss/musubi-tuner.git", mt_dir, logf) != 0:
-                    raise RuntimeError("git clone musubi-tuner 失败，请检查网络/代理后重试")
+                # 一开始就走国内源（jsDelivr 直链下载 zip），GitHub git clone 仅作最后兜底
+                if _install_musubi_from_domestic(mt_dir, logf):
+                    logf("[第二引擎] musubi-tuner 国内直链解压完成")
+                else:
+                    if not git:
+                        raise RuntimeError("未找到内置 musubi-tuner 源码包，国内直链下载也失败，且未检测到 Git；请检查网络后重试，或手动放置源码包")
+                    shutil.rmtree(mt_dir, ignore_errors=True)
+                    os.makedirs(mt_dir, exist_ok=True)
+                    logf("[第二引擎] 国内直链不可用，改用 git 克隆（GitHub，需联网）…")
+                    if _git_clone(git, "https://github.com/kohya-ss/musubi-tuner.git", mt_dir, logf) != 0:
+                        raise RuntimeError("git clone musubi-tuner 失败，请检查网络/代理后重试")
         else:
             logf("[第二引擎] musubi-tuner 源码已存在，跳过解压")
         # 2) 独立 venv
@@ -2364,7 +2401,9 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         "--optimizer_type", opt_k.lower(), "--learning_rate", str(lr), "--gradient_checkpointing",
         "--max_data_loader_n_workers", "1",
         "--network_module", "networks.lora_krea2", "--network_dim", str(rank), "--network_alpha", str(alpha),
-        "--max_train_epochs", str(epochs), "--save_every_n_epochs", "1", "--seed", "42",
+        "--max_train_epochs", str(epochs),
+        "--save_every_n_epochs", str(_resolve_save_every_epochs(params)),
+        "--seed", "42",
         "--output_dir", out_dir, "--output_name", output_name,
     ]
     if use_nf4:
@@ -2576,7 +2615,9 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         "--optimizer_type", opt_k.lower(), "--learning_rate", str(lr),
         "--max_data_loader_n_workers", "1",
         "--network_module", "networks.lora_flux_2", "--network_dim", str(rank), "--network_alpha", str(alpha),
-        "--max_train_epochs", str(epochs), "--save_every_n_epochs", "1", "--seed", "42",
+        "--max_train_epochs", str(epochs),
+        "--save_every_n_epochs", str(_resolve_save_every_epochs(params)),
+        "--seed", "42",
         "--output_dir", out_dir, "--output_name", output_name,
     ]
     # FLUX.2：<16G 自动 int8（实测同 Krea2 减量化开销）；int8 时文本编码器仍走 fp8
@@ -4355,6 +4396,15 @@ def _warn_alloc_conf(logf):
         logf("[训练] ⚠ 检测到系统环境变量 PYTORCH_CUDA_ALLOC_CONF 含 expandable_segments"
              "（Windows 不支持，且可能引发“显存充足却 OOM”的假性爆显存），本次训练已自动忽略。"
              "建议彻底删除后重启软件：setx PYTORCH_CUDA_ALLOC_CONF \"\"")
+
+
+def _resolve_save_every_epochs(params):
+    """第二引擎（Krea2/FLUX.2）保存间隔（轮）：默认 1 轮；高级参数「保存间隔」可改（>=1）。"""
+    try:
+        v = int(params.get("save_every") or 1)
+    except Exception:
+        v = 1
+    return max(1, v)
 
 
 def preprocess_mode(mode, at_sub_mode=None):
@@ -6650,10 +6700,15 @@ def _write_sample_prompts(output_name, params, mode, resolution=None, engine="ko
     """
     if not params.get("sample_preview", True):
         return None
-    trig = (params.get("trigger") or "").strip()
-    # 采样提示词：用 portrait 偏向面部（降低早期未训练好的全身/不雅出图概率）；
-    # 不写死 1girl/solo（角色可能是男性/非人，写死会误导底模）。
-    prompt = (f"{trig}, portrait, masterpiece, best quality" if trig else "masterpiece, best quality")
+    user_prompt = (params.get("sample_prompt") or "").strip()
+    if user_prompt:
+        # 用户自定义采样提示词：整句生效（是否带 trigger 由用户决定），训练不再覆盖
+        prompt = user_prompt
+    else:
+        trig = (params.get("trigger") or "").strip()
+        # 采样提示词：用 portrait 偏向面部（降低早期未训练好的全身/不雅出图概率）；
+        # 不写死 1girl/solo（角色可能是男性/非人，写死会误导底模）。
+        prompt = (f"{trig}, portrait, masterpiece, best quality" if trig else "masterpiece, best quality")
     if engine == "musubi":
         res = int(resolution or 1024)
         prompt += f" --w {res} --h {res} --s 20"
@@ -6917,8 +6972,13 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         except Exception:
             pass
 
-    # 保存节奏：约每 1/10 步保存一次（至少 100 步），用于中间快照与断点续训
-    save_every = 200
+    # 保存节奏：默认每 200 步保存一次（用于中间快照与断点续训）；高级参数「保存间隔」可改（>=50）
+    try:
+        save_every = int(params.get("save_every") or 200)
+    except Exception:
+        save_every = 200
+    if save_every < 50:
+        save_every = 50
 
     # TensorBoard 日志目录：TensorFlow 在 Windows 上无法处理中文/非 ASCII 路径，
     # 安装目录含中文时（如 C:\Users\xx\新建文件夹\KohyaLoraTool_data\logs）训练初始化会报

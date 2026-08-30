@@ -645,6 +645,37 @@ def test_preprocess_crop_ratio(base: Path):
     print("PREPROCESS_CROP_RATIO_OK")
 
 
+def test_next_features(base: Path):
+    """下版本三条：musubi 国内源优先 / 采样提示词可编辑 / 保存间隔可设置。"""
+    # ① musubi 国内源：jsDelivr 直链 + 国内优先、git 兜底
+    assert "cdn.jsdelivr.net" in core.MUSUBI_CN_ZIP_URL
+    assert hasattr(core, "_install_musubi_from_domestic")
+    k = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
+    assert "从国内直链下载 musubi-tuner" in k
+    assert "改用 git 克隆（GitHub，需联网）" in k, "git 应保留为最后兜底"
+    # 国内下载失败 -> 返回 False（不抛）
+    with patch.object(core, "_download", side_effect=RuntimeError("net down")):
+        assert core._install_musubi_from_domestic(str(base / "mt"), lambda *a: None) is False
+
+    # ② 采样预览提示词：自定义整句生效；留空=自动（带 trigger）
+    with patch.object(core, "data_sub", side_effect=lambda *p: str(base.joinpath(*p))):
+        p1 = core._write_sample_prompts("o1", {"sample_preview": True, "sample_prompt": "1girl, red hair", "trigger": "tg"}, "style", engine="musubi", resolution=512)
+        t1 = open(p1, encoding="utf-8").read()
+        assert "1girl, red hair" in t1 and "--w 512 --h 512 --s 20" in t1 and "tg" not in t1, t1
+        p2 = core._write_sample_prompts("o2", {"sample_preview": True, "trigger": "tg"}, "style", engine="kohya")
+        t2 = open(p2, encoding="utf-8").read()
+        assert t2.startswith("tg, portrait") and "masterpiece" in t2, t2
+
+    # ③ 保存间隔：musubi 按轮（默认 1、>=1），train() 读 params
+    assert core._resolve_save_every_epochs({}) == 1
+    assert core._resolve_save_every_epochs({"save_every": 5}) == 5
+    assert core._resolve_save_every_epochs({"save_every": 0}) == 1
+    assert 'params.get("save_every")' in k
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    assert "模型保存间隔" in g and "sample_prompt" in g and "save_every" in g
+    print("NEXT_FEATURES_OK")
+
+
 def test_tools_module(base: Path):
     """主页 🧰 小工具模块：核心函数存在且可调用、训练进程名规则、GUI 静态接线。"""
     # 核心函数
@@ -2255,6 +2286,7 @@ def main():
         test_nvidia_smi_driver_safe(base)
         test_gui_resource_guard(base)
         test_tools_module(base)
+        test_next_features(base)
         test_external_python_safe_cwd(base)
         test_amd_download_progress(base)
         test_amd_torch_verification(base)

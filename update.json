@@ -1,6 +1,6 @@
 {
-  "version": "v0.12.0",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.12.0/Setup.exe",
+  "version": "v0.12.1",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.12.1/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.12.0：新增主页🧰小工具（查看显存/清理显存·仅N卡/清理内存/清理缓存/一键清理，无需训练可用）；nvidia-smi 全套防护（驱动缺失不再弹窗卡死）；expandable_segments 无效配置自动剥离；日志限行+导出完整；显卡名检测修正。"
+  "notes": "v0.12.1：采样预览提示词可编辑（不再被覆盖）；模型保存间隔可设置（画风/人物每N步、Krea2/FLUX.2每N轮）；第二引擎 musubi 源码一开始就走国内源（jsDelivr 直链，GitHub 仅兜底）。"
 }

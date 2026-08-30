@@ -389,6 +389,8 @@ class App:
         self.strong_bind_var = tk.BooleanVar(value=True)
         # 训练中采样出图预览（默认开；低显存 <10G 训练时自动关闭）
         self.sample_preview_var = tk.BooleanVar(value=True)
+        # 采样预览提示词（留空=自动生成；填了用用户整句，训练不再覆盖）
+        self.sample_prompt_var = tk.StringVar()
         # 预处理裁切比例（默认不裁切保比例）：可选手动 1:1/3:4/9:16 等，或直接输入自定义 宽:高（如 2:3）
         self.crop_ratio_var = tk.StringVar(value="不裁切（保比例）")
         # Qwen-Image / Z-Image 的画风/人物子模式（AT_SUB_LABELS 见类级常量）
@@ -1604,9 +1606,11 @@ class App:
                 "te_lr": params.get("te_lr"),
                 "repeats": params.get("repeats"),
                 "max_epochs": params.get("max_epochs"),
+                "save_every": params.get("save_every"),
                 "optimizer": params.get("optimizer") or "auto",
                 "strong_bind": bool(params.get("strong_bind", True)),
                 "crop_ratio": params.get("crop_ratio") or "",
+                "sample_prompt": params.get("sample_prompt") or "",
             },
         }
 
@@ -1693,6 +1697,12 @@ class App:
                 if k == "crop_ratio":
                     try:
                         self.crop_ratio_var.set(_crop_ratio_label(v))
+                    except Exception:
+                        pass
+                    continue
+                if k == "sample_prompt":
+                    try:
+                        self.sample_prompt_var.set(str(v or ""))
                     except Exception:
                         pass
                     continue
@@ -1809,6 +1819,16 @@ class App:
             text_color=TXT, font=ui_font(FONT_BODY))
         self.chk_sample_preview.pack(side="left")
         self.sample_preview_row.pack(fill="x", pady=(10, 0))
+        # 采样预览提示词（所有模式显示）：留空=自动（trigger + portrait…）；填了用用户整句
+        self.sample_prompt_row = ctk.CTkFrame(card2, fg_color="transparent")
+        ctk.CTkLabel(self.sample_prompt_row, text="采样预览提示词", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
+        self.sample_prompt_entry = ctk.CTkEntry(self.sample_prompt_row, width=340, height=30,
+                                                textvariable=self.sample_prompt_var, fg_color=CARD2, border_color=BORDER,
+                                                text_color=TXT, placeholder_text="留空=自动（trigger + portrait, masterpiece, best quality）",
+                                                font=ui_font(FONT_BODY))
+        self.sample_prompt_entry.pack(side="left", padx=(12, 8))
+        ctk.CTkLabel(self.sample_prompt_row, text="填了整句生效（是否带 trigger 自己定），不再被覆盖", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        self.sample_prompt_row.pack(fill="x", pady=(6, 0))
         # 预处理裁切比例（所有模式显示）：默认不裁切保比例；下拉可选 1:1/3:4/9:16 等，或直接输入自定义 宽:高（如 2:3）
         self.crop_ratio_row = ctk.CTkFrame(card2, fg_color="transparent")
         ctk.CTkLabel(self.crop_ratio_row, text="预处理裁切比例", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
@@ -3054,6 +3074,22 @@ class App:
             entry.pack(pady=(3, 0))
             self._adv_entries[key] = entry
             self._adv_frames[key] = f
+        # 模型保存间隔：画风/人物=每 N 步，Krea2/FLUX.2=每 N 轮（留空用默认）
+        sf = ctk.CTkFrame(g, fg_color="transparent")
+        sf.grid(row=1, column=0, columnspan=9, sticky="w", padx=10, pady=(0, 8))
+        ctk.CTkLabel(sf, text="模型保存间隔", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        _sv = self.param_vars.setdefault("save_every", tk.StringVar())
+        try:
+            _sv.trace_add("write", lambda *a: self._schedule_autosave())
+        except Exception:
+            pass
+        _se = ctk.CTkEntry(sf, width=80, height=28, justify="center", textvariable=_sv,
+                           fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
+        _se.pack(side="left", padx=(10, 8))
+        ctk.CTkLabel(sf, text="（画风/人物=每 N 步，Krea2/FLUX.2=每 N 轮；留空=默认 200 步 / 1 轮）",
+                     font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        self._adv_entries["save_every"] = _se
+        self._adv_frames["save_every"] = sf
         cb = ctk.CTkFrame(self.adv_body, fg_color="transparent"); cb.pack(anchor="w", pady=(4, 0))
         self.chk_unet_only = ctk.CTkCheckBox(cb, text="只训练 UNet（不训练文本编码器）", variable=self.unet_only_var,
                                              fg_color=ACC, hover_color=ACC_H, text_color=TXT, font=ui_font(FONT_BODY),
@@ -3248,6 +3284,7 @@ class App:
             "trigger": self.trigger_var.get().strip(),
             "strong_bind": bool(self.strong_bind_var.get()),
             "sample_preview": bool(self.sample_preview_var.get()),
+            "sample_prompt": self.sample_prompt_var.get().strip(),
             "crop_ratio": _crop_ratio_parse(self.crop_ratio_var.get()),
             "reg_dir": self.reg_var.get().strip() or None,
             "raw_dir": self.raw_dir_var.get().strip(),
@@ -3260,6 +3297,7 @@ class App:
             "max_epochs": int(float(_getv("max_epochs", "8"))),
             "resolution": int(float(_getv("resolution", "1024" if self.mode in ("krea2", "flux2") else str(core.RESOLUTIONS.get(self.base_type, 512))))),
             "video_steps": int(float(_getv("video_steps", "2000"))),
+            "save_every": (lambda _s: int(_s) if str(_s).isdigit() else None)(_getv("save_every", "")),
             "train_text_encoder": not self.unet_only_var.get(),
             "style_caption": getattr(self, "style_caption_var", tk.StringVar()).get().strip(),
             "global_pos": self.global_pos_var.get().strip(),
