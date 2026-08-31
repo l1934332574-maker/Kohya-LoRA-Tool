@@ -1,3 +1,18 @@
+## 未发布（进行中）
+
+### 待办 / 调研
+- [ ] NF4 4-bit Krea2 训练可行性调研：社区 AcademiaSD LoRAlab 声称 8G 显存可训（峰值 ~7.7G，4-bit NF4 冻结底模 + TE/VAE 预缓存不驻留 + 8-bit AdamW on BF16 LoRA），但为独立脚本、非 ai-toolkit；ai-toolkit 官方 Krea2 量化最低只到 qint8/qfloat8。待验证是否值得接入（可能需自研扩展或换训练框架）。
+- [ ] 16G 档 layer_offloading（DiT 30%）实机验证速度影响（预期每步稍慢，换取不 OOM）。
+
+### 修复：新建/打开项目后界面卡顿（同步环境检测）
+- 根因：创建/打开项目收尾在主线程同步调用 _refresh_status()，system_status() 缓存 TTL=30s 过期后要重跑 git/python（多子进程探测）/显卡检测，界面卡 1~3 秒。
+- 已修：新建/打开项目改为后台线程刷新（_refresh_status_async），UI 不再阻塞；徽章/引导稍后自动更新。
+
+### 修复：第三引擎训练开始蓝屏（训练前 NVIDIA 驱动预检）
+- 根因：安装第三引擎时才校验 NVIDIA 驱动 ≥570（cu130 要求），用户之后回滚/更换驱动后，训练首次初始化 CUDA 直接蓝屏（nvlddmkm）。
+- 已修：	rain_at_image（Qwen-Image/Z-Image）/ 	rain_krea2_at / 	rain_video（H3）训练前统一预检驱动，<570 中文拦截引导更新，不再等蓝屏；NVIDIA 正常用户仅多打一行日志。
+- 验证：AT_TRAIN_DRIVER_GUARD_OK（<570 拦截 / ≥570 放行 / 检测失败不误伤 / 三入口已接线）。
+
 ## v0.11.4（2026-08-29）
 
 ### 修复：第一引擎误选 FLUX.2 / Krea2 底模直接报错（自动拦截引导）

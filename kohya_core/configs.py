@@ -9,12 +9,13 @@ MODE_LABELS = {
     "style": "🎨 画风LoRA模式",
     "character": "👤 人物角色LoRA模式",
     "krea2": "🖼 Krea 2 图像LoRA",
+    "krea2_at": "🖼 Krea2 图像LoRA（AI-Toolkit 引擎）",
     "flux2": "🖼 FLUX.2 图像LoRA",
     "video": "🎬 视频LoRA（MiniMax H3）",
     "qwen_image": "🖼 Qwen-Image LoRA",
     "zimage": "🖼 Z-Image LoRA",
 }
-MODE_KEYS = ["style", "character", "krea2", "flux2", "video", "qwen_image", "zimage"]
+MODE_KEYS = ["style", "character", "krea2", "krea2_at", "flux2", "video", "qwen_image", "zimage"]
 
 # Qwen-Image / Z-Image 的画风/人物子模式（训练类型切换）
 AT_SUB_LABELS = {
@@ -103,6 +104,16 @@ PRESETS = {
         "anima": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
                   "repeats": "2", "max_epochs": "16", "resolution": "1024"},
     },
+    "krea2_at": {
+        "sd15": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
+                 "repeats": "2", "max_epochs": "8", "resolution": "1024"},
+        "sdxl": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
+                 "repeats": "2", "max_epochs": "8", "resolution": "1024"},
+        "flux": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
+                 "repeats": "2", "max_epochs": "8", "resolution": "1024"},
+        "anima": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
+                  "repeats": "2", "max_epochs": "8", "resolution": "1024"},
+    },
     "flux2": {
         "sd15": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
                  "repeats": "2", "max_epochs": "16", "resolution": "1024"},
@@ -146,7 +157,7 @@ PRESETS = {
 }
 
 RESOLUTIONS = {k: v["resolution"] for k, v in ARCH_INFO.items()}
-MIN_IMAGES = {"style": 20, "character": 15, "krea2": 15, "flux2": 15, "video": 3, "qwen_image": 15, "zimage": 15}   # 一键训练最少可用图片/视频数
+MIN_IMAGES = {"style": 20, "character": 15, "krea2": 15, "krea2_at": 15, "flux2": 15, "video": 3, "qwen_image": 15, "zimage": 15}   # 一键训练最少可用图片/视频数
 MAX_AUTO_STEPS = 12000                          # 一键训练自动约束的最大总步数（防过拟合）
 
 PARAM_LABELS = {
@@ -179,6 +190,12 @@ TRIGGER_HINT_CHARACTER = ("💡提示：填一个网上很少见到的英文单�
 TRIGGER_HINT_KREA2 = ("💡提示：填一个网上很少见到的英文单词（如 my_k2_01）\n"
                       "训练后输入这个单词，就能召唤这个角色/风格。\n"
                       "⚠ Krea 2 模式需先把模型放进 models/krea2/ 并安装第二引擎。")
+TRIGGER_HINT_KREA2_AT = ("💡提示：填一个网上很少见到的英文单词（如 my_k2at_01）\n"
+                       "训练后输入这个单词，就能召唤这个角色/风格。\n"
+                       "\u26a0 Krea2（AI-Toolkit 引擎）需先安装第三引擎；底模用 bf16 RAW（models/krea2/raw.safetensors），\n"
+                       "文本编码器/VAE 首次训练自动下载（约 9GB，国内镜像）。16G 显存自动 768 + int8 + 分层交换优化。\n"
+                       "不填也可以正常训练。")
+
 TRIGGER_HINT_FLUX2 = ("💡提示：填一个网上很少见到的英文单词（如 my_f2_01）\n"
                       "训练后输入这个单词，就能召唤这个角色/风格。\n"
                       "⚠ FLUX.2 模式需先把模型放进 models/flux2/（DiT+文本编码器+VAE）并安装第二引擎；8G 显存可跑但较慢，推荐 12G+。")
@@ -198,13 +215,14 @@ DATASET_TIPS = {
     "style": "📌 数据集提示：建议 20~60 张图片，尽量多不同人物、不同姿态，避免五官固化。画风模式自动过滤强人物五官标签；可填画风专属触发词，不需要正则图。",
     "character": "📌 数据集提示：建议 15~30 张同一人物，多角度、不同服装，推荐设置唯一 trigger 触发词；可配合正则数据集防过拟合。",
     "krea2": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Krea 2 模型放进 models/krea2/（RAW+VAE+文本编码器）。推荐 12G+ 显存。",
+    "krea2_at": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前把 Krea 2 RAW 底模放进 models/krea2/（26GB，bf16 原版），文本编码器/VAE 首次训练自动下载。推荐 16G+ 显存（16G 自动 768+int8+分层交换优化）。",
     "flux2": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 FLUX.2 模型放进 models/flux2/（DiT+Qwen3 文本编码器+VAE，约 16GB，国内镜像）。8G 显存可跑（自动开省显存），推荐 12G+。",
     "video": "📌 视频数据集提示：准备 3~10 段 3~10 秒的同角色/同风格视频（mp4），每段配一个同名 .txt 字幕描述内容。H3 模型 40GB+，训练推荐 24G 显存（NVIDIA）。",
     "qwen_image": "📌 数据集提示：15~30 张同一人物/风格图片。Qwen-Image 是 20B 大模型：16G 显存起步、24G 舒服（推荐）；首次训练自动下载模型约 40GB（国内镜像）。",
     "zimage": "📌 数据集提示：15~30 张同一人物/风格图片。Z-Image 是 8B 轻量模型：12G 显存起步、16G 舒服；首次训练自动下载模型约 16GB（国内镜像）。",
 }
 
-OUTPUT_NAMES = {"style": "anime_style_lora", "character": "character_lora", "krea2": "krea2_lora", "flux2": "flux2_lora", "video": "h3_video_lora", "qwen_image": "qwen_image_lora", "zimage": "zimage_lora"}
+OUTPUT_NAMES = {"style": "anime_style_lora", "character": "character_lora", "krea2": "krea2_lora", "krea2_at": "krea2_at_lora", "flux2": "flux2_lora", "video": "h3_video_lora", "qwen_image": "qwen_image_lora", "zimage": "zimage_lora"}
 # ---------- 新手引导步骤（数据驱动，按模式渲染） ----------
 # 每步：id(唯一) / label(显示文案) / btn(按钮文字) / check(完成判定类型) / act(GUI 动作方法名) / tip(悬停提示)
 # check 类型：
@@ -240,6 +258,16 @@ GUIDE_STEPS = {
          "tip": "安装第二引擎 musubi-tuner（Krea2 模式需要，只需一次）。"},
         {"id": "krea2_models", "label": "③ 下载 Krea2 模型", "btn": "去下载", "check": "krea2_models", "act": "cmd_dl_krea2_models",
          "tip": "应用内下载 Krea2 的 RAW/VAE/文本编码器 3 个文件（国内镜像，断点续传，下完自动识别）。"},
+        {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
+         "tip": "选择图片文件夹（15~30 张同一人物/风格）。"},
+    ],
+    "krea2_at": [
+        {"id": "env", "label": "① 环境准备", "btn": "去准备", "check": "env", "act": "cmd_env",
+         "tip": "安装 Git 和 Python（只需一次，全部项目通用）。"},
+        {"id": "at", "label": "② 安装第三引擎", "btn": "去安装", "check": "at", "act": "cmd_install_at",
+         "tip": "安装第三引擎 AI Toolkit（Krea2 AT 模式需要，只需一次，需 NVIDIA 显卡）。"},
+        {"id": "krea2_at_models", "label": "③ 下载 Krea2 模型", "btn": "去下载", "check": "krea2_at_models", "act": "cmd_dl_krea2_models",
+         "tip": "应用内下载 Krea 2 RAW 底模（26GB，bf16 原版）；文本编码器/VAE 首次训练自动下载（约 9GB，国内镜像）。"},
         {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
          "tip": "选择图片文件夹（15~30 张同一人物/风格）。"},
     ],

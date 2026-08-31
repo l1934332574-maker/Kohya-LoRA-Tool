@@ -705,6 +705,36 @@ def _ensure_onnx(py, logf=print):
     return False
 
 
+def _ensure_hf_hub(py, logf=print):
+    """解释器缺 huggingface_hub 时自动补装（WD14 打标脚本 import 时强制需要，缺了直接崩
+    ModuleNotFoundError，2026-08-31 4080S 用户复现）。返回是否就绪（尽力而为）。"""
+    try:
+        r = subprocess.run([py, "-c", "import huggingface_hub"], capture_output=True, timeout=60)
+        if r.returncode == 0:
+            return True
+    except Exception:
+        pass
+    try:
+        _env = dict(os.environ)
+        for _k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            _env.pop(_k, None)
+        _env["NO_PROXY"] = "*"
+        r = subprocess.run([py, "-m", "pip", "install", "--no-input", "--retries", "10",
+                            "--timeout", "120", "--index-url",
+                            "https://mirrors.aliyun.com/pypi/simple/",
+                            "--extra-index-url", "https://pypi.tuna.tsinghua.edu.cn/simple",
+                            "huggingface_hub"], env=_env,
+                           capture_output=True, text=True, timeout=600)
+        if r.returncode == 0:
+            r2 = subprocess.run([py, "-c", "import huggingface_hub"], capture_output=True, timeout=60)
+            if r2.returncode == 0:
+                logf(f"[WD14] 已自动补装 huggingface_hub（{py}）")
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _prepare_wd14_env(logf=print):
     """准备 WD14 打标解释器环境。返回 (python 路径, sd_scripts_root 或 None)。
 
@@ -718,6 +748,7 @@ def _prepare_wd14_env(logf=print):
     cur = sys.executable
     if _has_torch(cur):
         if _ensure_onnx(cur, logf):
+            _ensure_hf_hub(cur, logf)
             return cur, _sd_scripts_root()
     cands = []
     here = os.path.dirname(os.path.abspath(__file__))
@@ -738,6 +769,7 @@ def _prepare_wd14_env(logf=print):
         if _has_torch(p):
             logf(f"[WD14] 当前解释器缺 torch，改用 {p} 打标")
             if _ensure_onnx(p, logf):
+                _ensure_hf_hub(p, logf)
                 return p, _sd_scripts_root()
     return None, None
 

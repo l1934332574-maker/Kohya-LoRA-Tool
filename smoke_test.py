@@ -143,6 +143,39 @@ def test_yaml():
     d = yaml.safe_load(open(cfg, encoding="utf-8"))
     if d["config"]["process"][0]["model"]["arch"] != "minimax_h3":
         raise AssertionError("H3 yaml arch 不符")
+    # Krea2（AI-Toolkit 引擎）yaml：16G → qint8+768+low_vram+关采样；24G → qfloat8+1024
+    import tempfile as _tf
+    _td = _tf.mkdtemp(prefix="k2at_")
+    try:
+        _raw = os.path.join(_td, "raw.safetensors")
+        open(_raw, "wb").write(b"x" * 1024)
+        _old_files = core.krea2_model_files
+        core.krea2_model_files = lambda: {"raw": _raw, "vae": None, "te": None, "turbo": None}
+        _old_count = core.count_images
+        core.count_images = lambda *a, **k: 3
+        try:
+            cfg = os.path.join(tmp, "krea2_at16.yaml")
+            core.write_krea2_at_yaml(dict(params, resolution="1024", sample_preview=False), vd, tmp, cfg, vram_gb=16)
+            d = yaml.safe_load(open(cfg, encoding="utf-8"))
+            p0 = d["config"]["process"][0]
+            if p0["model"]["arch"] != "krea2" or p0["model"]["qtype"] != "qint8":
+                raise AssertionError("Krea2(AT) 16G yaml 档位不符")
+            if p0["datasets"][0]["resolution"] != [768, 768]:
+                raise AssertionError("Krea2(AT) 16G 未压到 768")
+            if "sample" in p0 or p0["train"].get("disable_sampling") is not True:
+                raise AssertionError("Krea2(AT) 16G 采样未关闭")
+            cfg = os.path.join(tmp, "krea2_at24.yaml")
+            core.write_krea2_at_yaml(dict(params, resolution="1024", sample_preview=True), vd, tmp, cfg, vram_gb=24)
+            d = yaml.safe_load(open(cfg, encoding="utf-8"))
+            p0 = d["config"]["process"][0]
+            if p0["model"]["qtype"] != "qfloat8" or p0["datasets"][0]["resolution"] != [1024, 1024]:
+                raise AssertionError("Krea2(AT) 24G yaml 档位不符")
+        finally:
+            core.krea2_model_files = _old_files
+            core.count_images = _old_count
+    finally:
+        import shutil as _sh
+        _sh.rmtree(_td, ignore_errors=True)
 
 
 def main():

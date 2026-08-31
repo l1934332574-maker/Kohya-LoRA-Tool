@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.12.2"
+APP_VERSION = "0.13.0"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2181,8 +2181,10 @@ def _resolve_krea2_swap(vram_gb, gc_on=True, ram_gb=None):
     （swap=12，每步搬 12 个块），4080S 用户实测 11~17s/it（2026-08-27）。
     取整后 16G 走 16-24G 档 swap=6；H2D-only（LoRA 冻结底模单向交换，
     Fizgig 实测块交换快 ~6.4x）对 16G 档同样保持开启。
-    系统内存 <32G 时（Krea2 官方建议 32G）把 12G/16G 档 swap 12→6，
+    系统内存 <24G 时（Krea2 官方建议 32G）把 12G/16G 档 swap 12→6，
     减少每步 CPU↔GPU 搬运量，避免 16G 内存被页面文件拖死（2026-08-29 3060 用户）。
+    阈值用 24G 而非 32G：4080S 16G + 31G 内存被误伤降到 swap6 后实测 56~80s/it
+    （swap12+pinned 是 7s/it），31G 内存其实足够，不应降（2026-08-31 用户）。
     返回 (blocks_to_swap, h2d_only)。
     """
     tier = round(vram_gb) if vram_gb is not None else None
@@ -2196,8 +2198,8 @@ def _resolve_krea2_swap(vram_gb, gc_on=True, ram_gb=None):
                            # swap=10 时 fp8 仍 30~40s/it；swap=12 留足显存余量防换页
     elif tier < 24:
         swap = 6           # 20-24G 档
-    if ram_gb is not None and ram_gb < 32 and tier is not None and tier >= 12:
-        swap = min(swap, 6)   # 低内存（<32G）：减少每步搬运，防页面文件拖死
+    if ram_gb is not None and ram_gb < 24 and tier is not None and tier >= 12:
+        swap = min(swap, 6)   # 低内存（<24G）：减少每步搬运，防页面文件拖死
     swap = min(swap, 26)   # Krea2 上限 26
     h2d_only = swap > 0 and (tier is None or tier <= 16) and gc_on
     return swap, h2d_only
@@ -2207,7 +2209,8 @@ def _resolve_flux2_swap(vram_gb, gc_on=True, ram_gb=None):
     """FLUX.2 blocks_to_swap / H2D-only 档位（显存取整判断，klein-4b 上限 13）。
 
     与 Krea2 同理：16G 卡（DXGI 报告 15.6~15.9）取整后走 16-24G 档 swap=2，
-    避免误判 12G 档 swap=6。系统内存 <32G 时 12G 档 swap 6→4（低内存防卡第一步）。
+    避免误判 12G 档 swap=6。系统内存 <24G 时 12G 档 swap 6→4（低内存防卡第一步；
+    阈值 24G 而非 32G，避免 4080S 16G + 31G 内存被误伤，2026-08-31）。
     返回 (blocks_to_swap, h2d_only)。
     """
     tier = round(vram_gb) if vram_gb is not None else None
@@ -2218,7 +2221,7 @@ def _resolve_flux2_swap(vram_gb, gc_on=True, ram_gb=None):
         swap = 6
     elif tier < 24:
         swap = 2
-    if ram_gb is not None and ram_gb < 32 and tier is not None and tier >= 12:
+    if ram_gb is not None and ram_gb < 24 and tier is not None and tier >= 12:
         swap = min(swap, 4)   # 低内存：12G 档 6→4，减少每步搬运
     swap = min(swap, 13)
     h2d_only = swap > 0 and (tier is None or tier <= 16) and gc_on
@@ -3706,6 +3709,7 @@ def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from
     """MiniMax H3 视频 LoRA 训练（第三引擎 AI Toolkit，T2V）。"""
     params = params or {}
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
+    _check_at_train_driver(logf)
     ok, detail, vpy = ai_toolkit_engine_status()
     if not ok:
         raise RuntimeError("第三训练引擎未安装，请点顶部「⚙ 安装第三引擎」安装。\n" + detail)
@@ -4087,11 +4091,428 @@ def _at_image_ms_download(mode, logf):
     return at_image_model_ready(mode)
 
 
+# ---------- Krea2 图像 LoRA（第三引擎 AI Toolkit） ----------
+# 2026-08-31 新增：musubi（第二引擎）Krea2 在 16G 卡上块交换搬运慢、Windows 缺 Triton 的
+# torch.compile 会崩；社区实测 ai-toolkit 的 Krea2 扩展（quanto qfloat8/qint8 + low_vram +
+# 梯度检查点）在 16G 上更稳。故在第三引擎接入 Krea2 图像 LoRA（与 Qwen-Image/Z-Image 同一套流程）。
+# 注意：训练底模仍是 bf16 RAW（models/krea2/raw.safetensors），显存靠 ai-toolkit 加载期量化；
+# ComfyUI 的预量化 fp8 文件（带 weight_scale）不能当训练底模，训练前拦截。
+KREA2_AT_MS_REPOS = {
+    "te": "Qwen/Qwen3-VL-4B-Instruct",   # 文本编码器（HF 目录：config+tokenizer+权重，约 9GB）
+    "vae": "Qwen/Qwen-Image",            # 仅取 vae/ 子目录（config.json + diffusion_pytorch_model.safetensors，约 0.25GB）
+}
+KREA2_AT_VAE_FILES = ("vae/config.json", "vae/diffusion_pytorch_model.safetensors")
+
+
+def krea2_at_models_dir():
+    """Krea2（第三引擎）专属模型目录（数据目录，随升级保留）：TE 目录 + VAE 目录。"""
+    return data_sub("models", "krea2_at")
+
+
+def krea2_at_te_dir():
+    return os.path.join(krea2_at_models_dir(), "te")
+
+
+def krea2_at_vae_dir():
+    return os.path.join(krea2_at_models_dir(), "vae")
+
+
+def krea2_at_text_encoder_ready():
+    """Qwen3-VL-4B-Instruct 本地目录是否完整（config + tokenizer + 权重分片齐全）。"""
+    d = krea2_at_te_dir()
+    if not (os.path.isfile(os.path.join(d, "config.json")) and os.path.isfile(os.path.join(d, "tokenizer.json"))):
+        return False
+    try:
+        import json as _json
+        idx = os.path.join(d, "model.safetensors.index.json")
+        if os.path.isfile(idx):
+            with open(idx, encoding="utf-8") as f:
+                _data = _json.load(f)
+            for _p in set((_data.get("weight_map") or {}).values()):
+                _fp = os.path.join(d, _p)
+                if not os.path.isfile(_fp) or os.path.getsize(_fp) < 1024 * 1024:
+                    return False
+        else:
+            _w = os.path.join(d, "model.safetensors")
+            if not os.path.isfile(_w) or os.path.getsize(_w) < 1024 * 1024:
+                return False
+    except Exception:
+        return False
+    return True
+
+
+def krea2_at_vae_ready():
+    d = os.path.join(krea2_at_vae_dir(), "vae")
+    return (os.path.isfile(os.path.join(d, "config.json"))
+            and os.path.isfile(os.path.join(d, "diffusion_pytorch_model.safetensors")))
+
+
+def krea2_at_model_ready():
+    return krea2_at_text_encoder_ready() and krea2_at_vae_ready()
+
+
+def _krea2_at_download_te(logf=print):
+    """Qwen3-VL-4B-Instruct 从魔搭下载到本地目录（断点续传）。返回 True=完整。"""
+    repo = KREA2_AT_MS_REPOS["te"]
+    files = _at_image_ms_file_list(repo)
+    if not files:
+        logf("[Krea2(AT)] ⚠ 魔搭文本编码器文件清单获取失败（网络问题），请稍后重试")
+        return False
+    local = krea2_at_te_dir()
+    os.makedirs(local, exist_ok=True)
+    logf(f"[Krea2(AT)] 下载文本编码器 Qwen3-VL-4B-Instruct（{len(files)} 个文件，约 9GB，国内直连 + 断点续传）…")
+    for idx, path in enumerate(files, 1):
+        dest = os.path.join(local, path.replace("/", os.sep))
+        if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+            continue
+        url = "https://modelscope.cn/models/%s/resolve/master/%s" % (repo, path)
+        logf(f"[Krea2(AT)] 下载 {idx}/{len(files)}: {path}")
+        if not _download_with_resume(url, dest, logf, direct=True):
+            logf(f"[Krea2(AT)] ⚠ 文本编码器文件下载失败：{path}（可重试，断点续传）")
+            return False
+    return krea2_at_text_encoder_ready()
+
+
+def _krea2_at_download_vae(logf=print):
+    """Qwen-Image VAE（diffusers 格式目录）从魔搭下载。返回 True=完整。"""
+    repo = KREA2_AT_MS_REPOS["vae"]
+    local = krea2_at_vae_dir()
+    os.makedirs(local, exist_ok=True)
+    for sub in KREA2_AT_VAE_FILES:
+        dest = os.path.join(local, sub.replace("/", os.sep))
+        if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+            continue
+        url = "https://modelscope.cn/models/%s/resolve/master/%s" % (repo, sub)
+        logf(f"[Krea2(AT)] 下载 VAE: {sub}")
+        if not _download_with_resume(url, dest, logf, direct=True):
+            logf(f"[Krea2(AT)] ⚠ VAE 文件下载失败：{sub}（可重试，断点续传）")
+            return False
+    return krea2_at_vae_ready()
+
+
+def _ensure_krea2_at_models(logf=print):
+    """确保 Krea2(AT) 的文本编码器/VAE 本地就绪（首次训练自动下载，断点续传）。返回 (ok, message)。"""
+    if krea2_at_model_ready():
+        return True, ""
+    if not krea2_at_text_encoder_ready():
+        logf("[Krea2(AT)] 文本编码器（Qwen3-VL-4B-Instruct）未就绪，开始自动下载（约 9GB，国内直连 + 断点续传）…")
+        if not _krea2_at_download_te(logf):
+            return False, "文本编码器下载不完整，请重试或检查网络"
+    if not krea2_at_vae_ready():
+        logf("[Krea2(AT)] Qwen-Image VAE 未就绪，开始自动下载（约 0.25GB）…")
+        if not _krea2_at_download_vae(logf):
+            return False, "VAE 下载不完整，请重试或检查网络"
+    return (True, "") if krea2_at_model_ready() else (False, "模型下载不完整")
+
+
+def krea2_at_missing_models():
+    """Krea2(AT) 训练前缺的文件提示（raw 底模必须手动放 models/krea2/；TE/VAE 训练时自动下载）。"""
+    files = krea2_model_files()
+    missing = []
+    if not files.get("raw"):
+        missing.append("· Krea 2 RAW 底模（bf16 原版，约 26GB，训练必需）\n"
+                       "  文件: models/krea2/raw.safetensors\n"
+                       "  下载: https://modelscope.cn/models/krea/Krea-2-Raw/resolve/master/raw.safetensors")
+    if not files.get("vae"):
+        missing.append("· Qwen-Image VAE（约 0.3GB）\n"
+                       "  文件: models/krea2/qwen_image_vae.safetensors\n"
+                       "  下载: https://modelscope.cn/models/Comfy-Org/Qwen-Image_ComfyUI/resolve/master/split_files/vae/qwen_image_vae.safetensors")
+    return missing
+
+
+def _check_at_krea2_support(at_dir, logf=print):
+    """校验已安装的 ai-toolkit 源码包含 krea2 扩展；缺失（旧版缓存）时自动重新部署最新源码。"""
+    k2 = os.path.join(at_dir, "extensions_built_in", "diffusion_models", "krea2", "krea2.py")
+    if os.path.isfile(k2):
+        return True
+    logf("[Krea2(AT)] ⚠ 检测到已安装的 ai-toolkit 源码不含 krea2 扩展（版本过旧），自动重新部署最新源码…")
+    try:
+        _zp = _download_engine_source("ai-toolkit", logf)
+        _install_engine_source(_zp, at_dir, "run.py", logf)
+        if os.path.isfile(k2):
+            logf("[Krea2(AT)] ✓ ai-toolkit 源码已更新（含 krea2 扩展）")
+            return True
+    except Exception as e:
+        logf(f"[Krea2(AT)] ai-toolkit 源码更新失败（{e}），请重装第三引擎后再试")
+    return False
+
+
+def _krea2_at_steps(params, train_dir):
+    """Krea2(AT) 总步数 = repeats × 图片数 × epochs（与第二引擎 Krea2 语义一致），防过拟合上限 KREA2_MAX_STEPS。"""
+    per_epoch = max(1, int(params.get("repeats", 5))) * max(1, count_images(train_dir))
+    steps = per_epoch * max(1, int(params.get("max_epochs", 8)))
+    return max(100, min(KREA2_MAX_STEPS, steps))
+
+
+def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=print, vram_gb=None):
+    """生成 AI Toolkit Krea2 图像 LoRA 训练 yaml（第三引擎，arch=krea2）。
+
+    底模 = models/krea2/raw.safetensors（bf16 原版），显存靠 ai-toolkit 加载期量化
+    （qfloat8/qint8）+ low_vram + 梯度检查点；文本编码器用本地 Qwen3-VL-4B-Instruct 目录，
+    VAE 用本地 Qwen-Image VAE 目录（均首次训练自动下载，国内镜像）。
+    """
+    name = _sanitize_dirname(params.get("project")) or "krea2_at_lora"
+    rank = int(params.get("rank", 16))
+    alpha = int(params.get("alpha", 16))
+    lr = float(params.get("unet_lr", 1e-4))
+    trig = params.get("trigger") or ""
+    reso = int(params.get("resolution", 1024))
+    steps = _krea2_at_steps(params, train_dir)
+    if vram_gb is not None and vram_gb <= 16:
+        reso = min(reso, 768)   # 16G 安全上限 768（1024 频繁 OOM）
+        # 16G 档：rank/alpha 仍为旧默认 16/16 时，自动升到社区激进档 32/32
+        if rank == 16 and alpha == 16:
+            rank, alpha = 32, 32
+
+    train_dir = os.path.abspath(train_dir).replace("\\", "/")
+    out_dir = os.path.abspath(out_dir).replace("\\", "/")
+    raw_path = (krea2_model_files().get("raw") or "").replace("\\", "/")
+    te_dir = krea2_at_te_dir().replace("\\", "/")
+    vae_dir = os.path.join(krea2_at_vae_dir(), "vae").replace("\\", "/")
+    # 显存档位：<=16G → qint8（更省显存，社区 16G 主流）+ 768；20G+ → qfloat8（质量更好）+ 1024
+    qtype = "qint8" if (vram_gb is not None and vram_gb <= 16) else "qfloat8"
+    _low_vram = True
+    if vram_gb is not None and vram_gb >= 20:
+        _low_vram = False
+    # 显存适配：16G 档加 layer_offloading（DiT 分层交换 30%）——社区激进兜底；
+    # qint8 DiT 约 12~13GB 对 16G 仍紧，把一部分层放内存、算到才搬，防 OOM；
+    # 24G+ 关闭保速度（同 H3 视频流做法，ai-toolkit 官方/RunComfy 推荐仅作最后兜底）。
+    _lo_block = ""
+    if vram_gb is not None and vram_gb <= 16:
+        _lo_block = (
+            "        layer_offloading: true\n"
+            "        layer_offloading_transformer_percent: 0.3\n"
+        )
+        logf("[Krea2(AT)] 显存 %sGB：启用 layer_offloading（DiT 分层交换 30%%，OOM 兜底，会稍慢）" % vram_gb)
+    elif vram_gb is not None:
+        logf("[Krea2(AT)] 显存 %sGB：不启用分层交换，保速度" % vram_gb)
+    if vpy:
+        try:
+            _opt_k, _od = resolve_optimizer(vpy, logf, requested=params.get("optimizer", "auto"))
+        except Exception:
+            _opt_k = "AdamW8bit"
+    else:
+        _opt_k = "AdamW8bit"
+    _opt_yaml = _optimizer_yaml_name(_opt_k)
+    sample_prompt = (trig + ", ") if trig else ""
+    # 16G 档采样极易 OOM（模型本身 ~13GB 占满显存），默认关闭，训练完再测 LoRA
+    sample_on = bool(params.get("sample_preview", True))
+    if vram_gb is not None and vram_gb <= 16:
+        sample_on = False
+    text = (
+        "job: extension\n"
+        "config:\n"
+        "  name: " + _yq(name) + "\n"
+        "  process:\n"
+        "    - type: 'sd_trainer'\n"
+        "      training_folder: " + _yq(out_dir) + "\n"
+        "      device: cuda:0\n"
+        "      trigger_word: " + _yq(trig) + "\n"
+        "      network:\n"
+        "        type: \"lora\"\n"
+        "        linear: " + str(rank) + "\n"
+        "        linear_alpha: " + str(alpha) + "\n"
+        "      save:\n"
+        "        dtype: float16\n"
+        "        save_every: " + str(int(params.get("save_every") or 200)) + "\n"
+        "        max_step_saves_to_keep: 5\n"
+        "      datasets:\n"
+        "        - folder_path: " + _yq(train_dir) + "\n"
+        "          caption_ext: \"txt\"\n"
+        "          caption_dropout_rate: 0.05\n"
+        "          num_frames: 1\n"
+        "          cache_latents_to_disk: true\n"
+        "          resolution: [" + str(reso) + ", " + str(reso) + "]\n"
+        "      train:\n"
+        "        batch_size: 1\n"
+        "        steps: " + str(steps) + "\n"
+        "        gradient_accumulation: 1\n"
+        "        train_unet: true\n"
+        "        train_text_encoder: false\n"
+        "        gradient_checkpointing: true\n"
+        "        noise_scheduler: \"flowmatch\"\n"
+        "        timestep_type: 'linear'\n"
+        "        optimizer: " + _yq(_opt_yaml) + "\n"
+        "        lr: " + repr(lr) + "\n"
+        "        dtype: bf16\n"
+        "        cache_text_embeddings: true\n"
+        + ("        disable_sampling: true\n" if not sample_on else "")
+        + "      model:\n"
+        "        name_or_path: " + _yq(raw_path) + "\n"
+        "        arch: 'krea2'\n"
+        "        quantize: true\n"
+        "        qtype: \"" + qtype + "\"\n"
+        "        quantize_te: true\n"
+        "        qtype_te: \"qfloat8\"\n"
+        "        low_vram: " + ("true" if _low_vram else "false") + "\n"
+        + _lo_block
+        + "        model_kwargs:\n"
+        "          text_encoder_path: " + _yq(te_dir) + "\n"
+        "          vae_path: " + _yq(vae_dir) + "\n"
+        + (("      sample:\n"
+            "        sampler: \"flowmatch\"\n"
+            "        sample_every: 250\n"
+            "        width: " + str(reso) + "\n"
+            "        height: " + str(reso) + "\n"
+            "        num_frames: 1\n"
+            "        prompts:\n"
+            "          - " + _yq(sample_prompt + "a high quality detailed portrait, masterpiece, best quality") + "\n"
+            "        seed: 42\n"
+            "        walk_seed: true\n"
+            "        guidance_scale: 4.0\n"
+            "        sample_steps: 20\n") if sample_on else "")
+        + "meta:\n"
+        "  name: " + _yq(name) + "\n"
+        "  version: '1.0'\n"
+    )
+    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    logf(f"[Krea2(AT)] yaml 已生成: {cfg_path}（qtype={qtype}, reso={reso}, low_vram={'开' if _low_vram else '关'}, sample={'开' if sample_on else '关'}）")
+    return cfg_path
+
+
+def _write_krea2_at_template(params, output_name, out_dir=None):
+    """Krea2（AI Toolkit）LoRA 使用模板。"""
+    out_dir = out_dir or data_sub("output")
+    path = os.path.join(out_dir, output_name + "_使用模板.txt")
+    trig = ", ".join(split_triggers(params.get("trigger"))) if params.get("trigger") else "<你的触发词>"
+    text = (
+        "【Krea2 图像LoRA（AI Toolkit 引擎）使用模板】\n"
+        f"模型文件：{output_name}.safetensors\n"
+        f"Trigger 触发词：{trig}\n"
+        "适用模型：Krea 2 RAW / Turbo（训练用 bf16 RAW，出图可挂 Turbo）\n\n"
+        "使用建议：\n"
+        f"1. 提示词以触发词开头：{trig}, <描述>\n"
+        "2. 推荐 LoRA 权重 0.6 ~ 0.9\n"
+        "3. 该 LoRA 只能用于 Krea 2 模型（不支持 SD/SDXL/FLUX）。\n"
+        "4. 若 ComfyUI 无法直接识别本 LoRA 键名，可先用 ai-toolkit 的转换脚本转成 ComfyUI 格式。\n"
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return path
+
+
+def _check_at_train_driver(logf=print):
+    """第三引擎（ai-toolkit，torch cu130）训练前 NVIDIA 驱动预检。
+
+    安装第三引擎时已要求驱动 570+，但用户之后可能回滚/更换驱动；
+    驱动过旧时首次初始化 CUDA 会直接蓝屏（nvlddmkm.sys）。训练前再查一次并拦截。
+    仅 NVIDIA 卡生效；检测失败（nvidia-smi 不可用）不阻断，避免误伤。
+    """
+    try:
+        _drv = nvidia_driver_version()
+    except Exception:
+        _drv = None
+    if _drv is not None and _drv < 570:
+        raise RuntimeError(
+            "检测到 NVIDIA 驱动版本过低（当前 %d，PyTorch cu130 需要 570+）。\n\n"
+            "直接开始训练会在首次初始化 CUDA 时驱动崩溃（蓝屏）。\n"
+            "请先更新 NVIDIA 显卡驱动到 570 及以上版本（GeForce 官网或 Windows 更新），再重试训练。" % _drv)
+    if _drv is not None:
+        logf("[训练] NVIDIA 驱动 %d（≥570，满足 cu130 要求）" % _drv)
+
+
+def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resume_from=None, progress=None):
+    """Krea2 图像 LoRA 训练（第三引擎 AI Toolkit，arch=krea2）。
+
+    与 Qwen-Image/Z-Image 同一套 AI Toolkit 流程；底模用 bf16 RAW（models/krea2/raw.safetensors），
+    文本编码器/VAE 首次训练自动下载（国内镜像）。16G 档自动 qint8 + 768 + low_vram + 关采样，
+    适合 4080S/4070Ti/3090/A5000 这类 16G 卡（比 musubi 块交换更快更稳）。
+    """
+    params = params or {}
+    _log_tail = deque(maxlen=400)
+    logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
+    _check_at_train_driver(logf)
+    ok, detail, vpy = ai_toolkit_engine_status()
+    if not ok:
+        raise RuntimeError("第三训练引擎未安装，请点顶部「⚙ 安装第三引擎」安装。\n" + detail)
+    kdir = get_kohya_dir()
+    at_dir = _at_dirs()[1]
+    _ensure_venv_hf_sitecustomize(os.path.dirname(os.path.dirname(vpy)), logf)
+    if not os.path.isfile(os.path.join(at_dir, "run.py")):
+        raise RuntimeError("ai-toolkit 源码缺失，请重装第三引擎")
+    if not _check_at_krea2_support(at_dir, logf):
+        raise RuntimeError("ai-toolkit 源码不含 krea2 扩展且自动更新失败，请重装第三引擎后再试")
+    if not _ensure_torchvision_deps(vpy, logf, label="第三引擎", cwd=at_dir):
+        raise RuntimeError("第三引擎 venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第三引擎。")
+    _ensure_ai_toolkit_triton(vpy, logf)
+    # 模型文件：raw 底模必须手动放（26GB）；TE/VAE 首次训练自动下载
+    missing = krea2_at_missing_models()
+    if missing:
+        raise RuntimeError(
+            "Krea2（AI Toolkit）训练缺少模型文件，请下载放入 models/krea2/ 文件夹：\n\n" + "\n".join(missing) +
+            "\n\n（在软件里点「📂 打开 Krea2 模型文件夹」，用浏览器打开上面的国内镜像直链下载后放进去）")
+    _raw = krea2_model_files().get("raw")
+    if not _safetensors_complete(_raw):
+        raise RuntimeError(f"检测到 Krea2 RAW 底模损坏/不完整：{_raw}\n请删除后重新下载（约 26GB，国内镜像）。")
+    if _safetensors_is_prequantized(_raw):
+        raise RuntimeError(
+            "检测到 Krea2 底模 raw.safetensors 是「预量化 fp8/int8」文件（只能用于 ComfyUI 推理）。\n"
+            "Krea2 训练必须使用 bf16 原版底模（约 26GB）：\n"
+            "· 在软件里点「下载 Krea2 模型」重新下载 bf16 原版（自动覆盖）；\n"
+            "· 或到魔搭 https://modelscope.cn/models/krea/Krea-2-Raw 下载 raw.safetensors 替换。")
+    _okm, _msg = _ensure_krea2_at_models(logf)
+    if not _okm:
+        raise RuntimeError("Krea2（AI Toolkit）文本编码器/VAE 下载不完整：%s" % _msg)
+    _warn_laptop_heavy_load(logf, vram_gb, "Krea2")
+    _ram_gb = detect_ram_gb()
+    if _ram_gb:
+        logf(f"[Krea2] 系统内存: {_ram_gb:.0f}G（建议 ≥32G，避免 offload 换页变慢）")
+    _warn_low_ram(logf, _ram_gb, "Krea2")
+    # 数据集：Krea2/Qwen-Image/Z-Image 预处理统一写 train_character（即使画风子模式）
+    _sub_mode = params.get("at_sub_mode") or "character"
+    train_dir = dataset_train_dir("character", params.get("project"))
+    if count_images(train_dir) == 0:
+        raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
+    if _sub_mode == "character" and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+        try:
+            import preprocess as _pp
+            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
+            for _w in _warns:
+                logf(f"[Krea2] ⚠ {_w}")
+        except Exception as _e:
+            logf(f"[Krea2] 人物强绑定失败（忽略）: {_e}")
+    if vram_gb is not None and vram_gb <= 16:
+        logf(f"[Krea2] ⚠ 显存 {vram_gb}GB（16G 档）：自动 qint8 + 768 长边 + low_vram + 关闭采样（训练完再测 LoRA）")
+    proj = _sanitize_dirname(params.get("project")) or "krea2_at"
+    out_dir = data_sub("output", proj)
+    os.makedirs(out_dir, exist_ok=True)
+    cfg_path = os.path.join(KIT_DIR, "configs", "krea2_at_train.yaml")
+    write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=vpy, logf=logf, vram_gb=vram_gb)
+    steps = _krea2_at_steps(params, train_dir)
+    _n_img = count_images(train_dir)
+    logf(f"[Krea2] 数据集: {train_dir}（{_n_img} 张 × {params.get('repeats',5)} repeats × {params.get('max_epochs',8)} epochs）")
+    logf(f"[Krea2] 底模: {os.path.basename(_raw)}（bf16 原版，ai-toolkit 加载期量化）")
+    logf(f"[Krea2] LoRA: dim={params.get('rank',16)}, alpha={params.get('alpha',16)}, lr={params.get('unet_lr','1e-4')}, steps={steps}")
+    env = build_direct_env()
+    env["HF_ENDPOINT"] = "https://hf-mirror.com"
+    if progress is not None:
+        try:
+            progress.set_total(steps)
+        except Exception:
+            pass
+    logf("[Krea2] 启动 AI Toolkit 训练（首次要加载 26GB 底模并量化，请耐心等待）…")
+    rc = run_stream([vpy, os.path.join(at_dir, "run.py"), cfg_path], cwd=at_dir, env=env, logf=logf, collect=_log_tail)
+    if rc != 0:
+        _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
+        raise RuntimeError(f"Krea2（AI Toolkit）训练结束，退出码 {rc}，请查看上方日志")
+    model_path = _find_latest_safetensors(out_dir) or os.path.join(out_dir, "krea2_at_lora.safetensors")
+    logf(f"[Krea2] 完成！模型: {model_path}")
+    try:
+        _write_krea2_at_template(params, os.path.splitext(os.path.basename(model_path))[0], out_dir=os.path.dirname(model_path))
+        write_params_report(mode, params, os.path.splitext(os.path.basename(model_path))[0], out_dir=os.path.dirname(model_path))
+    except Exception as e:
+        logf(f"[Krea2] 生成模板/报告失败（忽略）: {e}")
+    return model_path
+
+
 def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, resume_from=None, progress=None):
     """AI Toolkit 图像 LoRA 训练（Qwen-Image / Z-Image，第三引擎）。"""
     params = params or {}
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
+    _check_at_train_driver(logf)
     info = AT_IMAGE_MODELS.get(mode)
     if not info:
         raise RuntimeError(f"未知模式: {mode}")

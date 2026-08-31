@@ -678,6 +678,14 @@ def test_next_features(base: Path):
     assert k2.count("--save_state") >= 2, "krea2/flux2 都应带 --save_state"
     assert k.count('cmd.append(f"--resume={resume_from}")') >= 2, "krea2/flux2 都应接线 --resume"
     assert "断点续训：从" in k2
+    # ⑤ 低内存降 swap 阈值 32→24：4080S 16G + 31G 不再被误伤（swap6 会慢 10 倍）；12G + 16G 仍生效
+    assert core._resolve_krea2_swap(15.67, ram_gb=31) == (12, True), "4080S 31G 应保持 swap12"
+    assert core._resolve_krea2_swap(12, ram_gb=16) == (6, True), "3060 12G + 16G 仍应降 swap6"
+    assert core._resolve_flux2_swap(15.67, ram_gb=31) == (2, True), "4080S 31G FLUX.2 应保持 swap2"
+    assert core._resolve_flux2_swap(12, ram_gb=16) == (4, True), "12G + 16G FLUX.2 仍应降 swap4"
+    # ⑥ WD14 打标 huggingface_hub 自愈补装
+    pp = (ROOT / "preprocess.py").read_text(encoding="utf-8")
+    assert "def _ensure_hf_hub" in pp and "_ensure_hf_hub(cur, logf)" in pp
     print("NEXT_FEATURES_OK")
 
 
@@ -2344,8 +2352,173 @@ def main():
         test_at_image_low_vram_vram_aware(base)
         test_third_engine_triton_and_laptop_warning(base)
         test_krea2_first_engine_guard(base)
+        test_at_train_driver_guard(base)
+        test_krea2_at_support(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
+
+
+
+def test_at_train_driver_guard(base: Path):
+    """第三引擎训练前 NVIDIA 驱动预检：<570 拦截，>=570/未知放行（cu130 首次 CUDA 蓝屏护栏）。"""
+    assert hasattr(core, "_check_at_train_driver"), "缺少 _check_at_train_driver"
+    logs = []
+    # <570 -> RuntimeError 拦截
+    with patch.object(core, "nvidia_driver_version", return_value=550):
+        try:
+            core._check_at_train_driver(logs.append)
+            raise AssertionError("550 应被拦截")
+        except RuntimeError as e:
+            assert "570" in str(e), str(e)
+    # >=570 -> 放行并打印
+    with patch.object(core, "nvidia_driver_version", return_value=572):
+        core._check_at_train_driver(logs.append)
+    assert any("572" in x for x in logs), logs
+    # 检测失败(None) -> 放行不误伤
+    with patch.object(core, "nvidia_driver_version", return_value=None):
+        core._check_at_train_driver(logs.append)
+    # 三个 ai-toolkit 训练入口都已接上护栏
+    src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8")
+    for fn in ("def train_krea2_at", "def train_at_image", "def train_video"):
+        i = src.find(fn)
+        assert i >= 0, fn
+        e = src.find("\ndef ", i + 10)
+        seg = src[i:e if e >= 0 else len(src)]
+        assert "_check_at_train_driver(logf)" in seg, fn + " 未接训练前驱动护栏"
+    print("AT_TRAIN_DRIVER_GUARD_OK")
+
+
+def test_krea2_at_support(base: Path):
+    """第三引擎 Krea2（AI-Toolkit）接入：模型检测 / yaml 生成 / 训练控制流。"""
+    # ---- 模型缺失提示：raw/vae 缺失时给国内直链 ----
+    with patch.object(core, "krea2_model_files", return_value={"raw": None, "vae": None, "te": None, "turbo": None}):
+        miss = core.krea2_at_missing_models()
+        assert len(miss) >= 2 and "raw.safetensors" in miss[0] and "modelscope.cn" in miss[0]
+
+    # ---- TE/VAE 本地目录完整性检测 ----
+    local = base / "models" / "krea2_at"
+    te = local / "te"
+    vae = local / "vae" / "vae"
+    (te).mkdir(parents=True, exist_ok=True)
+    (vae).mkdir(parents=True, exist_ok=True)
+    with patch.object(core, "data_sub", side_effect=lambda *pp: str(base.joinpath(*pp))):
+        assert core.krea2_at_text_encoder_ready() is False   # 缺 config/tokenizer
+        assert core.krea2_at_vae_ready() is False            # 缺 config/权重
+        # 补全 TE（index + 分片）
+        open(te / "config.json", "w", encoding="utf-8").write("{}")
+        open(te / "tokenizer.json", "w", encoding="utf-8").write("{}")
+        (te / "model.safetensors.index.json").write_text(
+            '{"weight_map": {"a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"}}',
+            encoding="utf-8")
+        (te / "model-00001-of-00002.safetensors").write_bytes(b"x" * (1024 * 1024 + 1))
+        (te / "model-00002-of-00002.safetensors").write_bytes(b"x" * (1024 * 1024 + 1))
+        assert core.krea2_at_text_encoder_ready() is True
+        # 补全 VAE
+        open(vae / "config.json", "w", encoding="utf-8").write("{}")
+        (vae / "diffusion_pytorch_model.safetensors").write_bytes(b"x" * (1024 * 1024 + 1))
+        assert core.krea2_at_vae_ready() is True
+        assert core.krea2_at_model_ready() is True
+        # 半截：删一个 TE 分片 → 未就绪
+        os.remove(te / "model-00002-of-00002.safetensors")
+        assert core.krea2_at_text_encoder_ready() is False
+        os.remove(te / "model-00001-of-00002.safetensors")
+        # index 仍在但分片缺失 → 必须判未就绪（防下载中断残留误判）
+        assert core.krea2_at_text_encoder_ready() is False
+        # 走单文件回退：删掉 index，只留 model.safetensors
+        os.remove(te / "model.safetensors.index.json")
+        (te / "model.safetensors").write_bytes(b"x" * (1024 * 1024 + 1))
+        assert core.krea2_at_text_encoder_ready() is True
+
+    # ---- yaml 生成（16G / 24G 档）----
+    train_dir = base / "train"
+    train_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(3):
+        (train_dir / ("i%d.png" % i)).write_bytes(b"x")
+        (train_dir / ("i%d.txt" % i)).write_text("t, girl", encoding="utf-8")
+    raw = base / "raw.safetensors"
+    raw.write_bytes(b"x" * 1024)
+    with patch.object(core, "data_sub", side_effect=lambda *pp: str(base.joinpath(*pp))), \
+         patch.object(core, "krea2_model_files", return_value={"raw": str(raw), "vae": None, "te": None, "turbo": None}), \
+         patch.object(core, "count_images", return_value=3):
+        import yaml
+        cfg = base / "krea2_at_16.yaml"
+        core.write_krea2_at_yaml({"project": "p", "rank": 16, "alpha": 16, "unet_lr": 1e-4,
+                                  "repeats": 2, "max_epochs": 3, "resolution": 1024,
+                                  "sample_preview": False, "trigger": "t"}, str(train_dir), str(base), str(cfg), vram_gb=16)
+        d = yaml.safe_load(open(cfg, encoding="utf-8"))
+        proc = d["config"]["process"][0]
+        assert proc["model"]["arch"] == "krea2"
+        assert proc["model"]["qtype"] == "qint8"
+        assert proc["datasets"][0]["resolution"] == [768, 768]      # 16G 压到 768
+        assert proc["train"].get("disable_sampling") is True
+        assert "sample" not in proc
+        assert proc["model"]["low_vram"] is True
+        assert "Qwen3-VL-4B-Instruct" in proc["model"]["model_kwargs"]["text_encoder_path"] or "te" in proc["model"]["model_kwargs"]["text_encoder_path"]
+        cfg2 = base / "krea2_at_24.yaml"
+        core.write_krea2_at_yaml({"project": "p", "rank": 16, "alpha": 16, "unet_lr": 1e-4,
+                                  "repeats": 2, "max_epochs": 3, "resolution": 1024,
+                                  "sample_preview": True, "trigger": "t"}, str(train_dir), str(base), str(cfg2), vram_gb=24)
+        d2 = yaml.safe_load(open(cfg2, encoding="utf-8"))
+        p2 = d2["config"]["process"][0]
+        assert p2["model"]["qtype"] == "qfloat8"
+        assert p2["datasets"][0]["resolution"] == [1024, 1024]
+        assert p2["model"]["low_vram"] is False
+        assert "sample" in p2
+
+    # ---- train_krea2_at 控制流 ----
+    vpy = str(base / "third" / "kohya_ss" / "ai_toolkit_venv" / "Scripts" / "python.exe")
+    at_dir = str(base / "third" / "kohya_ss" / "ai-toolkit")
+    os.makedirs(at_dir, exist_ok=True)
+    open(os.path.join(at_dir, "run.py"), "w", encoding="utf-8").write("print('ok')\n")
+    state = {"launched": None, "yaml_called": False}
+    logs = []
+
+    def fake_run_stream(cmd, cwd=None, env=None, logf=print, collect=None, **kwargs):
+        state["launched"] = [str(x) for x in cmd]
+        return 0
+
+    def fake_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=print, vram_gb=None):
+        state["yaml_called"] = True
+        return cfg_path
+
+    def fake_latest(out_dir):
+        return os.path.join(out_dir, "krea2_at_lora.safetensors")
+
+    kwargs = {
+        "data_sub": (lambda *pp: str(base.joinpath(*pp))),
+        "get_kohya_dir": (lambda: str(base / "third" / "kohya_ss")),
+        "ai_toolkit_engine_status": (lambda: (True, "ok", vpy)),
+        "_at_dirs": (lambda: (vpy, at_dir)),
+        "_ensure_venv_hf_sitecustomize": (lambda *a, **k: None),
+        "_check_at_krea2_support": (lambda *a, **k: True),
+        "_ensure_torchvision_deps": (lambda *a, **k: True),
+        "_ensure_ai_toolkit_triton": (lambda *a, **k: True),
+        "krea2_at_missing_models": (lambda: []),
+        "krea2_model_files": (lambda: {"raw": str(raw), "vae": None, "te": None, "turbo": None}),
+        "_safetensors_complete": (lambda *a, **k: True),
+        "_safetensors_is_prequantized": (lambda *a, **k: False),
+        "_ensure_krea2_at_models": (lambda *a, **k: (True, "")),
+        "_warn_laptop_heavy_load": (lambda *a, **k: None),
+        "detect_ram_gb": (lambda: 32),
+        "_warn_low_ram": (lambda *a, **k: None),
+        "dataset_train_dir": (lambda *a, **k: str(train_dir)),
+        "count_images": (lambda *a, **k: 3),
+        "write_krea2_at_yaml": fake_yaml,
+        "build_direct_env": (lambda: {}),
+        "run_stream": fake_run_stream,
+        "_find_latest_safetensors": fake_latest,
+        "_write_krea2_at_template": (lambda *a, **k: None),
+        "write_params_report": (lambda *a, **k: None),
+    }
+    with patch.multiple(core, **kwargs):
+        out = core.train_krea2_at(logf=logs.append, params={"project": "p", "at_sub_mode": "character",
+                                                            "rank": 16, "alpha": 16, "unet_lr": 1e-4,
+                                                            "repeats": 2, "max_epochs": 3, "trigger": ""},
+                                  vram_gb=16)
+        assert out and out.endswith("krea2_at_lora.safetensors")
+        assert state["yaml_called"] is True
+        assert state["launched"] and len(state["launched"]) >= 3 and state["launched"][1].endswith("run.py")
+    print("KREA2_AT_SUPPORT_OK")
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,6 @@
 {
-  "version": "v0.12.2",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.12.2/Setup.exe",
+  "version": "v0.13.0",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.13.0/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.12.2：修复 Krea2/FLUX.2 断点续训完全不可用（此前缺 --save_state 也不接 --resume，中断后只能从头训）；现每轮保存训练状态并支持从断点继续。"
+  "notes": "v0.13.0：新增 Krea2 图像 LoRA 接入第三引擎（AI-Toolkit）「Krea2AT」模式；\n    · 16G 自动 qint8+768+分层交换+关采样，24G+ qfloat8+1024+采样开，文本编码器/VAE 首次训练自动国内镜像下载；\n    · 修复第三引擎训练开始蓝屏（训练前 NVIDIA 驱动 ≥570 预检，覆盖 Z-Image/Qwen-Image/Krea2AT/H3）；\n    · 修复新建/打开项目后界面卡顿（环境检测改后台线程）；\n    · 修复 musubi Krea2/FLUX.2 低内存块交换阈值误伤（32→24G）；WD14 打标缺 huggingface_hub 自动补装。"
 }
