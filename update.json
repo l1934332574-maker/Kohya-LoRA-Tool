@@ -1,6 +1,6 @@
 {
-  "version": "v0.13.0",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.13.0/Setup.exe",
+  "version": "v0.13.1",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.13.1/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.13.0：新增 Krea2 图像 LoRA 接入第三引擎（AI-Toolkit）「Krea2AT」模式；\n    · 16G 自动 qint8+768+分层交换+关采样，24G+ qfloat8+1024+采样开，文本编码器/VAE 首次训练自动国内镜像下载；\n    · 修复第三引擎训练开始蓝屏（训练前 NVIDIA 驱动 ≥570 预检，覆盖 Z-Image/Qwen-Image/Krea2AT/H3）；\n    · 修复新建/打开项目后界面卡顿（环境检测改后台线程）；\n    · 修复 musubi Krea2/FLUX.2 低内存块交换阈值误伤（32→24G）；WD14 打标缺 huggingface_hub 自动补装。"
+  "notes": "v0.13.1：修复 Krea2AT 文本编码器/VAE 下载截断自动检测并重下（真实 safetensors 头部校验）；\n    · 修复第三引擎 4 个模式按钮在侧边栏被挤压（2×2 网格）；\n    · 修复 musubi 块交换在 AMD ROCm 崩溃（Found no NVIDIA driver，RX 7000 开 --blocks_to_swap 复现）。"
 }

@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.13.0"
+APP_VERSION = "0.13.1"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2016,6 +2016,40 @@ def _patch_musubi_int8_weight_dtype(kdir, logf=print):
     return True  # 已打过或结构变化（跳过）
 
 
+def _patch_musubi_offload_device(kdir, logf=print):
+    """给 musubi custom_offloading_utils.py 打幂等补丁：块交换 move_blocks 不硬调 torch.cuda.current_device()。
+
+    AMD ROCm（RX 7000）下 torch.cuda.is_available() 为 False，但 accelerator.device 仍是 cuda:0；
+    musubi 块交换 fallback 调 torch.cuda.current_device() → _cuda_init 找 NVIDIA 驱动 → 崩
+    "Found no NVIDIA driver on your system"（GitHub issue #5：RX 7900 XT 20G，开 --blocks_to_swap 复现）。
+    NVIDIA 无影响（is_available True 走原路径）；源码结构变化自动跳过。
+    """
+    try:
+        fp = os.path.join(kdir, "musubi-tuner", "src", "musubi_tuner", "modules", "custom_offloading_utils.py")
+        if not os.path.isfile(fp):
+            return
+        with open(fp, "r", encoding="utf-8") as f:
+            src = f.read()
+        if "elif torch.cuda.is_available():" in src:
+            return
+        _o = "            dev = self.device.index if self.device.index is not None else torch.cuda.current_device()"
+        if _o not in src:
+            logf("[musubi] custom_offloading_utils.py 结构变化，跳过块交换设备补丁")
+            return
+        _n = ("            if self.device.index is not None:\n"
+              "                dev = self.device.index\n"
+              "            elif torch.cuda.is_available():\n"
+              "                dev = torch.cuda.current_device()\n"
+              "            else:\n"
+              "                dev = 0")
+        src = src.replace(_o, _n, 1)
+        with open(fp, "w", encoding="utf-8") as f:
+            f.write(src)
+        logf("[musubi] 已给块交换打设备兼容补丁（AMD ROCm 不再崩 Found no NVIDIA driver）")
+    except Exception as e:
+        logf(f"[musubi] 块交换设备补丁失败（忽略）: {e}")
+
+
 def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
     """确保 Krea2/FLUX.2（musubi）的 Qwen3-VL-4B tokenizer 本地就绪并让 musubi 用本地目录。
 
@@ -2048,6 +2082,8 @@ def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
         _patch_musubi_fp8_dequant_bf16(_kdir, logf)
         # INT8/NF4 量化底模补丁（幂等；Krea2/FLUX.2 共用；结构变化自动跳过，不影响原 fp8 流程）
         patch_musubi_quant_base(_kdir, logf)
+        # AMD ROCm（RX 7000）块交换 fallback 硬调 torch.cuda.current_device() 崩 Found no NVIDIA driver（issue #5）
+        _patch_musubi_offload_device(_kdir, logf)
         try:
             _r = subprocess.run([mvpy, "-c", "import protobuf"], capture_output=True, text=True, timeout=60)
             if _r.returncode != 0:
@@ -4082,7 +4118,16 @@ def _at_image_ms_download(mode, logf):
     for idx, path in enumerate(files, 1):
         dest = os.path.join(local, path.replace("/", os.sep))
         if os.path.isfile(dest) and os.path.getsize(dest) > 0:
-            continue
+            if dest.lower().endswith(".safetensors"):
+                if _safetensors_complete(dest):
+                    continue
+                logf("[" + info['label'] + "] ⚠ 检测到模型文件截断/损坏（" + os.path.basename(dest) + "），删除重下…")
+                try:
+                    os.remove(dest)
+                except Exception:
+                    pass
+            else:
+                continue
         url = "https://modelscope.cn/models/%s/resolve/master/%s" % (repo, path)
         logf(f"[{info['label']}] 下载 {idx}/{len(files)}: {path}")
         if not _download_with_resume(url, dest, logf, direct=True):
@@ -4118,7 +4163,7 @@ def krea2_at_vae_dir():
 
 
 def krea2_at_text_encoder_ready():
-    """Qwen3-VL-4B-Instruct 本地目录是否完整（config + tokenizer + 权重分片齐全）。"""
+    """Qwen3-VL-4B-Instruct 本地目录是否完整（config + tokenizer + 权重分片齐全且未截断）。"""
     d = krea2_at_te_dir()
     if not (os.path.isfile(os.path.join(d, "config.json")) and os.path.isfile(os.path.join(d, "tokenizer.json"))):
         return False
@@ -4130,11 +4175,11 @@ def krea2_at_text_encoder_ready():
                 _data = _json.load(f)
             for _p in set((_data.get("weight_map") or {}).values()):
                 _fp = os.path.join(d, _p)
-                if not os.path.isfile(_fp) or os.path.getsize(_fp) < 1024 * 1024:
+                if not _safetensors_complete(_fp):
                     return False
         else:
             _w = os.path.join(d, "model.safetensors")
-            if not os.path.isfile(_w) or os.path.getsize(_w) < 1024 * 1024:
+            if not _safetensors_complete(_w):
                 return False
     except Exception:
         return False
@@ -4144,7 +4189,7 @@ def krea2_at_text_encoder_ready():
 def krea2_at_vae_ready():
     d = os.path.join(krea2_at_vae_dir(), "vae")
     return (os.path.isfile(os.path.join(d, "config.json"))
-            and os.path.isfile(os.path.join(d, "diffusion_pytorch_model.safetensors")))
+            and _safetensors_complete(os.path.join(d, "diffusion_pytorch_model.safetensors")))
 
 
 def krea2_at_model_ready():
@@ -4164,7 +4209,16 @@ def _krea2_at_download_te(logf=print):
     for idx, path in enumerate(files, 1):
         dest = os.path.join(local, path.replace("/", os.sep))
         if os.path.isfile(dest) and os.path.getsize(dest) > 0:
-            continue
+            if dest.lower().endswith(".safetensors"):
+                if _safetensors_complete(dest):
+                    continue
+                logf("[Krea2(AT)] ⚠ 检测到文本编码器文件截断/损坏（" + os.path.basename(dest) + "），删除重下…")
+                try:
+                    os.remove(dest)
+                except Exception:
+                    pass
+            else:
+                continue
         url = "https://modelscope.cn/models/%s/resolve/master/%s" % (repo, path)
         logf(f"[Krea2(AT)] 下载 {idx}/{len(files)}: {path}")
         if not _download_with_resume(url, dest, logf, direct=True):
@@ -4181,7 +4235,16 @@ def _krea2_at_download_vae(logf=print):
     for sub in KREA2_AT_VAE_FILES:
         dest = os.path.join(local, sub.replace("/", os.sep))
         if os.path.isfile(dest) and os.path.getsize(dest) > 0:
-            continue
+            if dest.lower().endswith(".safetensors"):
+                if _safetensors_complete(dest):
+                    continue
+                logf("[Krea2(AT)] ⚠ 检测到 VAE 文件截断/损坏（" + os.path.basename(dest) + "），删除重下…")
+                try:
+                    os.remove(dest)
+                except Exception:
+                    pass
+            else:
+                continue
         url = "https://modelscope.cn/models/%s/resolve/master/%s" % (repo, sub)
         logf(f"[Krea2(AT)] 下载 VAE: {sub}")
         if not _download_with_resume(url, dest, logf, direct=True):
@@ -7453,6 +7516,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     elif family == "anima":
         # RDNA2 上 fp16 VAE 编码 latent 普遍 NaN → 训练第一步 loss=nan；训练前打幂等补丁（配合 ANIMA_VAE_FP32=1）
         _patch_anima_vae_fp32(kdir, logf)
+        _patch_musubi_offload_device(kdir, logf)   # 块交换设备兼容（AMD ROCm 崩 Found no NVIDIA driver，issue #5）
         qwen3, vae = _ensure_anima_components(logf)
         cmd += [f"--qwen3={qwen3}", f"--vae={vae}",
                 "--qwen_image_vae_2d", "--vae_chunk_size=64"]

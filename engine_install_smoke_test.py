@@ -1417,6 +1417,32 @@ def test_quant_mode_resolution(base):
     print("QUANT_MODE_RESOLUTION_UNIT_TESTS_OK")
 
 
+def test_musubi_offload_device_patch(base: Path):
+    """musubi custom_offloading_utils.py 块交换设备兼容补丁：AMD ROCm 不硬调 torch.cuda.current_device()。"""
+    mdir = base / "kohya_ss" / "musubi-tuner" / "src" / "musubi_tuner" / "modules"
+    mdir.mkdir(parents=True, exist_ok=True)
+    fp = mdir / "custom_offloading_utils.py"
+    old_line = "            dev = self.device.index if self.device.index is not None else torch.cuda.current_device()"
+    fp.write_text("def move_blocks(...):\n" + old_line + "\n            torch.cuda.set_device(dev)\n", encoding="utf-8")
+    logs = []
+    core._patch_musubi_offload_device(str(base / "kohya_ss"), logs.append)
+    src = fp.read_text(encoding="utf-8")
+    assert "elif torch.cuda.is_available():" in src, src
+    assert old_line not in src, src
+    # 幂等：再打一次不重复插入
+    core._patch_musubi_offload_device(str(base / "kohya_ss"), logs.append)
+    src2 = fp.read_text(encoding="utf-8")
+    assert src2.count("elif torch.cuda.is_available():") == 1, src2
+    # 结构变化（找不到原行）→ 不崩、跳过
+    fp.write_text("def move_blocks(...):\n    pass\n", encoding="utf-8")
+    core._patch_musubi_offload_device(str(base / "kohya_ss"), logs.append)
+    # 已接入 Krea2/FLUX.2 聚合路径与 Anima 路径
+    main_src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8")
+    assert main_src.count("_patch_musubi_offload_device(_kdir, logf)") >= 1, main_src
+    assert main_src.count("_patch_musubi_offload_device(kdir, logf)") >= 1, main_src
+    print("MUSUBI_OFFLOAD_DEVICE_PATCH_OK")
+
+
 def test_musubi_quant_patch(base):
     """musubi INT8/NF4 补丁：对随包 musubi-tuner-main.zip 应用全部成功且幂等。"""
     import zipfile
@@ -2318,6 +2344,7 @@ def main():
         test_preset_for_fallback(base)
         test_sample_preview_16g_default_off(base)
         test_musubi_quant_patch(base)
+        test_musubi_offload_device_patch(base)
         test_accelerate_cpu_config_self_heal(base)
         test_anima_vae_fp32_patch(base)
         test_dataset_config_is_reg_subset(base)
@@ -2353,10 +2380,48 @@ def main():
         test_third_engine_triton_and_laptop_warning(base)
         test_krea2_first_engine_guard(base)
         test_at_train_driver_guard(base)
+        test_krea2_at_truncated_te_self_heal(base)
         test_krea2_at_support(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 
+
+
+def test_krea2_at_truncated_te_self_heal(base: Path):
+    """Krea2AT 文本编码器：截断 safetensors 分片能被识别（>1MB 但头部声明超文件大小），下载时自动删除重下。"""
+    import struct
+    import json as _json
+    td = base / "krea2_at_te"
+    td.mkdir(parents=True, exist_ok=True)
+    (td / "config.json").write_text("{}", encoding="utf-8")
+    (td / "tokenizer.json").write_text("{}", encoding="utf-8")
+    idx = {"weight_map": {"a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"}}
+    (td / "model.safetensors.index.json").write_text(_json.dumps(idx), encoding="utf-8")
+    # 截断分片：头部声明 100MB 数据，实际只有 2MB（>1MB，旧检查会误判为完整）
+    hdr = {"t": {"dtype": "F32", "shape": [1], "data_offsets": [0, 100 * 1024 * 1024]}}
+    hb = _json.dumps(hdr, separators=(",", ":")).encode("utf-8")
+    shard1 = td / "model-00001-of-00002.safetensors"
+    shard1.write_bytes(struct.pack("<Q", len(hb)) + hb + b"\x00" * (2 * 1024 * 1024))
+    assert core._safetensors_complete(str(shard1)) is False, "截断分片应判为不完整"
+    with patch.object(core, "krea2_at_te_dir", return_value=str(td)):
+        assert core.krea2_at_text_encoder_ready() is False, "存在截断分片应判为未就绪"
+        logs = []
+        files = ["config.json", "tokenizer.json", "model.safetensors.index.json",
+                 "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
+        def _dl(url, dest, logf, direct=False, **kw):
+            hb2 = _json.dumps({"t": {"dtype": "F32", "shape": [4], "data_offsets": [0, 16]}},
+                              separators=(",", ":")).encode("utf-8")
+            with open(dest, "wb") as f:
+                f.write(struct.pack("<Q", len(hb2)) + hb2 + b"\x00" * 16)
+            return True
+        with patch.object(core, "_at_image_ms_file_list", return_value=files), \
+             patch.object(core, "_download_with_resume", side_effect=_dl):
+            ok = core._krea2_at_download_te(logs.append)
+        assert ok is True, logs
+        assert core.krea2_at_text_encoder_ready() is True, "自愈后应就绪"
+        assert core._safetensors_complete(str(shard1)) is True, "截断分片应被重下为完整"
+        assert any("截断" in x for x in logs), logs
+    print("KREA2_AT_TRUNCATED_TE_SELF_HEAL_OK")
 
 
 def test_at_train_driver_guard(base: Path):
@@ -2410,12 +2475,18 @@ def test_krea2_at_support(base: Path):
         (te / "model.safetensors.index.json").write_text(
             '{"weight_map": {"a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"}}',
             encoding="utf-8")
-        (te / "model-00001-of-00002.safetensors").write_bytes(b"x" * (1024 * 1024 + 1))
-        (te / "model-00002-of-00002.safetensors").write_bytes(b"x" * (1024 * 1024 + 1))
+        import struct as _st
+        import json as _json
+        def _mk_safe(pth):
+            _h = {"t": {"dtype": "F32", "shape": [4], "data_offsets": [0, 16]}}
+            _hb = _json.dumps(_h, separators=(",", ":")).encode("utf-8")
+            pth.write_bytes(_st.pack("<Q", len(_hb)) + _hb + b"\x00" * 16)
+        _mk_safe(te / "model-00001-of-00002.safetensors")
+        _mk_safe(te / "model-00002-of-00002.safetensors")
         assert core.krea2_at_text_encoder_ready() is True
         # 补全 VAE
         open(vae / "config.json", "w", encoding="utf-8").write("{}")
-        (vae / "diffusion_pytorch_model.safetensors").write_bytes(b"x" * (1024 * 1024 + 1))
+        _mk_safe(vae / "diffusion_pytorch_model.safetensors")
         assert core.krea2_at_vae_ready() is True
         assert core.krea2_at_model_ready() is True
         # 半截：删一个 TE 分片 → 未就绪
@@ -2426,7 +2497,7 @@ def test_krea2_at_support(base: Path):
         assert core.krea2_at_text_encoder_ready() is False
         # 走单文件回退：删掉 index，只留 model.safetensors
         os.remove(te / "model.safetensors.index.json")
-        (te / "model.safetensors").write_bytes(b"x" * (1024 * 1024 + 1))
+        _mk_safe(te / "model.safetensors")
         assert core.krea2_at_text_encoder_ready() is True
 
     # ---- yaml 生成（16G / 24G 档）----

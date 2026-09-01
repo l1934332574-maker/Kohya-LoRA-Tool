@@ -4,14 +4,19 @@
 - [ ] NF4 4-bit Krea2 训练可行性调研：社区 AcademiaSD LoRAlab 声称 8G 显存可训（峰值 ~7.7G，4-bit NF4 冻结底模 + TE/VAE 预缓存不驻留 + 8-bit AdamW on BF16 LoRA），但为独立脚本、非 ai-toolkit；ai-toolkit 官方 Krea2 量化最低只到 qint8/qfloat8。待验证是否值得接入（可能需自研扩展或换训练框架）。
 - [ ] 16G 档 layer_offloading（DiT 30%）实机验证速度影响（预期每步稍慢，换取不 OOM）。
 
-### 修复：新建/打开项目后界面卡顿（同步环境检测）
-- 根因：创建/打开项目收尾在主线程同步调用 _refresh_status()，system_status() 缓存 TTL=30s 过期后要重跑 git/python（多子进程探测）/显卡检测，界面卡 1~3 秒。
-- 已修：新建/打开项目改为后台线程刷新（_refresh_status_async），UI 不再阻塞；徽章/引导稍后自动更新。
+### 修复：第三引擎 4 个模式按钮在侧边栏被挤压（2×2 网格）
+- 根因：侧边栏宽 252px（内容区约 232px），第三引擎组新增 Krea2AT 后共 4 个模式按钮，单行 4×64px+间距≈280px 超出侧边栏，按钮被挤压/裁切。
+- 已修：4 个模式及以上改 2×2 网格等宽铺满（视频H3/Krea2AT/Qwen/Z-Image），1~2 个模式的引擎组保持原单行布局，零影响。
 
-### 修复：第三引擎训练开始蓝屏（训练前 NVIDIA 驱动预检）
-- 根因：安装第三引擎时才校验 NVIDIA 驱动 ≥570（cu130 要求），用户之后回滚/更换驱动后，训练首次初始化 CUDA 直接蓝屏（nvlddmkm）。
-- 已修：	rain_at_image（Qwen-Image/Z-Image）/ 	rain_krea2_at / 	rain_video（H3）训练前统一预检驱动，<570 中文拦截引导更新，不再等蓝屏；NVIDIA 正常用户仅多打一行日志。
-- 验证：AT_TRAIN_DRIVER_GUARD_OK（<570 拦截 / ≥570 放行 / 检测失败不误伤 / 三入口已接线）。
+### 修复：Krea2AT 文本编码器/VAE 下载截断导致训练失败（自动检测 + 重下自愈）
+- 根因：Krea2AT 首次训练自动下载 Qwen3-VL-4B-Instruct（约 9GB），下载中断会留下截断的 safetensors 分片；旧完整性检查只判断「文件存在且 >1MB」，截断文件被误判为完整，训练加载文本编码器时爆 SafetensorError: incomplete metadata, file not fully covered（4080S 用户复现）。
+- 已修：文本编码器/VAE 就绪检查改用真实 safetensors 头部校验（_safetensors_complete，头部声明的数据区不超过文件实际大小）；下载时检测到截断/损坏的 safetensors 自动删除重下（断点续传）；Qwen-Image/Z-Image 模型下载同款跳过逻辑一并修复。
+- 验证：KREA2_AT_TRUNCATED_TE_SELF_HEAL_OK（截断分片识别 / 自愈重下 / 就绪判断）。
+
+### 修复：musubi 块交换在 AMD ROCm 崩溃（Found no NVIDIA driver）
+- 根因：musubi custom_offloading_utils.py 块交换 move_blocks 在 device.index 为 None 时 fallback 调 torch.cuda.current_device()，AMD ROCm（RX 7000）下 is_available 为 False 但 accelerator.device 仍是 cuda:0，_cuda_init 找 NVIDIA 驱动 → 崩（GitHub issue #5，RX 7900 XT 20G，开 --blocks_to_swap 复现）。
+- 已修：训练前给 musubi 打幂等补丁，move_blocks 改为 device.index 优先 → torch.cuda.is_available() 时才调 current_device()，否则 dev=0；NVIDIA 无影响，已接入 Krea2/FLUX.2 与 Anima 路径。
+- 验证：MUSUBI_OFFLOAD_DEVICE_PATCH_OK（补丁生效 / 幂等 / 结构变化跳过 / 两路径接线）。
 
 ## v0.11.4（2026-08-29）
 

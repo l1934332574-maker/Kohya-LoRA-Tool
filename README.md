@@ -4,94 +4,18 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.11.1** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+**当前版本：v0.13.1** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
 ---
 
-- **Krea2 Raw/Turbo 下载 403 根治**：改走魔搭官方转存直链，免许可、免代理一键下载（原为 HuggingFace 门禁模型，hf-mirror 匿名必 401/403）。
-- **修复 Krea2/FLUX.2 开采样预览训练秒崩**：训练子进程漏传本地 tokenizer/hf-mirror 环境，采样加载文本编码器时在线拉 HF tokenizer 失败；已与缓存步骤一致化，顺带修复 RDNA2 训练漏传 fp16。
-- **修复「人物模式 + 正则数据集」训练必崩**：`is_reg` 写错 TOML 层级（应写在子集层），现按 sd-scripts schema 修正。
-- **修复失败误诊**：训练失败不再被误报为 bitsandbytes 8-bit 问题，优先报告真实原因（配置校验 / OOM / 优化器）。
-- **RDNA2（RX 6000）Anima 训练加官方 `--no_half_vae`**：VAE 全程 fp32（含缓存阶段），根治 latent NaN / 第一步 loss=nan。
+## 🆕 v0.13.x 更新重点
 
-- **修复老系统 curl 不兼容导致 torch 大轮子下载永远失败**：`--retry-all-errors` 需 curl 8.0+，Windows 自带旧版 curl 自动省略该参数，Kohya/第二引擎/AMD 大文件下载不再报错。
-- **修复 Accelerate 中文路径误报「不属于同一环境」**：子进程强制 UTF-8 + realpath 容错比较，中文安装目录不再误报（真实环境不一致仍硬报错）。
-
-- **MiniMax H3（视频 LoRA）低显存自动适配**：所有 H3 训练默认开 `low_vram`，<24G 自动开分层交换，12G 卡不再加载就 OOM。
-- **MiniMax H3 支持 nvfp4 量化主模型**（12~16G 显存推荐，约 11.7GB 更小更稳），自动检测并优先使用。
-
-- **MiniMax H3 模型下载全部改走魔搭国内直链**（ModelScope）：int8 / nvfp4 主模型、Qwen3-VL-32B 文本编码器、视频/音频 VAE 全部改为国内 CDN 直链，支持断点续传，再也不用苦等 hf-mirror。
-
-- **MiniMax H3 模型完整性校验**：下载不完整的文件会被识别并提示重新下载，不再等训练时报 SafetensorError。
-- **12~16G 显存 H3 训练前强提示**：必须用 nvfp4 主模型（int8 19.5GB 物理放不下），直接给魔搭下载链接。
-- **视频模式「数据预处理」不再自动跳训练**：只检查提示，避免误触发训练。
-- **修复 Krea2/FLUX.2 只装第二引擎时一键训练误报「Kohya 尚未安装」**：预处理自动多引擎 fallback。
-
-- **修复英文系统（cp1252）下训练打印中文崩溃**：所有训练/预处理子进程强制 UTF-8 输出，不再 UnicodeEncodeError。
-- **修复 Krea2/Qwen-Image/Z-Image 画风子模式训练报「缺少预处理数据」**：训练统一读 train_character（与预处理一致）。
-
-- **修复手动修改项目 json 后点「打开」无反应**：配置恢复容错，失败时按默认配置打开并提示。
-- **FLUX 模型下载改走魔搭国内直链**：DiT / CLIP-L / T5-XXL / AE 全部国内 CDN 直连、支持断点续传，不再直连 HuggingFace（避免 SSL 失败）。
-
-- **修复繁体/英文系统下 Krea2 缓存 latents 打印中文崩溃**：所有子进程默认强制 UTF-8 输出，不再 UnicodeEncodeError。
-
-## 🆕 v0.11.1 更新重点
-
-- **修复 16G 卡训练越跑越慢**：训练中采样预览默认关（每 100 步采样会残留显存、16G 卡后续换页变慢，4080S 实测 13.9→54s/it）。
-- **新增「torch.compile 加速」勾选**（高级参数，Krea2/FLUX.2，默认关）：musubi 编译 28 个块提速，随项目保存。
-
-## 🆕 v0.11.0 更新重点
-
-- **界面重做：侧边栏引擎导航**：第一/第二/第三引擎分组清晰，模式用按钮切换并高亮，顶部不再堆叠。
-- **修复模式切换卡死**：画风 + FLUX.2 底模后切模式不再冻结（预设查表防御 + 底模类型自动重置）。
-- **修复 Z-Image/Qwen-Image 魔搭下载 WinError 183**：目录项不再误当文件，16GB 模型正常断点续传下载。
-
-## 🆕 v0.10.21 更新重点
-
-- **修复 Z-Image/Qwen-Image 魔搭下载报 WinError 183**：魔搭文件清单里的目录项被误当文件下载导致中断；现只下载文件（跳过目录），16GB 模型可正常断点续传下载。
-
-## 🆕 v0.10.20 更新重点
-
-- **Z-Image / Qwen-Image 底模下载改走魔搭直链**：hf-mirror 故障/被污染后不再依赖，16GB 模型国内直连 + 断点续传；Krea2 VAE/文本编码器、FLUX.2 三件套下载也全部魔搭化。
-- **Krea2 16G 卡默认配置调优**：默认 int8 + 块交换 12（4080S 实测 7s/it，比 fp8+swap10 的 30~40s/it 快 4~5 倍），不用再手动调高级参数。
-- **修复训练监控面板"只有日志在动"**：Krea2/FLUX.2/AI-Image 训练现在正常显示步数/loss/速度/曲线。
-- **Krea2 预量化底模拦截**：误放 ComfyUI 用的 fp8 raw 会提前明确提示换 bf16 原版。
-- **Anima/Krea2 模型文件完整性校验**：损坏/截断的 VAE、底模、文本编码器训练前拦截并中文提示重下，不再爆 reshape 英文错。
-
-## 🆕 v0.10.19 更新重点
-
-- **修复 Krea2 16G 卡「换页卡死 / 越跑越慢」**：16G 档块交换 6→10（显存留足余量防换页）+ 16G 及以上自动开 pinned memory 加速块交换搬运（musubi 官方加速）。实测链路：swap=6 时显存 15.5/16 顶满、v0.10.17 卡死一下午、v0.10.18 64→176s/it 越跑越慢。
-- **高级参数新增「块交换数」下拉**（Krea2/FLUX.2）：自动 / 2 / 4 / 6 / 8 / 10 / 12，跑稳后可手动往下调换速度，随项目保存。
-
-## 🆕 v0.10.18 更新重点
-
-- **Krea2/FLUX.2 16G 卡默认量化照搬社区改 fp8**：16G 卡带宽不是瓶颈，int8 的省带宽优势用不上反而算子低效（4080S 实测 100% 利用率功耗仅 80W）；现 16G+ 自动默认 fp8_scaled（musubi 官方 + 社区 16G 主流），int8 只留给 8~12G 带宽瓶颈档。
-- **高级参数新增「量化方式」下拉**（Krea2/FLUX.2）：自动 / fp8 / int8 / nf4 可自行对比，选择随项目保存。
-
-## 🆕 v0.10.17 更新重点
-
-- **修复 16G 显卡（如 RTX 4080 SUPER）Krea2/FLUX.2 训练异常慢**：16G 卡被 Windows 检测为 15.6~15.9GB，之前会误判成 12G 档、每步搬运 12 个模型块（实测 11~17s/it、预计 3~4 小时）；现按显存档位取整，16G 走正确的 16-24G 档（Krea2 swap=6 / FLUX.2 swap=2），回到社区 16G 正常速度（同配置预计 2~4s/it、30~60 分钟）。
-
-## 🆕 v0.10.16 更新重点
-
-- **新增「一键导出日志」**：日志面板/训练监控一键导出 `KohyaLoRA_<项目>_<时间>.txt`（桌面），自动附带软件版本、操作系统、显卡/驱动、Python/Git、三引擎状态、torch 后端等环境信息 + 完整运行日志；出问题直接把 txt 发给维护者即可定位，不用再截图/手抄半截日志。
-- **修复第三引擎模型下载卡死（Xet CDN）**：向三个训练环境注入 sitecustomize，强制走 hf-mirror + 禁用 HF Xet（大文件下载不再 peer closed / 超时卡在 Fetching files）。
-- **修复 Krea2/FLUX.2 开「训练中采样预览」训练秒崩**：采样加载文本编码器时 tokenizer 走了在线拉取（国内直连 HF SSL 失败）；现训练子进程与缓存步骤一致使用本地 tokenizer + hf-mirror，顺带修复 RDNA2 训练步骤漏传 fp16。
-
-## 🆕 v0.10.15 更新重点
-
-- **Krea2 Raw/Turbo 下载 403 根治**：下载源改走魔搭（ModelScope）官方转存 `krea/Krea-2-Raw` / `krea/Krea-2-Turbo`，无需接受 Krea 许可、无需代理、国内 CDN 直连 + 断点续传，一键下载；文件名不变，训练零改动。
-
-## 🆕 v0.10.7 更新重点
-
-- **人物 LoRA 自动强绑定**：一个触发词绑定一个人物——自动提取训练集 100% 一致的身份特征并固定为标签前缀（keep_tokens 覆盖整组），特征不一致训练前警告，支持 ||| 手动固定区。
-- **修复 Krea2/FLUX.2 预量化底模（fp8/int8）训练启动报错**：底模本身已量化时不再重复加量化参数。
-
-## 🆕 v0.10.6 更新重点
-
-- **修复 FLUX.2 低显存 int8 训练启动即断言崩溃**：musubi 只处理 fp8 不处理 int8 的 bug，已自动打补丁，8G 用户能正常训练。
+- **新增 Krea2 图像 LoRA 接入第三引擎（AI-Toolkit）**：新模式「Krea2AT」，与第二引擎 musubi 的 Krea2 共存；16G 自动 qint8 + 768 + 分层交换 + 关采样，24G+ qfloat8 + 1024 + 采样开；文本编码器/VAE 首次训练自动从国内镜像下载。
+- **Krea2AT 模型下载自愈**：文本编码器/VAE 截断或损坏自动检测并重下（真实 safetensors 头部校验），不再训练中途 SafetensorError。
+- **训练前环境自愈**：第三引擎 NVIDIA 驱动预检（<570 拦截，防训练开始蓝屏）；musubi 块交换 AMD ROCm 兼容补丁（RX 7000 不再崩 Found no NVIDIA driver）。
+- **界面优化**：第三引擎 4 个模式按钮改 2×2 网格不再挤压；新建/打开项目不再卡顿。
 
 > 完整更新记录见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -105,14 +29,14 @@
 |---|---|---|
 | 经典图像 LoRA | SD1.5、SDXL、FLUX.1、Anima | 第一引擎（kohya / sd-scripts） |
 | 新架构图像 LoRA | Krea 2、FLUX.2 | 第二引擎（musubi-tuner） |
-| AI Toolkit 图像 LoRA | Qwen-Image、Z-Image | 第三引擎（AI Toolkit） |
-| 视频 LoRA | MiniMax H3 | 独立视频训练流程 |
+| AI Toolkit 图像 LoRA | Krea2（AT）、Qwen-Image、Z-Image | 第三引擎（AI-Toolkit） |
+| 视频 LoRA | MiniMax H3 | 第三引擎（AI-Toolkit） |
 
 主要能力：
 
 - **底模自动识别**：选择模型后自动判断 SD1.5、SDXL、FLUX、Anima 等架构，并切换合适的分辨率与参数预设。
 - **画风 / 人物双模式**：画风模式过滤人物干扰标签；人物模式保留角色特征并支持 Trigger。
-- **Qwen-Image / Z-Image 子模式**：两种架构都可单独选择画风或人物训练。
+- **Qwen-Image / Z-Image / Krea2（AT）子模式**：三种架构都可单独选择画风或人物训练。
 - **低显存适配**：根据显存自动调整精度、梯度检查点、block swap 等省显存参数，并给出中文提示。
 - **高级参数可调**：支持修改分辨率、批次、Epoch、学习率、Rank 等常用训练参数。
 
@@ -168,7 +92,7 @@
 
 | 文件 | 说明 |
 |---|---|
-| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源和 WD14 打标模型；当前最新版为 v0.9.29 |
+| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源和 WD14 打标模型；当前最新版为 v0.13.1 |
 | `KohyaLoraTool_*_portable.zip` | 便携版，解压后运行；若该版本未上传 ZIP，请使用 `Setup.exe` |
 
 ### 国内镜像
@@ -194,7 +118,7 @@
 
 | 使用情况 | 默认位置 |
 |---|---|
-| v0.9.7 及之后新安装的打包版 | 安装目录同级的 `KohyaLoraTool_data` |
+| 新安装的打包版 | 安装目录同级的 `KohyaLoraTool_data` |
 | 无法写入安装盘时 | `%APPDATA%\KohyaLoraTool` |
 | 老用户升级但尚未迁移 | 继续使用原数据目录，可在主页手动迁移 |
 | 用户手动指定 | 用户选择的任意目录 |

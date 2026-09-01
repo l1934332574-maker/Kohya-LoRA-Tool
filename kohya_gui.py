@@ -791,13 +791,26 @@ class App:
             ctk.CTkLabel(self.engine_nav, text="▍" + _gname, font=ui_font(FONT_HINT),
                          text_color=SUB, anchor="w").pack(fill="x", padx=(2, 0), pady=(8 if _gi else 0, 2))
             _rf = ctk.CTkFrame(self.engine_nav, fg_color="transparent"); _rf.pack(fill="x")
-            for _mk in _modes:
-                _btn = ctk.CTkButton(_rf, text=SHORT_MODE_LABELS.get(_mk, _mk), width=64, height=26,
-                                     fg_color=CARD2, hover_color="#3a4150", corner_radius=6,
-                                     font=ui_font(FONT_HINT), text_color=TXT,
-                                     command=lambda m=_mk: self._nav_select_mode(m))
-                _btn.pack(side="left", padx=(2, 4), pady=2)
-                self._nav_mode_btns[_mk] = _btn
+            if len(_modes) >= 4:
+                # 4 个模式（第三引擎：视频H3/Krea2AT/Qwen/Z-Image）：单行 4×64px 超出侧边栏（252px）会挤压，
+                # 改 2×2 网格等宽铺满；1~2 个模式的引擎组保持原单行布局。
+                _rf.grid_columnconfigure(0, weight=1)
+                _rf.grid_columnconfigure(1, weight=1)
+                for _mi, _mk in enumerate(_modes):
+                    _btn = ctk.CTkButton(_rf, text=SHORT_MODE_LABELS.get(_mk, _mk), height=26,
+                                         fg_color=CARD2, hover_color="#3a4150", corner_radius=6,
+                                         font=ui_font(FONT_HINT), text_color=TXT,
+                                         command=lambda m=_mk: self._nav_select_mode(m))
+                    _btn.grid(row=_mi // 2, column=_mi % 2, sticky="ew", padx=(2, 4), pady=2)
+                    self._nav_mode_btns[_mk] = _btn
+            else:
+                for _mk in _modes:
+                    _btn = ctk.CTkButton(_rf, text=SHORT_MODE_LABELS.get(_mk, _mk), width=64, height=26,
+                                         fg_color=CARD2, hover_color="#3a4150", corner_radius=6,
+                                         font=ui_font(FONT_HINT), text_color=TXT,
+                                         command=lambda m=_mk: self._nav_select_mode(m))
+                    _btn.pack(side="left", padx=(2, 4), pady=2)
+                    self._nav_mode_btns[_mk] = _btn
         self._guide_dots = {}
         self._guide_btns = {}
         self._guide_vars = {}
