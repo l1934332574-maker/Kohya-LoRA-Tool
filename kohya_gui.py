@@ -107,7 +107,6 @@ _MAIN_BTN_TIPS = {
     "标签编辑器": "打开标签编辑器：逐张看图改标签、批量删除/替换标签、置顶 trigger、标签频率统计、整理成 repeats_名称 子目录结构。训练前改好标签，模型学得更准。",
 }
 
-
 # GUI 显示 → 训练参数 optimizer 映射（resolve_optimizer 接受小写）
 _OPT_GUI_MAP = {"自动": "auto", "AdamW": "adamw", "Lion": "lion", "AdamW8bit": "adamw8bit"}
 # GUI 显示 → Krea2/FLUX.2 底模量化方式（auto=按显存档位自动选 fp8/int8）
@@ -123,7 +122,6 @@ _CROP_RATIO_PRESETS = {
 }
 _CROP_RATIO_LABELS = {v: k for k, v in _CROP_RATIO_PRESETS.items()}
 
-
 def _crop_ratio_parse(text):
     """界面显示文本 -> 宽:高 比例（"" = 不裁切）；预设之外支持自定义输入（如 2:3）。"""
     text = (text or "").strip()
@@ -131,14 +129,12 @@ def _crop_ratio_parse(text):
         return _CROP_RATIO_PRESETS[text]
     return core.normalize_crop_ratio(text)
 
-
 def _crop_ratio_label(ratio):
     """宽:高 比例 -> 界面显示文本（自定义比例原样回填）。"""
     ratio = (ratio or "").strip()
     if ratio in _CROP_RATIO_LABELS:
         return _CROP_RATIO_LABELS[ratio]
     return ratio or "不裁切（保比例）"
-
 
 # 方案A：侧边栏引擎导航（引擎 → 模式；模式选择替代顶部训练模式下拉）
 ENGINE_GROUPS = [
@@ -151,7 +147,6 @@ SHORT_MODE_LABELS = {
     "style": "画风", "character": "人物", "krea2": "Krea2", "flux2": "FLUX.2",
     "krea2_fz": "Krea2F", "video": "视频H3", "krea2_at": "Krea2AT", "qwen_image": "Qwen", "zimage": "Z-Image",
 }
-
 
 class Tooltip:
     """鼠标悬停显示通俗中文说明的气泡（适配 customtkinter 控件）。"""
@@ -200,7 +195,6 @@ class Tooltip:
             except Exception:
                 pass
             self.tip = None
-
 
 def _hex2rgb(h):
     h = h.lstrip("#")
@@ -270,7 +264,6 @@ def create_soft_shadow_card(parent, corner_radius=8, pad=10, offset=(1, 2),
     canvas.bind("<Configure>", _layout)
     return canvas, inner
 
-
 # ---------- 一键导出日志（反馈/求助时直接发这个 txt，含环境信息） ----------
 def _collect_env_lines():
     """收集环境信息文本行（导出日志用；任一步失败不阻塞，只跳过该行）。"""
@@ -327,7 +320,6 @@ def _collect_env_lines():
         pass
     return out
 
-
 def _export_log_text(log_text, project, env_lines=None):
     """组装导出日志全文（纯函数，便于测试；env_lines 为空时自动收集环境信息）。"""
     if env_lines is None:
@@ -346,7 +338,6 @@ def _export_log_text(log_text, project, env_lines=None):
     L.append("【运行日志】")
     L.append(log_text if log_text else "（暂无日志）")
     return "\n".join(L)
-
 
 class App:
     def __init__(self):
@@ -731,7 +722,6 @@ class App:
             self.mon_sample_txt.set(f"采样预览：{os.path.basename(newest)}")
         except Exception:
             pass
-
 
     def _draw_loss_curve(self, hist):
         try:
@@ -1200,7 +1190,6 @@ class App:
         """只刷新左侧引导状态（用缓存的环境结果），不重复跑子进程检测。"""
         self._refresh_guide()
 
-
     def _current_steps(self):
         """当前模式的新手引导步骤（数据驱动，来自 core.GUIDE_STEPS）。"""
         return list(core.GUIDE_STEPS.get(self.mode, []))
@@ -1348,8 +1337,6 @@ class App:
                 first_pending = step["id"]
         self._highlight_guide(first_pending)
         self._refresh_one_click_state()
-
-
 
     def _bind_autosave_traces(self):
         """给所有输入控件绑定变更回调，自动保存项目。"""
@@ -2856,34 +2843,6 @@ class App:
         except Exception:
             pass
 
-def _write_update_restart_helper(dest):
-    """写一个独立 VBS 重启助手：等旧进程退出 → 静默安装（等完成）→ 成功则重新启动应用。
-
-    升级流程：工具下载 Setup.exe 后要静默安装，但安装器带 /NORESTART 且 [Run] 启动项
-    skipifsilent，装完不会自动拉起；这里用 wscript 跑一个独立助手（不依赖本进程存活），
-    安装成功后重新打开应用，实现「装完自动重启」。返回 VBS 路径。"""
-    if getattr(sys, "frozen", False):
-        app_cmd = '"%s"' % sys.executable
-    else:
-        app_cmd = '"%s" "%s"' % (sys.executable, os.path.abspath(sys.argv[0]))
-    inst_cmd = '"%s" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART' % dest
-    _ic = inst_cmd.replace('"', '""')
-    _ac = app_cmd.replace('"', '""')
-    vbs = os.path.join(os.environ.get("TEMP", "."), "kohya_update_restart.vbs")
-    content = (
-        "Set sh = CreateObject(\"WScript.Shell\")\r\n"
-        "sh.Sleep 2000\r\n"
-        "rc = sh.Run(\"" + _ic + "\", 1, True)\r\n"
-        "If rc = 0 Then\r\n"
-        "  sh.Run(\"" + _ac + "\", 1, False)\r\n"
-        "End If\r\n"
-    )
-    try:
-        with open(vbs, "w", encoding="utf-8-sig") as f:
-            f.write(content)
-    except Exception:
-        raise
-    return vbs
     def _handle_update_done(self, ok, dest, ver):
         self._updating = False
         try:
@@ -2896,8 +2855,7 @@ def _write_update_restart_helper(dest):
             return
         self._log(f"[更新] 下载完成，正在静默安装 {ver} …（装完自动重启）")
         try:
-            helper = _write_update_restart_helper(dest)
-            subprocess.Popen(["wscript.exe", helper], creationflags=subprocess.CREATE_NO_WINDOW)
+            subprocess.Popen([dest, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
         except Exception as e:
             self._log(f"[更新] 启动安装失败：{e}")
             messagebox.showerror(core.APP_NAME, f"启动安装失败：{e}")
@@ -3227,7 +3185,6 @@ def _write_update_restart_helper(dest):
             except Exception:
                 self._tool_busy["all"] = False
         threading.Thread(target=work, daemon=True).start()
-
 
     def _toggle_adv(self):
         self.adv_collapsed = not self.adv_collapsed
@@ -3690,7 +3647,6 @@ def _write_update_restart_helper(dest):
         txt.insert("1.0", guide)
         txt.configure(state="disabled")
 
-
     def cmd_open_h3_models(self):
         d = core.h3_models_dir()
         try:
@@ -3790,7 +3746,6 @@ def _write_update_restart_helper(dest):
         else:
             messagebox.showinfo(core.APP_NAME, "所有视频都已有同名 txt 字幕，无需生成。")
 
-
     def cmd_video_caption(self):
         """用 Qwen2.5-VL 给视频自动生成英文描述（写同名 txt）。"""
         params = self._collect_params()
@@ -3827,8 +3782,6 @@ def _write_update_restart_helper(dest):
             traceback.print_exc()
         finally:
             self.q.put("__DONE__")
-
-
 
     def _refresh_at_status(self):
         try:
@@ -3874,7 +3827,6 @@ def _write_update_restart_helper(dest):
             messagebox.showwarning(core.APP_NAME, "请先选择图片数据集文件夹。")
             return False
         return True
-
 
     def _ensure_video_ready(self):
         """视频模式训练前检查：第三引擎已装 + H3 模型齐全 + 数据集有视频与字幕。返回是否可继续。"""
@@ -3987,7 +3939,6 @@ def _write_update_restart_helper(dest):
         )
         txt.insert("1.0", guide)
         txt.configure(state="disabled")
-
 
     # ============ 预处理 / 训练 ============
     def cmd_preprocess(self):
@@ -4179,8 +4130,6 @@ def _write_update_restart_helper(dest):
             self._log(f"[ERROR] 一键训练失败：{e}")
             traceback.print_exc()
             self.q.put("__DONE__")
-
-
 
     # ============ 训练前预检弹窗 / 缺模引导 ============
     def cmd_open_base_dir(self):
@@ -4659,7 +4608,6 @@ def _write_update_restart_helper(dest):
             return False
         return True
 
-
     def _ensure_krea2_at_ready(self):
         """Krea2（AI-Toolkit 引擎）模式训练前检查：第三引擎已装 + RAW/VAE 模型齐全。返回是否可继续。
 
@@ -4719,7 +4667,6 @@ def _write_update_restart_helper(dest):
             "是否自动重装 CUDA 版（cu128）PyTorch？\n"
             "· 约 3.3GB，国内镜像，断点续传，可随时点停止\n"
             "· 选「否」将继续用 CPU 训练（不推荐）")
-
 
     def _warn_no_nvidia(self):
         """显卡兼容检查：N 卡直接放行；AMD 卡走兼容模式；其他保持原警告。返回 True=继续。"""
@@ -4890,8 +4837,6 @@ def _write_update_restart_helper(dest):
         # 这里先释放，否则 _start_worker 的防重入检查会拦截训练启动。
         self._set_busy(False)
         self._start_worker(lambda: self._train_worker(params, resume), "训练")
-
-
 
     # ============ 底模下载（应用内 / 浏览器） ============
     def _show_arch_download_help(self, bt):
@@ -5082,7 +5027,6 @@ def _write_update_restart_helper(dest):
         else:
             self._log("[ERROR] 下载失败或已取消")
 
-
     def _build_links_dialog(self, title, intro, links, files, open_label, open_cmd, rebuild_cmd, dl_fn, hint=""):
         """通用模型文件下载对话框（H3 / FLUX / Krea2 共用）：每文件应用内下载或浏览器直链。"""
         dlg = ctk.CTkToplevel(self.root)
@@ -5148,7 +5092,6 @@ def _write_update_restart_helper(dest):
             core.KREA2_MODEL_LINKS, core.krea2_model_files(),
             "📂 打开 Krea2 模型文件夹", self.cmd_open_krea2_models, self.cmd_dl_krea2_models,
             self._start_krea2_dl, "保存到 models/krea2/，下完自动识别（顶部状态变「齐全 ✓」）。")
-
 
     def _start_model_file_dl(self, key, links, dest_dir, kind, label):
         """启动单个模型文件的应用内下载（断点续传），H3 / FLUX / Krea2 共用。"""
@@ -5237,15 +5180,12 @@ def _write_update_restart_helper(dest):
         except Exception:
             pass
 
-
     def cmd_dl_cancel(self):
         try:
             if self._dl is not None:
                 self._dl.cancel()
         except Exception:
             pass
-
-
 
     def _refresh_one_click_state(self):
         steps = [s for s in self._current_steps() if s["check"] != "at_model"]
@@ -5741,12 +5681,10 @@ class LabelEditorWindow:
         except Exception:
             pass
 
-
 def main():
     app = App()
     app.root.mainloop()
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

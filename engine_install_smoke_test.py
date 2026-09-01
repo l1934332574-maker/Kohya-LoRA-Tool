@@ -20,15 +20,12 @@ import Kohya一键工具 as core
 
 ROOT = Path(__file__).resolve().parent
 
-
 def result(code=0, stdout="", stderr=""):
     return subprocess.CompletedProcess([], code, stdout, stderr)
-
 
 def fake_python(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"")
-
 
 def common_patches(kdir: Path):
     cache = kdir.parent / "cache"
@@ -41,7 +38,6 @@ def common_patches(kdir: Path):
         patch.object(core, "_release_kohya_install_lock", return_value=None),
         patch.object(core, "detect_gpu_vendor", return_value="nvidia"),
     )
-
 
 def test_main_engine(base: Path):
     kdir = base / "main" / "kohya_ss"
@@ -93,7 +89,6 @@ def test_main_engine(base: Path):
     assert state["torch"] and state["setup"] and state["deps"]
     assert (kdir / "sd-scripts" / "sdxl_train_network.py").is_file()
     print("MAIN_ENGINE_FULL_FLOW_OK")
-
 
 def test_kohya_coexist_with_other_engines(base: Path):
     """先装第二/三引擎（musubi/ai-toolkit 已在 kohya_ss 目录内）再装第一引擎：不再误报「目标目录非空且不是 kohya_ss」。"""
@@ -155,7 +150,6 @@ def test_kohya_coexist_with_other_engines(base: Path):
     assert (kdir / "ai-toolkit").is_dir() and (kdir / "musubi-tuner").is_dir()
     print("KOHYA_COEXIST_WITH_OTHER_ENGINES_OK")
 
-
 def test_kohya_foreign_content_still_blocks(base: Path):
     """kohya_ss 目录里有陌生文件（非 kohya 也非第二/三引擎）时仍应阻止安装（防呆保留）。"""
     kdir = base / "foreign" / "kohya_ss"
@@ -165,9 +159,6 @@ def test_kohya_foreign_content_still_blocks(base: Path):
     # 空目录 / 不存在 → False（可安装）
     assert core._kohya_dir_has_foreign_content(str(base / "empty_dir")) is False
     print("KOHYA_FOREIGN_CONTENT_STILL_BLOCKS_OK")
-
-
-
 
 def test_second_engine(base: Path):
     kdir = base / "second" / "kohya_ss"
@@ -222,7 +213,6 @@ def test_second_engine(base: Path):
     assert (kdir / "musubi-tuner" / "krea2_train_network.py").is_file()
     print("SECOND_ENGINE_FULL_FLOW_OK")
 
-
 def test_second_engine_without_git(base: Path):
     """内置 musubi 源码存在时，Git 缺失不应阻塞安装。"""
     kdir = base / "second_no_git" / "kohya_ss"
@@ -266,13 +256,11 @@ def test_second_engine_without_git(base: Path):
     assert state["torch"] and state["editable"]
     print("SECOND_ENGINE_BUNDLED_SOURCE_WITHOUT_GIT_OK")
 
-
 def make_source_zip(path: Path, root: str, files: dict[str, str]):
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, content in files.items():
             zf.writestr(f"{root}/{name}", content)
-
 
 def test_third_engine(base: Path):
     kdir = base / "third" / "kohya_ss"
@@ -350,7 +338,6 @@ def test_third_engine(base: Path):
     assert any(kdir.glob("ai_toolkit_venv_broken_*"))
     assert any("已损坏" in line for line in logs)
     print("THIRD_ENGINE_FULL_FLOW_AND_BROKEN_VENV_RECOVERY_OK")
-
 
 def test_optimizer_resolution(base: Path):
     """resolve_optimizer / _probe_adamw8bit / _probe_lion / _optimizer_yaml_name 单元测试（mock 子进程，不真实运行 CUDA）。"""
@@ -450,7 +437,6 @@ def test_optimizer_resolution(base: Path):
 
     print("OPTIMIZER_RESOLUTION_UNIT_TESTS_OK")
 
-
 def test_preprocess_deps(base: Path):
     """_ensure_preprocess_deps 单元测试（mock 子进程/补装，不真实修改 venv）。"""
     vpy = str(base / "deps" / "venv" / "Scripts" / "python.exe")
@@ -527,7 +513,6 @@ def test_preprocess_deps(base: Path):
 
     print("PREPROCESS_DEPS_UNIT_TESTS_OK")
 
-
 def test_preprocess_auto_retry(base: Path):
     """preprocess() 子进程缺依赖失败时：补装后自动重试一次；补装也失败则报明确错误。"""
     kdir = base / "pp" / "kohya_ss"
@@ -584,8 +569,6 @@ def test_preprocess_auto_retry(base: Path):
     assert calls2["n"] == 1, "补装失败时不应重试 preprocess"
     assert deps_n["n"] == 2, deps_n
     print("PREPROCESS_AUTO_RETRY_OK")
-
-
 
 def test_preprocess_crop_ratio(base: Path):
     """预处理裁切比例：默认保比例不传参；square_crop 旧接口等价 1:1；crop_ratio 支持任意 W:H。"""
@@ -644,7 +627,6 @@ def test_preprocess_crop_ratio(base: Path):
     assert "crop_ratio_var" in g and "crop_ratio_combo" in g, "GUI 应有裁切比例下拉"
     print("PREPROCESS_CROP_RATIO_OK")
 
-
 def test_next_features(base: Path):
     """下版本三条：musubi 国内源优先 / 采样提示词可编辑 / 保存间隔可设置。"""
     # ① musubi 国内源：jsDelivr 直链 + 国内优先、git 兜底
@@ -688,7 +670,6 @@ def test_next_features(base: Path):
     assert "def _ensure_hf_hub" in pp and "_ensure_hf_hub(cur, logf)" in pp
     print("NEXT_FEATURES_OK")
 
-
 def test_tools_module(base: Path):
     """主页 🧰 小工具模块：核心函数存在且可调用、训练进程名规则、GUI 静态接线。"""
     # 核心函数
@@ -721,7 +702,6 @@ def test_tools_module(base: Path):
         assert m in g, m
     print("TOOLS_MODULE_OK")
 
-
 def test_gui_resource_guard(base: Path):
     """GUI 资源防护：监控器用安全 nvidia-smi + 节流；日志框限行；缩略图缓存上限（防 Tk 内存/GDI 耗尽弹窗）。"""
     # safe_nvidia_smi 已从 core 导出（监控器用）
@@ -750,7 +730,6 @@ def test_gui_resource_guard(base: Path):
     k = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
     assert "SetErrorMode(0x8003)" in k
     print("GUI_RESOURCE_GUARD_OK")
-
 
 def test_nvidia_smi_driver_safe(base: Path):
     """重装系统未装 NVIDIA 驱动（nvidia-smi 0xc0000142）时：不调用 nvidia-smi、不弹窗、不卡死，
@@ -804,7 +783,6 @@ def test_nvidia_smi_driver_safe(base: Path):
     assert "未检测到可用独立显卡驱动" in g
     print("NVIDIA_SMI_DRIVER_SAFE_OK")
 
-
 def test_alloc_conf_expandable_stripped(base: Path):
     """Windows 不支持 expandable_segments：训练子进程环境自动剥离，避免“显存充足却 OOM”假性爆显存。"""
     import os as _os
@@ -828,7 +806,6 @@ def test_alloc_conf_expandable_stripped(base: Path):
     assert logs2 == [], logs2
     print("ALLOC_CONF_EXPANDABLE_STRIPPED_OK")
 
-
 def test_preprocess_mode_mapping(base: Path):
     """训练模式 -> 预处理模式映射：FLUX.2 等第二/三引擎不能再把 flux2 当 --mode 传（preprocess 只收 style/character）。"""
     # 单测 preprocess_mode
@@ -847,7 +824,6 @@ def test_preprocess_mode_mapping(base: Path):
     k = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
     assert 'mode=preprocess_mode(params["mode"], params.get("at_sub_mode"))' in k
     print("PREPROCESS_MODE_MAPPING_OK")
-
 
 def test_preinstall_torch_mirror_fallback(base: Path):
     """_preinstall_torch 本地安装多镜像回退：清华失败 -> 阿里云成功；全部失败才报明确错误。"""
@@ -923,8 +899,6 @@ def test_preinstall_torch_mirror_fallback(base: Path):
 
     print("PREINSTALL_TORCH_MIRROR_FALLBACK_OK")
 
-
-
 class _FakeResp:
     def __init__(self, data=b"{}"):
         self._data = data
@@ -934,7 +908,6 @@ class _FakeResp:
         return False
     def read(self):
         return self._data
-
 
 def test_tokenizer_cache(base: Path):
     """_ensure_tokenizer_cached：内置离线复制 / 文件级多源下载 / auto 完整性 / transformers 兜底。"""
@@ -1001,8 +974,6 @@ def test_tokenizer_cache(base: Path):
 
     print("TOKENIZER_CACHE_UNIT_TESTS_OK")
 
-
-
 def test_external_python_safe_cwd(base: Path):
     """_external_python_safe_cwd：当前 cwd 含 python312.dll（打包版应用目录）时必须切走，
     避免 Windows DLL 搜索命中打包版 DLL 导致 venv 的 _ctypes/numpy 崩溃。"""
@@ -1047,7 +1018,6 @@ def test_external_python_safe_cwd(base: Path):
 
     print("EXTERNAL_PYTHON_SAFE_CWD_UNIT_TESTS_OK")
 
-
 def test_amd_download_progress(base: Path):
     """AMD 大文件阶段会向调用方上报下载进度，且不触发真实网络/安装。"""
     events = []
@@ -1085,7 +1055,6 @@ def test_amd_download_progress(base: Path):
     assert any(e[0] == "ROCm" and e[4] == 2 and e[5] == 2 for e in events), events
     assert any(e[0] == "PyTorch" and e[2:6] == (16, 16, 1, 1) for e in events), events
     print("AMD_DOWNLOAD_PROGRESS_UNIT_TEST_OK")
-
 
 def test_amd_torch_verification(base: Path):
     """AMD 最终验证保留真实错误，并区分正常 ROCm 与 GPU 不可用。"""
@@ -1156,10 +1125,6 @@ def test_main_engine_accel_always_defined(base: Path):
     assert m, "主引擎 train() 未找到无条件 accel 赋值"
     print("MAIN_ENGINE_ACCEL_ALWAYS_DEFINED_UNIT_TEST_OK")
 
-
-
-
-
 def test_sample_preview_16g_default_off(base):
     """16G 档采样预览默认关（Krea2/FLUX.2 显存紧，采样残留显存导致越跑越慢）；20G+ 默认开；显式开启被尊重。"""
     assert core._sample_preview_enabled({}, 16) is False, "16G 默认关"
@@ -1169,7 +1134,6 @@ def test_sample_preview_16g_default_off(base):
     assert core._sample_preview_enabled({"sample_preview": True}, 16) is True, "用户显式开启被尊重"
     assert core._sample_preview_enabled({"sample_preview": False}, 24) is False, "用户显式关闭被尊重"
     print("SAMPLE_PREVIEW_16G_DEFAULT_OFF_OK")
-
 
 def test_preset_for_fallback(base):
     """preset_for：底模类型与模式不匹配（style+flux2）时回退默认档，不抛 KeyError（UI 卡死 bug 修复）。"""
@@ -1185,7 +1149,6 @@ def test_preset_for_fallback(base):
     for mk in core.MODE_KEYS:
         assert ('"%s"' % mk) in gsrc, "引擎导航缺少模式 " + mk
     print("PRESET_FOR_FALLBACK_OK")
-
 
 def test_at_image_ms_parse_skips_dirs(base):
     """_parse_at_image_ms_files：只取文件（Type=blob），跳过目录（Type=tree）与非必要文件。"""
@@ -1203,7 +1166,6 @@ def test_at_image_ms_parse_skips_dirs(base):
     assert "vae/config.json" in files and "vae/diffusion_pytorch_model.safetensors" in files, files
     assert ".gitattributes" not in files and "README.md" not in files, files  # 非必要文件跳过
     print("AT_IMAGE_MS_PARSE_SKIPS_DIRS_OK")
-
 
 def test_safetensors_complete_check(base):
     """_safetensors_complete：截断/损坏的 safetensors 能被识别（训练前拦截，避免 reshape 英文错）。"""
@@ -1224,7 +1186,6 @@ def test_safetensors_complete_check(base):
     assert core._safetensors_complete(str(base / "nonexistent.safetensors")) is False
     print("SAFETENSORS_COMPLETE_CHECK_OK")
 
-
 def test_modelscope_mirror_urls(base):
     """Krea2/FLUX.2 模型链接与 AT_IMAGE 下载全部魔搭化（hf-mirror 故障/被污染后不再依赖）。"""
     for key in ("vae", "te"):
@@ -1239,7 +1200,6 @@ def test_modelscope_mirror_urls(base):
     # 文件清单函数对非法仓库返回 None（不抛异常）
     assert core._at_image_ms_file_list("NoSuch/Repo_0000") is None
     print("MODELSCOPE_MIRROR_URLS_OK")
-
 
 def test_train_monitor_krea2_parsing(base):
     """TrainMonitor 解析 Krea2 tqdm（avr_loss=）与缓存→训练阶段切换（监控面板数据来源）。"""
@@ -1267,7 +1227,6 @@ def test_train_monitor_krea2_parsing(base):
     assert abs(m2.snapshot().get("lr") - 1e-4) < 1e-12, m2.snapshot()
     print("TRAIN_MONITOR_KREA2_PARSING_OK")
 
-
 def test_prequantized_krea2_raw_detected(base):
     """Krea2 预量化 fp8/int8 底模必须被识别（训练前拦截，musubi 0.3.4 不支持预量化 Krea2 训练）。"""
     import struct
@@ -1283,9 +1242,6 @@ def test_prequantized_krea2_raw_detected(base):
     p2.write_bytes(struct.pack("<Q", len(hb2)) + hb2 + b"\x00" * 32)
     assert core._safetensors_is_prequantized(str(p2)) is False, "bf16 原版底模不应判为 prequantized"
     print("PREQUANTIZED_KREA2_RAW_DETECTED_OK")
-
-
-
 
 def test_low_ram_swap(base):
     """低内存（<32G）自动降 swap：Krea2 12/16G 档 12→6、FLUX.2 12G 档 6→4；
@@ -1312,7 +1268,6 @@ def test_low_ram_swap(base):
     core._warn_low_ram(out2.append, None, "Krea2")
     assert out2 == [], ">=32G / None 不应警告"
     print("LOW_RAM_SWAP_AUTO_OK")
-
 
 def test_flux2_first_engine_guard(base):
     """FLUX.2 底模不能在第一引擎训练：_looks_like_flux2 识别 + train() 拦截。"""
@@ -1389,7 +1344,6 @@ def test_swap_tier_resolution(base):
     assert core._resolve_flux2_swap(None) == (10, True)
     print("SWAP_TIER_RESOLUTION_OK")
 
-
 def test_quant_mode_resolution(base):
     """_resolve_quant_mode：档位默认 / 显式指定 / NF4 回退。"""
     fake_vpy = object()
@@ -1416,7 +1370,6 @@ def test_quant_mode_resolution(base):
         core._probe_nf4 = real_probe
     print("QUANT_MODE_RESOLUTION_UNIT_TESTS_OK")
 
-
 def test_musubi_offload_device_patch(base: Path):
     """musubi custom_offloading_utils.py 块交换设备兼容补丁：AMD ROCm 不硬调 torch.cuda.current_device()。"""
     mdir = base / "kohya_ss" / "musubi-tuner" / "src" / "musubi_tuner" / "modules"
@@ -1442,7 +1395,6 @@ def test_musubi_offload_device_patch(base: Path):
     assert main_src.count("_patch_musubi_offload_device(kdir, logf)") >= 1, main_src
     print("MUSUBI_OFFLOAD_DEVICE_PATCH_OK")
 
-
 def test_musubi_quant_patch(base):
     """musubi INT8/NF4 补丁：对随包 musubi-tuner-main.zip 应用全部成功且幂等。"""
     import zipfile
@@ -1467,7 +1419,6 @@ def test_musubi_quant_patch(base):
     ]
     assert not any(rs2), f"补丁应幂等（第二次全跳过）: {rs2}"
     print("MUSUBI_QUANT_PATCH_UNIT_TESTS_OK")
-
 
 def test_accelerate_cpu_config_self_heal(base):
     """残留 accelerate use_cpu=true 自愈：检测→修复→复核；launch 显式单进程、配置干净零探测。"""
@@ -1510,7 +1461,6 @@ def test_accelerate_cpu_config_self_heal(base):
         core._probe_accelerate_device = real_probe
     print("ACCELERATE_CPU_CONFIG_SELF_HEAL_OK")
 
-
 def test_anima_vae_fp32_patch(base: Path):
     """Anima VAE fp32 补丁：对随包 sd-scripts anima_train_network.py 首次应用成功 + 幂等。"""
     import zipfile
@@ -1530,7 +1480,6 @@ def test_anima_vae_fp32_patch(base: Path):
     assert cnt == 1, f"补丁应只出现一次，实际 {cnt}"
     print("ANIMA_VAE_FP32_PATCH_OK")
 
-
 def test_dataset_config_is_reg_subset(base: Path):
     """is_reg 必须写在 [[datasets.subsets]] 子集层，不能写在 [[datasets]] 层（issue #3）。"""
     import preprocess
@@ -1546,7 +1495,6 @@ def test_dataset_config_is_reg_subset(base: Path):
         assert not any("is_reg" in l for l in ds), f"datasets 层不应有 is_reg: {ds}"
     assert "  is_reg = true" in blocks[2], "正则子集应含 is_reg=true"
     print("DATASET_CONFIG_IS_REG_SUBSET_OK")
-
 
 def test_diagnose_optimizer_failure_scenarios(base: Path):
     """_diagnose_optimizer_failure：配置校验错误优先、bnb 命中、OOM/命令重印不误报。"""
@@ -1578,7 +1526,6 @@ def test_diagnose_optimizer_failure_scenarios(base: Path):
     assert not ok
     print("DIAGNOSE_OPTIMIZER_FAILURE_SCENARIOS_OK")
 
-
 def test_anima_rdna2_no_half_vae(base: Path):
     """RDNA2 + Anima 必须传官方 --no_half_vae（cache_latents 阶段 vae_dtype 会覆盖 load 补丁）。"""
     src = Path(core.__file__).read_text(encoding="utf-8-sig")
@@ -1593,7 +1540,6 @@ def test_anima_rdna2_no_half_vae(base: Path):
         tn = z.read("sd-scripts-main/train_network.py").decode("utf-8", errors="replace")
     assert '"--no_half_vae"' in tn, "sd-scripts 无 --no_half_vae 参数"
     print("ANIMA_RDNA2_NO_HALF_VAE_OK")
-
 
 def test_h3_vram_adapt(base: Path):
     """H3 训练 yaml 按显存自动启用 low_vram / layer_offloading（照搬 ai-toolkit 官方/RunComfy 社区配置）。
@@ -1657,7 +1603,6 @@ def test_h3_vram_adapt(base: Path):
     assert any("19.5GB" in m for m in miss24), miss24
     print("H3_VRAM_ADAPT_OK")
 
-
 def test_video_caption_args(base: Path):
     """video_caption.py 的 args 引用必须全部有定义（修复 args.model 未定义导致视频自动打标必崩）。"""
     vc = (ROOT / "video_caption.py").read_text(encoding="utf-8")
@@ -1669,7 +1614,6 @@ def test_video_caption_args(base: Path):
     assert r.returncode == 0, (r.returncode, r.stderr)
     assert "--model" in r.stdout and "Qwen/Qwen2.5-VL-3B-Instruct" in r.stdout, r.stdout
     print("VIDEO_CAPTION_ARGS_OK")
-
 
 def test_preprocess_python_fallback(base: Path):
     """Krea2/FLUX.2 只装第二引擎时，预处理用 musubi venv 而非误报「Kohya 尚未安装」。"""
@@ -1698,7 +1642,6 @@ def test_preprocess_python_fallback(base: Path):
     assert "尚未安装任何训练引擎" in _src_all, "preprocess 报错文案未更新"
     print("PREPROCESS_PYTHON_FALLBACK_OK")
 
-
 def test_h3_integrity_and_nvfp4_required(base: Path):
     """H3 模型完整性校验（防 SafetensorError）+ 12~16G 必须 nvfp4 强提示。"""
     # 1) 不完整文件：目录里有小体积 nvfp4 → 视为缺失 + h3_missing_models 提示
@@ -1719,7 +1662,6 @@ def test_h3_integrity_and_nvfp4_required(base: Path):
     assert "12~16G 显存训练 MiniMax H3 必须用 nvfp4 主模型" in src_all, "train_h3 缺 nvfp4 强提示"
     print("H3_INTEGRITY_AND_NVFP4_REQUIRED_OK")
 
-
 def test_video_preprocess_no_auto_train(base: Path):
     """视频模式「数据预处理」只检查提示，不再自动进入训练（避免误触发训练）。"""
     g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
@@ -1730,7 +1672,6 @@ def test_video_preprocess_no_auto_train(base: Path):
     # 视频分支不再 q.put AUTO_CONFIRM
     assert 'q.put(("AUTO_CONFIRM"' not in seg, "视频分支仍会自动进入训练流程"
     print("VIDEO_PREPROCESS_NO_AUTO_TRAIN_OK")
-
 
 def test_build_env_utf8_output(base: Path):
     """训练子进程强制 UTF-8 输出：英文系统（cp1252）下打印中文不再 UnicodeEncodeError。"""
@@ -1752,7 +1693,6 @@ def test_build_env_utf8_output(base: Path):
     assert "中文测试" in r2.stdout
     print("BUILD_ENV_UTF8_OUTPUT_OK")
 
-
 def test_krea2_style_subdir_consistency(base: Path):
     """Krea2/Qwen-Image 画风子模式：预处理输出 train_character，训练必须读 train_character（防「缺少预处理数据」）。"""
     src_all = Path(core.__file__).read_text(encoding="utf-8-sig")
@@ -1761,7 +1701,6 @@ def test_krea2_style_subdir_consistency(base: Path):
     # 不再存在按子模式切换 train/train_character 的旧写法
     assert 'dataset_train_dir("style" if _sub_mode == "style"' not in src_all, "仍存在按子模式切换目录"
     print("KREA2_STYLE_SUBDIR_CONSISTENCY_OK")
-
 
 def test_project_open_robust(base: Path):
     """手动改坏项目 json（base_model/params 类型异常）后点「打开」不能静默无反应。"""
@@ -1778,7 +1717,6 @@ def test_project_open_robust(base: Path):
     assert "isinstance(p, dict)" in a, "params 缺类型校验"
     print("PROJECT_OPEN_ROBUST_OK")
 
-
 def test_run_stream_default_utf8(base: Path):
     """run_stream 默认 env 强制 UTF-8：繁体(cp950)/英文(cp1252)系统打印中文不再崩（krea2_cache_latents 漏传 env 根因）。"""
     u = (ROOT / "kohya_core" / "utils.py").read_text(encoding="utf-8")
@@ -1793,7 +1731,6 @@ def test_run_stream_default_utf8(base: Path):
     assert rc == 0, (rc, logs)
     assert any("\u9879\u76ee_\u6d4b\u8bd5" in l for l in logs), logs
     print("RUN_STREAM_DEFAULT_UTF8_OK")
-
 
 def test_musubi_int8_weight_dtype_patch(base: Path):
     """FLUX.2 <16G int8 量化：musubi 断言不再崩溃（int8_base 时 dit_weight_dtype 应为 None）。"""
@@ -1824,7 +1761,6 @@ def test_musubi_int8_weight_dtype_patch(base: Path):
     assert ns2["dit_weight_dtype"] == "bf16", ns2
     print("MUSUBI_INT8_WEIGHT_DTYPE_PATCH_OK")
 
-
 def test_prequantized_base_detect(base: Path):
     """Krea2/FLUX.2 底模已预量化（fp8/int8）时跳过工具侧量化（防 musubi 'already in fp8 format' 报错）。"""
     import struct as _st, json as _json
@@ -1848,7 +1784,6 @@ def test_prequantized_base_detect(base: Path):
     assert src_all.count('_safetensors_is_prequantized(files["raw"])') >= 1, "train_krea2 未接入"
     assert src_all.count('_safetensors_is_prequantized(files["dit"])') >= 1, "train_flux2 未接入"
     print("PREQUANTIZED_BASE_DETECT_OK")
-
 
 def test_strong_binding(base: Path):
     """人物强绑定：trigger + 100% 一致特征词自动固定前缀 + keep_tokens + 一致性警告 + ||| 分隔符。"""
@@ -1899,9 +1834,6 @@ def test_strong_binding(base: Path):
     assert i != -1 and "strong_bind" in g[i:i + 1200], "GUI _collect_params 未接 strong_bind"
     print("STRONG_BINDING_OK")
 
-
-
-
 def test_at_image_model_ready_local(base: Path):
     """at_image_model_ready：完整本地仓库→就绪；半截（缺 config.json/分片）→未就绪（不依赖真实 HF 缓存）。"""
     local = base / "models" / "at_image" / "zimage"
@@ -1932,7 +1864,6 @@ def test_at_image_model_ready_local(base: Path):
         with patch.object(core.os.path, "expanduser", return_value=str(base / "fakehome")):
             assert core.at_image_model_ready("zimage") is False
     print("AT_IMAGE_MODEL_READY_LOCAL_OK")
-
 
 def test_at_image_pre_download(base: Path):
     """Z-Image/Qwen-Image 底模预下载：未下载→自动魔搭直链下载（_at_image_ms_download）→yaml 指向本地目录。"""
@@ -1985,9 +1916,6 @@ def test_at_image_pre_download(base: Path):
     assert str(out).endswith("lora.safetensors"), out
     print("AT_IMAGE_PRE_DOWNLOAD_OK")
 
-
-
-
 def test_wd14_triton_noise_collapse(base: Path):
     """WD14 无 Triton 告警/traceback 折叠成一行友好提示，不吞正常输出。"""
     import preprocess as pp
@@ -2013,7 +1941,6 @@ def test_wd14_triton_noise_collapse(base: Path):
     assert "normal line 1" in text and "normal line 2" in text, text
     print("WD14_TRITON_NOISE_COLLAPSE_OK")
 
-
 def test_musubi_version_check(base: Path):
     """_check_musubi_krea2_version：旧版 musubi（Krea2/FLUX.2 缺标记）阻止；新版通过。"""
     enc = base / "musubi" / "musubi-tuner" / "src" / "musubi_tuner"
@@ -2031,7 +1958,6 @@ def test_musubi_version_check(base: Path):
     (enc / "flux_2" / "flux2_utils.py").write_text("load_safetensors_with_lora_and_fp8\n", encoding="utf-8")
     core._check_musubi_krea2_version(str(base / "musubi"), lambda *a: None)
     print("MUSUBI_VERSION_CHECK_OK")
-
 
 def test_quarantine_input_corrupt(base: Path):
     """预处理前损坏图片提前隔离：截断 PNG 移到 <输入目录>_corrupt，正常图保留。"""
@@ -2053,7 +1979,6 @@ def test_quarantine_input_corrupt(base: Path):
     assert good.exists()
     print("QUARANTINE_INPUT_CORRUPT_OK")
 
-
 def test_flux2_qwen3_06b_hint(base: Path):
     """FLUX.2 缺 4B 文本编码器且检测到 Anima 的 Qwen3-0.6B 时，缺失提示明确说明不适用。"""
     with patch.object(core, "flux2_model_files", return_value={}), \
@@ -2063,9 +1988,6 @@ def test_flux2_qwen3_06b_hint(base: Path):
     assert "qwen_3_4b.safetensors" in joined, joined
     assert "Qwen3-0.6B" in joined and "不适用于 FLUX.2" in joined, joined
     print("FLUX2_QWEN3_06B_HINT_OK")
-
-
-
 
 def test_sample_preview(base: Path):
     """训练中采样出图预览：提示词文件生成 + 显存门控 + 三引擎命令接线 + GUI 预览。"""
@@ -2094,9 +2016,6 @@ def test_sample_preview(base: Path):
     assert "sample_preview_var" in g and "_refresh_sample_preview" in g and "mon_sample_lbl" in g and "_is_sample_file" in g
     print("SAMPLE_PREVIEW_OK")
 
-
-
-
 def test_gated_download_guidance(base: Path):
     """门禁模型下载兜底引导：_http_status 401 探测 + 下载器 HF_TOKEN/提示 + GUI 预检接线。"""
     import urllib.error
@@ -2109,7 +2028,6 @@ def test_gated_download_guidance(base: Path):
     g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
     assert 'key in ("raw", "turbo")' in g and "魔搭（ModelScope）官方转存直链" in g
     print("GATED_DOWNLOAD_GUIDANCE_OK")
-
 
 def test_at_image_low_vram_vram_aware(base: Path):
     """AI 图像 low_vram 显存感知（v0.11.3）：显存充足关掉提速（A6000 48G Qwen-Image 9.76s/it 主因），低显存/未知保持开。"""
@@ -2126,7 +2044,6 @@ def test_at_image_low_vram_vram_aware(base: Path):
     assert "low_vram: true" in _gen(8), "低显存应保持开"
     assert "low_vram: true" in _gen(None), "显存未知应保守开"
     print("AT_IMAGE_LOW_VRAM_VRAM_AWARE_OK")
-
 
 def test_krea2_first_engine_guard(base: Path):
     """Krea2 底模不能在第一引擎（kohya）训练：识别 + 拦截 + 引导（否则按 FLUX 加载 OOM）。"""
@@ -2150,7 +2067,6 @@ def test_krea2_first_engine_guard(base: Path):
     assert "Krea2 训练请用第二引擎" in g, "GUI 缺 Krea2 提示文案"
     print("KREA2_FIRST_ENGINE_GUARD_OK")
 
-
 def test_third_engine_triton_and_laptop_warning(base: Path):
     """v0.11.3：第三引擎缺 Triton 自动补装 + 笔记本低显存重型模型强警告。"""
     src = Path(core.__file__).read_text(encoding="utf-8-sig")
@@ -2173,7 +2089,6 @@ def test_third_engine_triton_and_laptop_warning(base: Path):
     assert not logs, logs
     print("THIRD_ENGINE_TRITON_AND_LAPTOP_WARNING_OK")
 
-
 def test_swap_zero_option(base: Path):
     """块交换数下拉应可选 0（全驻留显存不搬）：GUI 可选 + 后端手动分支正确生成无 swap 命令。"""
     g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8-sig")
@@ -2192,7 +2107,6 @@ def test_swap_zero_option(base: Path):
         assert "swap = min(int(_manual_swap), " in seg, "%s 缺 swap 上限收敛" % fn
         assert "if swap > 0:" in seg, "%s 缺 swap>0 才追加参数" % fn
     print("SWAP_ZERO_OPTION_OK")
-
 
 def test_torch_compile_safe_fallback(base: Path):
     """v0.11.1「勾选 torch.compile 直接 TritonMissing 崩溃」修复：自检/自动补装/失败自动回退，不再硬崩。"""
@@ -2225,7 +2139,6 @@ def test_torch_compile_safe_fallback(base: Path):
     assert "自动去掉 --compile" in f, "FLUX.2 缺运行期自动重试"
     print("TORCH_COMPILE_SAFE_FALLBACK_OK")
 
-
 def test_venv_hf_sitecustomize(base: Path):
     """训练环境注入 sitecustomize.py：强制 hf-mirror + 禁用 Xet（幂等、不覆盖用户自定义）。"""
     venv = base / "venv"
@@ -2252,7 +2165,6 @@ def test_venv_hf_sitecustomize(base: Path):
     assert src_main.count("_ensure_venv_hf_sitecustomize(") >= 7  # helper def + 5 train + amd 分支
     print("VENV_HF_SITECUSTOMIZE_OK")
 
-
 def test_export_log(base: Path):
     """一键导出日志：纯函数组装含版本/环境/日志内容 + GUI 按钮/弹窗接线。"""
     g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
@@ -2272,7 +2184,6 @@ def test_export_log(base: Path):
     assert "（暂无日志）" in text2
     print("EXPORT_LOG_OK")
 
-
 def test_krea2_training_env_propagation(base: Path):
     """Krea2/FLUX.2 训练命令必须带 KREA2_TOKENIZER_DIR 环境（采样加载文本编码器用本地 tokenizer）。
 
@@ -2286,7 +2197,6 @@ def test_krea2_training_env_propagation(base: Path):
     assert src.count('_k2env["KREA2_TOKENIZER_DIR"]') == 2
     assert src.count("run_stream(cmd, cwd=mt_dir, env=_k2env, logf=logf, collect=_log_tail)") == 2
     print("KREA2_TRAINING_ENV_PROPAGATION_OK")
-
 
 def test_krea2_modelscope_mirror(base: Path):
     """Krea2 Raw/Turbo 已改走魔搭官方转存（免许可直链），文件名与识别逻辑不变。"""
@@ -2302,8 +2212,6 @@ def test_krea2_modelscope_mirror(base: Path):
     md = (ROOT / "model_downloader.py").read_text(encoding="utf-8")
     assert "modelscope.cn" in md
     print("KREA2_MODELSCOPE_MIRROR_OK")
-
-
 
 def test_fourth_engine(base: Path):
     """第四引擎（Fizgig）安装控制流：NVIDIA CUDA + AMD ROCm 两条路径（mock 子进程）。"""
@@ -2622,15 +2530,6 @@ def test_stuck_100_watchdog(base: Path):
     assert state["stopped"], "watchdog should have auto-stopped"
     assert any("自动停止" in x for x in logs)
     print("STUCK_100_WATCHDOG_OK")
-def test_update_restart_helper(base: Path):
-    """升级后自动重启：VBS 助手接线 + 安装器去掉 RestartApplications（避免双重启动）。"""
-    gui = (ROOT / "kohya_gui.py").read_text(encoding="utf-8-sig")
-    assert "def _write_update_restart_helper" in gui, "缺 VBS 重启助手"
-    assert "wscript.exe" in gui and "kohya_update_restart.vbs" in gui, "缺 wscript 接线"
-    assert 'sh.Run(' in gui and 'If rc = 0 Then' in gui, "缺安装等完成+成功后重启逻辑"
-    iss = (ROOT / "build_exe" / "installer" / "installer.iss").read_text(encoding="utf-8-sig")
-    assert "RestartApplications=yes" not in iss, "安装器不应再自重启（避免与 VBS 双开）"
-    print("UPDATE_RESTART_HELPER_OK")
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -2644,7 +2543,6 @@ def main():
         test_fourth_engine_train_pipeline(base)
         test_resume_monitor_seed(base)
         test_stuck_100_watchdog(base)
-        test_update_restart_helper(base)
         test_optimizer_resolution(base)
         test_preprocess_deps(base)
         test_preinstall_torch_mirror_fallback(base)
@@ -2719,9 +2617,6 @@ def main():
         test_krea2_at_support(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
-
-
-
 def test_cpu_device_probe_warning(base: Path):
     """训练前始终探测加速设备：CPU 版 torch/坏 ROCm 命中 device: cpu 时醒目警告（防全程 CPU 傻跑）。"""
     src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8")
@@ -2729,7 +2624,6 @@ def test_cpu_device_probe_warning(base: Path):
     assert "探测不到 GPU" in src and "device: cpu" in src, "缺 CPU 警告文案"
     assert "def _probe_accelerate_device" in src, "缺探测函数"
     print("CPU_DEVICE_PROBE_WARNING_OK")
-
 
 def test_tokenizer_failure_self_heal(base: Path):
     """tokenizer 缓存损坏自愈：失败判定命中、_complete_dir 拒绝 0 字节、train() 已接线强制重建重试。"""
@@ -2749,7 +2643,6 @@ def test_tokenizer_failure_self_heal(base: Path):
     assert "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k" in _sdxl_tk, "SDXL 缺 tokenizer2"
     assert (ROOT / "installers" / "tokenizers" / "openai_clip-vit-large-patch14" / "vocab.json").is_file(), "内置 tokenizer1 缺失"
     print("TOKENIZER_FAILURE_SELF_HEAL_OK")
-
 
 def test_config_export_import(base: Path):
     """配置导出/导入：默认排除提示词与本机路径、可选项保留、解析逐字段容错、底模只留文件名并可自动定位。"""
@@ -2789,7 +2682,6 @@ def test_config_export_import(base: Path):
     assert core.find_model_by_filename("", None) is None
     print("CONFIG_EXPORT_IMPORT_OK")
 
-
 def test_krea2_at_start_oom_retry(base: Path):
     """Krea2AT 16G 启动 OOM 自动重试判定：启动 OOM 命中、中途 OOM/正常不命中；16G yaml 保持 0.3 保速度。"""
     assert core._log_mentions_start_oom(["Error running job: CUDA error: out of memory"]) is True
@@ -2800,7 +2692,6 @@ def test_krea2_at_start_oom_retry(base: Path):
     assert "layer_offloading_transformer_percent: 0.3" in src, "16G 应保持 0.3 保速度"
     assert "自动重试一次" in src, "缺启动 OOM 自动重试"
     print("KREA2_AT_START_OOM_RETRY_OK")
-
 
 def test_krea2_at_truncated_te_self_heal(base: Path):
     """Krea2AT 文本编码器：截断 safetensors 分片能被识别（>1MB 但头部声明超文件大小），下载时自动删除重下。"""
@@ -2838,7 +2729,6 @@ def test_krea2_at_truncated_te_self_heal(base: Path):
         assert any("截断" in x for x in logs), logs
     print("KREA2_AT_TRUNCATED_TE_SELF_HEAL_OK")
 
-
 def test_at_train_driver_guard(base: Path):
     """第三引擎训练前 NVIDIA 驱动预检：<570 拦截，>=570/未知放行（cu130 首次 CUDA 蓝屏护栏）。"""
     assert hasattr(core, "_check_at_train_driver"), "缺少 _check_at_train_driver"
@@ -2866,7 +2756,6 @@ def test_at_train_driver_guard(base: Path):
         seg = src[i:e if e >= 0 else len(src)]
         assert "_check_at_train_driver(logf)" in seg, fn + " 未接训练前驱动护栏"
     print("AT_TRAIN_DRIVER_GUARD_OK")
-
 
 def test_krea2_at_support(base: Path):
     """第三引擎 Krea2（AI-Toolkit）接入：模型检测 / yaml 生成 / 训练控制流。"""

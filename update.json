@@ -1,6 +1,6 @@
 {
-  "version": "v0.14.1",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.14.1/Setup.exe",
+  "version": "v0.14.2",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.14.2/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.14.1：热修复——\n    · 修复：SDXL 训练 tokenizer 自愈漏重建 tokenizer1（vocab_file=None 重试仍崩，4070S 用户日志复现）——补全 SDXL 双 tokenizer 预缓存与自愈；\n    · 修复：升级后不自动重启——新增独立 VBS 重启助手，静默安装成功后自动重新打开应用。"
+  "notes": "v0.14.2：热修复——\n    · 修复：SDXL 训练 tokenizer 自愈漏重建 tokenizer1（vocab_file=None 重试仍崩）——补全 SDXL 双 tokenizer 预缓存与自愈；\n    · 回滚 v0.14.1 的「升级后自动重启」改动（VBS 助手在部分环境异常），恢复原升级流程（装完手动打开）。"
 }

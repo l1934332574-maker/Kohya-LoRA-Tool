@@ -4,7 +4,7 @@
 ; 默认安装到用户文档目录 {userdocs}\KohyaLoraTool，避开 Program Files 权限问题
 ; ============================================================
 #define MyAppName "KohyaLoraTool"
-#define MyAppVersion "0.14.1"
+#define MyAppVersion "0.14.2"
 #define MyAppExeName "Kohya一键工具.exe"
 #define MyAppDir "..\dist\Kohya一键工具"
 
@@ -23,7 +23,7 @@ DisableDirPage=no
 UsePreviousAppDir=yes
 ; 安装前自动关闭正在运行的软件，避免 exe 被占用导致覆盖失败
 CloseApplications=yes
-; 重启由工具端 VBS 助手负责（静默安装 /NORESTART 时安装器不自动拉起应用，且避免与 VBS 双重启动）
+RestartApplications=yes
 PrivilegesRequired=lowest
 OutputDir=.
 OutputBaseFilename=Setup
