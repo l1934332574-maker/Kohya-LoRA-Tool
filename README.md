@@ -13,9 +13,7 @@
 ## 🆕 v0.13.x 更新重点
 
 - **新增 Krea2 图像 LoRA 接入第三引擎（AI-Toolkit）**：新模式「Krea2AT」，与第二引擎 musubi 的 Krea2 共存；16G 自动 qint8 + 768 + 分层交换 + 关采样，24G+ qfloat8 + 1024 + 采样开；文本编码器/VAE 首次训练自动从国内镜像下载。
-- **Krea2AT 模型下载自愈**：文本编码器/VAE 截断或损坏自动检测并重下（真实 safetensors 头部校验），不再训练中途 SafetensorError。
-- **训练前环境自愈**：第三引擎 NVIDIA 驱动预检（<570 拦截，防训练开始蓝屏）；musubi 块交换 AMD ROCm 兼容补丁（RX 7000 不再崩 Found no NVIDIA driver）。
-- **界面优化**：第三引擎 4 个模式按钮改 2×2 网格不再挤压；新建/打开项目不再卡顿。
+- **界面优化**
 
 > 完整更新记录见 [CHANGELOG.md](CHANGELOG.md)。
 
