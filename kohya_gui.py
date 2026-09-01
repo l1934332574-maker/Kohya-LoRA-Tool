@@ -1482,6 +1482,11 @@ class App:
             for k, v in (tpl.get("params") or {}).items():
                 self.param_vars.setdefault(k, tk.StringVar()).set(v)
             self._refresh_preset_summary()
+            # 导入配置：完全覆盖模板/预设（模式/底模/参数）
+            if getattr(self, "_pending_import_config", None):
+                self._apply_imported_config(self._pending_import_config)
+                self._pending_import_config = None
+                self._log("[配置] 已应用导入的配置（新建项目参数已按导入覆盖）")
             data = self._collect_project_data(template=tpl_var.get())
             data["created"] = None  # save 时会自动补
             ok = core.save_project(name, data)
@@ -1494,6 +1499,29 @@ class App:
             dlg.destroy()
             self._show_work()
             self._refresh_status_async()
+        import_note = ctk.CTkLabel(body, text="（可选）导入上次/他人的配置，自动套用模式与参数",
+                                   font=ui_font(FONT_HINT), text_color=HINT, wraplength=420, justify="left")
+        import_note.pack(anchor="w", pady=(2, 2))
+        def _pick_import():
+            from tkinter import filedialog
+            fp = filedialog.askopenfilename(title="选择要导入的配置", filetypes=[("配置 JSON", "*.json")])
+            if not fp:
+                return
+            try:
+                import io as _io
+                _cfg, _sum = core.parse_config_json(_io.open(fp, encoding="utf-8").read())
+            except Exception as _e:
+                messagebox.showerror(core.APP_NAME, f"配置导入失败：{_e}")
+                return
+            self._pending_import_config = _cfg
+            try:
+                import_note.configure(text=f"✅ 已导入配置（应用 {_sum['applied']} 项 / 忽略 {_sum['ignored']} 项）：{os.path.basename(fp)}")
+            except Exception:
+                pass
+        ctk.CTkButton(body, text="📥 导入配置", width=110, height=34, fg_color=CARD2, hover_color="#3a4150",
+                      border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                      font=ui_font(FONT_HINT), command=_pick_import).pack(side="left", pady=(8, 0))
+        self._refresh_status_async()
         ctk.CTkButton(body, text="创建并打开", width=120, height=34, fg_color=ACC, hover_color=ACC_H,
                       corner_radius=6, font=ui_font(FONT_BODY), command=_do_create).pack(side="right", pady=(8, 0))
         ctk.CTkButton(body, text="取消", width=80, height=34, fg_color=CARD2, hover_color="#343a46",
@@ -1888,7 +1916,7 @@ class App:
         self._main_widgets.append(btns)
         for t, w, cmd in [("数据预处理", 110, self.cmd_preprocess), ("标签编辑器", 112, self.cmd_label_editor),
                           ("一键训练", 96, self.cmd_train), ("打开输出文件夹", 112, self.cmd_open_output),
-                          ("使用说明", 90, self.cmd_readme)]:
+                          ("📤 导出配置", 96, self.cmd_export_config), ("使用说明", 90, self.cmd_readme)]:
             b = ctk.CTkButton(btns, text=t, width=w, height=38, fg_color=CARD2, hover_color="#343a46",
                               border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
                               font=ui_font(FONT_BODY), command=cmd)
@@ -2462,6 +2490,92 @@ class App:
             os.startfile(core.data_sub("output", self.current_project))
         else:
             os.startfile(core.data_sub("output"))
+
+    def _apply_imported_config(self, cfg):
+        """把导入的配置应用到当前（新）项目界面：完全覆盖模式/底模/参数（复用项目恢复逻辑）。"""
+        bm = cfg.get("base_model") or ""
+        full = core.find_model_by_filename(bm, cfg.get("mode")) if bm else None
+        if full:
+            self._log(f"[配置] 已自动定位底模：{full}")
+        elif bm:
+            self._log(f"[配置] ⚠ 本机未找到底模 {bm}，请重新选择底模。")
+        data = {
+            "mode": cfg.get("mode"),
+            "base_type": cfg.get("base_type"),
+            "at_sub_mode": cfg.get("at_sub_mode") or "character",
+            "trigger": cfg.get("trigger") or "",
+            "global_pos": cfg.get("global_pos") or "",
+            "global_neg": cfg.get("global_neg") or "",
+            "reg_dir": "",
+            "raw_dir": "",
+            "train_env": "",
+            "base_model": full or "",
+            "unet_only": bool(cfg.get("unet_only", False)),
+            "params": cfg.get("params") or {},
+        }
+        self._apply_project_data(data)
+        sc = cfg.get("style_caption")
+        if sc:
+            try:
+                self.style_caption_var.set(sc)
+            except Exception:
+                pass
+        sp = cfg.get("sample_prompt")
+        if sp:
+            try:
+                self.sample_prompt_var.set(sp)
+            except Exception:
+                pass
+        self._update_mode_ui()
+        self._refresh_preset_summary()
+
+    def cmd_export_config(self):
+        """导出当前项目配置为可分享 JSON（不含本机路径/提示词，提示词可选勾选）。"""
+        if not self.current_project:
+            messagebox.showinfo(core.APP_NAME, "请先打开或新建一个项目，再导出配置。")
+            return
+        dlg = ctk.CTkToplevel(self.root)
+        dlg.title("导出配置")
+        dlg.geometry("480x240")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        body = ctk.CTkFrame(dlg, fg_color=BG)
+        body.pack(fill="both", expand=True, padx=18, pady=16)
+        ctk.CTkLabel(body, text="配置名称", font=ui_font(FONT_BODY), text_color=TXT).pack(anchor="w")
+        name_var = tk.StringVar(value=(self.current_project or "配置") + "_配置")
+        name_entry = ctk.CTkEntry(body, textvariable=name_var, width=320, height=30,
+                                  fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
+        name_entry.pack(anchor="w", pady=(4, 2))
+        ctk.CTkLabel(body, text="保存位置：桌面（.json）", font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w", pady=(0, 6))
+        inc_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(body, text="包含 trigger 与提示词（画风描述词/采样提示词/全局提示词）",
+                        variable=inc_var, fg_color=ACC, hover_color=ACC_H, text_color=TXT,
+                        font=ui_font(FONT_HINT)).pack(anchor="w", pady=(4, 2))
+
+        def _do_export():
+            import json as _json
+            name = name_var.get().strip() or ((self.current_project or "配置") + "_配置")
+            cfg = core.export_config_json(self._collect_params(), include_prompts=inc_var.get())
+            safe = re.sub(r'[\\/:*?"<>|\r\n\t ]+', "_", name)[:60] or "配置"
+            desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+            if not os.path.isdir(desktop):
+                desktop = os.path.expanduser("~")
+            path = os.path.join(desktop, safe + ".json")
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    _json.dump(cfg, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                messagebox.showerror(core.APP_NAME, f"导出失败：{e}")
+                return
+            self._log(f"[配置] 已导出到 {path}")
+            messagebox.showinfo(core.APP_NAME, f"配置已导出：\n{path}\n\n可分享给他人，或下次新建项目时点「导入配置」复用。")
+            dlg.destroy()
+
+        ctk.CTkButton(body, text="导出", width=110, height=34, fg_color=ACC, hover_color=ACC_H,
+                      corner_radius=6, font=ui_font(FONT_BODY), command=_do_export).pack(side="right", pady=(8, 0))
+        ctk.CTkButton(body, text="取消", width=90, height=34, fg_color=CARD2, hover_color="#343a46",
+                      border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                      font=ui_font(FONT_BODY), command=dlg.destroy).pack(side="right", padx=(8, 0), pady=(8, 0))
 
     def cmd_readme(self):
         self._show_help_window()

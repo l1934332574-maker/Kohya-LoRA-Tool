@@ -35,6 +35,16 @@
 
 ### 修复：第三引擎界面误显示「torch.compile 加速」勾选框（无效且误导）
 - 根因：torch.compile 加速只接第二引擎 musubi 的 Krea2/FLUX.2（--compile），第三引擎（ai-toolkit）yaml 无 compile 配置；但勾选框在视频H3/Krea2AT/Qwen/Z-Image 模式仍显示，勾了不生效还让人误以为是 OOM 原因。
+### 新增：配置导出 / 导入（新建项目一键复用上次参数，可分享）
+- 项目页新增「📤 导出配置」：导出当前模式/底模/训练参数为 .json（默认存桌面，名称可手填）；默认不含 trigger/画风描述词/采样/全局提示词与本机路径（弹窗可勾选包含提示词），可分享给他人。
+- 新建项目弹窗新增「📥 导入配置」：完全覆盖新项目（模式/底模/参数），逐字段容错（缺失默认、坏数值忽略、未知模式回退 character、废弃字段忽略），导入后显示应用/忽略摘要；底模按文件名在本机 models 目录自动定位，找不到则清空并提示重选。
+- 验证：CONFIG_EXPORT_IMPORT_OK（排除/可选提示词/容错解析/底模定位）；smoke_test + engine_install_smoke_test 全绿。
+
+### 修复：tokenizer 缓存损坏导致第一引擎训练失败（vocab_file None）自动重建重试
+- 根因：SDXL 等训练加载 CLIP tokenizer 时 from_pretrained 报 TypeError: expected str... not NoneType（vocab_file=None），是本地 tokenizer 缓存损坏/不完整（0 字节占位等）导致；原完整性校验只查文件存在，不查内容/大小（4070S 用户复现）。
+- 已修：① _complete_dir 完整性校验增加非空（文件大小>0）判断；② 训练失败检测到 tokenizer 加载错误时，强制重建分词器缓存（删除后从内置包/国内镜像补齐）并自动重试一次。
+- 验证：TOKENIZER_FAILURE_SELF_HEAL_OK（失败判定命中/0 字节拒绝/接线检查）；smoke_test + engine_install_smoke_test 全绿。
+
 - 已修：第三引擎 4 个模式隐藏该勾选框，仅第二引擎 Krea2/FLUX.2 显示。
 - 验证：编译 + smoke_test 全绿。
 

@@ -2382,10 +2382,65 @@ def main():
         test_at_train_driver_guard(base)
         test_krea2_at_truncated_te_self_heal(base)
         test_krea2_at_start_oom_retry(base)
+        test_config_export_import(base)
+        test_tokenizer_failure_self_heal(base)
         test_krea2_at_support(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 
+
+
+def test_tokenizer_failure_self_heal(base: Path):
+    """tokenizer 缓存损坏自愈：失败判定命中、_complete_dir 拒绝 0 字节、train() 已接线强制重建重试。"""
+    assert core._log_mentions_tokenizer_failure(
+        ["TypeError: expected str, bytes or os.PathLike object, not NoneType", "tokenization_clip.py", "vocab_file"]) is True
+    assert core._log_mentions_tokenizer_failure(["spiece.model", "not NoneType"]) is True
+    assert core._log_mentions_tokenizer_failure(["steps: 1/100, avr_loss=0.05"]) is False
+    assert core._log_mentions_tokenizer_failure(["CUDA error: out of memory"]) is False
+    src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8")
+    assert "os.path.getsize(_p) > 0" in src, "缺 0 字节拒绝"
+    assert "强制重建分词器缓存后自动重试" in src, "缺失败重试接线"
+    assert "def _force_rebuild_tokenizer_cache" in src, "缺强制重建函数"
+    print("TOKENIZER_FAILURE_SELF_HEAL_OK")
+
+
+def test_config_export_import(base: Path):
+    """配置导出/导入：默认排除提示词与本机路径、可选项保留、解析逐字段容错、底模只留文件名并可自动定位。"""
+    import json as _json
+    params = {
+        "mode": "style", "base_type": "sdxl", "at_sub_mode": "画风（过滤人物标签）",
+        "base_model": r"D:\models\anima-base-v1.0.safetensors",
+        "rank": 16, "alpha": 8, "unet_lr": 1e-4, "te_lr": 5e-5, "repeats": 5,
+        "max_epochs": 8, "resolution": 1024, "save_every": 200, "optimizer": "AdamW8bit",
+        "quant_mode": "auto", "blocks_to_swap": "6", "strong_bind": True,
+        "sample_preview": False, "crop_ratio": "3:4", "train_text_encoder": True,
+        "trigger": "zzz", "style_caption": "水彩风", "raw_dir": r"D:\data", "train_env": r"D:\venv",
+    }
+    cfg = core.export_config_json(params)
+    assert cfg["base_model"] == "anima-base-v1.0.safetensors", cfg
+    assert cfg["at_sub_mode"] == "style", cfg
+    assert "trigger" not in cfg and "style_caption" not in cfg and "raw_dir" not in cfg and "train_env" not in cfg, cfg
+    cfg2 = core.export_config_json(params, include_prompts=True)
+    assert cfg2.get("trigger") == "zzz" and cfg2.get("style_caption") == "水彩风", cfg2
+    # 解析容错：未知模式回退、坏数值忽略、未知字段忽略、短标签画风识别、底模取文件名
+    text = _json.dumps({"mode": "unknown_mode", "base_type": "nope", "at_sub_mode": "画风",
+                        "base_model": "x/y/z.safetensors",
+                        "params": {"rank": "abc", "unet_lr": "1e-4", "repeats": "5", "future_field": 1},
+                        "trigger": "t1"})
+    pcfg, summ = core.parse_config_json(text)
+    assert pcfg["mode"] == "character" and pcfg["at_sub_mode"] == "style", pcfg
+    assert "rank" not in pcfg["params"] and pcfg["params"]["unet_lr"] == 1e-4, pcfg
+    assert pcfg["base_model"] == "z.safetensors" and pcfg["trigger"] == "t1", pcfg
+    assert summ["ignored"] >= 3, summ  # mode/base_type/rank/future_field 被忽略
+    # 底模自动定位：models/base 下同名文件能找全路径
+    mdir = base / "models" / "base"
+    mdir.mkdir(parents=True, exist_ok=True)
+    (mdir / "anima-base-v1.0.safetensors").write_bytes(b"x")
+    with patch.object(core, "data_sub", side_effect=lambda *pp: str(base.joinpath(*pp))):
+        found = core.find_model_by_filename("anima-base-v1.0.safetensors", "style")
+    assert found and str(found).replace("\\", "/").endswith("anima-base-v1.0.safetensors"), found
+    assert core.find_model_by_filename("", None) is None
+    print("CONFIG_EXPORT_IMPORT_OK")
 
 
 def test_krea2_at_start_oom_retry(base: Path):

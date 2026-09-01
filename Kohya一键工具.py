@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.13.2"
+APP_VERSION = "0.13.3"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -4852,6 +4852,25 @@ def _start_anima_latent_nan_watcher(dataset_dir, vpy, logf=print):
     threading.Thread(target=_watch, daemon=True).start()
 
 
+def _force_rebuild_tokenizer_cache(cache_dir, model_id, kind="clip", logf=print):
+    """强制重建单个分词器缓存：删除目标目录后重新从内置包/下载补齐。"""
+    target = os.path.join(cache_dir, model_id.replace("/", "_"))
+    try:
+        if os.path.isdir(target):
+            shutil.rmtree(target, ignore_errors=True)
+    except Exception:
+        pass
+    _ensure_tokenizer_cached(cache_dir, model_id, logf, kind=kind)
+
+
+def _log_mentions_tokenizer_failure(tail):
+    """训练子进程日志是否出现 tokenizer 加载失败（缓存损坏/不完整，vocab_file=None 等）。"""
+    blob = "\n".join(tail or [])
+    if "not NoneType" not in blob:
+        return False
+    return any(k in blob for k in ("tokenizer", "vocab_file", "merges.txt", "spiece.model"))
+
+
 def _ensure_torchvision_deps(vpy, logf=print, label="Kohya", cwd=None):
     """确保训练 venv 可 import torchvision（torch 在但 torchvision 缺时自动补装匹配版本）。
 
@@ -5129,6 +5148,137 @@ def gpu_status_text():
         except Exception:
             pass
     return "\n".join(lines) or "（无显卡信息）"
+
+
+# ---------- 配置导出 / 导入（可分享；不含本机路径与提示词，提示词可选） ----------
+_CFG_PARAM_INT_KEYS = ("rank", "alpha", "repeats", "max_epochs", "resolution", "video_steps")
+_CFG_PARAM_FLOAT_KEYS = ("unet_lr", "te_lr")
+_CFG_PARAM_BOOL_KEYS = ("strong_bind", "sample_preview", "compile")
+_CFG_PARAM_STR_KEYS = ("optimizer", "quant_mode", "blocks_to_swap", "save_every", "crop_ratio")
+_CFG_PROMPT_KEYS = ("trigger", "style_caption", "sample_prompt", "global_pos", "global_neg")
+_CFG_AT_LABEL_TO_KEY = {v: k for k, v in AT_SUB_LABELS.items()}
+_CFG_AT_LABEL_TO_KEY.update({"画风": "style", "人物": "character", "风格": "style"})  # 兼容手写短标签
+
+
+def _cfg_at_sub_key(params):
+    """at_sub_mode 兼容 key 与中文标签，统一转 key。"""
+    val = params.get("at_sub_mode") or "character"
+    if val in AT_SUB_LABELS:
+        return val
+    return _CFG_AT_LABEL_TO_KEY.get(val, "character")
+
+
+def export_config_json(params, include_prompts=False):
+    """把当前训练参数整理成可分享的配置 dict（纯函数，便于测试）。
+
+    - 保留：mode / at_sub_mode(key) / base_type / 底模文件名 / 训练参数；
+    - 剔除：本机绝对路径（数据集/正则/训练环境/底模完整路径）；
+    - 提示词类（trigger/画风描述词/采样/全局）默认不带，include_prompts=True 时带上。
+    """
+    params = params or {}
+    bm = params.get("base_model") or ""
+    cfg = {
+        "tool_version": str(APP_VERSION or ""),
+        "config_version": 1,
+        "mode": params.get("mode") or "character",
+        "at_sub_mode": _cfg_at_sub_key(params),
+        "base_type": params.get("base_type") or "sdxl",
+        "base_model": os.path.basename(str(bm).replace("\\", "/")) if bm else "",
+        "unet_only": bool(params.get("unet_only", params.get("train_text_encoder") is False)),
+    }
+    prm = {}
+    for k in _CFG_PARAM_INT_KEYS + _CFG_PARAM_FLOAT_KEYS + _CFG_PARAM_BOOL_KEYS + _CFG_PARAM_STR_KEYS:
+        if k in params and params[k] not in (None, ""):
+            prm[k] = params[k]
+    cfg["params"] = prm
+    if include_prompts:
+        for k in _CFG_PROMPT_KEYS:
+            v = params.get(k)
+            if isinstance(v, str) and v.strip():
+                cfg[k] = v.strip()
+            elif v:
+                cfg[k] = v
+    return cfg
+
+
+def parse_config_json(text):
+    """解析导入的配置 JSON，逐字段容错。返回 (cfg, summary)；格式错误抛 ValueError。"""
+    import json as _json
+    raw = _json.loads(text)
+    if not isinstance(raw, dict):
+        raise ValueError("配置不是有效的 JSON 对象")
+    cfg, summary = {}, {"applied": 0, "ignored": 0}
+    m = raw.get("mode")
+    cfg["mode"] = m if m in MODE_LABELS else "character"
+    summary["applied" if m in MODE_LABELS else "ignored"] += 1
+    bt = raw.get("base_type")
+    cfg["base_type"] = bt if bt in BASE_TYPE_LABELS else "sdxl"
+    summary["applied" if bt in BASE_TYPE_LABELS else "ignored"] += 1
+    sub = raw.get("at_sub_mode") or "character"
+    if sub in AT_SUB_LABELS:
+        cfg["at_sub_mode"] = sub
+    elif sub in _CFG_AT_LABEL_TO_KEY:
+        cfg["at_sub_mode"] = _CFG_AT_LABEL_TO_KEY[sub]
+    else:
+        cfg["at_sub_mode"] = "character"
+    summary["applied"] += 1
+    bm = raw.get("base_model") or ""
+    cfg["base_model"] = os.path.basename(str(bm).replace("\\", "/")) if isinstance(bm, str) and bm else ""
+    if isinstance(raw.get("unet_only"), bool):
+        cfg["unet_only"] = raw["unet_only"]
+        summary["applied"] += 1
+    prm = {}
+    rawp = raw.get("params") or {}
+    if isinstance(rawp, dict):
+        for k, v in rawp.items():
+            if k in _CFG_PARAM_INT_KEYS:
+                try:
+                    prm[k] = int(float(v))
+                    summary["applied"] += 1
+                except Exception:
+                    summary["ignored"] += 1
+            elif k in _CFG_PARAM_FLOAT_KEYS:
+                try:
+                    prm[k] = float(v)
+                    summary["applied"] += 1
+                except Exception:
+                    summary["ignored"] += 1
+            elif k in _CFG_PARAM_BOOL_KEYS:
+                prm[k] = bool(v) if not isinstance(v, str) else v.lower() in ("1", "true", "yes", "on", "开")
+                summary["applied"] += 1
+            elif k in _CFG_PARAM_STR_KEYS:
+                prm[k] = str(v)
+                summary["applied"] += 1
+            else:
+                summary["ignored"] += 1  # 未知/废弃字段
+    cfg["params"] = prm
+    for k in _CFG_PROMPT_KEYS:
+        v = raw.get(k)
+        if isinstance(v, str) and v.strip():
+            cfg[k] = v.strip()
+            summary["applied"] += 1
+    return cfg, summary
+
+
+def find_model_by_filename(filename, mode=None):
+    """按文件名在 models 各目录查找完整路径；找不到返回 None（导入配置自动定位底模用）。"""
+    fn = os.path.basename(str(filename or "").replace("\\", "/")).strip()
+    if not fn:
+        return None
+    roots = []
+    for r in (data_sub("models"), os.path.join(KIT_DIR, "models")):
+        if r and os.path.isdir(r):
+            roots.append(r)
+    for root in roots:
+        for sub in ("base", "anima", "krea2", "flux2", "minimax_h3", "qwen_image", "zimage", "at"):
+            d = os.path.join(root, sub)
+            if os.path.isfile(os.path.join(d, fn)):
+                return os.path.join(d, fn)
+    for root in roots:
+        for r, _dirs, files in os.walk(root):
+            if fn in files:
+                return os.path.join(r, fn)
+    return None
 
 
 def clear_temp_cache():
@@ -6707,12 +6857,14 @@ def _ensure_tokenizer_cached(cache_dir, model_id, logf=print, kind="clip", vpy=N
 
     def _complete_dir(d):
         try:
+            def _ok(name):
+                _p = os.path.join(d, name)
+                return os.path.isfile(_p) and os.path.getsize(_p) > 0   # 拒绝 0 字节占位/损坏文件
             if kind == "clip":
-                return all(os.path.isfile(os.path.join(d, n)) for n in _need_clip())
+                return all(_ok(n) for n in _need_clip())
             # auto：fast tokenizer 需要 tokenizer.json；slow（T5/Qwen sentencepiece）用 spiece.model
-            return (os.path.isfile(os.path.join(d, "tokenizer_config.json"))
-                    and (os.path.isfile(os.path.join(d, "tokenizer.json"))
-                         or os.path.isfile(os.path.join(d, "spiece.model"))))
+            return (_ok("tokenizer_config.json")
+                    and (_ok("tokenizer.json") or _ok("spiece.model")))
         except Exception:
             return False
 
@@ -7672,6 +7824,13 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
             except Exception:
                 pass
         raise
+    if rc != 0 and _log_mentions_tokenizer_failure(_log_tail):
+        # tokenizer 缓存损坏/不完整（vocab_file=None 等）：强制重建后自动重试一次（2026-09-01 4070S 用户）
+        logf("[训练] ⚠ 检测到 tokenizer 加载失败（缓存损坏/不完整），强制重建分词器缓存后自动重试…")
+        for _tid, _kind in arch_info["tokenizers"]:
+            _force_rebuild_tokenizer_cache(data_sub("tokenizers"), _tid, _kind, logf)
+        _log_tail.clear()
+        rc = run_stream(cmd, cwd=sds, env=env, logf=logf, collect=_log_tail)
     if rc != 0:
         if progress is not None:
             try:
