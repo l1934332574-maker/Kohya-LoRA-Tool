@@ -18,6 +18,26 @@
 - 已修：训练前给 musubi 打幂等补丁，move_blocks 改为 device.index 优先 → torch.cuda.is_available() 时才调 current_device()，否则 dev=0；NVIDIA 无影响，已接入 Krea2/FLUX.2 与 Anima 路径。
 - 验证：MUSUBI_OFFLOAD_DEVICE_PATCH_OK（补丁生效 / 幂等 / 结构变化跳过 / 两路径接线）。
 
+### 修复：Krea2AT 16G 训练开始随机 OOM（保持速度 + 启动 OOM 自动重试）
+- 根因：ai-toolkit layer_offloading 的 offload_percent 语义是「该比例层按需流式，其余常驻显存」；16G 档 0.3 = qint8 DiT（约 13GB）70% 常驻 ≈9GB，16G Windows 可用约 14.5GB，正处临界线——启动 OOM 是显存抖动的随机问题（4080S 复现，用户未改配置重开即可跑，实测 512@2s/768@5s）。
+- 已修：保留 0.3 保速度；训练启动若 CUDA OOM（且尚无已完成步，avr_loss 判定）自动重试一次，模拟「重开即好」，用户无感。中途 OOM 不重试（避免浪费进度）。24G+ 仍不开启保速度。
+- 验证：_log_mentions_start_oom 四场景（启动 OOM 命中 / cudaErrorMemoryAllocation 命中 / 中途 OOM 不命中 / 正常不命中）；yaml 输出 0.3；smoke_test + engine_install_smoke_test 全绿。
+
+### 修复：画风模式采样预览与训练风格完全不符（提示词带入画风描述词）
+- 根因：采样预览提示词写死通用的 portrait/masterpiece，画风模式无 trigger 时就是一张与训练风格无关的通用图；画风描述词（style_caption）未参与。
+- 已修：采样提示词优先带入「画风描述词」（kohya/musubi 的 sample_prompts + ai-toolkit 的 Krea2AT/Qwen-Image/Z-Image yaml），预览才贴近实际训练风格；无描述词时保持原 portrait 兜底。
+- 验证：三种情况（画风描述词 / 仅 trigger / 两者都有）提示词均正确拼接；编译 + smoke_test 全绿。
+
+### 修复：AMD 中文用户名下 MIOpen 缓存打不开导致训练崩溃（miopenStatusInternalError）
+- 根因：ROCm MIOpen 默认把卷积内核缓存写到 C:\Users\<用户名>\.miopen；用户名含中文（如 GMX究极霸王龙）时 sqlite_db.hpp 打不开数据库文件（Cannot open database file），Anima 缓存 latent 时 VAE 卷积直接 miopenStatusInternalError（RX 7800 XT 复现）。
+- 已修：AMD 兼容模式训练环境自动把 MIOpen 缓存重定向到数据目录下 ASCII 路径（data/.miopen）并预建目录（MIOPEN_CACHE_DIR + MIOPEN_USER_DB_PATH），中文用户名不再崩。
+- 验证：编译 + smoke_test 全绿。
+
+### 修复：第三引擎界面误显示「torch.compile 加速」勾选框（无效且误导）
+- 根因：torch.compile 加速只接第二引擎 musubi 的 Krea2/FLUX.2（--compile），第三引擎（ai-toolkit）yaml 无 compile 配置；但勾选框在视频H3/Krea2AT/Qwen/Z-Image 模式仍显示，勾了不生效还让人误以为是 OOM 原因。
+- 已修：第三引擎 4 个模式隐藏该勾选框，仅第二引擎 Krea2/FLUX.2 显示。
+- 验证：编译 + smoke_test 全绿。
+
 ## v0.11.4（2026-08-29）
 
 ### 修复：第一引擎误选 FLUX.2 / Krea2 底模直接报错（自动拦截引导）

@@ -2152,6 +2152,20 @@ class App:
                         pass
         except Exception:
             pass
+        # torch.compile 加速只接第二引擎 musubi 的 Krea2/FLUX.2（--compile）；第三引擎（ai-toolkit）yaml 无 compile 配置，
+        # 显示在视频H3/Krea2AT/Qwen/Z-Image 是误导，隐藏（2026-09-01 群友 16G 第三引擎误勾加速导致困惑）。
+        try:
+            _cr = getattr(self, "compile_row", None)
+            if _cr is not None:
+                if self.mode in ("video", "krea2_at", "qwen_image", "zimage"):
+                    _cr.pack_forget()
+                else:
+                    try:
+                        _cr.pack(anchor="w", pady=(4, 0))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         try:
             _hide_base = self.mode in ("krea2", "krea2_at", "flux2", "video", "qwen_image", "zimage")
             for w in (self.base_label, self.base_combo, self.btn_pick_base, self.btn_refresh_base, self.btn_download_base):
@@ -3166,6 +3180,7 @@ class App:
         ctk.CTkLabel(bw, text="（自动=按显存档位；0=全部驻留显存；块越少越快但越吃显存）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         cc = ctk.CTkFrame(self.adv_body, fg_color="transparent"); cc.pack(anchor="w", pady=(4, 0))
+        self.compile_row = cc
         self.compile_var = tk.BooleanVar(value=False)
         try:
             self.compile_var.trace_add("write", lambda *a: self._schedule_autosave())

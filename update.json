@@ -1,6 +1,6 @@
 {
-  "version": "v0.13.1",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.13.1/Setup.exe",
+  "version": "v0.13.2",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.13.2/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.13.1：修复 Krea2AT 文本编码器/VAE 下载截断自动检测并重下（真实 safetensors 头部校验）；\n    · 修复第三引擎 4 个模式按钮在侧边栏被挤压（2×2 网格）；\n    · 修复 musubi 块交换在 AMD ROCm 崩溃（Found no NVIDIA driver，RX 7000 开 --blocks_to_swap 复现）。"
+  "notes": "v0.13.2：修复 Krea2AT 16G 训练开始随机 OOM（启动 OOM 自动重试一次，0.3 分层交换保速度）；\n    · 修复 AMD 中文用户名下 MIOpen 缓存打不开（重定向 ASCII 路径，RX 7800 XT）；\n    · 修复 musubi Krea2/FLUX.2 16G 开 torch.compile 启动 OOM（16G 自动禁用）；\n    · 第三引擎界面隐藏无效的 torch.compile 勾选框；画风采样预览带入画风描述词。"
 }

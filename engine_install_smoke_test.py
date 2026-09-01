@@ -2381,10 +2381,23 @@ def main():
         test_krea2_first_engine_guard(base)
         test_at_train_driver_guard(base)
         test_krea2_at_truncated_te_self_heal(base)
+        test_krea2_at_start_oom_retry(base)
         test_krea2_at_support(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 
+
+
+def test_krea2_at_start_oom_retry(base: Path):
+    """Krea2AT 16G 启动 OOM 自动重试判定：启动 OOM 命中、中途 OOM/正常不命中；16G yaml 保持 0.3 保速度。"""
+    assert core._log_mentions_start_oom(["Error running job: CUDA error: out of memory"]) is True
+    assert core._log_mentions_start_oom(["Traceback", "cudaErrorMemoryAllocation"]) is True
+    assert core._log_mentions_start_oom(["steps: 5/464 [00:10<10:00, 0.5s/it, avr_loss=0.07]", "CUDA error: out of memory"]) is False
+    assert core._log_mentions_start_oom(["Loading transformer", "Moving transformer to CPU"]) is False
+    src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8")
+    assert "layer_offloading_transformer_percent: 0.3" in src, "16G 应保持 0.3 保速度"
+    assert "自动重试一次" in src, "缺启动 OOM 自动重试"
+    print("KREA2_AT_START_OOM_RETRY_OK")
 
 
 def test_krea2_at_truncated_te_self_heal(base: Path):

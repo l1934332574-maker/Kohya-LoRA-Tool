@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.13.1"
+APP_VERSION = "0.13.2"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2464,7 +2464,11 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         # v0.11.2：自检 Triton/inductor，缺失自动补装 triton-windows；装不上自动回退 SDPA，不再硬崩
         _compile_ok, _compile_note = _ensure_compile_ready(mvpy, logf)
         if _compile_ok:
-            cmd += ["--compile"]
+            # 16G 卡开 torch.compile：编译会额外占显存，训练开始常 CUDA OOM（群友 16G 实测，关掉 compile 即正常且快）
+            if vram_gb is not None and vram_gb <= 16.5:
+                logf("[Krea2] ⚠ 检测到 16G 显存：torch.compile 编译额外占用显存、训练开始易 OOM，已自动禁用（标准 SDPA 继续）。")
+            else:
+                cmd += ["--compile"]
         else:
             logf(f"[Krea2] ⚠ torch.compile 已自动禁用（{_compile_note}），本次用标准 SDPA 继续训练，不会中断。")
     if swap > 0:
@@ -2683,7 +2687,11 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     if _flux2_compile:
         _flux2_compile_ok, _flux2_compile_note = _ensure_compile_ready(mvpy, logf)
         if _flux2_compile_ok:
-            cmd += ["--compile"]
+            # 16G 卡开 torch.compile：编译会额外占显存，训练开始常 CUDA OOM（群友 16G 实测，关掉 compile 即正常且快）
+            if vram_gb is not None and vram_gb <= 16.5:
+                logf("[FLUX.2] ⚠ 检测到 16G 显存：torch.compile 编译额外占用显存、训练开始易 OOM，已自动禁用（标准 SDPA 继续）。")
+            else:
+                cmd += ["--compile"]
         else:
             logf(f"[FLUX.2] ⚠ torch.compile 已自动禁用（{_flux2_compile_note}），本次用标准 SDPA 继续训练，不会中断。")
     if swap > 0:
@@ -3977,7 +3985,9 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
     else:
         _opt_k = "AdamW"
     _opt_yaml = _optimizer_yaml_name(_opt_k)
-    sample_prompt = (trig + ", ") if trig else ""
+    _style_cap = (params.get("style_caption") or "").strip()
+    # 采样预览：画风模式把「画风描述词」带进提示词，预览才贴近实际风格
+    sample_prompt = (", ".join(x for x in (trig, _style_cap) if x) + ", ") if (trig or _style_cap) else ""
     # low_vram 显存感知（v0.11.3）：官方默认开（模型放 CPU 按需搬显存，省显存但每步有搬运开销）。
     # 显存足够装下量化模型+激活时关掉提速（2026-08-28 A6000 48G 跑 Qwen-Image 20B 实测：
     # 硬开 low_vram 9.76s/it，关掉后预计回到 5~7s/it）。
@@ -4338,15 +4348,17 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     if vram_gb is not None and vram_gb >= 20:
         _low_vram = False
     # 显存适配：16G 档加 layer_offloading（DiT 分层交换 30%）——社区激进兜底；
-    # qint8 DiT 约 12~13GB 对 16G 仍紧，把一部分层放内存、算到才搬，防 OOM；
-    # 24G+ 关闭保速度（同 H3 视频流做法，ai-toolkit 官方/RunComfy 推荐仅作最后兜底）。
+    # ai-toolkit offload_percent 语义 = 该比例的层按需流式（其余常驻显存）；
+    # qint8 DiT 约 12~13GB：0.3 时 70% 常驻 ≈9GB，16G Windows 处临界线（可用约 14.5GB），
+    # 启动 OOM 是显存抖动的随机问题（实测 512@2s/768@5s 可跑，偶尔启动 OOM）；保留 0.3 保速度，
+    # 启动 OOM 由训练侧「自动重试一次」兜底（模拟重开即好）；24G+ 关闭保速度（同 H3 做法）。
     _lo_block = ""
     if vram_gb is not None and vram_gb <= 16:
         _lo_block = (
             "        layer_offloading: true\n"
             "        layer_offloading_transformer_percent: 0.3\n"
         )
-        logf("[Krea2(AT)] 显存 %sGB：启用 layer_offloading（DiT 分层交换 30%%，OOM 兜底，会稍慢）" % vram_gb)
+        logf("[Krea2(AT)] 显存 %sGB：启用 layer_offloading（DiT 分层交换 30%%，启动 OOM 自动重试兜底）" % vram_gb)
     elif vram_gb is not None:
         logf("[Krea2(AT)] 显存 %sGB：不启用分层交换，保速度" % vram_gb)
     if vpy:
@@ -4357,7 +4369,9 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     else:
         _opt_k = "AdamW8bit"
     _opt_yaml = _optimizer_yaml_name(_opt_k)
-    sample_prompt = (trig + ", ") if trig else ""
+    _style_cap = (params.get("style_caption") or "").strip()
+    # 采样预览：画风模式把「画风描述词」带进提示词，预览才贴近实际风格
+    sample_prompt = (", ".join(x for x in (trig, _style_cap) if x) + ", ") if (trig or _style_cap) else ""
     # 16G 档采样极易 OOM（模型本身 ~13GB 占满显存），默认关闭，训练完再测 LoRA
     sample_on = bool(params.get("sample_preview", True))
     if vram_gb is not None and vram_gb <= 16:
@@ -4476,6 +4490,20 @@ def _check_at_train_driver(logf=print):
         logf("[训练] NVIDIA 驱动 %d（≥570，满足 cu130 要求）" % _drv)
 
 
+def _log_mentions_start_oom(tail):
+    """训练子进程日志是否出现「启动阶段」CUDA OOM（16G 边界显存抖动，重开即好）。
+
+    仅当出现 OOM 且还没有任何已完成训练步（avr_loss）时判定为启动 OOM → 自动重试一次；
+    训练中途 OOM（已有步数/avr_loss）不重试，避免浪费已跑进度。
+    """
+    blob = "\n".join(tail or [])
+    if not any(m in blob for m in ("out of memory", "CUDA error", "cudaErrorMemoryAllocation")):
+        return False
+    if "avr_loss" in blob:
+        return False
+    return True
+
+
 def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resume_from=None, progress=None):
     """Krea2 图像 LoRA 训练（第三引擎 AI Toolkit，arch=krea2）。
 
@@ -4557,6 +4585,11 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
             pass
     logf("[Krea2] 启动 AI Toolkit 训练（首次要加载 26GB 底模并量化，请耐心等待）…")
     rc = run_stream([vpy, os.path.join(at_dir, "run.py"), cfg_path], cwd=at_dir, env=env, logf=logf, collect=_log_tail)
+    if rc != 0 and _log_mentions_start_oom(_log_tail):
+        # 16G 边界显存：启动 OOM 是显存抖动（实测重开即好、512@2s/768@5s 可跑），自动重试一次
+        logf("[Krea2] ⚠ 启动阶段 CUDA OOM（16G 边界显存抖动），自动重试一次…")
+        _log_tail.clear()
+        rc = run_stream([vpy, os.path.join(at_dir, "run.py"), cfg_path], cwd=at_dir, env=env, logf=logf, collect=_log_tail)
     if rc != 0:
         _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError(f"Krea2（AI Toolkit）训练结束，退出码 {rc}，请查看上方日志")
@@ -7198,9 +7231,13 @@ def _write_sample_prompts(output_name, params, mode, resolution=None, engine="ko
         prompt = user_prompt
     else:
         trig = (params.get("trigger") or "").strip()
-        # 采样提示词：用 portrait 偏向面部（降低早期未训练好的全身/不雅出图概率）；
-        # 不写死 1girl/solo（角色可能是男性/非人，写死会误导底模）。
-        prompt = (f"{trig}, portrait, masterpiece, best quality" if trig else "masterpiece, best quality")
+        style_cap = (params.get("style_caption") or "").strip()
+        # 采样提示词：画风模式用「画风描述词」，预览才贴近实际风格（此前写死 portrait 完全对不上）；
+        # 否则用 portrait 偏向面部（降低早期未训练好的全身/不雅出图概率）；不写死 1girl/solo。
+        if style_cap:
+            prompt = (f"{trig}, " if trig else "") + style_cap + ", masterpiece, best quality"
+        else:
+            prompt = (f"{trig}, portrait, masterpiece, best quality" if trig else "masterpiece, best quality")
     if engine == "musubi":
         res = int(resolution or 1024)
         prompt += f" --w {res} --h {res} --s 20"
@@ -7591,6 +7628,17 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
             logf("[训练] AMD 兼容模式：RX 6000 系已设置 HSA_OVERRIDE_GFX_VERSION=10.3.0")
         env.setdefault("DISABLE_ADDMM_CUDA_LT", "1")  # ZLUDA/ROCm 兼容
         env.setdefault("MIOPEN_FIND_MODE", "2")       # ROCm 卷积搜索加速
+        # MIOpen 缓存路径：用户名含中文（如 GMX究极霸王龙）时默认 C:\Users\<用户>\.miopen 打不开
+        # （sqlite_db.hpp: Cannot open database file），VAE 编码 latent 直接 miopenStatusInternalError；
+        # 重定向到数据目录下的 ASCII 路径并预建目录。
+        try:
+            _miopen_root = os.path.join(data_sub(), ".miopen")
+            os.makedirs(os.path.join(_miopen_root, "cache"), exist_ok=True)
+            env.setdefault("MIOPEN_CACHE_DIR", os.path.join(_miopen_root, "cache"))
+            env.setdefault("MIOPEN_USER_DB_PATH", os.path.join(_miopen_root, "perf.db"))
+            logf("[训练] AMD 兼容模式：MIOpen 缓存重定向到 " + os.path.join(_miopen_root, "cache"))
+        except Exception:
+            pass
     # Anima：RDNA2（RX 6000）fp16 VAE 溢出 NaN 自愈——强制 VAE fp32 + 自动清理旧 NaN 缓存
     if family == "anima" and _amd_is_gfx103x():
         env["ANIMA_VAE_FP32"] = "1"
