@@ -1,6 +1,6 @@
 {
-  "version": "v0.14.0",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.14.0/Setup.exe",
+  "version": "v0.14.1",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.14.1/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.14.0：新增第四引擎 Fizgig（Krea2 图像 LoRA，NVIDIA/AMD 双平台）——AMD 原生支持（ROCm 魔搭国内直连，不用再开兼容模式），显存自动适配（8G→NF4 可训 / 16G→fp8+块交换）；断点续训监控续上；训练 100% 卡住自动停止；新增配置导出/导入（项目页导出可分享 json、新建项目一键导入复用参数）；\n    · 修复：tokenizer 缓存损坏自动重建重试、Krea2AT 模型下载截断自愈、Krea2AT 16G 启动 OOM 自动重试、musubi AMD 块交换崩溃、AMD 中文用户名 MIOpen 崩溃、画风采样预览带描述词、第三引擎 compile 勾选隐藏、侧边栏 2×2 网格、CPU 设备探测警告、16G 自动禁用 torch.compile。"
+  "notes": "v0.14.1：热修复——\n    · 修复：SDXL 训练 tokenizer 自愈漏重建 tokenizer1（vocab_file=None 重试仍崩，4070S 用户日志复现）——补全 SDXL 双 tokenizer 预缓存与自愈；\n    · 修复：升级后不自动重启——新增独立 VBS 重启助手，静默安装成功后自动重新打开应用。"
 }

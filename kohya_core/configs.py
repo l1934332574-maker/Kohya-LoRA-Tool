@@ -41,7 +41,7 @@ ARCH_INFO = {
         "min_bucket": 512, "max_bucket": 2048, "family": "sd",
         "min_vram": 12, "recommend_vram": 16,
         "hint": "⚠ SDXL 底模推荐 16G 及以上显存，否则容易显存不足。",
-        "tokenizers": [("laion/CLIP-ViT-bigG-14-laion2B-39B-b160k", "clip")],
+        "tokenizers": [("openai/clip-vit-large-patch14", "clip"), ("laion/CLIP-ViT-bigG-14-laion2B-39B-b160k", "clip")],
     },
     "flux": {
         "label": "FLUX.1（1024px）", "resolution": 1024, "script": "flux_train_network.py",

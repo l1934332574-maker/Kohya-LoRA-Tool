@@ -2856,6 +2856,34 @@ class App:
         except Exception:
             pass
 
+def _write_update_restart_helper(dest):
+    """写一个独立 VBS 重启助手：等旧进程退出 → 静默安装（等完成）→ 成功则重新启动应用。
+
+    升级流程：工具下载 Setup.exe 后要静默安装，但安装器带 /NORESTART 且 [Run] 启动项
+    skipifsilent，装完不会自动拉起；这里用 wscript 跑一个独立助手（不依赖本进程存活），
+    安装成功后重新打开应用，实现「装完自动重启」。返回 VBS 路径。"""
+    if getattr(sys, "frozen", False):
+        app_cmd = '"%s"' % sys.executable
+    else:
+        app_cmd = '"%s" "%s"' % (sys.executable, os.path.abspath(sys.argv[0]))
+    inst_cmd = '"%s" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART' % dest
+    _ic = inst_cmd.replace('"', '""')
+    _ac = app_cmd.replace('"', '""')
+    vbs = os.path.join(os.environ.get("TEMP", "."), "kohya_update_restart.vbs")
+    content = (
+        "Set sh = CreateObject(\"WScript.Shell\")\r\n"
+        "sh.Sleep 2000\r\n"
+        "rc = sh.Run(\"" + _ic + "\", 1, True)\r\n"
+        "If rc = 0 Then\r\n"
+        "  sh.Run(\"" + _ac + "\", 1, False)\r\n"
+        "End If\r\n"
+    )
+    try:
+        with open(vbs, "w", encoding="utf-8-sig") as f:
+            f.write(content)
+    except Exception:
+        raise
+    return vbs
     def _handle_update_done(self, ok, dest, ver):
         self._updating = False
         try:
@@ -2868,7 +2896,8 @@ class App:
             return
         self._log(f"[更新] 下载完成，正在静默安装 {ver} …（装完自动重启）")
         try:
-            subprocess.Popen([dest, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+            helper = _write_update_restart_helper(dest)
+            subprocess.Popen(["wscript.exe", helper], creationflags=subprocess.CREATE_NO_WINDOW)
         except Exception as e:
             self._log(f"[更新] 启动安装失败：{e}")
             messagebox.showerror(core.APP_NAME, f"启动安装失败：{e}")

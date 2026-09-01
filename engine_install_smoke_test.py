@@ -2622,6 +2622,15 @@ def test_stuck_100_watchdog(base: Path):
     assert state["stopped"], "watchdog should have auto-stopped"
     assert any("自动停止" in x for x in logs)
     print("STUCK_100_WATCHDOG_OK")
+def test_update_restart_helper(base: Path):
+    """升级后自动重启：VBS 助手接线 + 安装器去掉 RestartApplications（避免双重启动）。"""
+    gui = (ROOT / "kohya_gui.py").read_text(encoding="utf-8-sig")
+    assert "def _write_update_restart_helper" in gui, "缺 VBS 重启助手"
+    assert "wscript.exe" in gui and "kohya_update_restart.vbs" in gui, "缺 wscript 接线"
+    assert 'sh.Run(' in gui and 'If rc = 0 Then' in gui, "缺安装等完成+成功后重启逻辑"
+    iss = (ROOT / "build_exe" / "installer" / "installer.iss").read_text(encoding="utf-8-sig")
+    assert "RestartApplications=yes" not in iss, "安装器不应再自重启（避免与 VBS 双开）"
+    print("UPDATE_RESTART_HELPER_OK")
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -2635,6 +2644,7 @@ def main():
         test_fourth_engine_train_pipeline(base)
         test_resume_monitor_seed(base)
         test_stuck_100_watchdog(base)
+        test_update_restart_helper(base)
         test_optimizer_resolution(base)
         test_preprocess_deps(base)
         test_preinstall_torch_mirror_fallback(base)
@@ -2732,6 +2742,12 @@ def test_tokenizer_failure_self_heal(base: Path):
     assert "os.path.getsize(_p) > 0" in src, "缺 0 字节拒绝"
     assert "强制重建分词器缓存后自动重试" in src, "缺失败重试接线"
     assert "def _force_rebuild_tokenizer_cache" in src, "缺强制重建函数"
+    # SDXL 需要两个 tokenizer（tokenizer1=openai/clip-vit-large-patch14 + tokenizer2=laion）；
+    # 漏配 tokenizer1 会导致自愈只重建 laion、vocab_file=None 重试仍崩（2026-09-01 4070S 用户 v0.14.0 日志）
+    _sdxl_tk = [m for m, _k in core.ARCH_INFO.get("sdxl", {}).get("tokenizers", [])]
+    assert "openai/clip-vit-large-patch14" in _sdxl_tk, "SDXL 缺 tokenizer1"
+    assert "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k" in _sdxl_tk, "SDXL 缺 tokenizer2"
+    assert (ROOT / "installers" / "tokenizers" / "openai_clip-vit-large-patch14" / "vocab.json").is_file(), "内置 tokenizer1 缺失"
     print("TOKENIZER_FAILURE_SELF_HEAL_OK")
 
 

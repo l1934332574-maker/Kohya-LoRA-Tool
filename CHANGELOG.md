@@ -24,6 +24,19 @@
 
 ## 未发布（进行中）
 
+### 修复：SDXL 训练 tokenizer 自愈漏重建 tokenizer1（vocab_file=None 重试仍崩）
+- 根因：SDXL 实际需要两个 tokenizer（tokenizer1=openai/clip-vit-large-patch14 + tokenizer2=laion/CLIP-ViT-bigG-14），
+  但 `ARCH_INFO["sdxl"]["tokenizers"]` 只配了 tokenizer2——预缓存与失败自愈都只处理 laion，
+  tokenizer1 缓存损坏（vocab_file=None）时训练崩、自愈重建错对象、重试依旧崩（v0.14.0 4070S 用户日志复现）。
+- 已修：SDXL 配置补上 tokenizer1（内置包 openai_clip-vit-large-patch14 随安装包分发）；预缓存/自愈都会重建两个。
+- 验证：TOKENIZER_FAILURE_SELF_HEAL_OK 增加 SDXL 双 tokenizer + 内置包断言；两套冒烟全绿。
+
+### 修复：升级后不自动重启（装完需手动打开）
+- 根因：工具静默安装带 /NORESTART、安装器 [Run] 启动项 skipifsilent，装完应用只关窗口不拉起。
+- 已修：更新完成时写独立 VBS 重启助手（wscript 运行）：等旧进程退出 → 静默安装（等完成）→ 成功则重新打开应用；
+  安装器去掉 RestartApplications=yes（避免与 VBS 双重启动）。
+- 验证：UPDATE_RESTART_HELPER_OK + 两套冒烟全绿。
+
 ### 待办
 - ai-toolkit（Krea2AT/Qwen/Z-Image/视频H3）与 Fizgig 断点续训接入
 - Fizgig 训练中采样预览（二期）
