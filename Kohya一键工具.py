@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.14.2"
+APP_VERSION = "0.14.3"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -798,6 +798,9 @@ def _release_kohya_install_lock(lock_f):
         pass
 
 
+# PyTorch 大轮子魔搭缓存（钉死版本，国内直连；优先走这里，上海交大/阿里云最后兜底——用户反馈阿里云太慢）
+MODELSCOPE_PTW_MIRROR = "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/engine_sources/pytorch_wheels/"
+
 def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
                       xf_ver=None, ta_ver=None, cu="cu128", label="Kohya", force=False):
     """预下载并安装 PyTorch 大轮子（torch/torchvision[/xformers][/torchaudio]）。
@@ -815,7 +818,14 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
         tag = None
     if tag not in ("cp310", "cp311", "cp312"):
         raise RuntimeError("暂不支持该 Python 版本的 PyTorch 预装: %s" % (tag or "未知"))
-    bases = ["https://mirrors.aliyun.com/pytorch-wheels/%s" % cu, "https://mirror.sjtu.edu.cn/pytorch-wheels/%s" % cu]
+    _off = _official_source_preferred()
+    bases = (["https://download.pytorch.org/whl/%s" % cu] if _off else []) + [
+        MODELSCOPE_PTW_MIRROR,
+        "https://mirror.sjtu.edu.cn/pytorch-wheels/%s" % cu,
+        "https://mirrors.aliyun.com/pytorch-wheels/%s" % cu,
+    ]
+    if _off:
+        logf("[%s] 已启用「官方源优先」：先走 PyTorch 官方下载（需开代理），国内镜像仍作备用" % label)
     wheels = [
         ("torch-%s%%2B%s-%s-%s-win_amd64.whl" % (torch_ver, cu, tag, tag), 1_000_000_000),
         ("torchvision-%s%%2B%s-%s-%s-win_amd64.whl" % (tv_ver, cu, tag, tag), 5_000_000),
@@ -875,10 +885,13 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
                 label, os.path.getsize(part) / 1048576.0, local_name))
         downloaded = False
         for source_idx, base in enumerate(bases, 1):
-            source_name = "阿里云" if "aliyun" in base else "上海交大"
+            source_name = ("PyTorch 官方" if "download.pytorch.org" in base
+                           else ("魔搭" if "modelscope.cn" in base
+                                 else ("上海交大" if "sjtu" in base else "阿里云")))
             logf("[%s] 从%s下载 %s（国内直连，断点续传）…" % (label, source_name, local_name))
             # 下载到 .part（curl -C - 自动续传），完整校验通过后才改名为正式 wheel
-            if _download_with_resume(base + "/" + name, part, logf, progress_cb=_progress_log, direct=True):
+            _use_direct = "download.pytorch.org" not in base  # 官方源走系统代理
+            if _download_with_resume(base + "/" + name, part, logf, progress_cb=_progress_log, direct=_use_direct):
                 if os.path.isfile(part) and os.path.getsize(part) >= minsize and _wheel_valid(part):
                     try:
                         os.replace(part, dest)
@@ -1600,6 +1613,86 @@ def write_musubi_dataset_config(image_dir, cache_dir, config_path, resolution=10
     with open(config_path, "w", encoding="utf-8") as f:
         f.write(text)
     return image_dir
+
+
+
+def _musubi_flat_images(folder):
+    """simulate musubi-tuner image scan: top-level only + fixed extensions (non-recursive)."""
+    exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".avif", ".jxl")
+    if not os.path.isdir(folder):
+        return []
+    out = []
+    try:
+        for fn in os.listdir(folder):
+            low = fn.lower()
+            if low.endswith(exts) and os.path.isfile(os.path.join(folder, fn)):
+                out.append(os.path.join(folder, fn))
+    except Exception:
+        pass
+    out.sort()
+    return out
+
+
+def _musubi_dataset_precheck(train_dir, label, logf):
+    """Pre-train validation for musubi dataset (scan rules differ from kohya).
+
+    Returns the image count musubi can actually see; raises actionable errors otherwise,
+    so a silent 0-item cache does not turn into a cryptic "total batches: 0" later.
+    """
+    if not os.path.isdir(train_dir) or count_images(train_dir) == 0:
+        raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
+    flat = _musubi_flat_images(train_dir)
+    if not flat:
+        sub_files, unsupported = [], []
+        for root, _dirs, files in os.walk(train_dir):
+            for fn in files:
+                if not fn.lower().endswith(IMAGE_EXTS):
+                    continue
+                fp = os.path.join(root, fn)
+                if root != train_dir:
+                    sub_files.append(os.path.relpath(fp, train_dir))
+                else:
+                    unsupported.append(fn)
+        hint = ""
+        if sub_files:
+            hint += "\n· 有 %d 张图在子文件夹里（musubi 只扫描顶层目录，请把图片直接放到 %s 根目录）" % (len(sub_files), train_dir)
+        if unsupported:
+            hint += "\n· 有 %d 张图扩展名 musubi 不识别（仅支持 png/jpg/jpeg/webp/bmp/avif/jxl）：%s" % (len(unsupported), ", ".join(unsupported[:8]))
+        raise RuntimeError(
+            "[%s] 数据集校验失败：musubi 在 %s 里没找到可训练的图片。%s\n请重新执行【数据预处理】" % (label, train_dir, hint or "")
+        )
+    missing_cap = [os.path.basename(p) for p in flat if not os.path.isfile(os.path.splitext(p)[0] + ".txt")]
+    if missing_cap:
+        show = ", ".join(missing_cap[:5]) + (" …" if len(missing_cap) > 5 else "")
+        raise RuntimeError(
+            "[%s] 数据集校验失败：%d 张图片没有同名 .txt 标签（如 %s），musubi 会全部过滤导致训练 0 批次。\n"
+            "请重新执行【数据预处理】生成标签（或确认打标完成后）再重试。" % (label, len(missing_cap), show)
+        )
+    logf(f"[{label}] 数据集校验通过：{len(flat)} 张图片（含 .txt 标签）")
+    return len(flat)
+
+
+def _verify_musubi_cache(cache_dir, label, logf, phase="latents", expected=None):
+    """Post-cache validation: musubi training only reads *_<arch>.safetensors + *_<arch>_te.safetensors."""
+    if phase in ("latents", "both"):
+        latents = [f for f in glob.glob(os.path.join(cache_dir, "*.safetensors")) if not f.endswith("_te.safetensors")]
+        if not latents:
+            raise RuntimeError(
+                "[%s] latents 缓存为空：%s\n缓存脚本未生成任何文件（数据集为空或图片被过滤）。请按上方数据集校验提示检查图片与 .txt 标签后重试。" % (label, cache_dir)
+            )
+        if expected is not None and len(latents) < expected:
+            logf("[%s] ⚠ latents 缓存不足：%d / 预期 %d，缺缓存的部分会被跳过" % (label, len(latents), expected))
+        logf(f"[{label}] latents 缓存校验通过：{len(latents)} 个")
+    if phase in ("te", "both"):
+        te = glob.glob(os.path.join(cache_dir, "*_te.safetensors"))
+        if not te:
+            raise RuntimeError(
+                "[%s] 文本编码器缓存为空：%s\n缓存脚本未生成任何 *_te.safetensors，训练会 0 批次。请检查文本编码器路径/模型后重试。" % (label, cache_dir)
+            )
+        if expected is not None and len(te) < expected:
+            logf("[%s] ⚠ 文本编码器缓存不足：%d / 预期 %d，缺缓存的部分会被跳过" % (label, len(te), expected))
+        logf(f"[{label}] 文本编码器缓存校验通过：{len(te)} 个")
+
 
 
 def _accelerate_config_path():
@@ -2422,8 +2515,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     # Krea2/Qwen-Image/Z-Image 数据统一放 train_character（与预处理 dataset_mode="character" 一致），
     # 即使画风子模式也读 train_character，避免「预处理输出 train_character / 训练读 train」不一致。
     train_dir = dataset_train_dir("character", params.get("project"))
-    if count_images(train_dir) == 0:
-        raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
+    _flat_n = _musubi_dataset_precheck(train_dir, "Krea2", logf)
     # 人物强绑定：trigger + 100% 一致特征固定前缀（musubi 不吃 keep_tokens，靠第一行不 shuffle 保护）
     if _sub_mode == "character" and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
@@ -2448,6 +2540,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
                    "--dataset_config", cfg_path, "--vae", files["vae"], "--num_workers", "1"],
                   cwd=mt_dir, logf=logf) != 0:
         raise RuntimeError("latents 缓存失败，请查看上方日志")
+    _verify_musubi_cache(cache_dir, "Krea2", logf, phase="latents", expected=_flat_n)
     # 自愈：Qwen3-VL-4B tokenizer 本地化（避免 musubi 在线拉 HF tokenizer 国内超时）
     _k2tk = _ensure_krea2_tokenizer_ready(logf, mvpy)
     _k2env = build_direct_env()
@@ -2465,6 +2558,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
                    "--dataset_config", cfg_path, "--text_encoder", files["te"], "--batch_size", "1", "--num_workers", "1"],
                   cwd=mt_dir, logf=logf, env=_k2env) != 0:
         raise RuntimeError("文本编码器缓存失败，请查看上方日志")
+    _verify_musubi_cache(cache_dir, "Krea2", logf, phase="te", expected=_flat_n)
     # 训练参数
     rank = int(params.get("rank", 32))
     alpha = int(params.get("alpha", 32))
@@ -2490,7 +2584,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         h2d_only = swap > 0 and gc_on
         logf(f"[Krea2] 高级参数手动指定 blocks_to_swap={swap}")
     # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
-    per_epoch = int(params.get("repeats", 5)) * count_images(train_dir)
+    per_epoch = int(params.get("repeats", 5)) * _flat_n
     if per_epoch * epochs > KREA2_MAX_STEPS:
         new_epochs = max(1, int(KREA2_MAX_STEPS / max(1, per_epoch)))
         logf(f"[Krea2] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
@@ -2656,8 +2750,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     # Krea2/Qwen-Image/Z-Image 数据统一放 train_character（与预处理 dataset_mode="character" 一致），
     # 即使画风子模式也读 train_character，避免「预处理输出 train_character / 训练读 train」不一致。
     train_dir = dataset_train_dir("character", params.get("project"))
-    if count_images(train_dir) == 0:
-        raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
+    _flat_n = _musubi_dataset_precheck(train_dir, "FLUX.2", logf)
     # 人物强绑定：trigger + 100% 一致特征固定前缀（musubi 不吃 keep_tokens，靠第一行不 shuffle 保护）
     if _sub_mode == "character" and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
@@ -2683,6 +2776,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
                    "--model_version", FLUX2_MODEL_VERSION, "--num_workers", "1"],
                   cwd=mt_dir, logf=logf) != 0:
         raise RuntimeError("latents 缓存失败，请查看上方日志")
+    _verify_musubi_cache(cache_dir, "FLUX.2", logf, phase="latents", expected=_flat_n)
     # 自愈：Qwen3-VL-4B tokenizer 本地化（避免 musubi 在线拉 HF tokenizer 国内超时）
     _k2tk = _ensure_krea2_tokenizer_ready(logf, mvpy)
     _k2env = build_direct_env()
@@ -2701,6 +2795,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
                    "--batch_size", "1", "--num_workers", "1", "--model_version", FLUX2_MODEL_VERSION],
                   cwd=mt_dir, logf=logf, env=_k2env) != 0:
         raise RuntimeError("文本编码器缓存失败，请查看上方日志")
+    _verify_musubi_cache(cache_dir, "FLUX.2", logf, phase="te", expected=_flat_n)
     # 训练参数
     rank = int(params.get("rank", 32))
     alpha = int(params.get("alpha", 32))
@@ -2716,7 +2811,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         h2d_only = swap > 0 and gc_on
         logf(f"[FLUX.2] 高级参数手动指定 blocks_to_swap={swap}")
     # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
-    per_epoch = int(params.get("repeats", 2)) * count_images(train_dir)
+    per_epoch = int(params.get("repeats", 2)) * _flat_n
     if per_epoch * epochs > FLUX2_MAX_STEPS:
         new_epochs = max(1, int(FLUX2_MAX_STEPS / max(1, per_epoch)))
         logf(f"[FLUX.2] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
@@ -3025,6 +3120,15 @@ def _save_app_settings(d):
         return False
 
 
+
+def _official_source_preferred():
+    """用户设置：国内镜像下载太慢时，是否改用官方源（PyTorch 官方 / GitHub / HuggingFace，需开代理）。"""
+    try:
+        return bool(_load_app_settings().get("download_official_first"))
+    except Exception:
+        return False
+
+
 def data_dir_size():
     """当前数据目录总大小（字节）。"""
     total = 0
@@ -3254,10 +3358,24 @@ def _download_engine_source(kind, logf=print):
         except Exception:
             pass
     urls = ENGINE_SOURCE_URLS[kind]
+    if _official_source_preferred():
+        # 官方源优先（GitHub 直连，需代理）→ gh 国内加速 → 魔搭
+        urls = ([u for u in urls if u.startswith("https://github.com/")] +
+                [u for u in urls if "ghfast.top" in u or "gh-proxy.com" in u] +
+                [u for u in urls if "modelscope.cn" in u])
+        logf("[第三引擎] 已启用「官方源优先」：GitHub 直连优先（需开代理）")
     for idx, url in enumerate(urls, 1):
-        label = "魔搭" if "modelscope.cn" in url else ("ghfast 国内加速" if "ghfast.top" in url else "gh-proxy 国内加速")
-        logf(f"[第三引擎] 下载 {names[kind]}（{label}，第{idx}/{len(urls)}个来源，国内直连）…")
-        if _download_with_resume(url, dest, logf, direct=True) and _valid_zip(dest, required[kind]):
+        if "modelscope.cn" in url:
+            _src = "魔搭"
+        elif url.startswith("https://github.com/"):
+            _src = "GitHub 官方"
+        elif "ghfast.top" in url:
+            _src = "ghfast 国内加速"
+        else:
+            _src = "gh-proxy 国内加速"
+        logf(f"[第三引擎] 下载 {names[kind]}（{_src}，第{idx}/{len(urls)}个来源）…")
+        _official_url = url.startswith("https://github.com/")
+        if _download_with_resume(url, dest, logf, direct=not _official_url) and _valid_zip(dest, required[kind]):
             logf(f"[第三引擎] {names[kind]} 下载完成并校验通过。")
             return dest
         for old in (dest, dest + ".part"):
@@ -3525,7 +3643,12 @@ FIZGIG_ROCM_WHEELS = {
     "rocm_sdk_core-7.15.0a20260728-py3-none-win_amd64.whl": 700_000_000,
     "rocm_sdk_libraries-7.15.0a20260728-py3-none-win_amd64.whl": 100_000_000,
     "bitsandbytes-0.50.2.dev0-cp312-cp312-win_amd64.whl": 10_000_000,
+    "rocm_bootstrap-0.1.0-py3-none-any.whl": 5_000,
 }
+# torch 运行时 import rocm_sdk（AMD 元包，提供 GPU 目标探测）；以 sdist 构建安装
+FIZGIG_ROCM_SDIST = ("rocm-7.15.0a20260728.tar.gz", 20_000)
+# AMD 路径额外纯 Python 依赖（torch requires-dist，不在共享依赖里；setuptools<82 是 torch 硬约束）
+FIZGIG_ROCM_EXTRA_DEPS = "filelock typing-extensions sympy networkx jinja2 fsspec setuptools<82"
 
 # Fizgig requirements.txt 过滤 CUDA torch/bnb 行后的共享依赖（torch 单独装）
 FIZGIG_SHARED_DEPS = (
@@ -3716,6 +3839,42 @@ def _fizgig_verify(vpy, fz_dir, logf=print, backend="nvidia"):
         raise
 
 
+
+def _ensure_fizgig_deps(vpy, fz_dir, logf=print):
+    """训练前自愈：fizgig_venv 缺关键依赖（如老版本安装漏了 toml）时按需补装。
+
+    「已安装」校验只查 torch + GPU + 源码标记；老版本安装可能漏装 toml/voluptuous 等，
+    训练时 krea2_cache_latents.py import 直接 ModuleNotFoundError（2026-09-02 AMD 7900 XT 用户）。
+    """
+    _probe = ["toml", "voluptuous", "yaml", "omegaconf", "einops", "safetensors",
+              "diffusers", "transformers", "accelerate", "tensorboard", "tqdm",
+              "PIL", "numpy", "cv2", "imageio_ffmpeg", "psutil", "packaging"]
+    _pkg = {"yaml": "pyyaml", "PIL": "pillow", "cv2": "opencv-python", "imageio_ffmpeg": "imageio-ffmpeg"}
+    _miss = []
+    try:
+        _code = ("import importlib\n"
+                 "mods=%r\n"
+                 "print('MISSING=' + ','.join(m for m in mods if importlib.util.find_spec(m) is None))\n"
+                 % _probe)
+        r = subprocess.run([vpy, "-c", _code], capture_output=True, text=True, timeout=120)
+        for _ln in (r.stdout or "").splitlines():
+            if _ln.startswith("MISSING="):
+                _miss = [m for m in _ln.split("=", 1)[1].split(",") if m]
+    except Exception:
+        _miss = ["toml"]
+    if not _miss:
+        return True
+    _pkgs = [_pkg.get(m, m) for m in _miss]
+    logf("[第四引擎] ⚠ fizgig_venv 缺依赖：%s，自动补装（国内镜像）…" % ", ".join(_pkgs))
+    _env = build_direct_env()
+    if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                   "--index-url", "https://mirrors.aliyun.com/pypi/simple/",
+                   "--extra-index-url", "https://pypi.tuna.tsinghua.edu.cn/simple"] + _pkgs,
+                  cwd=fz_dir, env=_env, logf=logf) == 0:
+        logf("[第四引擎] Fizgig 依赖补装完成")
+        return True
+    logf("[第四引擎] Fizgig 依赖补装失败（网络/镜像问题），可稍后重试或重装第四引擎")
+    return False
 def install_fizgig_engine(logf=print):
     """安装第四训练引擎 Fizgig（Krea2 图像 LoRA，NVIDIA/AMD 双平台）。
 
@@ -3818,16 +3977,21 @@ def install_fizgig_engine(logf=print):
                         if not _download_with_resume(FIZGIG_ROCM_MIRROR + _name, _p, logf, direct=True) or not _wheel_valid(_p):
                             raise RuntimeError("魔搭下载失败: " + _name)
                     local.append(_p)
-                _sdk = [p for p in local if "bitsandbytes" not in os.path.basename(p)]
-                if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
-                               "--find-links", rocm_dir,
-                               "--index-url", "https://mirrors.aliyun.com/pypi/simple/"] + _sdk,
+                _sdk = [p for p in local if "bitsandbytes" not in os.path.basename(p) and "rocm_bootstrap" not in os.path.basename(p)]
+                if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + _sdk,
                               cwd=fz_dir, env=env, logf=logf) != 0:
-                    raise RuntimeError("本地 ROCm 栈 pip 安装失败")
+                    raise RuntimeError("本地 ROCm 栈安装失败")
                 _bnb = [p for p in local if "bitsandbytes" in os.path.basename(p)]
-                if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120"] + _bnb,
+                if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + _bnb,
                               cwd=fz_dir, env=env, logf=logf) != 0:
                     raise RuntimeError("bitsandbytes 安装失败")
+                if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120", _sd],
+                              cwd=fz_dir, env=env, logf=logf) != 0:
+                    raise RuntimeError("rocm 元包安装失败")
+                _rb = [p for p in local if "rocm_bootstrap" in os.path.basename(p)]
+                if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + _rb,
+                              cwd=fz_dir, env=env, logf=logf) != 0:
+                    raise RuntimeError("rocm-bootstrap 安装失败")
                 _rocm_ok = True
                 logf("[第四引擎] AMD ROCm 栈安装成功（魔搭国内直连）。")
             except Exception as e:
@@ -3860,6 +4024,8 @@ def install_fizgig_engine(logf=print):
         _deps = FIZGIG_SHARED_DEPS
         if backend == "nvidia":
             _deps = _deps + " " + FIZGIG_NVIDIA_EXTRA_DEPS
+        else:
+            _deps = _deps + " " + FIZGIG_ROCM_EXTRA_DEPS
         os.makedirs(os.path.dirname(_req_tmp), exist_ok=True)
         with open(_req_tmp, "w", encoding="utf-8") as _rf:
             _rf.write("\n".join(x for x in _deps.split()) + "\n")
@@ -3959,6 +4125,8 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
         raise RuntimeError("第四训练引擎（Fizgig）未安装，请先点「⚙ 安装第四引擎」。\n" + detail)
     kdir = get_kohya_dir()
     fz_dir = os.path.join(kdir, "fizgig")
+    if not _ensure_fizgig_deps(vpy, fz_dir, logf):
+        raise RuntimeError("Fizgig 依赖补装失败（网络不稳或镜像不可达）。请检查网络后重试，或点「⚙ 安装第四引擎」重装。")
     _ram_gb = detect_ram_gb()
     if _ram_gb:
         logf(f"[Krea2(Fizgig)] 系统内存: {_ram_gb:.0f}G")
@@ -4981,7 +5149,7 @@ def _krea2_at_steps(params, train_dir):
     return max(100, min(KREA2_MAX_STEPS, steps))
 
 
-def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=print, vram_gb=None):
+def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=print, vram_gb=None, force_offload=None):
     """生成 AI Toolkit Krea2 图像 LoRA 训练 yaml（第三引擎，arch=krea2）。
 
     底模 = models/krea2/raw.safetensors（bf16 原版），显存靠 ai-toolkit 加载期量化
@@ -5017,12 +5185,14 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     # 启动 OOM 是显存抖动的随机问题（实测 512@2s/768@5s 可跑，偶尔启动 OOM）；保留 0.3 保速度，
     # 启动 OOM 由训练侧「自动重试一次」兜底（模拟重开即好）；24G+ 关闭保速度（同 H3 做法）。
     _lo_block = ""
+    _off_pct = None
     if vram_gb is not None and vram_gb <= 16:
+        _off_pct = force_offload if force_offload is not None else 0.3
         _lo_block = (
             "        layer_offloading: true\n"
-            "        layer_offloading_transformer_percent: 0.3\n"
+            "        layer_offloading_transformer_percent: %.1f\n" % _off_pct
         )
-        logf("[Krea2(AT)] 显存 %sGB：启用 layer_offloading（DiT 分层交换 30%%，启动 OOM 自动重试兜底）" % vram_gb)
+        logf("[Krea2(AT)] 显存 %sGB：启用 layer_offloading（DiT 分层交换 %.0f%%，启动 OOM 自动重试兜底）" % (vram_gb, _off_pct * 100))
     elif vram_gb is not None:
         logf("[Krea2(AT)] 显存 %sGB：不启用分层交换，保速度" % vram_gb)
     if vpy:
@@ -5248,12 +5418,22 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
         except Exception:
             pass
     logf("[Krea2] 启动 AI Toolkit 训练（首次要加载 26GB 底模并量化，请耐心等待）…")
-    rc = run_stream([vpy, os.path.join(at_dir, "run.py"), cfg_path], cwd=at_dir, env=env, logf=logf, collect=_log_tail)
-    if rc != 0 and _log_mentions_start_oom(_log_tail):
-        # 16G 边界显存：启动 OOM 是显存抖动（实测重开即好、512@2s/768@5s 可跑），自动重试一次
-        logf("[Krea2] ⚠ 启动阶段 CUDA OOM（16G 边界显存抖动），自动重试一次…")
-        _log_tail.clear()
+    # 16G 边界显存：启动 OOM 是显存抖动（实测重开即好、512@2s/768@5s 可跑），
+    # 自动重试最多 3 次；最后一次加大分层交换（0.3→0.5）兜底，保证能启动（代价是速度略慢）。
+    rc = 1
+    _at_attempts = 3
+    for _at in range(_at_attempts):
+        if _at > 0:
+            _log_tail.clear()
+            logf("[Krea2] ⚠ 启动阶段 CUDA OOM（16G 边界显存抖动），自动重试（%d/%d）…" % (_at + 1, _at_attempts))
+            if _at == _at_attempts - 1 and vram_gb is not None and vram_gb <= 16:
+                logf("[Krea2] 仍 OOM，改用更大分层交换（50%%，会稍慢）最后兜底一次…")
+                write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=vpy, logf=logf, vram_gb=vram_gb, force_offload=0.5)
         rc = run_stream([vpy, os.path.join(at_dir, "run.py"), cfg_path], cwd=at_dir, env=env, logf=logf, collect=_log_tail)
+        if rc == 0:
+            break
+        if not _log_mentions_start_oom(_log_tail):
+            break
     if rc != 0:
         _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError(f"Krea2（AI Toolkit）训练结束，退出码 {rc}，请查看上方日志")
@@ -5620,10 +5800,14 @@ def preprocess_mode(mode, at_sub_mode=None):
 
     其余模式（krea2/flux2/qwen_image/zimage/video）数据统一走 train_character，
     预处理用画风/人物子模式，默认人物（保留全部标签）。
+    概念模式（concept，形态/种族）预处理同人物：保留全部标签 + trigger 插到开头。
     """
     if mode in ("style", "character"):
         return mode
-    return at_sub_mode or "character"
+    sub = at_sub_mode or "character"
+    if sub == "style":
+        return "style"
+    return "character"   # 人物 / 概念 / 未知子模式：一律保留全部标签
 
 
 # ==================== 小工具：训练前通用操作（主页 🧰 小工具模块） ====================
@@ -7467,7 +7651,24 @@ def write_usage_template(mode, params, output_name, out_dir=None):
 
     cap = _sample_caption()
 
-    if mode == "character":
+    if mode == "concept":
+        triggers = split_triggers(params.get("trigger"))
+        trig_line = ", ".join(triggers) if triggers else "<你的触发词>"
+        pos_example = ((gpos + ", ") if gpos else "") + ((trig_line + ", ") if triggers else "") + "1girl, <形态/种族描述…>"
+        text = (
+            "【概念（形态/种族）LoRA 使用模板】\n"
+            f"模型文件：{output_name}.safetensors\n"
+            f"Trigger 触发词：{trig_line}\n"
+            f"训练分辨率：{reso}px\n\n"
+            "使用建议：\n"
+            f"1. 正向提示词以触发词开头，角色就会变成训练的形态：{pos_example}\n"
+            + (f"   你的训练标签示例：{cap}\n" if cap else "")
+            + "2. 推荐 LoRA 权重 0.6 ~ 0.9（按底模微调）。\n"
+            "3. 想让形态更明显就提高权重；想自然融入就用 0.6 左右。\n"
+            f"4. 负面提示词建议：{neg}\n"
+            "5. ⚠ 训练集混了多种画风时，trigger 只绑形态不绑画风；若输出画风也变了，说明训练集画风太单一。\n"
+        )
+    elif mode == "character":
         triggers = split_triggers(params.get("trigger"))
         trig_line = ", ".join(triggers) if triggers else "<你的触发词>"
         reg = "已启用" if params.get("reg_dir") else "未启用"
@@ -8074,7 +8275,10 @@ def _write_sample_prompts(output_name, params, mode, resolution=None, engine="ko
         style_cap = (params.get("style_caption") or "").strip()
         # 采样提示词：画风模式用「画风描述词」，预览才贴近实际风格（此前写死 portrait 完全对不上）；
         # 否则用 portrait 偏向面部（降低早期未训练好的全身/不雅出图概率）；不写死 1girl/solo。
-        if style_cap:
+        if mode == "concept":
+            # 概念/形态：trigger 吸收原型，采样直接 trigger 出图，不要 portrait 偏向（会出半身人脸而非完整形态）
+            prompt = ((trig + ", ") if trig else "") + "masterpiece, best quality"
+        elif style_cap:
             prompt = (f"{trig}, " if trig else "") + style_cap + ", masterpiece, best quality"
         else:
             prompt = (f"{trig}, portrait, masterpiece, best quality" if trig else "masterpiece, best quality")
@@ -8239,7 +8443,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         logf(f"[训练] 已注入全局正向提示词，使用临时数据集: {global_dataset}")
 
     keep_tokens = 0
-    if mode in ("character", "style"):
+    if mode in ("character", "style", "concept"):
         _trig = params.get("trigger") or ""
         if _trig.strip():
             keep_tokens = max(1, len(split_triggers(_trig)))
@@ -9290,6 +9494,35 @@ def _anima_find_qwen3(base):
             if f.lower().endswith(".safetensors") and f.lower().startswith("qwen"):
                 return os.path.join(base, f)
     return None
+
+def _download_qwen3_from_modelscope(qwen3_dir, logf=print):
+    """从魔搭（ModelScope）直链下载 Qwen3-0.6B 文本编码器（hf-mirror 失败时兜底，国内直连、断点续传）。"""
+    os.makedirs(qwen3_dir, exist_ok=True)
+    _ms = "https://modelscope.cn/models/Qwen/Qwen3-0.6B/resolve/master/"
+    _files = [
+        ("config.json", 200),
+        ("generation_config.json", 200),
+        ("merges.txt", 100000),
+        ("tokenizer.json", 1000000),
+        ("tokenizer_config.json", 500),
+        ("vocab.json", 100000),
+        ("model.safetensors", 1_400_000_000),
+    ]
+    for _name, _minsize in _files:
+        _dest = os.path.join(qwen3_dir, _name)
+        if os.path.isfile(_dest) and os.path.getsize(_dest) >= _minsize:
+            logf(f"[Anima] Qwen3 已存在 {_name}，跳过下载")
+            continue
+        logf(f"[Anima] 从魔搭下载 Qwen3-0.6B/{_name}…")
+        if not _download_with_resume(_ms + _name, _dest, logf, direct=True):
+            raise RuntimeError(f"魔搭下载失败：{_name}（已保留断点，可重试）")
+        if os.path.getsize(_dest) < _minsize:
+            raise RuntimeError(f"魔搭下载不完整：{_name}")
+    if _anima_find_qwen3(qwen3_dir) is None:
+        raise RuntimeError("魔搭下载完成但 Qwen3-0.6B 仍不可用（文件缺失或命名异常）")
+    return True
+
+
 def _ensure_anima_components(logf=print):
     """确保 Anima 的 Qwen3-0.6B 文本编码器和 Qwen-Image VAE 就位。
 
@@ -9312,9 +9545,13 @@ def _ensure_anima_components(logf=print):
                 logf(f"[Anima] 检测到不完整的 Qwen3-0.6B（缺权重），已备份到 {_bak}，将自动重新下载…")
             except Exception as _e:
                 logf(f"[Anima] 检测到不完整的 Qwen3-0.6B（缺权重），但自动备份失败（{_e}），将尝试重新下载…")
-        logf("[Anima] 首次使用需要下载 Qwen3-0.6B 文本编码器（约 1.2GB，走 hf-mirror）…")
+        logf("[Anima] 首次使用需要下载 Qwen3-0.6B 文本编码器（约 1.2GB，hf-mirror/魔搭双源）…")
         try:
-            _hf_download("Qwen/Qwen3-0.6B", qwen3_dir, logf)
+            try:
+                _hf_download("Qwen/Qwen3-0.6B", qwen3_dir, logf)
+            except Exception as _hf_e:
+                logf(f"[Anima] hf-mirror 下载失败（{_hf_e}），自动切换魔搭国内直链下载…")
+                _download_qwen3_from_modelscope(qwen3_dir, logf)
             qwen3_path, qwen3_base = _anima_find_qwen3_any()
         except Exception as e:
             raise RuntimeError(
@@ -9323,7 +9560,9 @@ def _ensure_anima_components(logf=print):
                 f"1) 完整模型文件夹（含 config.json + 权重 + tokenizer），解压后放到：\n   {os.path.join(base, 'Qwen3-0.6B')}\n"
                 "2) 只下一个 Qwen3-0.6B 的 .safetensors 权重文件（如 model.safetensors），\n"
                 f"   放到 {os.path.join(base, 'Qwen3-0.6B')} 文件夹里即可（程序会自动用内置配置加载）\n\n"
-                "下载地址（国内镜像）：https://hf-mirror.com/Qwen/Qwen3-0.6B")
+                "下载地址（国内镜像，任选）：\n"
+                "· hf-mirror：https://hf-mirror.com/Qwen/Qwen3-0.6B\n"
+                "· 魔搭：https://modelscope.cn/models/Qwen/Qwen3-0.6B")
         if qwen3_path is None:
             raise RuntimeError(f"Qwen3-0.6B 仍未就绪，请检查：{os.path.join(base, 'Qwen3-0.6B')}")
     vae_dir = os.path.join(base, "Anima_vae")
@@ -10979,3 +11218,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+

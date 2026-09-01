@@ -2240,8 +2240,8 @@ def test_fourth_engine(base: Path):
                 fake_python(target / "Scripts" / "python.exe")
                 state["rebuilt"] = True
                 return 0
-            if "--find-links" in cmd and any("rocm_sdk_devel" in x for x in cmd):
-                # 魔搭缓存路径：本地 wheel 安装（find-links + 阿里云）
+            if "--no-deps" in cmd and any("rocm_sdk_devel" in x for x in cmd):
+                # 魔搭缓存路径：本地 wheel --no-deps 安装（绕开 rocm 元包解析）
                 assert any("rocm_sdk_core" in x for x in cmd)
                 assert any("torch-2.12.0+rocm7.15.0a20260728" in x for x in cmd)
                 state["rocm"] = True
@@ -2251,7 +2251,7 @@ def test_fourth_engine(base: Path):
                 assert "rocm-sdk-devel==7.15.0a20260728" in cmd
                 state["rocm"] = True
                 return 0
-            if len(cmd) >= 6 and cmd[3] == "install" and cmd[4] == "--no-input" and cmd[-1].endswith(".whl"):
+            if len(cmd) >= 6 and cmd[3] == "install" and cmd[4] == "--no-input" and cmd[-1].endswith(".whl") and "bitsandbytes" in cmd[-1]:
                 state["bnb"] = True
                 return 0
             if "-r" in cmd:
@@ -2261,6 +2261,7 @@ def test_fourth_engine(base: Path):
                     assert "triton-windows" in req and "bitsandbytes==0.48.2" in req
                 else:
                     assert "triton-windows" not in req and "bitsandbytes" not in req
+                    assert "setuptools<82" in req and "filelock" in req
                 state["deps"] = True
                 return 0
             return 0
@@ -2321,6 +2322,10 @@ def test_fourth_engine(base: Path):
     assert s1["torch"] and not s1["rocm"]
     assert any("NVIDIA CUDA" in x for x in l1)
 
+    # 魔搭路径：rocm sdist 下载后需真实文件存在（代码检查 os.path.isfile）
+    _rdir = base / "fourth" / "cache" / "cache" / "engine_sources" / "rocm"
+    _rdir.mkdir(parents=True, exist_ok=True)
+    (_rdir / "rocm-7.15.0a20260728.tar.gz").write_bytes(b"dummy")
     s2, l2 = run_flow("amd")
     assert s2["rocm"] and s2["bnb"] and not s2["torch"]
     assert any("AMD ROCm" in x for x in l2) and any("gfx1100" in x for x in l2)
@@ -2382,6 +2387,14 @@ def test_fourth_engine(base: Path):
     assert state["rocm"] and state["bnb"] and state["verify"]
     assert any("回退 AMD nightly" in x for x in logs)
     print("FOURTH_ENGINE_AMD_NIGHTLY_FALLBACK_OK")
+
+def test_fizgig_deps_self_heal(base: Path):
+    """Fizgig 训练前依赖自愈：老版本装的 fizgig_venv 缺 toml 等包时按需补装（AMD 7900 XT 用户复现）。"""
+    src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
+    assert "def _ensure_fizgig_deps" in src, "缺 Fizgig 依赖自愈函数"
+    assert "_ensure_fizgig_deps(vpy, fz_dir, logf)" in src, "缺训练前接线"
+    assert "find_spec" in src and "MISSING=" in src, "缺依赖探测"
+    print("FIZGIG_DEPS_SELF_HEAL_OK")
 def test_fourth_engine_train_pipeline(base: Path):
     """train_krea2_fizgig：数据集 TOML + 缓存 + 训练命令构造（8G→NF4 / 16G→fp8+swap20）。"""
     import contextlib
@@ -2432,6 +2445,7 @@ def test_fourth_engine_train_pipeline(base: Path):
             patch.object(core, "dataset_train_dir", return_value=str(train_dir)),
             patch.object(core, "detect_ram_gb", return_value=32),
             patch.object(core, "run_stream", side_effect=run_stream),
+            patch.object(core, "_ensure_fizgig_deps", return_value=True),
         )
         params = {"project": proj, "rank": "16", "alpha": "8", "unet_lr": "1e-4",
                   "max_epochs": "2", "repeats": "2", "resolution": "512",
@@ -2530,6 +2544,56 @@ def test_stuck_100_watchdog(base: Path):
     assert state["stopped"], "watchdog should have auto-stopped"
     assert any("自动停止" in x for x in logs)
     print("STUCK_100_WATCHDOG_OK")
+def test_concept_mode(base: Path):
+    """概念模式（形态/种族）：预处理映射 + 训练目录 + 推理模板 + 采样提示词。"""
+    # 预处理映射：concept → character（保留全部标签）
+    assert core.preprocess_mode("concept", None) == "character"
+    assert core.preprocess_mode("krea2", "concept") == "character"
+    assert core.preprocess_mode("krea2", "style") == "style"
+    # 训练目录：concept 走 train_character
+    assert "train_character" in core.dataset_train_dir("concept", "proj_x").replace("\\", "/")
+    # 触发词提示
+    assert hasattr(core, "TRIGGER_HINT_CONCEPT")
+    # 推理模板 concept 分支（trigger + 形态模板，不落画风模板）
+    import tempfile as _tf
+    out = _tf.mkdtemp()
+    tpl = core.write_usage_template("concept", {"trigger": "my_mer_01", "base_type": "sdxl"}, "concept_test", out_dir=out)
+    txt = open(tpl, encoding="utf-8").read()
+    assert "概念（形态/种族）LoRA 使用模板" in txt and "my_mer_01" in txt
+    # 采样提示词 concept 分支：trigger + 不带 portrait（避免偏向半身人脸）
+    sp = core._write_sample_prompts("concept_test", {"trigger": "my_mer_01", "sample_preview": True}, "concept", resolution=1024)
+    assert sp and "my_mer_01" in open(sp, encoding="utf-8").read()
+    assert "portrait" not in open(sp, encoding="utf-8").read()
+    print("CONCEPT_MODE_OK")
+
+def test_official_source_option(base: Path):
+    """下载太慢切官方源：设置开关持久化 + torch 轮子/GitHub 引擎源码/HuggingFace 底模接线（需代理）。"""
+    src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
+    assert "def _official_source_preferred" in src, "缺官方源设置读取函数"
+    assert "download_official_first" in src, "缺设置键 download_official_first"
+    assert "download.pytorch.org/whl" in src, "缺 PyTorch 官方轮子源"
+    assert "https://github.com/" in src, "缺 GitHub 引擎源码源"
+    gsrc = (ROOT / "kohya_gui.py").read_text(encoding="utf-8-sig")
+    assert "⑥ 下载源" in gsrc and "download_official_first" in gsrc, "GUI 缺下载源开关"
+    assert "https://huggingface.co/" in gsrc, "GUI 缺 HuggingFace 直连"
+    assert "_download_qwen3_from_modelscope" in src, "缺 Qwen3 魔搭兜底函数"
+    assert "modelscope.cn/models/Qwen/Qwen3-0.6B" in src, "缺 Qwen3 魔搭直链"
+    assert "自动切换魔搭" in src, "缺 hf-mirror→魔搭切换"
+    print("OFFICIAL_SOURCE_OPTION_OK")
+
+
+def test_modelscope_ptw_preferred(base: Path):
+    """PyTorch 大轮子下载源：魔搭优先，上海交大/阿里云最后兜底（用户反馈阿里云太慢）。"""
+    src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
+    assert "MODELSCOPE_PTW_MIRROR" in src, "缺魔搭轮子缓存常量"
+    assert "download.pytorch.org/whl" in src, "缺官方源（PyTorch 官方，需代理）"
+    assert 'modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/engine_sources/pytorch_wheels/' in src
+    # 国内链顺序：魔搭 → 上海交大 → 阿里云
+    i1 = src.find("MODELSCOPE_PTW_MIRROR,")
+    i2 = src.find("mirror.sjtu.edu.cn/pytorch-wheels")
+    i3 = src.find("mirrors.aliyun.com/pytorch-wheels")
+    assert 0 <= i1 < i2 < i3, "下载源顺序应为 魔搭→上海交大→阿里云"
+    print("MODELSCOPE_PTW_PREFERRED_OK")
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -2541,8 +2605,12 @@ def main():
         test_third_engine(base)
         test_fourth_engine(base)
         test_fourth_engine_train_pipeline(base)
+        test_fizgig_deps_self_heal(base)
         test_resume_monitor_seed(base)
         test_stuck_100_watchdog(base)
+        test_concept_mode(base)
+        test_modelscope_ptw_preferred(base)
+        test_official_source_option(base)
         test_optimizer_resolution(base)
         test_preprocess_deps(base)
         test_preinstall_torch_mirror_fallback(base)
@@ -2615,6 +2683,7 @@ def main():
         test_tokenizer_failure_self_heal(base)
         test_cpu_device_probe_warning(base)
         test_krea2_at_support(base)
+        test_musubi_dataset_precheck(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 def test_cpu_device_probe_warning(base: Path):
@@ -2689,8 +2758,20 @@ def test_krea2_at_start_oom_retry(base: Path):
     assert core._log_mentions_start_oom(["steps: 5/464 [00:10<10:00, 0.5s/it, avr_loss=0.07]", "CUDA error: out of memory"]) is False
     assert core._log_mentions_start_oom(["Loading transformer", "Moving transformer to CPU"]) is False
     src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8")
-    assert "layer_offloading_transformer_percent: 0.3" in src, "16G 应保持 0.3 保速度"
-    assert "自动重试一次" in src, "缺启动 OOM 自动重试"
+    assert "force_offload" in src and "else 0.3" in src, "16G 默认保持 0.3 保速度，支持兜底加大"
+    assert "自动重试（" in src and "最后兜底" in src, "缺启动 OOM 多次自动重试 + 加大分层交换兜底"
+    # force_offload=0.5 时 yaml 应写出 0.5（16G 最后兜底）
+    _td = base / "at_oom_yaml"
+    _td.mkdir(parents=True, exist_ok=True)
+    with patch.object(core, "krea2_model_files", return_value={"raw": str(base / "raw.safetensors")}), \
+         patch.object(core, "krea2_at_te_dir", return_value=str(_td)), \
+         patch.object(core, "krea2_at_vae_dir", return_value=str(_td)), \
+         patch.object(core, "dataset_train_dir", return_value=str(base)), \
+         patch.object(core, "count_images", return_value=5):
+        _cfg = str(_td / "t.yaml")
+        core.write_krea2_at_yaml({"project": "p", "rank": "32", "alpha": "32"}, str(base), str(_td), _cfg, vram_gb=16, force_offload=0.5)
+        _y = open(_cfg, encoding="utf-8").read()
+        assert "layer_offloading_transformer_percent: 0.5" in _y, _y
     print("KREA2_AT_START_OOM_RETRY_OK")
 
 def test_krea2_at_truncated_te_self_heal(base: Path):
@@ -2895,5 +2976,74 @@ def test_krea2_at_support(base: Path):
         assert state["launched"] and len(state["launched"]) >= 3 and state["launched"][1].endswith("run.py")
     print("KREA2_AT_SUPPORT_OK")
 
+
+def test_musubi_dataset_precheck(base: Path):
+    """musubi 训练前/缓存后校验：子文件夹、不支持扩展名、缺 .txt、缓存为空都要给明确报错，
+    避免“缓存静默为空 → 训练 total batches: 0”的谜之失败。"""
+    logs = []
+
+    def fresh(name):
+        d = base / "dataset" / name
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    # 1) 合法子集：a.png + a.txt，返回 1
+    valid = fresh("valid")
+    (valid / "a.png").write_bytes(b"x")
+    (valid / "a.txt").write_text("1girl", encoding="utf-8")
+    n = core._musubi_dataset_precheck(str(valid), "Krea2", logs.append)
+    assert n == 1, n
+    assert any("数据集校验通过" in x for x in logs)
+
+    # 2) 缺 .txt 标签 → 明确报错
+    missing = fresh("missing_cap")
+    (missing / "b.png").write_bytes(b"x")
+    try:
+        core._musubi_dataset_precheck(str(missing), "Krea2", logs.append)
+        raise AssertionError("missing caption should raise")
+    except RuntimeError as e:
+        assert ".txt" in str(e) and "b.png" in str(e), str(e)
+
+    # 3) 只有子文件夹图片 → 报“子文件夹”
+    only_sub = fresh("only_sub")
+    (only_sub / "sub").mkdir(parents=True, exist_ok=True)
+    (only_sub / "sub" / "x.png").write_bytes(b"x")
+    (only_sub / "sub" / "x.txt").write_text("1girl", encoding="utf-8")
+    try:
+        core._musubi_dataset_precheck(str(only_sub), "Krea2", logs.append)
+        raise AssertionError("subfolder should raise")
+    except RuntimeError as e:
+        assert "子文件夹" in str(e), str(e)
+
+    # 4) 只有不支持扩展名 → 报“扩展名”
+    only_gif = fresh("only_gif")
+    (only_gif / "x.gif").write_bytes(b"x")
+    (only_gif / "x.txt").write_text("1girl", encoding="utf-8")
+    try:
+        core._musubi_dataset_precheck(str(only_gif), "Krea2", logs.append)
+        raise AssertionError("unsupported ext should raise")
+    except RuntimeError as e:
+        assert "扩展名" in str(e), str(e)
+
+    # 5) 缓存校验：latents 为空 / te 缺失 / 通过
+    cache = base / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    try:
+        core._verify_musubi_cache(str(cache), "Krea2", logs.append, phase="latents")
+        raise AssertionError("empty cache should raise")
+    except RuntimeError as e:
+        assert "latents 缓存为空" in str(e), str(e)
+    (cache / "a_1024x1024_kr2.safetensors").write_bytes(b"x")
+    core._verify_musubi_cache(str(cache), "Krea2", logs.append, phase="latents", expected=1)
+    try:
+        core._verify_musubi_cache(str(cache), "Krea2", logs.append, phase="te")
+        raise AssertionError("missing te should raise")
+    except RuntimeError as e:
+        assert "文本编码器缓存为空" in str(e), str(e)
+    (cache / "a_kr2_te.safetensors").write_bytes(b"x")
+    core._verify_musubi_cache(str(cache), "Krea2", logs.append, phase="te", expected=1)
+    print("MUSUBI_DATASET_PRE_CHECK_OK")
+
 if __name__ == "__main__":
     main()
+

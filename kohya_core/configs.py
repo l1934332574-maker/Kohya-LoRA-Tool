@@ -8,6 +8,7 @@
 MODE_LABELS = {
     "style": "🎨 画风LoRA模式",
     "character": "👤 人物角色LoRA模式",
+    "concept": "🦄 概念LoRA模式（形态/种族）",
     "krea2": "🖼 Krea 2 图像LoRA",
     "krea2_at": "🖼 Krea2 图像LoRA（AI-Toolkit 引擎）",
     "krea2_fz": "🖼 Krea2 图像LoRA（Fizgig 引擎）",
@@ -16,12 +17,13 @@ MODE_LABELS = {
     "qwen_image": "🖼 Qwen-Image LoRA",
     "zimage": "🖼 Z-Image LoRA",
 }
-MODE_KEYS = ["style", "character", "krea2", "krea2_at", "krea2_fz", "flux2", "video", "qwen_image", "zimage"]
+MODE_KEYS = ["style", "character", "concept", "krea2", "krea2_at", "krea2_fz", "flux2", "video", "qwen_image", "zimage"]
 
 # Qwen-Image / Z-Image 的画风/人物子模式（训练类型切换）
 AT_SUB_LABELS = {
     "character": "人物（保留全部标签）",
     "style": "画风（过滤人物标签）",
+    "concept": "概念（形态/种族）",
 }
 
 # 架构注册表（对标秋叶：SD1.5 / SDXL / FLUX.1 / Anima）
@@ -94,6 +96,16 @@ PRESETS = {
                  "repeats": "3", "max_epochs": "6", "resolution": "1024"},
         "anima": {"rank": "16", "alpha": "16", "unet_lr": "8e-5", "te_lr": "8e-5",
                   "repeats": "3", "max_epochs": "6", "resolution": "1024"},
+    },
+    "concept": {
+        "sd15": {"rank": "32", "alpha": "16", "unet_lr": "1e-4", "te_lr": "5e-5",
+                 "repeats": "3", "max_epochs": "8", "resolution": "512"},
+        "sdxl": {"rank": "32", "alpha": "16", "unet_lr": "1e-4", "te_lr": "5e-5",
+                 "repeats": "3", "max_epochs": "8", "resolution": "1024"},
+        "flux": {"rank": "32", "alpha": "16", "unet_lr": "1e-4", "te_lr": "5e-5",
+                 "repeats": "3", "max_epochs": "8", "resolution": "1024"},
+        "anima": {"rank": "32", "alpha": "16", "unet_lr": "1e-4", "te_lr": "5e-5",
+                  "repeats": "3", "max_epochs": "8", "resolution": "1024"},
     },
     "krea2": {
         "sd15": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
@@ -168,7 +180,7 @@ PRESETS = {
 }
 
 RESOLUTIONS = {k: v["resolution"] for k, v in ARCH_INFO.items()}
-MIN_IMAGES = {"style": 20, "character": 15, "krea2": 15, "krea2_at": 15, "krea2_fz": 15, "flux2": 15, "video": 3, "qwen_image": 15, "zimage": 15}   # 一键训练最少可用图片/视频数
+MIN_IMAGES = {"style": 20, "character": 15, "concept": 15, "krea2": 15, "krea2_at": 15, "krea2_fz": 15, "flux2": 15, "video": 3, "qwen_image": 15, "zimage": 15}   # 一键训练最少可用图片/视频数
 MAX_AUTO_STEPS = 12000                          # 一键训练自动约束的最大总步数（防过拟合）
 
 PARAM_LABELS = {
@@ -193,6 +205,9 @@ PARAM_TIPS = {
     "resolution": "训练分辨率：512 最省显存最快，768 平衡，1024 画质最好。16G 显存跑 Krea2/SDXL 建议降到 768 或 512，防止爆显存。",
     "video_steps": "视频 LoRA 总训练步数：2000 左右较稳；步数过高会死记视频内容（过拟合）。上限 3000。",
 }
+
+TRIGGER_HINT_CONCEPT = ("💡提示：填一个网上很少见到的英文单词（如 my_mer_01），出图时带上它，角色就会变成你训练的形态/种族（美人鱼/半人马/木偶人等）。\n"
+                    "⚠ 训练集要混不同画风，否则 trigger 会把画风也绑进去。")
 
 TRIGGER_HINT_CHARACTER = ("💡提示：填一个网上很少见到的英文单词，比如 my_oc01\n"
                           "不要用 girl 这种普通单词！\n"
@@ -225,6 +240,7 @@ TRIGGER_HINT_AT = ("💡提示：填一个网上很少见到的英文单词（�
 DATASET_TIPS = {
     "style": "📌 数据集提示：建议 20~60 张图片，尽量多不同人物、不同姿态，避免五官固化。画风模式自动过滤强人物五官标签；可填画风专属触发词，不需要正则图。",
     "character": "📌 数据集提示：建议 15~30 张同一人物，多角度、不同服装，推荐设置唯一 trigger 触发词；可配合正则数据集防过拟合。",
+    "concept": "📌 数据集提示：15~30 张同一形态/种族（如美人鱼/半人马/木偶人），刻意混不同画风/3D/实拍，避免 trigger 把画风一起吸进去；trigger 是唯一共同元素，描述只写每张的变体。",
     "krea2": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Krea 2 模型放进 models/krea2/（RAW+VAE+文本编码器）。推荐 12G+ 显存。",
     "krea2_at": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前把 Krea 2 RAW 底模放进 models/krea2/（26GB，bf16 原版），文本编码器/VAE 首次训练自动下载。推荐 16G+ 显存（16G 自动 768+int8+分层交换优化）。",
     "krea2_fz": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Krea 2 模型放进 models/krea2/（RAW+VAE+文本编码器）。NVIDIA/AMD 双平台，8G 显存自动 NF4、12G+ 用 fp8。",
@@ -234,7 +250,7 @@ DATASET_TIPS = {
     "zimage": "📌 数据集提示：15~30 张同一人物/风格图片。Z-Image 是 8B 轻量模型：12G 显存起步、16G 舒服；首次训练自动下载模型约 16GB（国内镜像）。",
 }
 
-OUTPUT_NAMES = {"style": "anime_style_lora", "character": "character_lora", "krea2": "krea2_lora", "krea2_at": "krea2_at_lora", "krea2_fz": "krea2_fizgig_lora", "flux2": "flux2_lora", "video": "h3_video_lora", "qwen_image": "qwen_image_lora", "zimage": "zimage_lora"}
+OUTPUT_NAMES = {"style": "anime_style_lora", "character": "character_lora", "concept": "concept_lora", "krea2": "krea2_lora", "krea2_at": "krea2_at_lora", "krea2_fz": "krea2_fizgig_lora", "flux2": "flux2_lora", "video": "h3_video_lora", "qwen_image": "qwen_image_lora", "zimage": "zimage_lora"}
 # ---------- 新手引导步骤（数据驱动，按模式渲染） ----------
 # 每步：id(唯一) / label(显示文案) / btn(按钮文字) / check(完成判定类型) / act(GUI 动作方法名) / tip(悬停提示)
 # check 类型：
@@ -262,6 +278,16 @@ GUIDE_STEPS = {
          "tip": "选择基础底模（.safetensors），建议和出图用的底模同系列。"},
         {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
          "tip": "选择同一人物的图片文件夹（15~30 张）。"},
+    ],
+    "concept": [
+        {"id": "env", "label": "① 环境准备", "btn": "去准备", "check": "env", "act": "cmd_env",
+         "tip": "安装 Git 和 Python（只需一次，全部项目通用）。"},
+        {"id": "kohya", "label": "② 安装训练内核", "btn": "去安装", "check": "kohya", "act": "cmd_install",
+         "tip": "安装 Kohya 训练内核（概念模式需要，只需一次）。"},
+        {"id": "base", "label": "③ 选择底模", "btn": "去选底模", "check": "base", "act": "cmd_pick_base",
+         "tip": "选择基础底模（.safetensors），SD1.5/SDXL/FLUX/Anima 都可。"},
+        {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
+         "tip": "15~30 张同一形态/种族（如美人鱼），刻意混不同画风，避免 trigger 把画风也吸进去。"},
     ],
     "krea2": [
         {"id": "env", "label": "① 环境准备", "btn": "去准备", "check": "env", "act": "cmd_env",

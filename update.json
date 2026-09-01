@@ -1,6 +1,6 @@
 {
-  "version": "v0.14.2",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.14.2/Setup.exe",
+  "version": "v0.14.3",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.14.3/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.14.2：热修复——\n    · 修复：SDXL 训练 tokenizer 自愈漏重建 tokenizer1（vocab_file=None 重试仍崩）——补全 SDXL 双 tokenizer 预缓存与自愈；\n    · 回滚 v0.14.1 的「升级后自动重启」改动（VBS 助手在部分环境异常），恢复原升级流程（装完手动打开）。"
+  "notes": "v0.14.3（2026-09-02）：\n    · 新增：概念模式（形态/种族）——一个 trigger 绑定整个形态，kohya 顶层 + Krea2/Fizgig 子模式；\n    · 修复：第四引擎 AMD ROCm 安装失败（rocm 元包/rocm-bootstrap 缺失）——补齐缓存 + --no-deps 构建安装，实测 import torch 成功；\n    · 优化：PyTorch 大轮子下载源改为魔搭优先（→上海交大→阿里云兜底），解决下载太慢；\n    · 新增：🧰 小工具 → ⑥ 下载源——国内镜像太慢可改用官方源（PyTorch 官方/GitHub/HuggingFace，需开代理）；\n    · 修复：Krea2/FLUX.2 训练前数据集校验（子文件夹/扩展名不支持/缺 .txt 标签明确报错，不再 0 批次）；\n    · 修复：Anima Qwen3-0.6B 下载失败（hf-mirror 失败自动切魔搭直链）；\n    · 修复：Fizgig（第四引擎）训练报 No module named 'toml'——训练前自动补装缺失依赖（老版本安装漏装）；\n    · 修复：程序启动崩溃（kohya_gui.py Python 3.10 不兼容语法）。"
 }

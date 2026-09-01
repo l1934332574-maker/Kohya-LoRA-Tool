@@ -1,4 +1,4 @@
-## v0.14.0（2026-09-01）
+﻿## v0.14.0（2026-09-01）
 
 ### 新增：第四引擎（Fizgig · Krea2 图像 LoRA，NVIDIA/AMD 双平台）——第 1 步骨架（进行中）
 - 背景：第二引擎 musubi 在 AMD 上会 fallback CPU；Fizgig v4.3+ 官方支持 AMD ROCm（Windows 主推）、NVIDIA 是主场。
@@ -36,6 +36,55 @@
 - 已回滚：删除 VBS 重启助手、恢复原升级流程（静默安装后关窗口，需手动打开）、安装器恢复 RestartApplications=yes。
 - 保留 v0.14.1 的 SDXL tokenizer 修复。
 
+### 新增：概念模式（形态/种族，如美人鱼/半人马/木偶人）
+- 定位：练「形态原型」——trigger 吸收整个形态，出图时任意角色套上该形态；数据集没有"同一个人"，只有"同一类形态"。
+- kohya 第一引擎新增顶层模式「🦄 概念」（模式 key `concept`，预设 rank32/alpha16/lr1e-4/repeats3/epochs8）；
+  Krea2 / Krea2F（Fizgig）子模式新增「概念」（trigger 吸收原型，不强绑人脸）。
+- 预处理：概念=保留全部标签 + trigger 插开头（同人物机制，不套画风过滤、不套人脸强绑定）；
+  引导文案提醒素材刻意混画风，避免 trigger 把画风一起吸进去。
+- 推理模板/采样提示词：概念分支（trigger 开头、不写 portrait 偏向，出完整形态）。
+- 验证：CONCEPT_MODE_OK（预处理映射/训练目录/模板/采样提示词）+ 两套冒烟全绿。
+
+### 修复：第四引擎 AMD ROCm 安装失败（Could not find rocm==7.15.0a20260728）
+- 根因：torch(ROCm) 的依赖声明包含 AMD 元包 `rocm[libraries]==7.15.0a20260728`（提供 torch 运行时 import 的 `rocm_sdk`）和 `rocm-bootstrap`；
+  本地魔搭缓存只放了 6 个大 wheel，缺这两个小包 → find-links 本地安装报 "Could not find a version that satisfies the requirement rocm==..."（RX 7900 XT 用户复现），回退 nightly 又遇网络中断。
+- 已修：缓存补齐 `rocm-7.15.0a20260728.tar.gz`（sdist 元包，24KB）+ `rocm_bootstrap-0.1.0-py3-none-any.whl`（26KB）并上传魔搭；
+  安装改为 5 个 ROCm wheel + bitsandbytes 用 `--no-deps` 本地装（绕开元包解析）→ 构建安装 rocm sdist（装出 rocm_sdk，实测 `import torch` 成功：torch 2.12.0+rocm7.15.0a20260728 / rocm=7.15.0）→ rocm-bootstrap → 共享依赖 + torch 纯 Python 依赖（filelock/sympy/networkx/jinja2/fsspec/typing-extensions + setuptools<82）走阿里云。
+- 验证：临时 venv 全流程 pip 实测 import torch 成功；FOURTH_ENGINE_NVIDIA_AND_AMD_CONTROL_FLOW_OK（mock 更新）+ 两套冒烟全绿。
+
+### 优化：PyTorch 大轮子下载源改为「魔搭优先」（用户反馈阿里云太慢）
+- 背景：大量用户安装第二引擎时从阿里云 pytorch-wheels 下载 torch（2~3GB）极慢。
+- 已改：`_preinstall_torch` 下载源顺序改为 **魔搭（modelscope 缓存）→ 上海交大 → 阿里云（仅最后兜底）**，魔搭国内直连断点续传；
+  torch 2.7.0/2.7.1/2.10.0(cu128) + 2.13.0(cu130) + 对应 torchvision/xformers/torchaudio 钉死版本轮子已上传魔搭 `engine_sources/pytorch_wheels/`。
+- 验证：MODELSCOPE_PTW_PREFERRED_OK（魔搭为第一源、顺序 魔搭→上海交大→阿里云）+ 两套冒烟全绿。
+
+### 修复：Krea2 / FLUX.2（musubi）训练前数据集校验（total batches: 0 / No training items found）
+- 根因：musubi 扫图只认顶层目录 + 固定扩展名（png/jpg/jpeg/webp/bmp/avif/jxl），且配置 caption_extension=.txt 时缺同名 .txt 的图会被直接过滤；
+  缓存脚本在 0 张可识别图片时会静默退出 0（还会清掉旧缓存），训练时直接报 "No training items found / total batches: 0"。
+- 已修：新增 `_musubi_dataset_precheck`（训练前按 musubi 真实规则校验：子文件夹/不支持扩展名/缺 .txt 都给出明确中文报错）+
+  `_verify_musubi_cache`（latents / 文本编码器缓存生成后逐项核对，为空立即报错）；Krea2 与 FLUX.2 两条 musubi 流程已接入。
+- 验证：MUSUBI_DATASET_PRE_CHECK_OK + 两套冒烟全绿。
+
+### 新增：🧰 小工具 → ⑥ 下载源（国内镜像太慢切官方源，需代理）
+- 入口：主页「🧰 小工具」新增「⑥ 下载源」开关「国内镜像太慢时改用官方源（需开代理）」；
+- 勾选后：torch 大轮子走 PyTorch 官方 download.pytorch.org、引擎源码走 GitHub 直连、底模应用内下载走 HuggingFace 直连（均走系统代理，国内镜像仍作备用）；
+- 设置存 settings.json（download_official_first），下次下载/重试立即生效。
+- 验证：OFFICIAL_SOURCE_OPTION_OK + 两套冒烟全绿。
+
+### 修复：Anima Qwen3-0.6B 文本编码器下载失败（hf-mirror 被网络重置）
+- 根因：Qwen3-0.6B 只走 hf-mirror 的 snapshot_download，部分网络对 hf-mirror API 也会重置（WinError 10054）导致下载失败。
+- 已修：新增 `_download_qwen3_from_modelscope` 魔搭直链兜底（config/model.safetensors 1.4GB/tokenizer 等 7 个文件，断点续传），
+  hf-mirror 失败自动切换；错误提示改为 hf-mirror / 魔搭双地址。
+- 验证：OFFICIAL_SOURCE_OPTION_OK 增加魔搭兜底断言 + 两套冒烟全绿。
+
+### 修复：Fizgig（第四引擎）训练报 No module named 'toml'（训练前依赖自愈）
+- 根因：老版本安装 Fizgig 时可能漏装 toml/voluptuous 等包，而「已安装」校验只查 torch + GPU + 源码标记，
+  训练时 krea2_cache_latents.py import 直接 ModuleNotFoundError（AMD RX 7900 XT 用户 2026-09-02 复现）。
+- 已修：`train_krea2_fizgig` 训练前新增 `_ensure_fizgig_deps` 自愈——探测 toml/voluptuous/yaml/omegaconf 等关键依赖，
+  缺失时按需 pip 补装（阿里/清华国内镜像），无需重装整个引擎。
+- 验证：FIZGIG_DEPS_SELF_HEAL_OK + FOURTH_ENGINE_TRAIN_PIPELINE_OK + 两套冒烟全绿。
+### 修复：程序启动崩溃（kohya_gui.py Python 3.10 不兼容语法）
+- kohya_gui.py 一处 f-string 内嵌同种引号在 Python 3.10 会直接 SyntaxError（程序起不来），已改为兼容写法。
 ### 待办
 - ai-toolkit（Krea2AT/Qwen/Z-Image/视频H3）与 Fizgig 断点续训接入
 - Fizgig 训练中采样预览（二期）

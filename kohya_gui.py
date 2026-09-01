@@ -138,13 +138,13 @@ def _crop_ratio_label(ratio):
 
 # 方案A：侧边栏引擎导航（引擎 → 模式；模式选择替代顶部训练模式下拉）
 ENGINE_GROUPS = [
-    ("第一引擎 · kohya", ("style", "character")),
+    ("第一引擎 · kohya", ("style", "character", "concept")),
     ("第二引擎 · musubi", ("krea2", "flux2")),
     ("第三引擎 · ai-toolkit", ("video", "krea2_at", "qwen_image", "zimage")),
     ("第四引擎 · fizgig", ("krea2_fz",)),
 ]
 SHORT_MODE_LABELS = {
-    "style": "画风", "character": "人物", "krea2": "Krea2", "flux2": "FLUX.2",
+    "style": "画风", "character": "人物", "concept": "概念", "krea2": "Krea2", "flux2": "FLUX.2",
     "krea2_fz": "Krea2F", "video": "视频H3", "krea2_at": "Krea2AT", "qwen_image": "Qwen", "zimage": "Z-Image",
 }
 
@@ -1817,14 +1817,14 @@ class App:
         self.at_sub_row = ctk.CTkFrame(card2, fg_color="transparent")
         ctk.CTkLabel(self.at_sub_row, text="训练类型", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
         self.at_sub_combo = ctk.CTkComboBox(
-            self.at_sub_row, values=[core.AT_SUB_LABELS["character"], core.AT_SUB_LABELS["style"]],
+            self.at_sub_row, values=[core.AT_SUB_LABELS["character"], core.AT_SUB_LABELS["style"], core.AT_SUB_LABELS["concept"]],
             width=230, height=30, variable=self.at_sub_var, state="readonly",
             fg_color=CARD2, border_color=BORDER, text_color=TXT,
             button_color="#3a4150", button_hover_color="#454d5e",
             dropdown_fg_color=CARD, dropdown_text_color=TXT, dropdown_hover_color="#2b303a",
             font=ui_font(FONT_BODY), command=lambda _e: self._on_at_sub_change())
         self.at_sub_combo.pack(side="left", padx=(12, 0))
-        self.at_sub_hint = ctk.CTkLabel(self.at_sub_row, text="人物=保留全部标签；画风=自动过滤人物五官/角色标签", font=ui_font(FONT_HINT), text_color=HINT)
+        self.at_sub_hint = ctk.CTkLabel(self.at_sub_row, text="人物=保留全部标签；画风=过滤人物标签；概念=形态/种族（trigger 吸收原型）", font=ui_font(FONT_HINT), text_color=HINT)
         self.at_sub_hint.pack(side="left", padx=(12, 0))
         self.at_sub_row.pack_forget()
         r2 = ctk.CTkFrame(card2, fg_color="transparent"); r2.pack(fill="x", padx=22, pady=(0, 4))
@@ -2148,6 +2148,8 @@ class App:
             if self.mode == "video":
                 _hint = core.TRIGGER_HINT_VIDEO
             elif self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2"):
+                if self._at_sub_label() == "concept":
+                    _hint = core.TRIGGER_HINT_CONCEPT
                 if self._at_sub_label() == "style":
                     _hint = core.TRIGGER_HINT_STYLE
                 elif self.mode in ("qwen_image", "zimage"):
@@ -2158,6 +2160,8 @@ class App:
                     _hint = core.TRIGGER_HINT_KREA2_AT
                 else:
                     _hint = core.TRIGGER_HINT_FLUX2
+            elif self.mode == "concept":
+                _hint = core.TRIGGER_HINT_CONCEPT
             elif self.mode == "character":
                 _hint = core.TRIGGER_HINT_CHARACTER
             else:
@@ -2305,6 +2309,10 @@ class App:
                 self.card1_title.configure(text="① 准备图片数据")
                 self.card1_hint.configure(text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好")
                 self.trig_card_title.configure(text="② 设置触发词（" + ("画风模式，一个词即可激活画风" if self._at_sub_label() == "style" else "人物模式") + "）")
+            elif self.mode == "concept":
+                self.card1_title.configure(text="① 准备图片数据")
+                self.card1_hint.configure(text="15~30 张同一形态/种族（如美人鱼/半人马），刻意混不同画风/3D/实拍，避免 trigger 把画风一起吸进去")
+                self.trig_card_title.configure(text="② 设置触发词（概念模式：一个词绑定整个形态/种族）")
             elif self.mode == "style":
                 self.card1_title.configure(text="① 准备图片数据")
                 self.card1_hint.configure(text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好")
@@ -2951,6 +2959,28 @@ class App:
             self.btn_tools_all.pack(side="right")
             self.tools_all_box = self._tools_result_box(body, 110)
 
+            # ⑥ 下载源：国内镜像太慢时切官方源（需代理）
+            s6 = _sec("⑥ 下载源", "国内镜像太慢/失败时，改用官方源（PyTorch 官方 / GitHub / HuggingFace，需开代理）")
+            self.var_official_src = ctk.BooleanVar(value=bool(core._load_app_settings().get("download_official_first")))
+
+            def _toggle_official_src():
+                try:
+                    _d = dict(core._load_app_settings())
+                    _d["download_official_first"] = bool(self.var_official_src.get())
+                    core._save_app_settings(_d)
+                    self._log("[下载源] %s官方源优先（PyTorch 官方 / GitHub / HuggingFace，需开代理）；国内镜像仍作备用。" %
+                              ("已启用" if self.var_official_src.get() else "已关闭，恢复"))
+                except Exception as _e:
+                    self._log("[下载源] 保存设置失败：%s" % _e)
+
+            self.chk_official_src = ctk.CTkCheckBox(
+                s6, text="国内镜像太慢时改用官方源（需开代理）", variable=self.var_official_src,
+                command=_toggle_official_src, font=ui_font(FONT_BODY), text_color=TXT)
+            self.chk_official_src.pack(side="left", padx=(0, 10))
+            ctk.CTkLabel(
+                s6, text="当前：%s（影响 torch 大轮子 / 引擎源码 / 底模下载，立即生效）" %
+                         ("官方源优先" if self.var_official_src.get() else "国内镜像优先"),
+                font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
             # 打开窗口自动跑一次「查看」
             self._tools_run("view", self.btn_tools_view, self.tools_view_box, core.gpu_status_text, "小工具·查看显卡", str)
         except Exception as e:
@@ -4085,8 +4115,8 @@ class App:
             if not params["base_model"]:
                 messagebox.showwarning(core.APP_NAME, "请先选择底模（步骤③）。")
                 return
-        _need_trigger = (self.mode == "character") or \
-            (self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2") and self._at_sub_label() == "character")
+        _need_trigger = (self.mode == "character") or (self.mode == "concept") or \
+            (self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2") and self._at_sub_label() in ("character", "concept"))
         if _need_trigger and not params["trigger"]:
             messagebox.showwarning(core.APP_NAME, "人物模式建议填写 Trigger 触发词（步骤②）。")
             return
@@ -4781,7 +4811,7 @@ class App:
             msg = (
                 "即将开始 " + (_info.get("label", "") if _info else "") + " 训练，请确认以下参数：\n\n"
                 f"模式        : {core.MODE_LABELS.get(params['mode'], params['mode'])}\n"
-                f"训练类型    : {"画风（过滤人物标签）" if params.get('at_sub_mode') == 'style' else "人物（保留全部标签）"}\n"
+                f"训练类型    : {'画风（过滤人物标签）' if params.get('at_sub_mode') == 'style' else '人物（保留全部标签）'}\n"
                 f"模型        : {_info.get('model_id', '？') if _info else '？'}\n"
                 f"rank / alpha: {params['rank']} / {params['alpha']}\n"
                 f"学习率      : {params['unet_lr']}\n"
@@ -4937,6 +4967,12 @@ class App:
             messagebox.showerror(core.APP_NAME, "暂无可下载的底模选项。")
             return
         url = model.get("url") or core.MODELSCOPE_URLS.get(bt) or core.HF_MIRROR_URL
+        if core._official_source_preferred():
+            # 官方源优先：HuggingFace 直连（需代理），魔搭/hf-mirror 作备用
+            _hf_direct = (model.get("fallback") or "").replace("https://hf-mirror.com/", "https://huggingface.co/")
+            if _hf_direct:
+                url = _hf_direct
+                self._log("[下载] 已启用「官方源优先」：从 HuggingFace 直连下载（需开代理）")
         fname, fsize = model["file"], model["size"]
         dest = os.path.join(core.base_models_dir(), fname)
         try:
@@ -5688,3 +5724,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
