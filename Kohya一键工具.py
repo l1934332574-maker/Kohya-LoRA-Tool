@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.13.3"
+APP_VERSION = "0.14.0"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -257,6 +257,16 @@ class TrainMonitor:
     def set_total(self, total):
         with self._lock:
             self.total = int(total or 0)
+
+    def set_step(self, step):
+        """断点续训时预填已完成的步数（监控从断点位置续上，而不是从 0 开始）。"""
+        try:
+            step = max(0, int(step or 0))
+        except Exception:
+            return
+        with self._lock:
+            self.step = step
+            self._last_step = step
 
     def set_lr(self, lr):
         """预填学习率（kohya 的 tqdm 日志里通常不输出 lr 字段，
@@ -923,7 +933,7 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
 # 第二引擎=musubi（kdir/musubi-tuner + musubi-venv）；第三引擎=ai-toolkit（kdir/ai-toolkit + ai_toolkit_venv）
 # 这些目录都是 get_kohya_dir() 同一个 kdir 下的子目录，安装 kohya 时不应误判"目录被占用"
 KOHYA_COEXIST_SUBDIRS = frozenset({
-    "musubi-tuner", "musubi-venv", "ai-toolkit", "ai_toolkit_venv",
+    "musubi-tuner", "musubi-venv", "ai-toolkit", "ai_toolkit_venv", "fizgig", "fizgig_venv",
     "venv", "venv_broken",  # venv 也可能已存在（部分安装残留），kohya 安装会自行校验/重建
 })
 
@@ -1715,6 +1725,17 @@ def _accelerate_launch_cmd(vpy, extra_args=(), logf=print):
                          "或重装训练内核（显卡无 CUDA/ROCm 时 CPU 训练本不可用）。")
     except Exception:
         pass
+    # 运行时设备探测：无论是否有 use_cpu 残留配置，都用与训练相同的 accelerate 路径确认加速设备；
+    # CPU 版 torch / 损坏的 ROCm 会让训练全程跑 CPU（accelerator device: cpu），Krea2/FLUX.2 等大模型无法训练
+    # （2026-09-01 RX 7900 XT 用户复现：工具提示 rocm 就绪但实际 device: cpu，训练卡在第一步）。
+    try:
+        _dev = _probe_accelerate_device(vpy, logf)
+        if _dev == "cpu":
+            logf("[加速器] ⚠ 当前训练环境探测不到 GPU（accelerate 设备 = cpu）！训练会全程跑 CPU，Krea2/FLUX.2 等大模型无法训练（极慢/卡住）。")
+            logf("[加速器]     请检查：① NVIDIA：显卡驱动/CUDA 是否正常，重装第二引擎；② AMD：RX 6000 走社区 ROCm 重装第二引擎；")
+            logf("[加速器]     RX 7000（RDNA3）需自行确保 ROCm torch 真正可用（当前 torch 未识别到 GPU）。")
+    except Exception:
+        pass
     # 显式单进程单机：避免残留配置里的多卡/分布式设置意外生效
     return [vpy, "-m", "accelerate.commands.launch", "--num_processes", "1", "--num_machines", "1"] + list(extra_args)
 
@@ -2264,6 +2285,55 @@ def _resolve_flux2_swap(vram_gb, gc_on=True, ram_gb=None):
     return swap, h2d_only
 
 
+def _start_train_stuck_watchdog(progress, logf, grace=150):
+    """训练进度达 100% 后，若进程仍卡住（不退出、无新步数）→ 自动停止。
+
+    AMD ROCm 收尾（保存/清理）偶发卡死：步数走满 100% 但进程不退出，需手动点停止。
+    看门狗：达到 100% 后开始计时，进程还活着且无新步数超过 grace 秒 →
+    stop_active_process()（与手动停止一致）；正常完成（进程已退出）不会触发。"""
+    fired = {"v": False}
+
+    def _watch():
+        try:
+            while not fired["v"]:
+                time.sleep(10)
+                snap = progress.snapshot()
+                if not snap.get("running"):
+                    return
+                if snap.get("phase") != "train":
+                    continue
+                total = snap.get("total") or 0
+                step = snap.get("step") or 0
+                if total <= 0 or step < total:
+                    continue
+                # 已达 100%：进入 stall 检测
+                last_step = step
+                stalled = time.time()
+                while not fired["v"]:
+                    time.sleep(10)
+                    s2 = progress.snapshot()
+                    if not s2.get("running"):
+                        return
+                    if s2.get("step", last_step) > last_step:
+                        last_step = s2["step"]
+                        stalled = time.time()
+                        continue
+                    if not active_process_pids():
+                        return          # 进程已正常退出，无需处理
+                    if time.time() - stalled > grace:
+                        fired["v"] = True
+                        logf("[自动停止] 训练已完成全部步数（100%），但进程卡在收尾（常见 AMD ROCm 保存/清理）。为避免一直等待，已自动停止；若最后模型未保存，可重新训练或断点续训。")
+                        try:
+                            stop_active_process()
+                        except Exception:
+                            pass
+                        return
+        except Exception:
+            pass
+
+    threading.Thread(target=_watch, daemon=True).start()
+
+
 def _attach_train_monitor(logf, progress, lr=None):
     """把训练子进程日志接入 TrainMonitor（步数/loss/曲线）。
 
@@ -2289,6 +2359,10 @@ def _attach_train_monitor(logf, progress, lr=None):
             progress.set_lr(float(lr))
         except Exception:
             pass
+    try:
+        _start_train_stuck_watchdog(progress, _wrapped)
+    except Exception:
+        pass
     return _wrapped
 
 
@@ -2449,6 +2523,11 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     if resume_from:
         cmd.append(f"--resume={resume_from}")
         logf(f"[Krea2] 断点续训：从 {resume_from} 继续")
+        if progress is not None:
+            _rs = resume_step_from(resume_from)
+            if _rs:
+                progress.set_step(_rs)
+                logf("[Krea2] 监控续上：已完成 %d 步 / 共 %d 步，本次继续 %d 步" % (_rs, per_epoch * epochs, max(0, per_epoch * epochs - _rs)))
     if use_nf4:
         cmd += ["--nf4_base"]
     elif use_int8:
@@ -2671,6 +2750,11 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     if resume_from:
         cmd.append(f"--resume={resume_from}")
         logf(f"[FLUX.2] 断点续训：从 {resume_from} 继续")
+        if progress is not None:
+            _rs = resume_step_from(resume_from)
+            if _rs:
+                progress.set_step(_rs)
+                logf("[FLUX.2] 监控续上：已完成 %d 步 / 共 %d 步，本次继续 %d 步" % (_rs, per_epoch * epochs, max(0, per_epoch * epochs - _rs)))
     # FLUX.2：<16G 自动 int8（实测同 Krea2 减量化开销）；int8 时文本编码器仍走 fp8
     # 底模已预量化（fp8/int8）时跳过工具侧量化，避免 musubi "already in fp8 format" 报错
     _flux2_int8 = not _safetensors_is_prequantized(files["dit"]) and (
@@ -3123,6 +3207,12 @@ ENGINE_SOURCE_URLS = {
         "https://ghfast.top/https://github.com/huggingface/diffusers/archive/c943837899b16cbae2f619b8dd4f7bb6f07dd81a.zip",
         "https://gh-proxy.com/https://github.com/huggingface/diffusers/archive/c943837899b16cbae2f619b8dd4f7bb6f07dd81a.zip",
     ],
+    "fizgig": [
+        "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/engine_sources/fizgig-v5.0.0.zip",
+        "https://ghfast.top/https://github.com/shootthesound/Fizgig/archive/refs/tags/v5.0.0.zip",
+        "https://gh-proxy.com/https://github.com/shootthesound/Fizgig/archive/refs/tags/v5.0.0.zip",
+        "https://github.com/shootthesound/Fizgig/archive/refs/tags/v5.0.0.zip",
+    ],
 }
 
 
@@ -3403,6 +3493,580 @@ def install_ai_toolkit_engine(logf=print):
         _release_kohya_install_lock(lock_f)
 
 
+# ---------- 第四训练引擎（Fizgig：Krea2 图像 LoRA，NVIDIA/AMD 双平台） ----------
+# 背景：第二引擎 musubi 在 AMD 上会 fallback CPU；Fizgig v4.3+ 官方支持 AMD ROCm（Windows 主推），
+# NVIDIA 是主场（torch cu128）。做成双平台引擎：NVIDIA→CUDA 路径，AMD→ROCm 路径。
+# 模型 100% 复用 models/krea2/（raw / qwen_image_vae / qwen3vl_4b_bf16）。
+
+FIZGIG_VERSION = "v5.0.0"          # 钉死版本（Fizgig 更新节奏快，不追 master）
+FIZGIG_SRC_MARKER = "src/fizgig/scripts/krea2_train.py"
+FIZGIG_SRC_REQUIRED = ("requirements.txt", FIZGIG_SRC_MARKER)
+
+# NVIDIA 路径（Fizgig 主推平台）：torch 2.10.0+cu128，Blackwell 原生支持，驱动 555+
+FIZGIG_TORCH_VERSION = "2.10.0"
+FIZGIG_TORCHVISION_VERSION = "0.25.0"
+FIZGIG_TORCH_CU = "cu128"
+
+# AMD ROCm 路径（Fizgig v4.3+ 官方支持，Windows 主推）：AMD nightly 钉死 multi-arch 栈
+FIZGIG_ROCM_INDEX = "https://rocm.nightlies.amd.com/whl-multi-arch/"
+FIZGIG_ROCM_TORCH_PIN = "2.12.0+rocm7.15.0a20260728"
+FIZGIG_ROCM_TORCHVISION_PIN = "0.27.0+rocm7.15.0a20260728"
+FIZGIG_ROCM_SDK_PIN = "7.15.0a20260728"
+FIZGIG_ROCM_BNB_URL = ("https://github.com/0xDELUXA/bitsandbytes_win_rocm/releases/download/"
+                       "0.50.2.dev0-py3.12-rocm7.16-win_amd64_all/"
+                       "bitsandbytes-0.50.2.dev0-cp312-cp312-win_amd64.whl")
+
+# AMD ROCm wheel 魔搭缓存（钉死版本，国内直连；安装优先走这里，失败回退 AMD nightly）
+FIZGIG_ROCM_MIRROR = "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/engine_sources/rocm/"
+FIZGIG_ROCM_WHEELS = {
+    "torch-2.12.0+rocm7.15.0a20260728-cp312-cp312-win_amd64.whl": 100_000_000,
+    "torchvision-0.27.0+rocm7.15.0a20260728-cp312-cp312-win_amd64.whl": 500_000,
+    "rocm_sdk_devel-7.15.0a20260728-py3-none-win_amd64.whl": 600_000_000,
+    "rocm_sdk_core-7.15.0a20260728-py3-none-win_amd64.whl": 700_000_000,
+    "rocm_sdk_libraries-7.15.0a20260728-py3-none-win_amd64.whl": 100_000_000,
+    "bitsandbytes-0.50.2.dev0-cp312-cp312-win_amd64.whl": 10_000_000,
+}
+
+# Fizgig requirements.txt 过滤 CUDA torch/bnb 行后的共享依赖（torch 单独装）
+FIZGIG_SHARED_DEPS = (
+    "accelerate==1.6.0 diffusers==0.32.1 safetensors==0.5.3 einops==0.7.0 "
+    "transformers==4.57.6 tokenizers==0.22.2 sentencepiece==0.2.1 toml==0.10.2 "
+    "voluptuous==0.15.2 pillow==12.3.0 numpy==2.1.3 opencv-python==4.10.0.84 "
+    "imageio-ffmpeg>=0.5 tensorboard==2.20.0 tqdm==4.67.1 huggingface-hub==0.34.3 "
+    "hf_xet>=1.0 pyyaml==6.0.3 packaging==25.0 psutil>=5.9"
+)
+FIZGIG_NVIDIA_EXTRA_DEPS = "bitsandbytes==0.48.2 triton-windows"
+
+
+def _fizgig_dirs():
+    """返回第四引擎目录 (venv_py, src_dir)。"""
+    kdir = get_kohya_dir()
+    return (os.path.join(kdir, "fizgig_venv", "Scripts", "python.exe"),
+            os.path.join(kdir, "fizgig"))
+
+
+def _fizgig_marker_ok():
+    """第四引擎快速标记检查（秒级）：venv + Fizgig 源码 + krea2_train.py。"""
+    vpy, fz_dir = _fizgig_dirs()
+    if not os.path.isfile(vpy):
+        return False
+    return os.path.isfile(os.path.join(fz_dir, *FIZGIG_SRC_MARKER.split("/")))
+
+def fizgig_engine_status():
+    """第四训练引擎（Fizgig）状态：返回 (ok, detail, venv_python, backend)。
+    backend: "nvidia" | "amd-rocm" | None。"""
+    vpy, fz_dir = _fizgig_dirs()
+    if not os.path.isfile(vpy):
+        return False, "未安装（未检测到 venv）", vpy, None
+    if not os.path.isfile(os.path.join(fz_dir, *FIZGIG_SRC_MARKER.split("/"))):
+        return False, "Fizgig 源码缺失", vpy, None
+    _vok, _vdetail = _venv_python_ok(vpy)
+    if not _vok:
+        return False, "环境异常（%s）" % _vdetail, vpy, None
+    try:
+        r = subprocess.run(
+            [vpy, "-c", "import torch; print(torch.__version__);"
+                        "print('rocm=' + str(getattr(torch.version, 'rocm', '') or ''));"
+                        "print('hip=' + str(getattr(torch.version, 'hip', '') or ''));"
+                        "print('cuda=' + str(torch.version.cuda or ''));"
+                        "print('ok=' + str(torch.cuda.is_available()))"],
+            capture_output=True, text=True, timeout=180, cwd=fz_dir)
+        if r.returncode == 0:
+            out = (r.stdout or "").splitlines()
+            backend = "amd-rocm" if any("rocm=" in x and x.split("=", 1)[1] for x in out) else "nvidia"
+            if "ok=True" in (r.stdout or ""):
+                return True, ("已就绪（第四引擎 Fizgig · %s）" % ("AMD ROCm" if backend == "amd-rocm" else "NVIDIA")), vpy, backend
+            return False, "环境异常（torch 未启用 GPU）", vpy, backend
+        return False, "环境异常（import 失败）", vpy, None
+    except Exception:
+        return False, "环境异常", vpy, None
+
+
+def _download_fizgig_source(logf=print):
+    """按国内优先顺序获取 Fizgig 源码 ZIP，缓存到用户数据目录。"""
+    name = "fizgig-v5.0.0.zip"
+    dest = os.path.join(_engine_source_cache_dir(), name)
+    if _valid_zip(dest, FIZGIG_SRC_REQUIRED):
+        logf(f"[第四引擎] 已复用源码缓存：{name}")
+        return dest
+    for old in (dest, dest + ".part"):
+        try:
+            if os.path.isfile(old):
+                os.remove(old)
+        except Exception:
+            pass
+    urls = ENGINE_SOURCE_URLS["fizgig"]
+    for idx, url in enumerate(urls, 1):
+        if "modelscope.cn" in url:
+            label = "魔搭"
+        elif "ghfast.top" in url:
+            label = "ghfast 国内加速"
+        elif "gh-proxy.com" in url:
+            label = "gh-proxy 国内加速"
+        else:
+            label = "GitHub 直连"
+        logf(f"[第四引擎] 下载 {name}（{label}，第{idx}/{len(urls)}个来源）…")
+        if _download_with_resume(url, dest, logf, direct=True) and _valid_zip(dest, FIZGIG_SRC_REQUIRED):
+            logf(f"[第四引擎] {name} 下载完成并校验通过。")
+            return dest
+        for old in (dest, dest + ".part"):
+            try:
+                if os.path.isfile(old):
+                    os.remove(old)
+            except Exception:
+                pass
+        logf("[第四引擎] 当前源码来源不可用，自动切换备用来源…")
+    raise RuntimeError(f"{name} 国内来源均下载失败，无需开代理，请稍后重试。")
+
+
+def _deploy_fizgig_source(fz_dir, logf=print):
+    """将 Fizgig 源码 ZIP 解压到标准源码目录；不把源码写入安装包。"""
+    marker = os.path.join(fz_dir, *FIZGIG_SRC_MARKER.split("/"))
+    if os.path.isfile(marker):
+        return
+    if os.path.isdir(fz_dir):
+        logf(f"[第四引擎] Fizgig 源码不完整，正在清理后重新部署：{fz_dir}")
+        shutil.rmtree(fz_dir, ignore_errors=True)
+    os.makedirs(fz_dir, exist_ok=True)
+    zip_path = _download_fizgig_source(logf)
+    _extract_zip(zip_path, fz_dir)
+    if not os.path.isfile(marker):
+        raise RuntimeError(f"Fizgig 源码解压不完整，缺少 {FIZGIG_SRC_MARKER}：{fz_dir}")
+    logf(f"[第四引擎] Fizgig 源码已按需部署到：{fz_dir}")
+
+
+def _find_python312_exe():
+    """定位 Python 3.12 解释器路径；找不到返回 None（不安装）。"""
+    try:
+        r = subprocess.run(["py", "-3.12", "-c", "import sys;print(sys.executable)"],
+                           capture_output=True, text=True, timeout=30)
+        p = (r.stdout or "").strip()
+        if r.returncode == 0 and p and os.path.isfile(p):
+            return p
+    except Exception:
+        pass
+    try:
+        py, ver = find_python()
+        if py and str(ver or "").startswith("3.12"):
+            return py
+    except Exception:
+        pass
+    return None
+
+
+def _fizgig_ensure_python312(logf=print):
+    """确保系统有 Python 3.12（ROCm bitsandbytes 轮子仅 cp312）。返回 3.12 解释器路径。"""
+    py312 = _find_python312_exe()
+    if py312:
+        return py312
+    logf("[第四引擎] 未检测到 Python 3.12（ROCm 轮子仅 cp312），开始安装 Python 3.12…")
+    ok, msg = install_python_312(logf)
+    if not ok:
+        raise RuntimeError("第四引擎需要 Python 3.12，安装失败：" + msg)
+    py312 = _find_python312_exe()
+    if not py312:
+        raise RuntimeError("Python 3.12 安装完成但未定位到解释器，请重启软件后重试")
+    return py312
+
+
+def _fizgig_amd_arch(fz_dir, logf=print):
+    """检测 AMD GPU 架构（gfxXXXX）。优先用 Fizgig 自带 detect_gpu.py。"""
+    script = os.path.join(fz_dir, "detect_gpu.py")
+    if os.path.isfile(script):
+        try:
+            r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=120)
+            arch = (r.stdout or "").strip().splitlines()
+            if arch and re.match(r"^gfx", arch[-1]):
+                return arch[-1]
+        except Exception:
+            pass
+    gname = detect_gpu_name() or ""
+    for pat, arch in (("7900", "gfx1100"), ("7800", "gfx1100"), ("7700", "gfx1101"),
+                      ("6900", "gfx1030"), ("6800", "gfx1030"), ("6700", "gfx1031"),
+                      ("6600", "gfx1032"), ("9070", "gfx1201"), ("9060", "gfx1201"),
+                      ("7600 XT", "gfx1151"), ("7600", "gfx1150")):
+        if pat in gname:
+            return arch
+    raise RuntimeError("无法识别 AMD GPU 架构（gfxXXXX）：%s。请更新显卡驱动后重试。" % (gname or "未知"))
+
+
+def _fizgig_verify(vpy, fz_dir, logf=print, backend="nvidia"):
+    """验证第四引擎可用：torch 能 import + GPU 可用 + krea2_train 可运行 --help。"""
+    try:
+        r = subprocess.run(
+            [vpy, "-c", "import torch; print(torch.__version__);"
+                        "print('rocm=' + str(getattr(torch.version, 'rocm', '') or ''));"
+                        "print('hip=' + str(getattr(torch.version, 'hip', '') or ''));"
+                        "print('cuda=' + str(torch.version.cuda or ''));"
+                        "print('ok=' + str(torch.cuda.is_available()))"],
+            capture_output=True, text=True, timeout=300)
+        out = (r.stdout or "").strip().splitlines()
+        logf("[第四引擎] 验证：" + " | ".join(out))
+        if r.returncode != 0 or not any("ok=True" in ln for ln in out):
+            raise RuntimeError("torch 未启用 GPU（" + ((r.stderr or r.stdout or "未知")[-200:]) + "）")
+        if backend == "amd-rocm" and not any("rocm=" in ln and ln.split("=", 1)[1] for ln in out):
+            raise RuntimeError("AMD ROCm torch 缺少 ROCm 版本信息，疑似装成 CUDA/CPU 版")
+        r2 = subprocess.run([vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "krea2_train.py"), "--help"],
+                            capture_output=True, text=True, timeout=180)
+        if r2.returncode != 0:
+            raise RuntimeError("Fizgig krea2_train 启动失败：" + ((r2.stderr or "")[-300:]))
+        return True
+    except Exception as e:
+        logf(f"[第四引擎] 验证失败: {e}")
+        raise
+
+
+def install_fizgig_engine(logf=print):
+    """安装第四训练引擎 Fizgig（Krea2 图像 LoRA，NVIDIA/AMD 双平台）。
+
+    - 独立 fizgig_venv（不碰 kohya / musubi / ai-toolkit venv）；
+    - NVIDIA：torch 2.10.0+cu128（阿里云/上海交大双镜像断点续传）+ 共享依赖；
+    - AMD：AMD nightly 钉死 ROCm 栈（torch + rocm-sdk）+ 0xDELUXA bitsandbytes；
+    - 已安装则跳过（幂等）。返回 fizgig_venv 的 python 路径。
+    """
+    py312 = _fizgig_ensure_python312(logf)
+    kdir = get_kohya_dir()
+    logf(f"[第四引擎] 安装目录: {kdir}")
+    lock_f = _acquire_kohya_install_lock(kdir, logf)
+    if lock_f is None:
+        raise RuntimeError("检测到另一个安装任务正在运行，请先等待完成后再试。")
+    try:
+        fz_dir = os.path.join(kdir, "fizgig")
+        _deploy_fizgig_source(fz_dir, logf)
+        fv = os.path.join(kdir, "fizgig_venv")
+        vpy = os.path.join(fv, "Scripts", "python.exe")
+        if not os.path.isfile(vpy):
+            logf("[第四引擎] 创建独立虚拟环境 fizgig_venv（不影响 kohya/musubi/ai-toolkit）…")
+            if run_stream([py312, "-m", "venv", fv], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
+                raise RuntimeError("创建 fizgig_venv 失败")
+            if not _ensure_venv_pip(vpy, fv, logf, label="第四引擎"):
+                raise RuntimeError("fizgig_venv 创建后无 pip，请检查 Python 安装是否完整")
+        else:
+            _vok, _vdetail = _venv_python_ok(vpy)
+            _need_rebuild = False
+            if not _vok:
+                logf(f"[第四引擎] ⚠ 检测到 fizgig_venv 已损坏：{_vdetail}")
+                logf("[第四引擎] 常见原因：数据目录迁移到新盘/更换系统用户/混入其他版本 Python 的依赖。")
+                _need_rebuild = True
+            elif not _ensure_venv_pip(vpy, fv, logf, label="第四引擎"):
+                logf("[第四引擎] ⚠ fizgig_venv 缺 pip 且自愈失败，自动重建（旧 venv 保留）…")
+                _need_rebuild = True
+            if _need_rebuild:
+                _bak = os.path.join(kdir, "fizgig_venv_broken_%s" % time.strftime("%Y%m%d_%H%M%S"))
+                while os.path.exists(_bak):
+                    _bak += "_1"
+                try:
+                    os.rename(fv, _bak)
+                    logf(f"[第四引擎] 旧 venv 已保留到: {os.path.basename(_bak)}")
+                except Exception as _e:
+                    raise RuntimeError("旧 fizgig_venv 重命名失败（%s），请手动删除/移动 %s 后重试" % (_e, fv))
+                logf("[第四引擎] 用 Python 3.12 重建 fizgig_venv…")
+                if run_stream([py312, "-m", "venv", fv], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
+                    raise RuntimeError("重建 fizgig_venv 失败")
+                if not _ensure_venv_pip(vpy, fv, logf, label="第四引擎"):
+                    raise RuntimeError("fizgig_venv 重建后仍无 pip，请检查 Python 安装是否完整")
+        # 已装验证（快速）：torch 可用 + GPU 可用 => 跳过
+        try:
+            r = subprocess.run(
+                [vpy, "-c", "import torch; print(torch.__version__); print('ok=' + str(torch.cuda.is_available()))"],
+                capture_output=True, text=True, timeout=180)
+            if r.returncode == 0 and "ok=True" in (r.stdout or ""):
+                logf("[第四引擎] 检测到已安装（torch + GPU 可用），跳过重复安装。")
+                return vpy
+        except Exception:
+            pass
+        if not _ensure_venv_pip(vpy, fv, logf, label="第四引擎"):
+            raise RuntimeError("fizgig_venv 缺少 pip，且 ensurepip 自愈失败，请重试安装")
+        logf("[第四引擎] 升级 pip / setuptools / wheel（清华/阿里双国内源）…")
+        if not _upgrade_pip(vpy, kdir, logf, label="第四引擎"):
+            raise RuntimeError("pip 升级失败：清华/阿里镜像均不可达，无需代理，请稍后重试")
+        env = build_direct_env()
+        backend = "nvidia"
+        try:
+            vendor = detect_gpu_vendor()
+            if vendor == "amd":
+                backend = "amd-rocm"
+        except Exception:
+            vendor = "nvidia"
+        if backend == "nvidia":
+            logf("[第四引擎] NVIDIA 路径：安装 torch %s+%s（阿里云/上海交大双国内镜像断点续传）…"
+                 % (FIZGIG_TORCH_VERSION, FIZGIG_TORCH_CU))
+            _torch_ok = False
+            for _try in range(3):
+                try:
+                    _preinstall_torch(vpy, kdir, logf, torch_ver=FIZGIG_TORCH_VERSION,
+                                      tv_ver=FIZGIG_TORCHVISION_VERSION, cu=FIZGIG_TORCH_CU,
+                                      label="第四引擎")
+                    _torch_ok = True
+                    break
+                except Exception as e:
+                    logf(f"[第四引擎] PyTorch 预下载失败（第{_try + 1}/3 次）：{e}（断点续传，可重试）")
+            if not _torch_ok:
+                raise RuntimeError("torch cu128 国内镜像下载/安装失败（详见上方日志）。无需开代理，请稍后重试；缓存支持断点续传。")
+        else:
+            arch = _fizgig_amd_arch(fz_dir, logf)
+            logf(f"[第四引擎] AMD ROCm 路径：检测到 GPU 架构 {arch}，安装钉死 ROCm 栈…")
+            _rocm_ok = False
+            rocm_dir = os.path.join(_engine_source_cache_dir(), "rocm")
+            os.makedirs(rocm_dir, exist_ok=True)
+            try:
+                local = []
+                for _name, _minsize in FIZGIG_ROCM_WHEELS.items():
+                    _p = os.path.join(rocm_dir, _name)
+                    if not (os.path.isfile(_p) and os.path.getsize(_p) >= _minsize and _wheel_valid(_p)):
+                        logf(f"[第四引擎] 下载 ROCm wheel（魔搭国内直连，断点续传）: {_name}")
+                        if not _download_with_resume(FIZGIG_ROCM_MIRROR + _name, _p, logf, direct=True) or not _wheel_valid(_p):
+                            raise RuntimeError("魔搭下载失败: " + _name)
+                    local.append(_p)
+                _sdk = [p for p in local if "bitsandbytes" not in os.path.basename(p)]
+                if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                               "--find-links", rocm_dir,
+                               "--index-url", "https://mirrors.aliyun.com/pypi/simple/"] + _sdk,
+                              cwd=fz_dir, env=env, logf=logf) != 0:
+                    raise RuntimeError("本地 ROCm 栈 pip 安装失败")
+                _bnb = [p for p in local if "bitsandbytes" in os.path.basename(p)]
+                if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120"] + _bnb,
+                              cwd=fz_dir, env=env, logf=logf) != 0:
+                    raise RuntimeError("bitsandbytes 安装失败")
+                _rocm_ok = True
+                logf("[第四引擎] AMD ROCm 栈安装成功（魔搭国内直连）。")
+            except Exception as e:
+                logf(f"[第四引擎] 魔搭缓存安装失败：{e}；自动回退 AMD nightly 直连（较慢，仅作兜底）…")
+            if not _rocm_ok:
+                for _try in range(3):
+                    try:
+                        cmd = [vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                               "--index-url", FIZGIG_ROCM_INDEX,
+                               "torch[device-%s]==%s" % (arch, FIZGIG_ROCM_TORCH_PIN),
+                               "torchvision[device-%s]==%s" % (arch, FIZGIG_ROCM_TORCHVISION_PIN),
+                               "rocm-sdk-devel==%s" % FIZGIG_ROCM_SDK_PIN]
+                        if run_stream(cmd, cwd=fz_dir, env=env, logf=logf) == 0:
+                            _rocm_ok = True
+                            break
+                    except Exception as e:
+                        logf(f"[第四引擎] AMD nightly 安装异常（第{_try + 1}/3 次）：{e}")
+                if _rocm_ok:
+                    bnb = os.path.join(_engine_source_cache_dir(), "bitsandbytes-0.50.2.dev0-cp312-cp312-win_amd64.whl")
+                    if not (os.path.isfile(bnb) and _wheel_valid(bnb)):
+                        logf("[第四引擎] 下载 bitsandbytes（ROCm Windows 社区轮子，0xDELUXA）…")
+                        if not _download_with_resume(FIZGIG_ROCM_BNB_URL, bnb, logf, direct=False) or not _wheel_valid(bnb):
+                            raise RuntimeError("bitsandbytes ROCm 轮子下载失败（GitHub 直连较慢，可稍后重试）")
+                    if run_stream([vpy, "-m", "pip", "install", "--no-input", bnb], cwd=fz_dir, env=env, logf=logf) != 0:
+                        raise RuntimeError("bitsandbytes ROCm 轮子安装失败")
+            if not _rocm_ok:
+                raise RuntimeError("AMD ROCm 栈安装失败（魔搭国内直连 + AMD nightly 均失败，详见上方日志）。可稍后重试。")
+        # 共享依赖（国内 PyPI）
+        _req_tmp = os.path.join(_engine_source_cache_dir(), "fizgig-requirements-domestic.txt")
+        _deps = FIZGIG_SHARED_DEPS
+        if backend == "nvidia":
+            _deps = _deps + " " + FIZGIG_NVIDIA_EXTRA_DEPS
+        os.makedirs(os.path.dirname(_req_tmp), exist_ok=True)
+        with open(_req_tmp, "w", encoding="utf-8") as _rf:
+            _rf.write("\n".join(x for x in _deps.split()) + "\n")
+        logf("[第四引擎] 安装 Fizgig 共享依赖（清华/阿里国内 PyPI，锁定兼容版本）…")
+        if run_stream([vpy, "-m", "pip", "install", "--upgrade", "--no-input", "--retries", "10", "--timeout", "120",
+                       "--index-url", "https://mirrors.aliyun.com/pypi/simple/",
+                       "--extra-index-url", "https://pypi.tuna.tsinghua.edu.cn/simple",
+                       "-r", _req_tmp], cwd=fz_dir, env=env, logf=logf) != 0:
+            raise RuntimeError("Fizgig 依赖安装失败（国内 PyPI 镜像均不可达或依赖冲突）")
+        _fizgig_verify(vpy, fz_dir, logf, backend=backend)
+        logf("[第四引擎] 安装完成：Krea2 图像 LoRA 可用（%s）。" % ("NVIDIA CUDA" if backend == "nvidia" else "AMD ROCm"))
+        return vpy
+    finally:
+        _release_kohya_install_lock(lock_f)
+def write_fizgig_dataset_config(image_dir, cache_dir, config_path, resolution=512, num_repeats=1):
+    """Fizgig 数据集配置（与 kohya/musubi 不同：image_directory / cache_directory / [general]）。"""
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write("# Auto-generated by Kohya-LoRA tool (Fizgig dataset config).\n")
+        f.write("[general]\n")
+        f.write("resolution = [%d, %d]\n" % (int(resolution), int(resolution)))
+        f.write('caption_extension = ".txt"\n')
+        f.write("batch_size = 1\n")
+        f.write("num_repeats = %d\n" % max(1, int(num_repeats)))
+        f.write("enable_bucket = true\n")
+        f.write("bucket_no_upscale = true\n")
+        f.write("\n[[datasets]]\n")
+        f.write('image_directory = "%s"\n' % str(image_dir).replace("\\", "/"))
+        f.write('cache_directory = "%s"\n' % str(cache_dir).replace("\\", "/"))
+
+
+def _fizgig_quant_swap(vram_gb, requested):
+    """Fizgig Krea2 量化档 + blocks_to_swap（Fizgig 官方 VRAM 表）。
+
+    NF4 4bit（--quantize_4bit）冻结底模 ~5.6GB，10-12G 卡主路径，强制关闭块交换；
+    INT8 W8A8（--quant_int8 bf16）需 24G+，最快；默认动态 fp8 + blocks_to_swap。
+    返回 (quant_flags, swap, detail)。
+    """
+    q = str(requested or "auto").strip().lower()
+    if q in ("nf4", "4bit", "4-bit", "4"):
+        return (["--quantize_4bit"], 0, "NF4 4bit（冻结底模 ~5.6GB，12G 以下推荐）")
+    if q in ("int8",):
+        return (["--quant_int8", "bf16"], 0, "INT8 W8A8（需 24G+，最快）")
+    tier = round(vram_gb) if vram_gb is not None else None
+    if tier is None or tier >= 32:
+        swap = 0
+    elif tier >= 24:
+        swap = 12
+    elif tier >= 16:
+        swap = 20
+    elif tier >= 10:
+        swap = 26
+    else:
+        return (["--quantize_4bit"], 0, "NF4 4bit（<10G 自动切换）")
+    return ([], swap, "动态 fp8 + blocks_to_swap=%d" % swap)
+
+
+def _fizgig_rocm_env(fz_dir, vpy):
+    """AMD ROCm 运行时环境（对齐 Fizgig 官方 run_fizgig_rocm.bat / write_rocm_env.py）。
+
+    bitsandbytes 需要 BNB_ROCM_VERSION 匹配 PyTorch wheel 内置的 ROCm SDK（7.15→715），
+    且 hipinfo.exe 要在 PATH 里（_rocm_sdk_core/bin + _rocm_sdk_devel/bin），否则报
+    "could not detect ROCm GPU architecture"。NVIDIA 路径不需要这些变量。"""
+    env = build_direct_env()
+    venv = os.path.dirname(os.path.dirname(vpy))
+    sp = os.path.join(venv, "Lib", "site-packages")
+    rocm_core = os.path.join(sp, "_rocm_sdk_core")
+    env["ROCM_PATH"] = rocm_core
+    env["HIP_PATH"] = rocm_core
+    env["MIOPEN_FIND_MODE"] = "2"
+    env["FLASH_ATTENTION_TRITON_AMD_ENABLE"] = "TRUE"
+    env["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:512,garbage_collection_threshold:0.8"
+    env["TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL"] = "1"
+    env["FIZGIG_GPU_BACKEND"] = "rocm"
+    env["BNB_ROCM_VERSION"] = "715"
+    path = []
+    for _p in (os.path.join(rocm_core, "bin"), os.path.join(sp, "_rocm_sdk_devel", "bin"),
+               os.path.join(venv, "Scripts")):
+        if os.path.isdir(_p):
+            path.append(_p)
+    env["PATH"] = ";".join(path + [env.get("PATH", "")])
+    return env
+
+
+def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, resume_from=None, progress=None):
+    """Krea2 图像 LoRA 训练（第四引擎 Fizgig，NVIDIA/AMD 双平台）。
+
+    流程：校验 Fizgig 环境 → 校验模型文件 → 写 Fizgig 数据集配置 →
+    缓存 latents/文本编码器 → krea2_train.py 训练。
+    模型复用 models/krea2/（raw / qwen_image_vae / qwen3vl_4b_bf16），无需重复下载。
+    """
+    params = params or {}
+    _log_tail = deque(maxlen=400)
+    logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
+    _warn_alloc_conf(logf)
+    ok, detail, vpy, backend = fizgig_engine_status()
+    if not ok:
+        raise RuntimeError("第四训练引擎（Fizgig）未安装，请先点「⚙ 安装第四引擎」。\n" + detail)
+    kdir = get_kohya_dir()
+    fz_dir = os.path.join(kdir, "fizgig")
+    _ram_gb = detect_ram_gb()
+    if _ram_gb:
+        logf(f"[Krea2(Fizgig)] 系统内存: {_ram_gb:.0f}G")
+    _warn_low_ram(logf, _ram_gb, "Krea2(Fizgig)")
+    # AMD ROCm：设置运行时环境（bnb DLL / hipinfo / MIOpen），对齐 Fizgig 官方启动器
+    _fz_env = None
+    if backend == "amd-rocm":
+        _fz_env = _fizgig_rocm_env(fz_dir, vpy)
+        logf("[Krea2(Fizgig)] AMD ROCm 运行时环境已设置（rocm7.15 / BNB_ROCM_VERSION=715）")
+    files = krea2_model_files()
+    missing = krea2_missing_models()
+    if missing:
+        raise RuntimeError(
+            "Krea2 训练缺少模型文件，请下载放入 models/krea2/ 文件夹：\n\n" + "\n".join(missing) +
+            "\n\n（在软件里点「打开 Krea2 模型文件夹」，用浏览器打开上面的国内镜像直链下载后放进去）")
+    # 完整性 + 预量化拦截（与第二引擎 Krea2 一致）
+    for _k, _desc in (("raw", "RAW 底模"), ("vae", "VAE"), ("te", "文本编码器")):
+        _p = files.get(_k)
+        if _p and not _safetensors_complete(_p):
+            raise RuntimeError(
+                f"检测到 Krea2 {_desc} 文件损坏/不完整：{_p}\n"
+                "（safetensors 头部与数据不一致，常见于下载中断）\n\n"
+                "请删除该文件后重新下载（软件内「下载Krea2模型」，魔搭国内直链 + 断点续传）。")
+    if _safetensors_is_prequantized(files.get("raw")):
+        raise RuntimeError(
+            "检测到 Krea2 底模 raw.safetensors 是「预量化 fp8/int8」文件（只能用于 ComfyUI 推理出图，\n"
+            "Fizgig 训练要求 bf16 原版底模 ~26GB，会报加载错误）。\n\n"
+            "请重新下载 bf16 原版底模替换 models/krea2/raw.safetensors。")
+    _sub_mode = params.get("at_sub_mode") or "character"
+    train_dir = dataset_train_dir("character", params.get("project"))
+    if count_images(train_dir) == 0:
+        raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
+    if _sub_mode == "character" and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+        try:
+            import preprocess as _pp
+            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
+            for _w in _warns:
+                logf(f"[Krea2(Fizgig)] ⚠ {_w}")
+        except Exception as _e:
+            logf(f"[Krea2(Fizgig)] 人物强绑定失败（忽略）: {_e}")
+    proj = _sanitize_dirname(params.get("project")) or "krea2_fz"
+    cfg_path = os.path.join(KIT_DIR, "configs", "fizgig_krea2_dataset_config.toml")
+    cache_dir = os.path.join(data_dir(), "dataset", proj, "fizgig_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    resolution = int(params.get("resolution") or KREA2_RESOLUTION or 512)
+    write_fizgig_dataset_config(train_dir, cache_dir, cfg_path, resolution=resolution,
+                                num_repeats=int(params.get("repeats", 1)))
+    logf(f"[Krea2(Fizgig)] 数据集: {train_dir}（{resolution}px, repeats={params.get('repeats', 1)}）")
+    logf("[Krea2(Fizgig)] 缓存 latents（Fizgig VAE）…")
+    if run_stream([vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "krea2_cache_latents.py"),
+                   "--dataset_config", cfg_path, "--vae", files["vae"], "--skip_existing"],
+                  cwd=fz_dir, env=_fz_env, logf=logf) != 0:
+        raise RuntimeError("latents 缓存失败，请查看上方日志")
+    logf("[Krea2(Fizgig)] 缓存文本编码器输出 …")
+    if run_stream([vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "krea2_cache_text.py"),
+                   "--dataset_config", cfg_path, "--text_encoder", files["te"], "--skip_existing"],
+                  cwd=fz_dir, env=_fz_env, logf=logf) != 0:
+        raise RuntimeError("文本编码器缓存失败，请查看上方日志")
+    rank = int(params.get("rank", 32))
+    alpha = int(params.get("alpha", 32))
+    lr = params.get("unet_lr", 1e-4)
+    epochs = int(params.get("max_epochs", 16))
+    per_epoch = int(params.get("repeats", 1)) * count_images(train_dir)
+    if per_epoch * epochs > KREA2_MAX_STEPS:
+        new_epochs = max(1, int(KREA2_MAX_STEPS / max(1, per_epoch)))
+        logf(f"[Krea2(Fizgig)] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
+        epochs = new_epochs
+    if progress is not None:
+        try:
+            progress.set_total(per_epoch * epochs)
+        except Exception:
+            pass
+    out_dir = data_sub("output", proj)
+    output_name = str(params.get("output_name") or "krea2_fizgig_lora").strip() or "krea2_fizgig_lora"
+    quant_flags, swap, quant_detail = _fizgig_quant_swap(vram_gb, params.get("quant_mode", "auto"))
+    _manual_swap = str(params.get("blocks_to_swap") or "").strip()
+    if _manual_swap.isdigit():
+        swap = int(_manual_swap)
+        logf(f"[Krea2(Fizgig)] 高级参数手动指定 blocks_to_swap={swap}")
+    logf(f"[Krea2(Fizgig)] 量化: {quant_detail}")
+    cmd = [
+        vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "krea2_train.py"),
+        "--dataset_config", cfg_path,
+        "--dit", files["raw"],
+        "--output_dir", out_dir, "--output_name", output_name,
+        "--network_dim", str(rank), "--network_alpha", str(alpha),
+        "--learning_rate", str(lr),
+        "--max_train_epochs", str(epochs),
+        "--save_every_n_epochs", str(_resolve_save_every_epochs(params)),
+        "--lr_scheduler", "cosine", "--lr_warmup_steps", "120",
+        "--seed", "42",
+    ] + quant_flags
+    if resume_from:
+        logf("[Krea2(Fizgig)] ⚠ Fizgig 断点续训暂未接入（二期），本次从头开始")
+    if swap > 0:
+        cmd += ["--blocks_to_swap", str(swap)]
+    # torch.compile：Fizgig 默认 auto 会自己权衡；默认关（Windows triton 需 MSVC 构建工具，缺失自动降级）
+    _k2_compile = str(params.get("compile") or "").lower() in ("1", "true", "on", "开")
+    cmd += ["--compile_blocks", "auto" if _k2_compile else "off"]
+    logf(f"[Krea2(Fizgig)] 底模(RAW): {files['raw']}")
+    logf(f"[Krea2(Fizgig)] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 1)}")
+    logf(f"[Krea2(Fizgig)] 引擎后端: {backend} | 量化={quant_detail} | blocks_to_swap={swap} | torch.compile={'开' if _k2_compile else '关'}")
+    rc = run_stream(cmd, cwd=fz_dir, env=_fz_env, logf=logf, collect=_log_tail)
+    if rc != 0:
+        _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
+        raise RuntimeError("Krea2(Fizgig) 训练失败，退出码 %d，请查看上方日志。" % rc)
+    logf(f"[Krea2(Fizgig)] 训练完成：{os.path.join(out_dir, output_name)}")
+    return out_dir
 def scan_video_dataset(folder):
     """扫描视频数据集文件夹，返回 (视频文件列表, 总时长秒, 无字幕视频数)。
 
@@ -6629,6 +7293,30 @@ def find_latest_state(output_dir, output_name):
     return max(cands, key=_step_no)
 
 
+def resume_step_from(resume_from):
+    """从断点快照解析已完成的训练步数（kohya/musubi 状态目录名 -stepNNNNNN-state）。
+
+    断点续训时监控从该步续上（而不是从 0 重新计数）；解析失败返回 0（监控照旧从日志里读）。"""
+    try:
+        base = os.path.basename(os.path.normpath(str(resume_from or "")))
+        m = re.search(r"-step(\d+)-state", base)
+        if m:
+            return int(m.group(1))
+        # 兜底：状态目录内 training_state.json 的 global_step
+        j = os.path.join(str(resume_from or ""), "training_state.json")
+        if os.path.isfile(j):
+            try:
+                import json as _json
+                st = _json.load(open(j, encoding="utf-8"))
+                gs = st.get("global_step") or st.get("step") or 0
+                return int(gs)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return 0
+
+
 def auto_training_setup(vram_gb, base_type):
     """根据显存智能适配 (batch_size, use_xformers, gc_suggest)。"""
     if base_type in ("flux", "anima"):
@@ -7751,6 +8439,11 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     if resume_from:
         cmd.append(f"--resume={resume_from}")
         logf(f"[训练] 断点续训：从 {resume_from} 继续")
+        if progress is not None:
+            _rs = resume_step_from(resume_from)
+            if _rs:
+                progress.set_step(_rs)
+                logf("[训练] 监控续上：已完成 %d 步 / 共 %d 步，本次继续 %d 步" % (_rs, total_steps, max(0, total_steps - _rs)))
 
     logf(f"[训练] 底模: {base_model}（{BASE_TYPE_LABELS.get(base_type, base_type)}）")
     logf(f"[训练] 模式: {MODE_LABELS.get(mode, mode)} | 脚本: {script} | 分辨率: {resolution}px")
@@ -7911,6 +8604,10 @@ def system_status(force=False):
         _at_ok = _at_marker_ok()
     except Exception:
         _at_ok = False
+    try:
+        _fizgig_ok = _fizgig_marker_ok()
+    except Exception:
+        _fizgig_ok = False
     data = {
         "git": git or None,
         "python": f"{ver}" if ver else None,
@@ -7919,6 +8616,7 @@ def system_status(force=False):
         "gpu": gpu,
         "musubi_ok": _musubi_ok,
         "at_ok": _at_ok,
+        "fizgig_ok": _fizgig_ok,
     }
     _SYSTEM_STATUS_CACHE["t"] = _now
     _SYSTEM_STATUS_CACHE["data"] = data

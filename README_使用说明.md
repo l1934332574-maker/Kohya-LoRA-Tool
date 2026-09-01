@@ -50,6 +50,7 @@
 - Windows 10 / 11（64 位）
 - **NVIDIA 独立显卡**（默认）；训练前自动检测，非 N 卡会提示兼容性风险
 - **AMD 显卡**：支持「AMD 兼容模式（实验性）」，见下方 2.1 节；不承诺稳定
+- **AMD 跑 Krea2（第四引擎 Fizgig）原生支持**：Windows ROCm 官方路径（RDNA1~RDNA4），不用开兼容模式，见下方「第四训练引擎」章节
 - 较新 NVIDIA 驱动（支持 CUDA 12.8，一般 2024 年后驱动即可）；AMD 需 Adrenalin 26.2.2 及以上
 
 **四种架构显存建议：**
@@ -122,6 +123,7 @@
 - **引导只显示当前模式真正需要的步骤**（不会让只训 H3 的用户装 kohya/musubi）：
   - 画风/人物：环境 → kohya 内核 → 选底模 → 选图片
   - Krea2：环境 → 第二引擎 → Krea2 模型 → 选图片
+  - Krea2F（Fizgig 引擎，NVIDIA/AMD）：环境 → 第四引擎 → Krea2 模型 → 选图片
   - 视频 H3：环境 → 第三引擎 → H3 模型 → 选视频
 - **按顺序点**：每一步的按钮完成（环境/引擎装一次全局绿点；底模/图片是项目级重新检测），自动高亮并闪烁下一步，全部完成「🚀 一键开始训练」才点亮。
 - 训练前会弹窗确认参数（可取消），可断点续训；任务中左下角出现「⏹ 停止当前任务」可中断
@@ -142,6 +144,22 @@
 - 预设：rank32 / alpha32 / lr 2e-4 / 训练步数 2000（上限 3000 防过拟合）。
 - ⚠ 硬性要求：**NVIDIA 显卡 + 24GB 及以上显存**（训练走 CUDA/NVFP4）；AMD 显卡暂不支持该模式，请继续使用画风/人物/Krea2 模式。
 - ⚠ 许可：MiniMax H3 为社区许可证（开放权重），商用请自行确认条款。
+
+### 第四训练引擎（Fizgig · Krea2 图像 LoRA，NVIDIA/AMD 双平台）
+
+- 侧边栏新增 **「第四引擎 · fizgig → Krea2F」**（`🖼 Krea2 图像LoRA（Fizgig 引擎）`）：基于 Fizgig（Apache-2.0）训练内核，**NVIDIA / AMD 双平台原生支持**，完全独立于第一/二/三引擎。
+  - **NVIDIA**：CUDA 路径（torch 2.10.0+cu128，国内镜像断点续传）——Fizgig 官方主推平台。
+  - **AMD**：ROCm 路径（AMD nightly 钉死版本 + 社区 bitsandbytes，Windows 官方支持 RDNA1~RDNA4）——**不需要开「AMD 兼容模式」**。
+- **安装**：krea2_fz 模式顶部「⚙ 安装第四引擎」；需 Python 3.12（自动检测/安装）。
+  - NVIDIA：torch 2.10.0+cu128（约 2.9GB，国内镜像断点续传）+ 共享依赖。
+  - AMD：钉死 ROCm 栈（torch / torchvision / rocm-sdk 三件 + bitsandbytes，共约 1.66GB）走**魔搭国内直连**（断点续传），失败自动回退 AMD nightly；安装器自动识别显卡架构（gfxXXXX）。
+- **模型**：与第二/三引擎**共用 `models/krea2/`**（RAW 底模 ~26GB / Qwen-Image VAE / Qwen3-VL-4B 文本编码器），零重复下载；RAW 必须是 **bf16 原版**（预量化 fp8 只能出图、不能训练）。
+- **训练**：参数页与 Krea2 模式一致（画风/人物子模式、触发词、强绑定、rank/alpha/学习率/epochs/分辨率、显存档）。
+  - 显存自动适配：**<10G → NF4 4bit**（底模驻留 ~5.6GB，8G 卡可训）；10~14G → fp8 + 块交换 26；16G → fp8 + 块交换 20；24G → 块交换 12；≥32G 无交换；INT8 可选（24G+ 最快）。
+  - 流程：缓存 latents → 缓存文本编码器 → 训练；AMD 训练自动设置 ROCm 运行时环境（bnb DLL / hipinfo / MIOpen，对齐 Fizgig 官方启动器）。
+  - 断点续训 / 训练中采样预览为二期功能（暂未接入，训练从头开始）。
+- **出图**：训练完的 LoRA 在 `output\<项目名>\`，配 Krea 2 RAW / Turbo 底模使用（官方推荐 Train on RAW → Run on Turbo，Turbo 出图快）。
+- ⚠ 说明：AMD 是 Fizgig 官方支持的 Windows 路径，但消费级 AMD（尤其 RDNA2 RX 6000 系）稳定性历史一般，建议先在 7800 XT 等 RDNA3 上实测；RDNA2 异常请反馈。
 
 ### 模式与预设
 - 顶部切换 **画风/人物**，自动填充整套预设参数（rank/alpha/学习率/repeats/epochs）；手动改过的参数切换模式不会被覆盖，点「↺ 恢复预设」可重载

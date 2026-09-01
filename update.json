@@ -1,6 +1,6 @@
 {
-  "version": "v0.13.3",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.13.3/Setup.exe",
+  "version": "v0.14.0",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.14.0/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.13.3：新增配置导出/导入（项目页「导出配置」存为可分享 json，新建项目弹窗「导入配置」一键复用上次参数，逐字段容错、底模按文件名自动定位）；\n    · 修复第一引擎训练因 tokenizer 缓存损坏/不完整失败（vocab_file=None）——完整性校验升级 + 失败自动重建缓存并重试一次。"
+  "notes": "v0.14.0：新增第四引擎 Fizgig（Krea2 图像 LoRA，NVIDIA/AMD 双平台）——AMD 原生支持（ROCm 魔搭国内直连，不用再开兼容模式），显存自动适配（8G→NF4 可训 / 16G→fp8+块交换）；断点续训监控续上；训练 100% 卡住自动停止；新增配置导出/导入（项目页导出可分享 json、新建项目一键导入复用参数）；\n    · 修复：tokenizer 缓存损坏自动重建重试、Krea2AT 模型下载截断自愈、Krea2AT 16G 启动 OOM 自动重试、musubi AMD 块交换崩溃、AMD 中文用户名 MIOpen 崩溃、画风采样预览带描述词、第三引擎 compile 勾选隐藏、侧边栏 2×2 网格、CPU 设备探测警告、16G 自动禁用 torch.compile。"
 }

@@ -2305,6 +2305,323 @@ def test_krea2_modelscope_mirror(base: Path):
 
 
 
+def test_fourth_engine(base: Path):
+    """第四引擎（Fizgig）安装控制流：NVIDIA CUDA + AMD ROCm 两条路径（mock 子进程）。"""
+    import contextlib
+    kdir = base / "fourth" / "kohya_ss"
+    fz_dir = kdir / "fizgig"
+    fv = kdir / "fizgig_venv"
+    fake_python(fv / "Scripts" / "python.exe")
+    (fv / "pyvenv.cfg").write_text("home = X:\\MissingPython\n", encoding="utf-8")
+
+    src_zip = base / "sources" / "fizgig.zip"
+    make_source_zip(src_zip, "Fizgig-master", {
+        "requirements.txt": "torch==2.10.0\nbitsandbytes==0.48.2\nnumpy\naccelerate==1.6.0\ntransformers\n",
+        "src/fizgig/scripts/krea2_train.py": "import sys\n",
+        "detect_gpu.py": "print('gfx1100')\n",
+    })
+
+    def run_flow(vendor):
+        state = {"rebuilt": False, "torch": False, "deps": False, "rocm": False, "bnb": False, "verify": False}
+        logs = []
+
+        def run_stream(cmd, cwd=None, env=None, logf=print, **kwargs):
+            cmd = [str(x) for x in cmd]
+            if len(cmd) >= 4 and cmd[1:3] == ["-m", "venv"]:
+                target = Path(cmd[3])
+                fake_python(target / "Scripts" / "python.exe")
+                state["rebuilt"] = True
+                return 0
+            if "--find-links" in cmd and any("rocm_sdk_devel" in x for x in cmd):
+                # 魔搭缓存路径：本地 wheel 安装（find-links + 阿里云）
+                assert any("rocm_sdk_core" in x for x in cmd)
+                assert any("torch-2.12.0+rocm7.15.0a20260728" in x for x in cmd)
+                state["rocm"] = True
+                return 0
+            if any("rocm.nightlies.amd.com" in x for x in cmd):
+                assert "torch[device-gfx1100]==2.12.0+rocm7.15.0a20260728" in cmd
+                assert "rocm-sdk-devel==7.15.0a20260728" in cmd
+                state["rocm"] = True
+                return 0
+            if len(cmd) >= 6 and cmd[3] == "install" and cmd[4] == "--no-input" and cmd[-1].endswith(".whl"):
+                state["bnb"] = True
+                return 0
+            if "-r" in cmd:
+                req = Path(cmd[cmd.index("-r") + 1]).read_text(encoding="utf-8")
+                assert "torch==" not in req and "torchvision==" not in req
+                if vendor == "nvidia":
+                    assert "triton-windows" in req and "bitsandbytes==0.48.2" in req
+                else:
+                    assert "triton-windows" not in req and "bitsandbytes" not in req
+                state["deps"] = True
+                return 0
+            return 0
+
+        def subrun(cmd, *args, **kwargs):
+            cmd = [str(x) for x in cmd]
+            if len(cmd) > 1 and str(cmd[1]).endswith("detect_gpu.py"):
+                return result(0, "gfx1100\n")
+            code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
+            if "import torch" in code:
+                if vendor == "amd":
+                    if not state["rocm"]:
+                        return result(1, "")
+                    if "rocm=" in code:
+                        return result(0, "2.12.0+rocm7.15.0a20260728\nrocm=7.15.0\nhip=7.15.0\ncuda=\nok=True\n")
+                    return result(0, "2.12.0+rocm7.15.0a20260728\nok=True\n")
+                if not state["torch"]:
+                    return result(1, "")
+                return result(0, "2.10.0+cu128\ncuda=12.8\nok=True\n")
+            if code and "print(sys.executable)" in code:
+                return result(0, r"C:\Python312\python.exe")
+            if len(cmd) > 1 and str(cmd[1]).endswith("krea2_train.py"):
+                state["verify"] = True
+                return result(0, "--help output")
+            return result(0)
+
+        def preinstall(*args, **kwargs):
+            assert kwargs.get("torch_ver") == "2.10.0"
+            assert kwargs.get("tv_ver") == "0.25.0"
+            assert kwargs.get("cu") == "cu128"
+            state["torch"] = True
+            return True
+
+        patches = common_patches(kdir) + (
+            patch.object(core, "_find_python312_exe", return_value=r"C:\Python312\python.exe"),
+            patch.object(core, "_download_fizgig_source", return_value=str(src_zip)),
+            patch.object(core, "run_stream", side_effect=run_stream),
+            patch.object(core.subprocess, "run", side_effect=subrun),
+            patch.object(core, "_upgrade_pip", return_value=True),
+            patch.object(core, "_ensure_venv_pip", return_value=True),
+            patch.object(core, "_venv_python_ok", return_value=(False, "venv 指向的 Python 已不存在")),
+            patch.object(core, "_preinstall_torch", side_effect=preinstall),
+            patch.object(core, "detect_gpu_vendor", return_value=vendor),
+            patch.object(core, "_download_with_resume", return_value=True),
+            patch.object(core, "_wheel_valid", return_value=True),
+        )
+        with contextlib.ExitStack() as st:
+            for p in patches:
+                st.enter_context(p)
+            out = core.install_fizgig_engine(logs.append)
+        assert Path(out) == fv / "Scripts" / "python.exe"
+        assert state["rebuilt"] and state["deps"] and state["verify"]
+        assert any("已损坏" in line for line in logs)
+        assert any(kdir.glob("fizgig_venv_broken_*"))
+        return state, logs
+
+    s1, l1 = run_flow("nvidia")
+    assert s1["torch"] and not s1["rocm"]
+    assert any("NVIDIA CUDA" in x for x in l1)
+
+    s2, l2 = run_flow("amd")
+    assert s2["rocm"] and s2["bnb"] and not s2["torch"]
+    assert any("AMD ROCm" in x for x in l2) and any("gfx1100" in x for x in l2)
+    print("FOURTH_ENGINE_NVIDIA_AND_AMD_CONTROL_FLOW_OK")
+
+    # 兜底：魔搭缓存下载失败 → 自动回退 AMD nightly（rocm.nightlies 命令）
+    kdir = base / "fourth" / "kohya_ss"
+    fv = kdir / "fizgig_venv"
+    fz_dir = kdir / "fizgig"
+    state = {"rebuilt": False, "torch": False, "deps": False, "rocm": False, "bnb": False, "verify": False}
+    logs = []
+    def run_stream2(cmd, cwd=None, env=None, logf=print, **kwargs):
+        cmd = [str(x) for x in cmd]
+        if len(cmd) >= 4 and cmd[1:3] == ["-m", "venv"]:
+            fake_python(Path(cmd[3]) / "Scripts" / "python.exe")
+            state["rebuilt"] = True
+            return 0
+        if any("rocm.nightlies.amd.com" in x for x in cmd):
+            assert "torch[device-gfx1100]==2.12.0+rocm7.15.0a20260728" in cmd
+            state["rocm"] = True
+            return 0
+        if len(cmd) >= 6 and cmd[3] == "install" and cmd[4] == "--no-input" and cmd[-1].endswith(".whl"):
+            state["bnb"] = True
+            return 0
+        if "-r" in cmd:
+            state["deps"] = True
+            return 0
+        return 0
+    def subrun2(cmd, *args, **kwargs):
+        cmd = [str(x) for x in cmd]
+        if len(cmd) > 1 and str(cmd[1]).endswith("detect_gpu.py"):
+            return result(0, "gfx1100\n")
+        code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
+        if "import torch" in code:
+            if not state["rocm"]:
+                return result(1, "")
+            return result(0, "2.12.0+rocm7.15.0a20260728\nrocm=7.15.0\nhip=7.15.0\ncuda=\nok=True\n")
+        if len(cmd) > 1 and str(cmd[1]).endswith("krea2_train.py"):
+            state["verify"] = True
+            return result(0, "--help")
+        return result(0)
+    patches2 = common_patches(kdir) + (
+        patch.object(core, "_find_python312_exe", return_value=r"C:\Python312\python.exe"),
+        patch.object(core, "_download_fizgig_source", return_value=str(base / "sources" / "fizgig.zip")),
+        patch.object(core, "run_stream", side_effect=run_stream2),
+        patch.object(core.subprocess, "run", side_effect=subrun2),
+        patch.object(core, "_upgrade_pip", return_value=True),
+        patch.object(core, "_ensure_venv_pip", return_value=True),
+        patch.object(core, "_venv_python_ok", return_value=(False, "venv 指向的 Python 已不存在")),
+        patch.object(core, "detect_gpu_vendor", return_value="amd"),
+        patch.object(core, "_download_with_resume",
+                     side_effect=lambda url, dest, logf=print, progress_cb=None, direct=False: "modelscope.cn" not in url),  # 魔搭失败→nightly；bnb(GitHub) 成功
+        patch.object(core, "_wheel_valid", return_value=True),
+    )
+    with contextlib.ExitStack() as st2:
+        for p in patches2:
+            st2.enter_context(p)
+        core.install_fizgig_engine(logs.append)
+    assert state["rocm"] and state["bnb"] and state["verify"]
+    assert any("回退 AMD nightly" in x for x in logs)
+    print("FOURTH_ENGINE_AMD_NIGHTLY_FALLBACK_OK")
+def test_fourth_engine_train_pipeline(base: Path):
+    """train_krea2_fizgig：数据集 TOML + 缓存 + 训练命令构造（8G→NF4 / 16G→fp8+swap20）。"""
+    import contextlib
+    import Kohya一键工具 as core_mod
+    proj = "fztest"
+    train_dir = base / "data" / "train_character"
+    train_dir.mkdir(parents=True, exist_ok=True)
+    for k in range(1, 5):
+        (train_dir / ("img%02d.png" % k)).write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+        (train_dir / ("img%02d.txt" % k)).write_text("fztest subject, portrait\n", encoding="utf-8")
+    kdir = base / "trainpipe" / "kohya_ss"
+    kdir.mkdir(parents=True, exist_ok=True)
+    (kdir / "fizgig_venv" / "Scripts").mkdir(parents=True, exist_ok=True)
+    fake_python(kdir / "fizgig_venv" / "Scripts" / "python.exe")
+    (kdir / "fizgig" / "src" / "fizgig" / "scripts").mkdir(parents=True, exist_ok=True)
+    (kdir / "fizgig" / "src" / "fizgig" / "scripts" / "krea2_train.py").write_text("import sys\n", encoding="utf-8")
+    mods = base / "models" / "krea2"
+    mods.mkdir(parents=True, exist_ok=True)
+    for name in ("raw.safetensors", "qwen_image_vae.safetensors", "qwen3vl_4b_bf16.safetensors"):
+        (mods / name).write_bytes(b"TENSOR" + b"\0" * 64)
+    kit = base / "kit"
+    (kit / "configs").mkdir(parents=True, exist_ok=True)
+
+    def run_flow(vram_gb, quant_mode, expect_flags, expect_no_flags, backend="nvidia"):
+        logs = []
+        cmds = []
+        envs = []
+
+        def run_stream(cmd, cwd=None, env=None, logf=print, **kwargs):
+            envs.append(env)
+            cmds.append([str(x) for x in cmd])
+            return 0
+
+        patches = (
+            patch.object(core, "get_kohya_dir", return_value=str(kdir)),
+            patch.object(core, "data_sub", side_effect=lambda *parts: str(base / "out" / ".".join(parts))),
+            patch.object(core, "data_dir", return_value=str(base / "appdata")),
+            patch.object(core, "KIT_DIR", str(kit)),
+            patch.object(core, "fizgig_engine_status", return_value=(True, "已就绪", str(kdir / "fizgig_venv" / "Scripts" / "python.exe"), backend)),
+            patch.object(core, "krea2_model_files", return_value={
+                "raw": str(mods / "raw.safetensors"),
+                "vae": str(mods / "qwen_image_vae.safetensors"),
+                "te": str(mods / "qwen3vl_4b_bf16.safetensors"),
+            }),
+            patch.object(core, "krea2_missing_models", return_value=[]),
+            patch.object(core, "_safetensors_complete", return_value=True),
+            patch.object(core, "_safetensors_is_prequantized", return_value=False),
+            patch.object(core, "dataset_train_dir", return_value=str(train_dir)),
+            patch.object(core, "detect_ram_gb", return_value=32),
+            patch.object(core, "run_stream", side_effect=run_stream),
+        )
+        params = {"project": proj, "rank": "16", "alpha": "8", "unet_lr": "1e-4",
+                  "max_epochs": "2", "repeats": "2", "resolution": "512",
+                  "trigger": "fztest", "quant_mode": quant_mode, "compile": "0"}
+        with contextlib.ExitStack() as st:
+            for p in patches:
+                st.enter_context(p)
+            core.train_krea2_fizgig(logs.append, mode="krea2_fz", params=params, vram_gb=vram_gb)
+        assert len(cmds) == 3, "expected 3 subprocess calls, got %d" % len(cmds)
+        lat, tex, trn = cmds
+        assert lat[1].endswith("krea2_cache_latents.py") and "--vae" in lat and "--skip_existing" in lat
+        assert tex[1].endswith("krea2_cache_text.py") and "--text_encoder" in tex and "--skip_existing" in tex
+        assert trn[1].endswith("krea2_train.py")
+        joined = " ".join(trn)
+        assert "--dit" in joined and "--network_dim" in joined and "16" in joined
+        assert "--compile_blocks" in joined and "off" in joined
+        for f in expect_flags:
+            assert f in joined, "missing %s in %s" % (f, joined[:300])
+        for f in expect_no_flags:
+            assert f not in joined, "unexpected %s in %s" % (f, joined[:300])
+        # 数据集 TOML
+        toml = (kit / "configs" / "fizgig_krea2_dataset_config.toml").read_text(encoding="utf-8")
+        assert "resolution = [512, 512]" in toml
+        assert "image_directory" in toml and train_dir.as_posix() in toml
+        assert "num_repeats = 2" in toml
+        # 训练输出日志
+        assert any("Krea2(Fizgig)" in x for x in logs)
+        return envs
+
+    l1 = run_flow(8, "auto", expect_flags=["--quantize_4bit"], expect_no_flags=["--blocks_to_swap"])
+    l2 = run_flow(16, "auto", expect_flags=["--blocks_to_swap", "20"], expect_no_flags=["--quantize_4bit"])
+    l3 = run_flow(12, "nf4", expect_flags=["--quantize_4bit"], expect_no_flags=["--blocks_to_swap"])
+    # AMD 后端：run_stream 必须收到 ROCm 运行时环境（BNB_ROCM_VERSION=715 等）
+    l4_envs = run_flow(16, "auto", expect_flags=["--blocks_to_swap", "20"], expect_no_flags=["--quantize_4bit"], backend="amd-rocm")
+    _train_env = l4_envs[-1] or {}
+    assert _train_env.get("BNB_ROCM_VERSION") == "715"
+    assert _train_env.get("FIZGIG_GPU_BACKEND") == "rocm"
+    assert _train_env.get("ROCM_PATH", "").endswith("_rocm_sdk_core")
+    assert "MIOPEN_FIND_MODE" in _train_env and "expandable_segments" in _train_env.get("PYTORCH_ALLOC_CONF", "")
+    print("FOURTH_ENGINE_AMD_ROCM_ENV_OK")
+    print("FOURTH_ENGINE_TRAIN_PIPELINE_OK")
+def test_resume_monitor_seed(base: Path):
+    """断点续训监控续上：resume_step_from 解析 + TrainMonitor.set_step 预填 + 日志覆盖。"""
+    assert core.resume_step_from(r"C:\out\proj\krea2_lora-step00000200-state") == 200
+    assert core.resume_step_from(r"C:\out\proj\no_step_dir") == 0
+    d = base / "state_dir"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "training_state.json").write_text('{"global_step": 321}', encoding="utf-8")
+    assert core.resume_step_from(str(d)) == 321
+    mon = core.TrainMonitor()
+    mon.start(total=544)
+    mon.set_step(200)
+    snap = mon.snapshot()
+    assert snap["step"] == 200 and snap["total"] == 544
+    # 后续训练日志仍会覆盖为真实进度（续上后继续走）
+    mon.on_line("steps: 210/544 [00:05<00:20, 1.00it/s, loss=0.5]")
+    assert mon.snapshot()["step"] == 210
+    print("RESUME_MONITOR_SEED_OK")
+def test_stuck_100_watchdog(base: Path):
+    """100% 卡住自动停止：进程还活着且无新步数超时 → stop_active_process。"""
+    import time as _time
+    clock = {"t": 1000.0}
+
+    def fake_time():
+        return clock["t"]
+
+    class FakeMon:
+        def __init__(self):
+            self.n = 0
+        def snapshot(self):
+            if self.n < 2:
+                self.n += 1
+                return {"running": True, "phase": "train", "total": 100, "step": 50}
+            return {"running": True, "phase": "train", "total": 100, "step": 100}
+
+    mon = FakeMon()
+    state = {"stopped": False}
+    logs = []
+
+    def fake_pids():
+        return {123}          # 进程还活着（卡住）
+    def fake_stop():
+        state["stopped"] = True
+    def fake_sleep(sec):
+        clock["t"] += sec
+
+    with patch.object(core, "active_process_pids", side_effect=fake_pids), \
+         patch.object(core, "stop_active_process", side_effect=fake_stop), \
+         patch.object(core.time, "sleep", side_effect=fake_sleep), \
+         patch.object(core.time, "time", side_effect=fake_time):
+        core._start_train_stuck_watchdog(mon, logs.append, grace=150)
+        for _ in range(400):
+            if state["stopped"]:
+                break
+            _time.sleep(0.05)
+    assert state["stopped"], "watchdog should have auto-stopped"
+    assert any("自动停止" in x for x in logs)
+    print("STUCK_100_WATCHDOG_OK")
 def main():
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
@@ -2314,6 +2631,10 @@ def main():
         test_second_engine(base)
         test_second_engine_without_git(base)
         test_third_engine(base)
+        test_fourth_engine(base)
+        test_fourth_engine_train_pipeline(base)
+        test_resume_monitor_seed(base)
+        test_stuck_100_watchdog(base)
         test_optimizer_resolution(base)
         test_preprocess_deps(base)
         test_preinstall_torch_mirror_fallback(base)
@@ -2384,10 +2705,20 @@ def main():
         test_krea2_at_start_oom_retry(base)
         test_config_export_import(base)
         test_tokenizer_failure_self_heal(base)
+        test_cpu_device_probe_warning(base)
         test_krea2_at_support(base)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 
+
+
+def test_cpu_device_probe_warning(base: Path):
+    """训练前始终探测加速设备：CPU 版 torch/坏 ROCm 命中 device: cpu 时醒目警告（防全程 CPU 傻跑）。"""
+    src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8")
+    assert "_probe_accelerate_device(vpy, logf)" in src, "缺设备探测调用"
+    assert "探测不到 GPU" in src and "device: cpu" in src, "缺 CPU 警告文案"
+    assert "def _probe_accelerate_device" in src, "缺探测函数"
+    print("CPU_DEVICE_PROBE_WARNING_OK")
 
 
 def test_tokenizer_failure_self_heal(base: Path):

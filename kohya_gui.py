@@ -145,10 +145,11 @@ ENGINE_GROUPS = [
     ("第一引擎 · kohya", ("style", "character")),
     ("第二引擎 · musubi", ("krea2", "flux2")),
     ("第三引擎 · ai-toolkit", ("video", "krea2_at", "qwen_image", "zimage")),
+    ("第四引擎 · fizgig", ("krea2_fz",)),
 ]
 SHORT_MODE_LABELS = {
     "style": "画风", "character": "人物", "krea2": "Krea2", "flux2": "FLUX.2",
-    "video": "视频H3", "krea2_at": "Krea2AT", "qwen_image": "Qwen", "zimage": "Z-Image",
+    "krea2_fz": "Krea2F", "video": "视频H3", "krea2_at": "Krea2AT", "qwen_image": "Qwen", "zimage": "Z-Image",
 }
 
 
@@ -315,6 +316,7 @@ def _collect_env_lines():
         out.append("第一引擎(kohya): %s" % ("已安装" if _st.get("kohya_ok") else "未安装"))
         out.append("第二引擎(musubi): %s" % ("已安装" if _st.get("musubi_ok") else "未安装"))
         out.append("第三引擎(ai-toolkit): %s" % ("已安装" if _st.get("at_ok") else "未安装"))
+        out.append("第四引擎(fizgig): %s" % ("已安装" if _st.get("fizgig_ok") else "未安装"))
     except Exception:
         pass
     try:
@@ -916,6 +918,10 @@ class App:
                                              text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
                                              command=self._show_krea2_guide)
         self.btn_krea2_guide.pack(side="left", padx=(6, 4))
+        self.btn_fizgig_install = ctk.CTkButton(self.krea2_row, text="⚙ 安装第四引擎", width=112, height=30,
+                                                fg_color="transparent", hover_color="#252a36", border_width=1,
+                                                border_color=ACC, text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
+                                                command=self.cmd_install_fizgig)
         # FLUX.2 模型状态（仅 FLUX.2 模式显示，独立一行占满宽度）
         self.flux2_row = ctk.CTkFrame(top, fg_color="transparent")
         self.flux2_model_var = tk.StringVar(value="")
@@ -1211,6 +1217,8 @@ class App:
                 return bool(core.system_status().get("musubi_ok"))
             if check == "at":
                 return bool(core.system_status().get("at_ok"))
+            if check == "fizgig":
+                return bool(core.system_status().get("fizgig_ok"))
             if check == "krea2_models":
                 return not core.krea2_missing_models()
             if check == "krea2_at_models":
@@ -1945,6 +1953,9 @@ class App:
                OK_TX if sts.get("python") else "#c9a8a8")
         _badge("● Kohya-SS 就绪" if sts.get("kohya_ok") else "● Kohya 未装", OK_BG if sts.get("kohya_ok") else "#3a3333",
                OK_TX if sts.get("kohya_ok") else "#c9a8a8")
+        _badge("● 第四引擎(Fizgig) 就绪" if sts.get("fizgig_ok") else "● 第四引擎未装",
+               OK_BG if sts.get("fizgig_ok") else "#3a3333",
+               OK_TX if sts.get("fizgig_ok") else "#c9a8a8")
         _gpu = sts.get("gpu")
         _badge(f"● {_gpu}" if _gpu else "● 未检测到 N 卡", HW_BG, HW_TX)
         try:
@@ -2139,7 +2150,7 @@ class App:
             pass
         # Qwen-Image / Z-Image：显示「画风/人物」训练类型切换；其他模式隐藏
         try:
-            _is_at = self.mode in ("qwen_image", "zimage", "krea2", "krea2_at", "flux2")
+            _is_at = self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2")
             if _is_at:
                 self.at_sub_row.pack(fill="x", padx=22, pady=(0, 6))
             else:
@@ -2149,12 +2160,12 @@ class App:
         try:
             if self.mode == "video":
                 _hint = core.TRIGGER_HINT_VIDEO
-            elif self.mode in ("qwen_image", "zimage", "krea2", "krea2_at", "flux2"):
+            elif self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2"):
                 if self._at_sub_label() == "style":
                     _hint = core.TRIGGER_HINT_STYLE
                 elif self.mode in ("qwen_image", "zimage"):
                     _hint = core.TRIGGER_HINT_AT
-                elif self.mode == "krea2":
+                elif self.mode in ("krea2", "krea2_fz"):
                     _hint = core.TRIGGER_HINT_KREA2
                 elif self.mode == "krea2_at":
                     _hint = core.TRIGGER_HINT_KREA2_AT
@@ -2171,7 +2182,7 @@ class App:
         try:
             _tef = getattr(self, "_adv_frames", {}).get("te_lr")
             if _tef is not None:
-                if self.mode in ("krea2", "krea2_at", "flux2", "video", "qwen_image", "zimage"):
+                if self.mode in ("krea2", "krea2_fz", "krea2_at", "flux2", "video", "qwen_image", "zimage"):
                     _tef.grid_remove()   # Krea2/FLUX.2/视频/AI图像：文本编码器不训练，该参数无效
                 else:
                     try:
@@ -2195,7 +2206,7 @@ class App:
         except Exception:
             pass
         try:
-            _hide_base = self.mode in ("krea2", "krea2_at", "flux2", "video", "qwen_image", "zimage")
+            _hide_base = self.mode in ("krea2", "krea2_fz", "krea2_at", "flux2", "video", "qwen_image", "zimage")
             for w in (self.base_label, self.base_combo, self.btn_pick_base, self.btn_refresh_base, self.btn_download_base):
                 try:
                     if _hide_base:
@@ -2210,9 +2221,18 @@ class App:
                     except Exception:
                         pass
             try:
-                if self.mode in ("krea2", "krea2_at"):
+                if self.mode in ("krea2", "krea2_fz", "krea2_at"):
                     self._refresh_krea2_status()
                     self.krea2_row.pack(fill="x", pady=(8, 0))
+                    try:
+                        _fzb = getattr(self, "btn_fizgig_install", None)
+                        if _fzb is not None:
+                            if self.mode == "krea2_fz":
+                                _fzb.pack(side="left", padx=(6, 4))
+                            else:
+                                _fzb.pack_forget()
+                    except Exception:
+                        pass
                 else:
                     try:
                         self.krea2_row.pack_forget()
@@ -2319,7 +2339,7 @@ class App:
         # 人物强绑定行：仅「人物」语义的模式显示（人物模式 / AI 图像・Krea2・FLUX.2 的人物子模式）
         try:
             _is_person = (self.mode == "character") or (
-                self.mode in ("qwen_image", "zimage", "krea2", "krea2_at", "flux2")
+                self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2")
                 and self._at_sub_label() == "character")
             if _is_person:
                 self.strong_bind_row.pack(fill="x", padx=22, pady=(0, 4))
@@ -3441,7 +3461,7 @@ class App:
             "te_lr": float(_getv("te_lr", "1.5e-4")),
             "repeats": int(float(_getv("repeats", "5"))),
             "max_epochs": int(float(_getv("max_epochs", "8"))),
-            "resolution": int(float(_getv("resolution", "1024" if self.mode in ("krea2", "krea2_at", "flux2") else str(core.RESOLUTIONS.get(self.base_type, 512))))),
+            "resolution": int(float(_getv("resolution", "1024" if self.mode in ("krea2", "krea2_fz", "krea2_at", "flux2") else str(core.RESOLUTIONS.get(self.base_type, 512))))),
             "video_steps": int(float(_getv("video_steps", "2000"))),
             "save_every": (lambda _s: int(_s) if str(_s).isdigit() else None)(_getv("save_every", "")),
             "train_text_encoder": not self.unet_only_var.get(),
@@ -3649,6 +3669,31 @@ class App:
             os.startfile(d)
         except Exception as e:
             messagebox.showerror(core.APP_NAME, f"打开失败：{e}")
+
+    def cmd_install_fizgig(self):
+        """安装第四训练引擎（Fizgig：Krea2 图像 LoRA，NVIDIA/AMD 双平台）。"""
+        if self.busy:
+            messagebox.showinfo(core.APP_NAME, "有任务正在运行，请先等待当前任务完成。")
+            return
+        if not messagebox.askyesno(core.APP_NAME,
+                "安装第四训练引擎（Fizgig · Krea2 图像 LoRA）？\n\n"
+                "· 独立环境，完全不影响现有引擎\n"
+                "· NVIDIA 显卡走 CUDA 路径（torch cu128 约 2.9GB，国内镜像断点续传）\n"
+                "· AMD 显卡走 ROCm 路径（AMD nightly 钉死版本）\n"
+                "· Krea2 模型与第二/三引擎共用 models/krea2/\n\n是否开始安装？"):
+            return
+        self._start_worker(self._install_fizgig_worker, "安装第四引擎")
+
+    def _install_fizgig_worker(self):
+        try:
+            core.install_fizgig_engine(self._log)
+            core.clear_status_cache()
+            self.q.put(("STATUS",))
+        except Exception as e:
+            self._log(f"[ERROR] 第四引擎安装失败：{e}")
+            traceback.print_exc()
+        finally:
+            self.q.put("__DONE__")
 
     def cmd_import_at_env(self):
         """导入已装好的第三引擎（AI Toolkit）环境：选择源码目录或根目录，软件直接复用，不用重新部署。"""
@@ -3939,7 +3984,7 @@ class App:
             pp_mode = core.preprocess_mode(params.get("mode"), params.get("at_sub_mode"))
             core.preprocess(
                 self._log, input_dir=params["raw_dir"],
-                size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") in ("krea2", "krea2_at") else core.RESOLUTIONS.get(params["base_type"], 512))),
+                size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") in ("krea2", "krea2_fz", "krea2_at") else core.RESOLUTIONS.get(params["base_type"], 512))),
                 mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=False, crop_ratio=params.get("crop_ratio") or "",
@@ -3970,6 +4015,9 @@ class App:
                 return
         elif params.get("mode") == "krea2_at":
             if not self._ensure_krea2_at_ready():
+                return
+        elif params.get("mode") == "krea2_fz":
+            if not self._ensure_krea2_fz_ready():
                 return
         else:
             if not params["base_model"]:
@@ -4003,6 +4051,9 @@ class App:
             elif params.get("mode") == "krea2_at":
                 core.train_krea2_at(self._log, mode="krea2_at", params=params,
                                     vram_gb=vram, resume_from=resume, progress=self._train_mon)
+            elif params.get("mode") == "krea2_fz":
+                core.train_krea2_fizgig(self._log, mode="krea2_fz", params=params,
+                                        vram_gb=vram, resume_from=resume, progress=self._train_mon)
             elif params.get("mode") == "flux2":
                 core.train_flux2(self._log, mode="flux2", params=params,
                                  vram_gb=vram, resume_from=resume, progress=self._train_mon)
@@ -4044,6 +4095,9 @@ class App:
         elif params.get("mode") == "krea2_at":
             if not self._ensure_krea2_at_ready():
                 return
+        elif params.get("mode") == "krea2_fz":
+            if not self._ensure_krea2_fz_ready():
+                return
         elif params.get("mode") == "flux2":
             if not self._ensure_flux2_ready():
                 return
@@ -4052,7 +4106,7 @@ class App:
                 messagebox.showwarning(core.APP_NAME, "请先选择底模（步骤③）。")
                 return
         _need_trigger = (self.mode == "character") or \
-            (self.mode in ("qwen_image", "zimage", "krea2", "krea2_at", "flux2") and self._at_sub_label() == "character")
+            (self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2") and self._at_sub_label() == "character")
         if _need_trigger and not params["trigger"]:
             messagebox.showwarning(core.APP_NAME, "人物模式建议填写 Trigger 触发词（步骤②）。")
             return
@@ -4070,7 +4124,7 @@ class App:
             pp_mode = core.preprocess_mode(params.get("mode"), params.get("at_sub_mode"))
             core.preprocess(
                 self._log, input_dir=params["raw_dir"],
-                size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") in ("krea2", "krea2_at") else core.RESOLUTIONS.get(params["base_type"], 512))),
+                size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") in ("krea2", "krea2_fz", "krea2_at") else core.RESOLUTIONS.get(params["base_type"], 512))),
                 mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=False, crop_ratio=params.get("crop_ratio") or "",
@@ -4528,6 +4582,30 @@ class App:
             return False
         return True
 
+    def _ensure_krea2_fz_ready(self):
+        """Krea2(Fizgig) 模式训练前检查：第四引擎已装 + Krea2 模型齐全。返回是否可继续。"""
+        try:
+            ok, detail, _, _ = core.fizgig_engine_status()
+        except Exception as e:
+            ok, detail = False, str(e)
+        if not ok:
+            messagebox.showwarning(core.APP_NAME,
+                                   "第四训练引擎未安装。\n请点「⚙ 安装第四引擎」安装。\n\n" + detail)
+            return False
+        missing = core.krea2_missing_models()
+        if missing:
+            d = core.krea2_models_dir()
+            if messagebox.askyesno(core.APP_NAME,
+                    "Krea 2 模式还缺少模型文件，需要先下载放入 models/krea2/：\n\n" + "\n".join(missing) +
+                    f"\n\n是否现在打开「应用内下载」对话框？（带断点续传，下完自动识别）"):
+                try:
+                    os.makedirs(d, exist_ok=True)
+                except Exception:
+                    pass
+                self.cmd_dl_krea2_models()
+            return False
+        return True
+
     def _ensure_flux2_ready(self):
         """FLUX.2 模式训练前检查：第二引擎已装 + FLUX.2 模型齐全。返回是否可继续。"""
         try:
@@ -4597,7 +4675,7 @@ class App:
         except Exception:
             return False
         # 方案 B：Krea2（12.9B）8G 显存强提示（fp8 在部分显卡退化 + 重度层换内存，每步数十秒以上）
-        if params.get("mode") in ("krea2", "krea2_at") and vram < 12:
+        if params.get("mode") in ("krea2", "krea2_fz", "krea2_at") and vram < 12:
             return messagebox.askyesno(
                 core.APP_NAME,
                 f"Krea 2 是 12.9B 大模型，建议 16G+ 显存；你的显卡只有约 {vram:.1f}G。\n\n"
@@ -4616,6 +4694,8 @@ class App:
 
     def _warn_no_nvidia(self):
         """显卡兼容检查：N 卡直接放行；AMD 卡走兼容模式；其他保持原警告。返回 True=继续。"""
+        if getattr(self, "mode", None) == "krea2_fz":
+            return True   # Fizgig 双平台（NVIDIA/AMD ROCm），不强制 AMD 兼容模式
         try:
             if core.detect_nvidia_gpu():
                 return True
@@ -4662,7 +4742,10 @@ class App:
             info = core.AT_IMAGE_MODELS.get(params["mode"], {})
             need = info.get("min_vram", 16)
             label = info.get("label", params["mode"])
-        elif params.get("mode") in ("krea2", "krea2_at"):
+        elif params.get("mode") == "krea2_fz":
+            need = 10
+            label = "Krea 2（Fizgig 引擎，NF4 最低 8G）"
+        elif params.get("mode") in ("krea2", "krea2_fz", "krea2_at"):
             need = 16
             label = "Krea 2（12.9B）"
         else:
@@ -4693,11 +4776,11 @@ class App:
         return None
 
     def _confirm_training(self, params, resume=None):
-        if params.get("mode") in ("krea2", "krea2_at"):
+        if params.get("mode") in ("krea2", "krea2_fz", "krea2_at"):
             files = core.krea2_model_files()
             msg = (
                 "即将开始 Krea 2 训练，请确认以下参数：\n\n"
-                f"模式        : {core.MODE_LABELS.get(params['mode'], params['mode'])}" + ("（AI-Toolkit 引擎）" if params.get('mode') == 'krea2_at' else "") + "\n"
+                f"模式        : {core.MODE_LABELS.get(params['mode'], params['mode'])}" + ("（AI-Toolkit 引擎）" if params.get('mode') == 'krea2_at' else "（Fizgig 引擎）" if params.get('mode') == 'krea2_fz' else "") + "\n"
                 f"底模(RAW)   : {os.path.basename(files.get('raw') or '？')}\n"
                 f"rank / alpha: {params['rank']} / {params['alpha']}\n"
                 f"学习率      : {params['unet_lr']}\n"

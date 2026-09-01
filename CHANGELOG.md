@@ -1,4 +1,34 @@
+## v0.14.0（2026-09-01）
+
+### 新增：第四引擎（Fizgig · Krea2 图像 LoRA，NVIDIA/AMD 双平台）——第 1 步骨架（进行中）
+- 背景：第二引擎 musubi 在 AMD 上会 fallback CPU；Fizgig v4.3+ 官方支持 AMD ROCm（Windows 主推）、NVIDIA 是主场。
+- 已做（核心层）：`install_fizgig_engine()`（NVIDIA→torch 2.10.0+cu128 国内镜像；AMD→AMD nightly 钉死 ROCm 栈 + 0xDELUXA bitsandbytes）、
+  `fizgig_engine_status()` / `_fizgig_marker_ok()`、`fizgig`/`fizgig_venv` 加入共存白名单、`system_status` 增加 `fizgig_ok`、
+  源码按国内优先下载部署（魔搭/ghfast/gh-proxy）、Python 3.12 自检与安装复用、AMD gfx 架构探测。
+- 测试：engine_install_smoke_test 新增 FOURTH_ENGINE_NVIDIA_AND_AMD_CONTROL_FLOW_OK（NVIDIA+AMD 双路径 mock 全流程）；
+  smoke_test + engine_install_smoke_test 全绿。
+- 第 2 步（本机 NVIDIA 实装）已完成：Fizgig v5.0.0 源码部署 + fizgig_venv（torch 2.10.0+cu128 / CUDA 12.8 / RTX 4070 验证通过，krea2_train --help 可用）；最小训练因本机负载被用户暂停。
+- 第 3 步（GUI 入口）已完成：侧边栏新增「第四引擎 · fizgig → Krea2F」导航、状态徽章/环境摘要/新手引导第 4 步、`⚙ 安装第四引擎` 按钮（krea2_fz 页显示）、`_ensure_krea2_fz_ready` 训练前检查、krea2_fz 并入 Krea2 参数页（画风/人物子模式、触发词、强绑定、显存/量化档）。
+- 第 4 步（训练管线）已完成：`train_krea2_fizgig()`（数据集 TOML → krea2_cache_latents → krea2_cache_text → krea2_train；量化档 NF4/INT8/fp8+swap 自动适配；模型复用 models/krea2/ 零重下）。
+- 测试：新增 FOURTH_ENGINE_TRAIN_PIPELINE_OK（8G→NF4 / 16G→fp8+swap20 命令构造 + TOML）；smoke_test + engine_install_smoke_test 全绿。
+- 魔搭缓存已完成：Fizgig v5.0.0 源码 + 6 个钉死 ROCm wheel（torch/torchvision/rocm-sdk-devel/core/libraries + bitsandbytes，共 1.66GB）已上传魔搭 `engine_sources/`；
+  `install_fizgig_engine()` AMD 路径改为「魔搭国内直连（断点续传 + wheel 校验）优先，失败自动回退 AMD nightly」；
+  顺带修复 venv 备份目录同名只加一次 `_1` 的潜在冲突（改 while 找空名）。
+  验证：FOURTH_ENGINE_AMD_NIGHTLY_FALLBACK_OK（魔搭失败→nightly 兜底）+ 两套冒烟全绿。
+- 使用说明已新增「第四训练引擎（Fizgig · Krea2 图像 LoRA，NVIDIA/AMD 双平台）」章节（安装/模型/显存档/AMD 说明），并更新新手引导与 AMD 环境要求。
+- 按 Fizgig 官方文档核对实现：AMD 训练补齐 ROCm 运行时环境（`_fizgig_rocm_env`，对齐 run_fizgig_rocm.bat / write_rocm_env.py：BNB_ROCM_VERSION=715、ROCM_PATH/HIP_PATH=venv `_rocm_sdk_core`、PATH 加 hipinfo 目录、MIOpen/alloc/triton 变量）；验证 FOURTH_ENGINE_AMD_ROCM_ENV_OK + 两套冒烟全绿。
+- 断点续训监控续上：断点续训时监控/步数不再从 0 开始，而是从快照步数预填（`resume_step_from` 解析状态目录名 `-stepNNNNNN-state` 或 training_state.json 的 global_step，`TrainMonitor.set_step` 预填，日志覆盖为真实进度）。
+  已接入 kohya（画风/人物）与 musubi（Krea2/FLUX.2）三处断点块；ai-toolkit 与 Fizgig 断点尚未接入（维持现状）。验证 RESUME_MONITOR_SEED_OK + 两套冒烟全绿。
+- 训练 100% 卡住自动停止：训练步数走满 100% 后若进程还活着且无新步数超过 150 秒（AMD ROCm 保存/清理偶发卡死，需手动点停止）→ 自动停止并提示（`_start_train_stuck_watchdog` 接入全部训练模式；正常完成进程已退出不会触发）。验证 STUCK_100_WATCHDOG_OK + 两套冒烟全绿。
+- 待办：ai-toolkit/Fizgig 断点接入、Fizgig 采样预览（二期）、AMD 真机试点（7800 XT）、发版。
+
 ## 未发布（进行中）
+
+### 待办
+- ai-toolkit（Krea2AT/Qwen/Z-Image/视频H3）与 Fizgig 断点续训接入
+- Fizgig 训练中采样预览（二期）
+- AMD 7800 XT 真机试点（验证 Krea2 第四引擎 + 100% 自动停止）
+- Fizgig LoRA 直接编辑功能接入（计划在桌面：Fizgig_LoRA编辑功能_接入计划.md）
 
 ### 待办 / 调研
 - [ ] NF4 4-bit Krea2 训练可行性调研：社区 AcademiaSD LoRAlab 声称 8G 显存可训（峰值 ~7.7G，4-bit NF4 冻结底模 + TE/VAE 预缓存不驻留 + 8-bit AdamW on BF16 LoRA），但为独立脚本、非 ai-toolkit；ai-toolkit 官方 Krea2 量化最低只到 qint8/qfloat8。待验证是否值得接入（可能需自研扩展或换训练框架）。
@@ -44,6 +74,11 @@
 - 根因：SDXL 等训练加载 CLIP tokenizer 时 from_pretrained 报 TypeError: expected str... not NoneType（vocab_file=None），是本地 tokenizer 缓存损坏/不完整（0 字节占位等）导致；原完整性校验只查文件存在，不查内容/大小（4070S 用户复现）。
 - 已修：① _complete_dir 完整性校验增加非空（文件大小>0）判断；② 训练失败检测到 tokenizer 加载错误时，强制重建分词器缓存（删除后从内置包/国内镜像补齐）并自动重试一次。
 - 验证：TOKENIZER_FAILURE_SELF_HEAL_OK（失败判定命中/0 字节拒绝/接线检查）；smoke_test + engine_install_smoke_test 全绿。
+
+### 修复：训练前始终探测加速设备，CPU 版 torch/坏 ROCm 不再静默傻跑
+- 根因：工具只在「残留 accelerate 配置 use_cpu=true」时才探测设备；CPU 版 torch 或损坏的 ROCm（RX 7000 RDNA3 手动环境）没触发该分支，训练全程跑 CPU（accelerator device: cpu），Krea2 卡在第一步（RX 7900 XT 用户复现）。
+- 已修：_accelerate_launch_cmd 始终用与训练相同的 accelerate 路径探测设备；探测到 cpu 时打印醒目警告（检查 NVIDIA 驱动/CUDA、AMD ROCm 或重装第二引擎），不再静默。
+- 验证：CPU_DEVICE_PROBE_WARNING_OK；smoke_test + engine_install_smoke_test 全绿。
 
 - 已修：第三引擎 4 个模式隐藏该勾选框，仅第二引擎 Krea2/FLUX.2 显示。
 - 验证：编译 + smoke_test 全绿。
