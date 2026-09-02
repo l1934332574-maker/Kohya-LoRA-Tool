@@ -2393,7 +2393,21 @@ def test_fizgig_deps_self_heal(base: Path):
     src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
     assert "def _ensure_fizgig_deps" in src, "缺 Fizgig 依赖自愈函数"
     assert "_ensure_fizgig_deps(vpy, fz_dir, logf)" in src, "缺训练前接线"
-    assert "find_spec" in src and "MISSING=" in src, "缺依赖探测"
+    assert "import importlib.util" in src, "探测必须显式引入 importlib.util（否则 find_spec 必崩、自愈静默失效）"
+    # 功能：探测返回 MISSING=toml → run_stream 应收到 pip install toml（自愈真的生效）
+    logs = []
+    calls = []
+
+    class _CP:
+        returncode = 0
+        stdout = "MISSING=toml\n"
+        stderr = ""
+
+    with patch.object(core.subprocess, "run", return_value=_CP()), \
+         patch.object(core, "run_stream", side_effect=lambda cmd, *a, **k: (calls.append([str(x) for x in cmd]), 0)[1]):
+        ok = core._ensure_fizgig_deps(r"X:\fizgig_venv\Scripts\python.exe", str(base), logs.append)
+    assert ok is True, "缺 toml 时应补装成功"
+    assert any("pip" in c and "install" in c and "toml" in c for c in calls), calls
     print("FIZGIG_DEPS_SELF_HEAL_OK")
 def test_fourth_engine_train_pipeline(base: Path):
     """train_krea2_fizgig：数据集 TOML + 缓存 + 训练命令构造（8G→NF4 / 16G→fp8+swap20）。"""

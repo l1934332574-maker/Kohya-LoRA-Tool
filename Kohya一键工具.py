@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.14.3"
+APP_VERSION = "0.14.4"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -3852,14 +3852,20 @@ def _ensure_fizgig_deps(vpy, fz_dir, logf=print):
     _pkg = {"yaml": "pyyaml", "PIL": "pillow", "cv2": "opencv-python", "imageio_ffmpeg": "imageio-ffmpeg"}
     _miss = []
     try:
-        _code = ("import importlib\n"
+        # 必须显式 import importlib.util（import importlib 不会加载 util 子模块，
+        # find_spec 必崩 → 探测静默失败、自愈不生效；2026-09-02 v0.14.3 AMD 7900 XT 复现）
+        _code = ("import importlib.util\n"
                  "mods=%r\n"
                  "print('MISSING=' + ','.join(m for m in mods if importlib.util.find_spec(m) is None))\n"
                  % _probe)
         r = subprocess.run([vpy, "-c", _code], capture_output=True, text=True, timeout=120)
-        for _ln in (r.stdout or "").splitlines():
-            if _ln.startswith("MISSING="):
-                _miss = [m for m in _ln.split("=", 1)[1].split(",") if m]
+        if r.returncode != 0:
+            # 探测脚本本身异常：保守起见至少补装 toml（Fizgig 关键依赖）
+            _miss = ["toml"]
+        else:
+            for _ln in (r.stdout or "").splitlines():
+                if _ln.startswith("MISSING="):
+                    _miss = [m for m in _ln.split("=", 1)[1].split(",") if m]
     except Exception:
         _miss = ["toml"]
     if not _miss:

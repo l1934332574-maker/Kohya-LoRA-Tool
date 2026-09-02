@@ -1,4 +1,20 @@
-﻿## v0.14.0（2026-09-01）
+﻿## v0.14.4（2026-09-02）热修复
+
+### 修复：Fizgig（第四引擎）训练前依赖自愈失效（探测脚本 import importlib.util 缺失）
+- 根因：`_ensure_fizgig_deps` 探测脚本写的是 `import importlib`，但 `importlib.util` 必须显式 `import importlib.util` 才会加载；
+  子进程 `find_spec` 必崩（AttributeError）、stdout 为空 → 解析不到缺失模块 → 静默返回 True（等于没修、无任何提示）。
+  v0.14.3 的该自愈实际是坏的（AMD 7900 XT 用户复现）。
+- 已修：探测脚本改 `import importlib.util`；探测子进程异常（returncode≠0）时保守兜底至少补装 toml；
+  冒烟测试升级为真跑探测逻辑（mock 探测返回 MISSING=toml → 断言发出 pip install toml）。
+- 验证：FIZGIG_DEPS_SELF_HEAL_OK（功能版）+ 两套冒烟全绿。
+
+### 修复：Krea2（AI Toolkit / 第三引擎）16G 启动阶段 CUDA OOM 自动重试增强
+- 根因：16G 边界显存，启动 OOM 是显存抖动（qint8 DiT + LoRA 网络初始化峰值超 14.5G 可用）；
+  原来只自动重试 1 次，同配置重试也容易再崩（4080 SUPER 16G 用户日志，手动重跑多次才成功一次）。
+- 已修：自动重试最多 3 次（进程退出自动释放显存，重试成本低）；最后一次仍 OOM 时自动把
+  DiT 分层交换从 0.3 提到 0.5 重新生成 yaml 兜底，保证能启动（代价是速度略慢）；默认仍 0.3 保速度。
+- 验证：KREA2_AT_START_OOM_RETRY_OK（新增 force_offload=0.5 时 yaml 实际写出 0.5 的功能断言）+ 两套冒烟全绿。
+## v0.14.0（2026-09-01）
 
 ### 新增：第四引擎（Fizgig · Krea2 图像 LoRA，NVIDIA/AMD 双平台）——第 1 步骨架（进行中）
 - 背景：第二引擎 musubi 在 AMD 上会 fallback CPU；Fizgig v4.3+ 官方支持 AMD ROCm（Windows 主推）、NVIDIA 是主场。
