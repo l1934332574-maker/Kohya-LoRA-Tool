@@ -1,4 +1,18 @@
-﻿## v0.14.4（2026-09-02）热修复
+﻿## v0.14.5（2026-09-02）热修复
+
+### 修复：Fizgig / ai-toolkit 国内 pip 安装撞死代理 + 损坏缓存
+- 根因：`build_direct_env` 只清环境变量；用户 pip.ini 里配了 `proxy = 127.0.0.1:7897`（Clash 没开）时 pip 仍会撞死代理；
+  且 pip 缓存目录被移动过、存在只读 wheel（`F:\cachemoved\...\antlr4...whl` Permission denied）导致安装中断（AMD 7900 XT 用户复现）。
+- 已修：新增 `_domestic_pip_env()`（清代理 + 空 `PIP_CONFIG_FILE` 让 pip 完全忽略 pip.ini）；Fizgig 自愈 / Fizgig 主安装 / ai-toolkit 安装的 pip 统一改用；
+  pip 命令加 `--no-cache-dir` 绕过损坏缓存。
+- 验证：FIZGIG_DEPS_SELF_HEAL_OK（新增 --no-cache-dir 断言）+ 两套冒烟全绿。
+
+### 修复：Fizgig（第四引擎）AMD ROCm 训练卡在优化器/首步
+- 根因：Fizgig 默认优化器是 bitsandbytes `AdamW8bit`，而 bnb 在 ROCm 上最不稳（工具全局 AMD 策略就是避开 bnb）；
+  Fizgig 流程漏给 AMD 传 `--optimizer_type`，导致模型已驻留显存（int8）后卡在优化器/首步无输出（AMD 7900 XT 用户日志：`INT8 W8A8 ... resident on cuda` 后停住）。
+- 已修：Fizgig AMD 路径强制 `--optimizer_type adamw`（纯 PyTorch，稳定）；加首次运行提示（加载/量化 26GB 底模 + 编译内核，前几分钟无步数输出属正常）。
+- 验证：FOURTH_ENGINE_TRAIN_PIPELINE_OK（新增 AMD 命令必须带 adamw 断言）+ 两套冒烟全绿。
+## v0.14.4（2026-09-02）热修复
 
 ### 修复：Fizgig（第四引擎）训练前依赖自愈失效（探测脚本 import importlib.util 缺失）
 - 根因：`_ensure_fizgig_deps` 探测脚本写的是 `import importlib`，但 `importlib.util` 必须显式 `import importlib.util` 才会加载；

@@ -2408,6 +2408,7 @@ def test_fizgig_deps_self_heal(base: Path):
         ok = core._ensure_fizgig_deps(r"X:\fizgig_venv\Scripts\python.exe", str(base), logs.append)
     assert ok is True, "缺 toml 时应补装成功"
     assert any("pip" in c and "install" in c and "toml" in c for c in calls), calls
+    assert any("--no-cache-dir" in c for c in calls), "应绕过损坏的 pip 缓存（--no-cache-dir）"
     print("FIZGIG_DEPS_SELF_HEAL_OK")
 def test_fourth_engine_train_pipeline(base: Path):
     """train_krea2_fizgig：数据集 TOML + 缓存 + 训练命令构造（8G→NF4 / 16G→fp8+swap20）。"""
@@ -2499,6 +2500,8 @@ def test_fourth_engine_train_pipeline(base: Path):
     assert _train_env.get("FIZGIG_GPU_BACKEND") == "rocm"
     assert _train_env.get("ROCM_PATH", "").endswith("_rocm_sdk_core")
     assert "MIOPEN_FIND_MODE" in _train_env and "expandable_segments" in _train_env.get("PYTORCH_ALLOC_CONF", "")
+    src2 = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
+    assert '"--optimizer_type", "adamw"' in src2, "AMD ROCm Fizgig 应强制 AdamW（避开 bnb 8-bit 卡死）"
     print("FOURTH_ENGINE_AMD_ROCM_ENV_OK")
     print("FOURTH_ENGINE_TRAIN_PIPELINE_OK")
 def test_resume_monitor_seed(base: Path):

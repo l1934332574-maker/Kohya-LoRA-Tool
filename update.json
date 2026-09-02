@@ -1,6 +1,6 @@
 {
-  "version": "v0.14.4",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.14.4/Setup.exe",
+  "version": "v0.14.5",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.14.5/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.14.4 热修复（2026-09-02）：\n    · 修复：Fizgig（第四引擎）训练前依赖自愈失效——探测脚本缺 import importlib.util，find_spec 必崩导致自愈静默不生效；已改为显式导入 + 探测异常时保守补装 toml，现在能真正自动补装缺失依赖（AMD 7900 XT 用户报 No module named 'toml'）；\n    · 修复：Krea2（AI Toolkit / 第三引擎）16G 启动 CUDA OOM——自动重试最多 3 次，最后一次自动加大 DiT 分层交换（0.3→0.5）兜底，保证能启动。"
+  "notes": "v0.14.5 热修复（2026-09-02）：\n    · 修复：Fizgig / ai-toolkit 国内 pip 安装——新增 _domestic_pip_env（清代理 + 空 PIP_CONFIG_FILE 绕开 pip.ini 里的失效代理）+ pip 命令加 --no-cache-dir 绕过损坏缓存（AMD 7900 XT 用户报 127.0.0.1:7897 连接被拒 / Permission denied）；\n    · 修复：Fizgig（第四引擎）AMD ROCm 训练卡在优化器/首步——默认 bitsandbytes AdamW8bit 在 ROCm 不稳，AMD 路径强制 --optimizer_type adamw（纯 PyTorch）。"
 }

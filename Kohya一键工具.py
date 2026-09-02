@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.14.4"
+APP_VERSION = "0.14.5"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -3560,7 +3560,7 @@ def install_ai_toolkit_engine(logf=print):
         logf("[第三引擎] 升级 pip / setuptools / wheel（清华/阿里双国内源）…")
         if not _upgrade_pip(vpy, kdir, logf, label="第三引擎"):
             raise RuntimeError("pip 升级失败：清华/阿里镜像均不可达，无需代理，请稍后重试")
-        env = build_direct_env()
+        env = _domestic_pip_env()
         # torch cu130：双国内镜像断点续传预下载大轮子 → 本地安装
         _torch_ok = False
         for _try in range(3):
@@ -3840,6 +3840,22 @@ def _fizgig_verify(vpy, fz_dir, logf=print, backend="nvidia"):
 
 
 
+
+def _domestic_pip_env():
+    """国内 pip 直连环境：清代理 + 用空 PIP_CONFIG_FILE 绕开用户 pip.ini 里的失效代理。
+
+    build_direct_env 只清环境变量；若用户 pip.ini 配了 proxy（如 127.0.0.1:7897 但 Clash 没开），
+    pip 仍会撞上死代理。PIP_CONFIG_FILE 指向空配置可让 pip 忽略 pip.ini（index-url 由命令显式传）。
+    """
+    env = build_direct_env()
+    try:
+        _cfg = os.path.join(tempfile.gettempdir(), "kohya_pip_direct.ini")
+        if not os.path.isfile(_cfg):
+            open(_cfg, "w", encoding="utf-8").close()
+        env["PIP_CONFIG_FILE"] = _cfg
+    except Exception:
+        pass
+    return env
 def _ensure_fizgig_deps(vpy, fz_dir, logf=print):
     """训练前自愈：fizgig_venv 缺关键依赖（如老版本安装漏了 toml）时按需补装。
 
@@ -3872,8 +3888,8 @@ def _ensure_fizgig_deps(vpy, fz_dir, logf=print):
         return True
     _pkgs = [_pkg.get(m, m) for m in _miss]
     logf("[第四引擎] ⚠ fizgig_venv 缺依赖：%s，自动补装（国内镜像）…" % ", ".join(_pkgs))
-    _env = build_direct_env()
-    if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+    _env = _domestic_pip_env()
+    if run_stream([vpy, "-m", "pip", "install", "--no-input", "--no-cache-dir", "--retries", "10", "--timeout", "120",
                    "--index-url", "https://mirrors.aliyun.com/pypi/simple/",
                    "--extra-index-url", "https://pypi.tuna.tsinghua.edu.cn/simple"] + _pkgs,
                   cwd=fz_dir, env=_env, logf=logf) == 0:
@@ -3945,7 +3961,7 @@ def install_fizgig_engine(logf=print):
         logf("[第四引擎] 升级 pip / setuptools / wheel（清华/阿里双国内源）…")
         if not _upgrade_pip(vpy, kdir, logf, label="第四引擎"):
             raise RuntimeError("pip 升级失败：清华/阿里镜像均不可达，无需代理，请稍后重试")
-        env = build_direct_env()
+        env = _domestic_pip_env()
         backend = "nvidia"
         try:
             vendor = detect_gpu_vendor()
@@ -4036,7 +4052,7 @@ def install_fizgig_engine(logf=print):
         with open(_req_tmp, "w", encoding="utf-8") as _rf:
             _rf.write("\n".join(x for x in _deps.split()) + "\n")
         logf("[第四引擎] 安装 Fizgig 共享依赖（清华/阿里国内 PyPI，锁定兼容版本）…")
-        if run_stream([vpy, "-m", "pip", "install", "--upgrade", "--no-input", "--retries", "10", "--timeout", "120",
+        if run_stream([vpy, "-m", "pip", "install", "--upgrade", "--no-input", "--no-cache-dir", "--retries", "10", "--timeout", "120",
                        "--index-url", "https://mirrors.aliyun.com/pypi/simple/",
                        "--extra-index-url", "https://pypi.tuna.tsinghua.edu.cn/simple",
                        "-r", _req_tmp], cwd=fz_dir, env=env, logf=logf) != 0:
@@ -4232,6 +4248,14 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     # torch.compile：Fizgig 默认 auto 会自己权衡；默认关（Windows triton 需 MSVC 构建工具，缺失自动降级）
     _k2_compile = str(params.get("compile") or "").lower() in ("1", "true", "on", "开")
     cmd += ["--compile_blocks", "auto" if _k2_compile else "off"]
+    # AMD ROCm：bitsandbytes 8-bit 优化器在 ROCm 上最不稳（工具全局 AMD 策略就是避开 bnb），
+    # Fizgig 默认 adamw8bit 会卡在优化器/首步（2026-09-02 AMD 7900 XT 用户 int8 驻留显存后无输出），
+    # 强制纯 PyTorch AdamW（显存占用略高但稳定）。
+    if backend == "amd-rocm":
+        cmd += ["--optimizer_type", "adamw"]
+        logf("[Krea2(Fizgig)] AMD ROCm：优化器强制 AdamW（避开 bitsandbytes 8-bit）")
+    # 首次运行提示：AMD 需加载/量化 26GB 底模并编译内核，LoRA 创建后到首个步数可能几分钟无输出
+    logf("[Krea2(Fizgig)] 提示：首次运行需加载并量化 26GB 底模、编译内核，前几分钟可能无步数输出，属正常现象，请耐心等待。")
     logf(f"[Krea2(Fizgig)] 底模(RAW): {files['raw']}")
     logf(f"[Krea2(Fizgig)] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 1)}")
     logf(f"[Krea2(Fizgig)] 引擎后端: {backend} | 量化={quant_detail} | blocks_to_swap={swap} | torch.compile={'开' if _k2_compile else '关'}")
