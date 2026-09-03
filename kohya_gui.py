@@ -5326,6 +5326,8 @@ class LabelEditorWindow:
         self._thumbs = {}
         self._current = None      # 当前选中的 record 下标
         self._dirty = set()       # 有未保存修改的 record 下标
+        self._tagdict = None      # 离线中英词典（惰性加载，词典窗/统计共用）
+        self._dict_win = None     # 中英词典窗引用（避免重复开多个）
         self._build_ui()
         self.refresh()
 
@@ -5421,6 +5423,10 @@ class LabelEditorWindow:
                                        border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
                                        font=ui_font(FONT_HINT), command=self._show_stats)
         self.btn_stats.pack(side="left", padx=(8, 0))
+        self.btn_dict = ctk.CTkButton(r2, text="🌐 中英词典", width=104, height=30, fg_color=CARD2, hover_color="#343a46",
+                                      border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
+                                      font=ui_font(FONT_HINT), command=self._open_dict)
+        self.btn_dict.pack(side="left", padx=(8, 0))
         self.btn_organize = ctk.CTkButton(r2, text="📁 整理为 repeats_名称", width=156, height=30, fg_color=CARD2,
                                           hover_color="#343a46", border_width=1, border_color=BORDER, text_color=TXT,
                                           corner_radius=6, font=ui_font(FONT_HINT), command=self._do_organize)
@@ -5647,6 +5653,10 @@ class LabelEditorWindow:
             row = ctk.CTkFrame(scroll, fg_color="transparent"); row.pack(fill="x", padx=6, pady=2)
             ctk.CTkLabel(row, text=f"{cnt:4d} 次", font=ui_font(FONT_HINT), text_color=ACC, width=64, anchor="w").pack(side="left")
             ctk.CTkLabel(row, text=tag, font=ui_font(FONT_BODY), text_color=TXT, anchor="w").pack(side="left", padx=(6, 0))
+            _zd = self.get_tagdict()
+            _zh = _zd.to_zh(tag) if _zd else None
+            if _zh and _zh != tag:
+                ctk.CTkLabel(row, text="/ " + _zh, font=ui_font(FONT_HINT), text_color=HINT, anchor="w").pack(side="left", padx=(2, 0))
             ctk.CTkButton(row, text="删除", width=56, height=24, fg_color="#4a3535", hover_color="#5a4141",
                           corner_radius=6, font=ui_font(FONT_HINT),
                           command=lambda t=tag, win=w: self._stats_delete(t, win)).pack(side="right")
@@ -5669,7 +5679,7 @@ class LabelEditorWindow:
     def _begin_batch(self, status):
         self._dirty.clear()
         self._set_status(status)
-        for b in (self.btn_del, self.btn_rep, self.btn_pin, self.btn_stats, self.btn_organize, self.btn_del_img, self.btn_save_one):
+        for b in (self.btn_del, self.btn_rep, self.btn_pin, self.btn_stats, self.btn_dict, self.btn_organize, self.btn_del_img, self.btn_save_one):
             try:
                 b.configure(state="disabled")
             except Exception:
@@ -5677,7 +5687,7 @@ class LabelEditorWindow:
         self.win.update_idletasks()
 
     def _end_batch(self):
-        for b in (self.btn_del, self.btn_rep, self.btn_pin, self.btn_stats, self.btn_organize, self.btn_del_img, self.btn_save_one):
+        for b in (self.btn_del, self.btn_rep, self.btn_pin, self.btn_stats, self.btn_dict, self.btn_organize, self.btn_del_img, self.btn_save_one):
             try:
                 b.configure(state="normal")
             except Exception:
@@ -5692,6 +5702,58 @@ class LabelEditorWindow:
             self.app._log(str(text))
         except Exception:
             pass
+
+
+    # ---------- 中英词典（v1 离线词条） ----------
+    def get_tagdict(self):
+        """惰性加载离线中英词典（编辑器/统计/词典窗共用，进程内只解析一次）。"""
+        if self._tagdict is None:
+            try:
+                from kohya_core.tagging import TagDict
+                self._tagdict = TagDict()
+                self._log_app("[标签] 已加载离线中英词典：%d 条" % len(self._tagdict))
+            except Exception as e:
+                self._log_app("[标签] 加载离线词典失败：%s" % e)
+                self._tagdict = False
+        td = self._tagdict
+        return td if td is not None and td is not False else None
+
+    def insert_tag_to_caption(self, en_tag):
+        """把词典选中的英文标签追加到当前图片标签末尾（已存在则跳过）。
+        返回 True=已插入；False=未插入（无当前图 / 已存在 / 空输入）。"""
+        tag = (en_tag or "").strip()
+        if not tag:
+            return False
+        if self._current is None:
+            messagebox.showinfo("中英词典", "请先在左侧选中一张图片，再插入标签。")
+            return False
+        cur = self.caption.get("1.0", "end")
+        if any(p.strip().lower() == tag.lower() for p in re.split(r"[,，\n]", cur) if p.strip()):
+            self._set_status("标签「%s」已存在，未重复添加" % tag)
+            return False
+        base = cur.rstrip("\n")
+        new = (base + ", " + tag) if base.strip() else tag
+        self.caption.delete("1.0", "end")
+        self.caption.insert("1.0", new + "\n")
+        self._mark_dirty()
+        self._set_status("已把「%s」加入当前图片标签" % tag)
+        self._log_app("[标签] 词典插入: %s" % tag)
+        return True
+
+    def _open_dict(self):
+        """打开中英词典窗（翻译 / 补全 / 插入当前图）。"""
+        try:
+            if self._dict_win is not None:
+                try:
+                    self._dict_win.win.lift()
+                    self._dict_win.win.focus_force()
+                    return
+                except Exception:
+                    self._dict_win = None
+            import gui.tag_tools
+            self._dict_win = gui.tag_tools.TagLookupWindow(self.win, self)
+        except Exception as e:
+            messagebox.showerror("中英词典", "打开词典失败：%s" % e)
 
     def _open_dir(self):
         try:

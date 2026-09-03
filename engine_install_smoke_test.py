@@ -2500,8 +2500,7 @@ def test_fourth_engine_train_pipeline(base: Path):
     assert _train_env.get("FIZGIG_GPU_BACKEND") == "rocm"
     assert _train_env.get("ROCM_PATH", "").endswith("_rocm_sdk_core")
     assert "MIOPEN_FIND_MODE" in _train_env and "expandable_segments" in _train_env.get("PYTORCH_ALLOC_CONF", "")
-    src2 = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
-    assert '"--optimizer_type", "adamw"' in src2, "AMD ROCm Fizgig 应强制 AdamW（避开 bnb 8-bit 卡死）"
+    # v0.14.6 起 AMD ROCm 优化器回归 Fizgig 官方默认（不再强制 adamw），此处不再断言命令带 adamw
     print("FOURTH_ENGINE_AMD_ROCM_ENV_OK")
     print("FOURTH_ENGINE_TRAIN_PIPELINE_OK")
 def test_resume_monitor_seed(base: Path):

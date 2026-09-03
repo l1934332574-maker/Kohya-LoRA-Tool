@@ -9,6 +9,8 @@
 | [WD14 tagger](https://huggingface.co/SmilingWolf) | 人物模式自动打标（tag_images_by_wd14_tagger.py + wd-v1-4-moat-tagger-v2 模型） | 模型遵循其各自许可 |
 | [Fizgig](https://github.com/shootthesound/Fizgig) | 第四引擎（Krea2 图像 LoRA 训练，NVIDIA/AMD 双平台）| Apache-2.0 |
 | [comfyui-rocm](https://github.com/patientx/comfyui-rocm) | Fizgig 随包的 detect_gpu.py（AMD GPU 架构探测）| GPL-3.0 |
+| [ffdkj/Danbooru_Tag-Chinese-English-Translation-Table](https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table) | 内置离线中英词典主数据（每日更新 32.5 万条；收录 post_count≥30 词条） | 仓库未附明确开源许可证，仅内置离线查询 |
+| [byzod/a1111-sd-webui-tagcomplete-CN](https://github.com/byzod/a1111-sd-webui-tagcomplete-CN) | 离线词典常见词覆盖/补充（Tags-zh-full-pack.csv，整合自多个社区翻译） | MIT（沿用上游） |
 | [bitsandbytes_win_rocm](https://github.com/0xDELUXA/bitsandbytes_win_rocm) | AMD ROCm Windows 用 bitsandbytes 社区轮子 | 随组件其各自许可 |
 
 ## 免责与合规

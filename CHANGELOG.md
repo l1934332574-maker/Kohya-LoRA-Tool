@@ -1,4 +1,26 @@
-﻿## v0.14.6（2026-09-03）
+﻿## v0.15.0（2026-09-03）
+
+### 新增：标签管理中英词典（v1 起步，离线词条）
+- 内置离线中英标签词典：installers/tag_dict/danbooru_zh.tsv，共 17.5 万+ 词条
+  （Danbooru post_count≥30 全量 + A1111 tagcomplete 中文整合包覆盖/补充），随包发布、无需联网；
+  数据来源与授权见 THIRD_PARTY_NOTICES.md。
+- 标签编辑器新增「🌐 中英词典」按钮：输入英文自动补全并显示中文（按热度排序，数据集里出现过的标签优先）；
+  输入中文反查英文标签；支持「翻译当前图标签」整段对照；双击/点「插入」把英文标签追加到当前图片（自动跳过重复）。
+- 「标签统计」窗口每个标签行内直接显示中文翻译，一眼看懂打标结果。
+- 代码结构：词典/翻译/补全核心放 kohya_core/tagging（纯 Python、可单测），界面工具放 gui/tag_tools.py，
+  不再往 Kohya一键工具.py / kohya_gui.py 里堆功能；新增 kohya_core/tagging/test_tagging.py 单测，并纳入冒烟测试。
+
+### 修复：WD14 自动打标没有用上（部分用户标签只剩 1girl, solo，训练效果差）
+- 根因 1：kohya 官方打标脚本要 import library.dataset -> cv2/imagesize，解释器缺 cv2 时整批失败
+  （用户日志实证 ModuleNotFoundError: No module named 'cv2'），失败后给图片补写兜底标签“1girl, solo”。
+- 根因 2：补写兜底后，下次预处理看到 .txt 已存在会「跳过 WD14 打标」，坏标签被永久留在数据集里继续训练。
+- 已修：
+  · 官方打标前自动补装 cv2 / imagesize 等依赖（国内镜像），不再因缺依赖整批失败；
+  · 新增内置 WD14 打标（onnxruntime 直读随包 model.onnx，输出与官方一致），
+    未装第一引擎（找不到官方脚本）或官方脚本环境损坏时自动回退，第四引擎/AMD 用户不再只剩 1girl, solo；
+  · 自愈：检测到上次失败留下的兜底标签先清掉再重新自动打标，避免「标签已齐全跳过打标」把坏标签永久留下。
+
+## v0.14.6（2026-09-03）
 
 ### 修复：PyTorch 大轮子国内下载死循环（第二引擎装不上）
 - 根因：魔搭 resolve 直链不支持断点续传（对 Range 回 200 而非 206），携带旧 .part 用 curl -C - 会 curl 33 反复空等 5 次才切源；且“已满大小但损坏”的 .part 会被 0 字节续传放过，坏缓存反复装失败（v0.14.5 用户 torchvision BadZipFile，3 次重试全在同一坏文件上）。

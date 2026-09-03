@@ -514,6 +514,11 @@ def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.
     if not py:
         logf("[WD14] 没有可用的打标解释器（缺 torch/onnxruntime），跳过自动打标")
         return False
+    # kohya 官方脚本会 import library.dataset -> cv2 / imagesize 等；缺失会整批失败
+    # （2026-09 用户日志：ModuleNotFoundError: No module named 'cv2'，只剩 1girl, solo 兜底标签）
+    if not _ensure_wd14_script_deps(py, logf):
+        logf("[WD14] 打标依赖（cv2/imagesize/onnxruntime）补装失败，官方脚本不可用，改用内置打标")
+        return False
     # 隔离损坏图片：避免一张坏图导致整批打标中断
     _quarantine_corrupt_images(output_dir, logf)
     model_dir, ready = _wd14_model_dir()
@@ -585,6 +590,271 @@ def _fill_missing_captions(output_dir, fallback, logf=print):
             n += 1
     if n:
         logf(f"[INFO] 为 {n} 张没有标签的图片补写了兜底 caption（未找到 WD14 打标结果）")
+
+
+
+def _imgs_no_txt(output_dir):
+    """输出目录里没有同名 .txt 的图片文件名。"""
+    out = []
+    for f in sorted(os.listdir(output_dir)):
+        if os.path.splitext(f)[1].lower() in IMAGE_EXTS and not os.path.isfile(
+                os.path.join(output_dir, os.path.splitext(f)[0] + ".txt")):
+            out.append(f)
+    return out
+
+
+def _is_placeholder_caption(text, trigger, fallback):
+    """判断 caption 是否上次打标失败留下的兜底（仅 fallback 那几个词 + 可选 trigger 前缀）。"""
+    fb = re.sub(r"\s+", " ", (fallback or "").strip().lower())
+    if not fb:
+        return False
+    t = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not t:
+        return False
+    if t == fb:
+        return True
+    # 去掉开头 trigger（可能多 trigger 词，逐词尝试；兼容 "trigger, xxx" / "trigger\nxxx"）
+    changed = True
+    while changed:
+        changed = False
+        for tg in re.split(r"[,，]+", trigger or ""):
+            tg = tg.strip().lower()
+            if not tg:
+                continue
+            m = re.match(r"^" + re.escape(tg) + r"[\s,，:：]*", t)
+            if m:
+                t = t[m.end():].strip()
+                changed = True
+                break
+        if t == fb:
+            return True
+    return False
+
+
+def _purge_placeholder_captions(output_dir, fallback, trigger, logf=print):
+    """自愈：删掉上次打标失败留下的兜底 caption（如 1girl, solo），让 WD14 重新打标。"""
+    n = 0
+    for f in sorted(os.listdir(output_dir)):
+        if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
+            continue
+        txt = os.path.join(output_dir, os.path.splitext(f)[0] + ".txt")
+        if not os.path.isfile(txt):
+            continue
+        try:
+            with open(txt, "r", encoding="utf-8") as fh:
+                content = fh.read()
+        except Exception:
+            continue
+        if _is_placeholder_caption(content, trigger, fallback):
+            try:
+                os.remove(txt)
+                n += 1
+            except Exception:
+                pass
+    if n:
+        logf(f"[INFO] 检测到 {n} 张图片是上次打标失败留下的兜底标签，先清掉重新自动打标")
+    return n
+
+
+def _has_pymod(py, mod):
+    try:
+        r = subprocess.run([py, "-c",
+                            "import sys, importlib.util;"
+                            "sys.exit(0 if importlib.util.find_spec('%s') else 1)" % mod],
+                           capture_output=True, text=True, timeout=120)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _pip_install(py, pkgs, logf=print, timeout=900):
+    """给指定解释器用国内镜像补装依赖（清代理 + 忽略 pip.ini）。返回是否成功。"""
+    try:
+        _env = dict(os.environ)
+        for _k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            _env.pop(_k, None)
+        _env["PIP_CONFIG_FILE"] = ""
+        _env["NO_PROXY"] = "*"
+        _env["no_proxy"] = "*"
+        r = subprocess.run([py, "-m", "pip", "install", "--no-input", "--retries", "10",
+                            "--timeout", "120", "--index-url",
+                            "https://mirrors.aliyun.com/pypi/simple/",
+                            "--extra-index-url", "https://pypi.tuna.tsinghua.edu.cn/simple"]
+                           + list(pkgs), env=_env,
+                           capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _ensure_wd14_script_deps(py, logf=print):
+    """官方打标脚本依赖自检（cv2 / imagesize / onnxruntime / onnx），缺失自动补装。"""
+    ok = True
+    for mod, pkg in (("cv2", "opencv-python"), ("imagesize", "imagesize"),
+                     ("onnxruntime", "onnxruntime"), ("onnx", "onnx")):
+        if _has_pymod(py, mod):
+            continue
+        logf(f"[WD14] 补装打标依赖 {pkg}（{py}）…")
+        if _pip_install(py, [pkg], logf):
+            logf(f"[WD14] 已自动补装 {pkg}（{py}）")
+        else:
+            logf(f"[WD14] 自动补装 {pkg} 失败（{py}）")
+            ok = False
+    return ok
+
+
+def _wd14_onnx_files():
+    """定位随包内置的 WD14 onnx 模型 + 标签表；缺任一返回 (None, None)。"""
+    model_dir, _ready = _wd14_model_dir()
+    repo_dir = os.path.join(model_dir, WD14_REPO_ID.replace("/", "_"))
+    onnx_p = os.path.join(repo_dir, "model.onnx")
+    csv_p = os.path.join(repo_dir, "selected_tags.csv")
+    if os.path.isfile(onnx_p) and os.path.isfile(csv_p):
+        return onnx_p, csv_p
+    return None, None
+
+
+def _run_wd14_onnx(output_dir, logf=print, threshold=0.35):
+    """内置 WD14 打标：onnxruntime 直读随包 model.onnx（CPU/GPU 自动），不依赖 kohya sd-scripts。
+
+    适用：没装第一引擎（找不到官方打标脚本）、或官方脚本环境损坏（缺 cv2 等）的机器。
+    预处理 / 阈值 / 输出格式与 kohya 官方 tag_images_by_wd14_tagger 的 default_format 一致
+    （pad 白边到正方形 -> resize 448 -> 只取 general/character，>threshold 的标签，下划线转空格）。
+    """
+    onnx_p, csv_p = _wd14_onnx_files()
+    if not onnx_p:
+        logf("[WD14] 内置打标：未找到 wd14_tagger_model 里的 model.onnx/selected_tags.csv")
+        return False
+    try:
+        import onnxruntime as ort
+    except Exception:
+        logf("[WD14] 内置打标：当前解释器缺 onnxruntime，自动补装…")
+        if not _ensure_onnx(sys.executable, logf):
+            logf("[WD14] 内置打标：onnxruntime 补装失败，无法打标")
+            return False
+        try:
+            import onnxruntime as ort
+        except Exception:
+            return False
+    try:
+        import numpy as np
+        from PIL import Image
+    except Exception as e:
+        logf(f"[WD14] 内置打标：缺 numpy/PIL：{e}")
+        return False
+    try:
+        import cv2
+    except Exception:
+        cv2 = None
+
+    # 标签表：rating(前 4) + general + character（与官方 default_format 顺序一致）
+    import csv
+    try:
+        with open(csv_p, "r", encoding="utf-8") as f:
+            rows = [r for r in csv.reader(f)][1:]
+        general = [r[1] for r in rows if r[2] == "0"]
+        character = [r[1] for r in rows if r[2] == "4"]
+    except Exception as e:
+        logf(f"[WD14] 内置打标：读取标签表失败：{e}")
+        return False
+
+    targets = _imgs_no_txt(output_dir)
+    if not targets:
+        return True
+    logf(f"[WD14] 内置打标（onnx）：{len(targets)} 张缺标签图片，模型 {os.path.basename(onnx_p)}")
+    try:
+        providers = [p for p in ("CUDAExecutionProvider", "ROCMExecutionProvider", "CPUExecutionProvider")
+                     if p in ort.get_available_providers()]
+        try:
+            sess = ort.InferenceSession(onnx_p, providers=providers)
+        except Exception:
+            sess = ort.InferenceSession(onnx_p, providers=["CPUExecutionProvider"])
+        iname = sess.get_inputs()[0].name
+        ishp = sess.get_inputs()[0].shape
+        H = int(ishp[1]) if len(ishp) >= 2 and ishp[1] else 448
+        W = int(ishp[2]) if len(ishp) >= 3 and ishp[2] else 448
+    except Exception as e:
+        logf(f"[WD14] 内置打标：加载 onnx 模型失败：{e}")
+        return False
+
+    def _prep(path):
+        image = Image.open(path)
+        if image.mode in ("RGBA", "LA") or "transparency" in image.info:
+            image = image.convert("RGBA")
+        elif image.mode != "RGB":
+            image = image.convert("RGB")
+        if image.mode == "RGBA":
+            bg = Image.new("RGB", image.size, (255, 255, 255))
+            bg.paste(image, mask=image.split()[3])
+            image = bg
+        arr = np.array(image)[:, :, ::-1].astype(np.float32)  # RGB->BGR
+        size = max(arr.shape[0:2])
+        pad_x, pad_y = size - arr.shape[1], size - arr.shape[0]
+        pad_l, pad_t = pad_x // 2, pad_y // 2
+        arr = np.pad(arr, ((pad_t, pad_y - pad_t), (pad_l, pad_x - pad_l), (0, 0)),
+                     mode="constant", constant_values=255)
+        h, w = arr.shape[0:2]
+        if h >= H and w >= W:
+            if cv2 is not None:
+                arr = cv2.resize(arr, (W, H), interpolation=cv2.INTER_AREA)
+            else:
+                arr = np.asarray(Image.fromarray(arr[:, :, ::-1].astype(np.uint8)).resize(
+                    (W, H), Image.LANCZOS))[:, :, ::-1].astype(np.float32)
+        else:
+            arr = np.asarray(Image.fromarray(arr[:, :, ::-1].astype(np.uint8)).resize(
+                (W, H), Image.LANCZOS))[:, :, ::-1].astype(np.float32)
+        return arr
+
+    tagged = 0
+    done = 0
+    total = len(targets)
+    for f in targets:
+        done += 1
+        stem = os.path.splitext(f)[0]
+        txt = os.path.join(output_dir, stem + ".txt")
+        try:
+            img_arr = _prep(os.path.join(output_dir, f))
+            probs = sess.run(None, {iname: img_arr[None, ...]})[0][0]
+            names = []
+            seen = set()
+            for i, p in enumerate(probs[4:]):
+                tag = None
+                if i < len(general):
+                    if p >= threshold:
+                        tag = general[i]
+                elif (i - len(general)) < len(character):
+                    if p >= threshold:
+                        tag = character[i - len(general)]
+                if not tag:
+                    continue
+                tag = tag.replace("_", " ") if len(tag) > 3 else tag
+                low = tag.lower()
+                if low in seen:
+                    continue
+                seen.add(low)
+                names.append(tag)
+            if names:
+                with open(txt, "w", encoding="utf-8") as fh:
+                    fh.write(", ".join(names) + "\n")
+                tagged += 1
+            if done % 5 == 0 or done == total:
+                logf(f"[WD14] 内置打标进度：{done}/{total}（已写 {tagged} 张）")
+        except Exception as e:
+            logf(f"[WD14] 内置打标失败（{f}）：{e}")
+    logf(f"[WD14] 内置打标完成：为 {tagged} 张图片生成标签")
+    return True
+
+
+def _run_wd14_auto(output_dir, logf=print, script=None):
+    """自动打标总入口：官方脚本（GPU/CPU 回退）优先，失败/缺失改用内置 onnx 打标。"""
+    script = script or find_wd14_tagger()
+    if script:
+        if run_wd14_tagger(output_dir, logf=logf, script=script):
+            return True
+        logf("[WD14] 官方打标脚本失败，自动改用内置打标（onnx）重试…")
+    else:
+        logf("[WD14] 未找到 kohya 官方打标脚本，改用内置打标（onnx，不依赖第一引擎）…")
+    return _run_wd14_onnx(output_dir, logf=logf)
 
 
 def _sd_scripts_root(script=None):
@@ -1289,24 +1559,24 @@ def main():
             if os.environ.get("PREPROCESS_DEBUG"):
                 traceback.print_exc()
 
-    # ---- 人物模式：WD14 打标 / 兜底 / 还原自带标签 / 插入 trigger ----
+    # ---- 人物模式：WD14 / 内置打标 / 兜底 / 还原自带标签 / 插入 trigger ----
     if mode == "character" and not args.no_caption and (ok + skipped):
-        tagger = find_wd14_tagger()
-        use_wd14 = (not args.no_wd14) and bool(tagger)
-        imgs_no_txt = [f for f in os.listdir(output_dir)
-                       if os.path.splitext(f)[1].lower() in IMAGE_EXTS
-                       and not os.path.isfile(os.path.join(output_dir, os.path.splitext(f)[0] + ".txt"))]
-        if use_wd14:
+        imgs_no_txt = _imgs_no_txt(output_dir)
+        if not args.no_wd14:
+            if not imgs_no_txt:
+                # 自愈：上次打标失败留下的兜底标签（1girl, solo 等）清掉重新自动打标
+                if _purge_placeholder_captions(output_dir, DEFAULT_CHARACTER_CAPTION, trigger):
+                    imgs_no_txt = _imgs_no_txt(output_dir)
             if imgs_no_txt:
-                wd14_ok = run_wd14_tagger(output_dir)
+                wd14_ok = _run_wd14_auto(output_dir)
                 if not wd14_ok:
                     _fill_missing_captions(output_dir, DEFAULT_CHARACTER_CAPTION)
+                    print("[WARN] WD14/内置打标都失败，缺标签图片使用兜底 caption（只有 1girl, solo 等极简词，训练效果会差；请查看上方日志排查后重试）")
             else:
                 print("[INFO] 图片标签已齐全，跳过 WD14 打标。")
         else:
             _fill_missing_captions(output_dir, DEFAULT_CHARACTER_CAPTION)
-            if not tagger:
-                print("[WARN] 未找到 kohya 官方 WD14 打标脚本，缺少标签的图片使用了兜底 caption。/n       （已检查：安装目录/用户目录 kohya_ss、kohya_dir.txt 指向目录、安装目录同级 KohyaLoraTool_data/kohya_ss、%APPDATA%/KohyaLoraTool/kohya_ss 下的 finetune 与 sd-scripts/finetune；若确认脚本存在，请检查 kohya_dir.txt 路径）")
+            print("[INFO] 已跳过 WD14 自动打标（按设置），缺标签图片使用兜底 caption")
         # 还原原图自带的 .txt（完整保留用户标签）
         for stem, cap in user_captions.items():
             if cap.strip():
@@ -1337,24 +1607,23 @@ def main():
             except Exception as _e:
                 print(f"[WARN] 人物强绑定失败（忽略）: {_e}")
 
-    # ---- 画风模式：无画风描述词时，用 WD14 打标 + 过滤人物标签（替代写死的动漫 caption） ----
+    # ---- 画风模式：无画风描述词时，用 WD14 / 内置打标 + 过滤人物标签 ----
     if mode == "style" and not args.no_caption and (ok + skipped) and not style_caption.strip():
-        tagger = find_wd14_tagger()
-        use_wd14 = (not args.no_wd14) and bool(tagger)
-        imgs_no_txt = [f for f in os.listdir(output_dir)
-                       if os.path.splitext(f)[1].lower() in IMAGE_EXTS
-                       and not os.path.isfile(os.path.join(output_dir, os.path.splitext(f)[0] + ".txt"))]
-        if use_wd14:
+        imgs_no_txt = _imgs_no_txt(output_dir)
+        if not args.no_wd14:
+            if not imgs_no_txt:
+                if _purge_placeholder_captions(output_dir, DEFAULT_CAPTION, trigger):
+                    imgs_no_txt = _imgs_no_txt(output_dir)
             if imgs_no_txt:
-                wd14_ok = run_wd14_tagger(output_dir)
+                wd14_ok = _run_wd14_auto(output_dir)
                 if not wd14_ok:
                     _fill_missing_captions(output_dir, DEFAULT_CAPTION)
+                    print("[WARN] WD14/内置打标都失败，缺标签图片使用兜底 caption（训练效果会差；请查看上方日志排查后重试）")
             else:
                 print("[INFO] 图片标签已齐全，跳过 WD14 打标。")
         else:
             _fill_missing_captions(output_dir, DEFAULT_CAPTION)
-            if not tagger:
-                print("[WARN] 未找到 kohya 官方 WD14 打标脚本，缺少标签的图片使用了兜底 caption。/n       （已检查：安装目录/用户目录 kohya_ss、kohya_dir.txt 指向目录、安装目录同级 KohyaLoraTool_data/kohya_ss、%APPDATA%/KohyaLoraTool/kohya_ss 下的 finetune 与 sd-scripts/finetune；若确认脚本存在，请检查 kohya_dir.txt 路径）")
+            print("[INFO] 已跳过 WD14 自动打标（按设置），缺标签图片使用兜底 caption")
         # 还原原图自带 txt（过滤人物标签）
         for stem, cap in user_captions.items():
             if cap.strip():

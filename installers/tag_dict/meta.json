@@ -1,0 +1,19 @@
+{
+  "description": "Danbooru 标签中英对照离线词典（用于标签编辑器翻译/补全）",
+  "updated": "2026-09-03",
+  "rows": 175336,
+  "format": "name<TAB>category<TAB>post_count<TAB>cn_name",
+  "sources": [
+    {
+      "name": "ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table",
+      "url": "https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table",
+      "note": "每日更新 32.5 万条中英对照；本词典收录 post_count>=30 的行。仓库未附带明确开源许可证。"
+    },
+    {
+      "name": "byzod/a1111-sd-webui-tagcomplete-CN Tags-zh-full-pack.csv",
+      "url": "https://github.com/byzod/a1111-sd-webui-tagcomplete-CN",
+      "note": "A1111 tagcomplete 中文整合包（MIT 许可，整合自多个社区翻译来源）；用于覆盖常见词并补充 ffdkj 缺失词条。"
+    }
+  ],
+  "license_note": "翻译词条整理自多个社区来源，仅用于本地离线查询；具体授权见 THIRD_PARTY_NOTICES.md 与各来源仓库。"
+}

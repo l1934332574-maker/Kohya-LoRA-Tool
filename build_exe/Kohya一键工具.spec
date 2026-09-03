@@ -32,7 +32,13 @@ a = Analysis(
         # WD14 打标模型内置：开箱即用，无需联网下载（约 311MB）
         ('..\\wd14_tagger_model', 'wd14_tagger_model'),
     ] + ctk_datas + dd_datas,
-    hiddenimports=ctk_hidden,
+    hiddenimports=ctk_hidden + [
+        # 标签管理 v1：中英词典/翻译/补全（kohya_gui 内惰性 import，显式声明防漏收集）
+        'gui.tag_tools',
+        'kohya_core.tagging', 'kohya_core.tagging.dictionary',
+        'kohya_core.tagging.normalize', 'kohya_core.tagging.translate',
+        'kohya_core.tagging.complete',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

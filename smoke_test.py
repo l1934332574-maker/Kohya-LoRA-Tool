@@ -38,7 +38,12 @@ def check(name, fn):
 
 def test_syntax():
     import py_compile
-    for f in ("Kohya一键工具.py", "kohya_gui.py", "preprocess.py", "video_caption.py"):
+    files = ["Kohya一键工具.py", "kohya_gui.py", "preprocess.py", "video_caption.py",
+             "gui/__init__.py", "gui/tag_tools.py",
+             "kohya_core/tagging/__init__.py", "kohya_core/tagging/dictionary.py",
+             "kohya_core/tagging/normalize.py", "kohya_core/tagging/translate.py",
+             "kohya_core/tagging/complete.py", "kohya_core/tagging/test_tagging.py"]
+    for f in files:
         py_compile.compile(os.path.join(ROOT, f), doraise=True)
 
 
@@ -177,6 +182,27 @@ def test_yaml():
         import shutil as _sh
         _sh.rmtree(_td, ignore_errors=True)
 
+def test_tagging():
+    """标签管理 v1 · 离线中英词典核心链路（加载/翻译/补全/中文反查/GUI 模块可导入）。"""
+    from kohya_core.tagging import TagDict
+    from kohya_core.tagging import normalize, translate
+    d = TagDict()
+    if not d.available():
+        raise AssertionError("缺少离线词典文件: installers/tag_dict/danbooru_zh.tsv")
+    if len(d) < 150000:
+        raise AssertionError("离线词条过少: %d" % len(d))
+    if d.to_zh("hatsune_miku") != "初音未来":
+        raise AssertionError("英→中 翻译错误: hatsune_miku")
+    if d.to_zh("blue hair") != d.to_zh("blue_hair"):
+        raise AssertionError("空格写法未规范化命中")
+    if normalize.norm_en("Blue Hair") != "blue_hair":
+        raise AssertionError("normalize 错误")
+    if not d.zh_candidates("初音") or d.zh_candidates("初音")[0][0] != "hatsune_miku":
+        raise AssertionError("中→英 反查错误: 初音")
+    if not any(r[0] == "blue_hair" for r in d.complete_en("blue", limit=50)):
+        raise AssertionError("英文补全缺 blue_hair")
+    import gui.tag_tools  # GUI 辅助模块可正常导入
+
 
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
@@ -185,6 +211,7 @@ def main():
     check("AI 图像模型配置", test_at_image_models)
     check("yaml 生成可解析", test_yaml)
     check("下载模型配置（FLUX/Anima/Krea2）", test_download_models)
+    check("标签管理 v1 · 离线词典核心链路", test_tagging)
     print("-" * 40)
     if FAILED:
         print("✘ 失败 %d 项: %s" % (len(FAILED), "、".join(FAILED)))
