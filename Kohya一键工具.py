@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.14.5"
+APP_VERSION = "0.14.6"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -884,7 +884,14 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
             logf("[%s] 存在未完成的 .part（%.0f MB），断点续传: %s" % (
                 label, os.path.getsize(part) / 1048576.0, local_name))
         downloaded = False
-        for source_idx, base in enumerate(bases, 1):
+        # 断点续传依赖服务器支持 Range（魔搭 resolve 直链不支持：对 Range 请求回 200 而非 206，
+        # 携带 .part 用 curl -C - 会 curl 33 反复空等 5 次才切换源，白白浪费时间）：
+        # 有 .part 需要续传时，把魔搭排到支持 Range 的上海交大/阿里云之后；无 .part 整包新下仍魔搭优先保速度。
+        if os.path.isfile(part) and os.path.getsize(part) > 0:
+            _bases = [b for b in bases if "modelscope.cn" not in b] + [b for b in bases if "modelscope.cn" in b]
+        else:
+            _bases = bases
+        for source_idx, base in enumerate(_bases, 1):
             source_name = ("PyTorch 官方" if "download.pytorch.org" in base
                            else ("魔搭" if "modelscope.cn" in base
                                  else ("上海交大" if "sjtu" in base else "阿里云")))
@@ -900,8 +907,14 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
                     except Exception as e:
                         logf("[%s] 下载完成但改名失败（%s），保留 .part 供重试" % (label, e))
                 else:
-                    logf("[%s] 下载完成但校验不通过（大小/完整性），保留 .part 供续传" % label)
-            if source_idx < len(bases):
+                    # 校验不过 = 该 .part 已损坏：必须删除再换下一源整包重下，不能带坏残片“续传”。
+                    # curl -C - 对“已满大小但内容损坏”的 .part 会 0 字节续传直接放过，坏文件会反复装失败。
+                    logf("[%s] 下载完成但校验不通过（大小/完整性），删除损坏残片后切换下一镜像重下…" % label)
+                    try:
+                        os.remove(part)
+                    except Exception:
+                        pass
+            if source_idx < len(_bases):
                 logf("[%s] 当前国内镜像失败，自动切换备用镜像…" % label)
         if not downloaded:
             raise RuntimeError("国内双镜像下载失败: %s" % local_name)
@@ -920,17 +933,50 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
     # "Could not find a version that satisfies the requirement filelock (from versions: none)"。
     # 因此按 阿里云 -> 清华 -> 上海交大 顺序自动回退，任一成功即完成；全部失败才报错。
     _install_ok = False
+    _pip_lines = []
     for _idx_name, _idx_url in (
             ("阿里云", "https://mirrors.aliyun.com/pypi/simple/"),
             ("清华", "https://pypi.tuna.tsinghua.edu.cn/simple"),
             ("上海交大", "https://mirror.sjtu.edu.cn/pypi/web/simple")):
         env["PIP_INDEX_URL"] = _idx_url
         logf("[%s] 本地安装 PyTorch 轮子（依赖走%s镜像）…" % (label, _idx_name))
-        if run_stream(cmd, cwd=kdir, env=env, logf=logf) == 0:
+        if run_stream(cmd, cwd=kdir, env=env, logf=logf, collect=_pip_lines) == 0:
             _install_ok = True
             break
         logf("[%s] %s镜像依赖安装失败（可能是镜像不可达/超时），自动切换下一镜像…" % (label, _idx_name))
     if not _install_ok:
+        # 全程失败需区分两类原因：
+        # 1) 纯网络/依赖解析失败（Could not find ... from versions: none）→ 保留缓存，重试会跳过下载；
+        # 2) 本地 wheel 损坏（BadZipFile / could not read ...dist-info / is not a valid wheel）→
+        #    删掉被 pip 判坏的轮子，下次外层重试整包重新下载，避免“坏缓存反复装失败”死循环
+        #    （v0.14.5 用户复现：torchvision 坏缓存 BadZipFile，3 次重试全在同一坏文件上失败）。
+        _err_lines = [ln for ln in _pip_lines
+                      if any(k in ln for k in ("BadZipFile", "could not read",
+                                               "is not a valid wheel", "not a zip", "ERROR"))]
+        _pip_err = "\n".join(_err_lines)
+        _corrupt = ("BadZipFile" in _pip_err or "could not read" in _pip_err
+                    or "is not a valid wheel" in _pip_err or "not a zip" in _pip_err)
+        if _corrupt:
+            _bad = []
+            for _p in paths:
+                _stem = os.path.basename(_p)
+                if _stem.lower().endswith(".whl"):
+                    _stem = _stem[:-5]
+                    _stem = re.sub(r"-(cp\d+)-.*$", "", _stem)
+                else:
+                    _stem = _stem.rsplit(".", 1)[0]
+                if _stem and _stem in _pip_err:
+                    _bad.append(_p)
+            if not _bad:
+                # pip 报错指向不明时保守全清：宁可重下一次，也不把坏缓存留到下次继续死循环
+                _bad = list(paths)
+            for _p in _bad:
+                try:
+                    os.remove(_p)
+                    logf("[%s] 已清除被 pip 判为损坏的本地缓存轮子（下次重试将整包重新下载）: %s"
+                         % (label, os.path.basename(_p)))
+                except Exception:
+                    pass
         raise RuntimeError(
             "本地安装 PyTorch 轮子失败：依赖解析在清华/阿里云/上海交大三个国内镜像均失败，"
             "请查看上方日志；网络恢复后重试（缓存轮子已存在，会跳过下载）")
@@ -2324,6 +2370,35 @@ def _warn_low_ram(logf, ram_gb, label):
              "已自动降低块交换数以减少内存压力（可手动调回）。")
 
 
+def _cleanup_leftover_trainers(logf, label):
+    """训练前自检并自动清理残留训练进程。
+
+    背景：Krea2 训练加载 26GB raw 前需在系统内存暂存；若上次训练残留孤儿进程
+    （点停止/关软件没杀干净），会一直占着 ~26GB，导致新训练卡在「Loading raw」十几分钟进不来
+    （AMD 7900 XT 用户：第一次能跑、关掉后再开十几分钟进不来 = 残留进程占满内存）。
+    检测到残留训练进程 + 空闲内存 <8GB 时自动结束它们。返回结束的进程数。
+    """
+    try:
+        _left = _training_procs_all()
+        _free_mb = _free_ram_mb()
+        if not _left:
+            return 0
+        _desc = ", ".join("%s(PID %s)" % (p["name"], p["pid"]) for p in _left[:6])
+        logf("[%s] ⚠ 检测到 %d 个残留训练进程（可能占着模型内存，导致新训练加载卡死）：%s" % (label, len(_left), _desc))
+        if _free_mb is not None and _free_mb < 8 * 1024:
+            logf("[%s] 系统空闲内存仅 %.1fG（模型 26GB 需要暂存），自动结束残留训练进程释放内存…" % (label, _free_mb / 1024.0))
+            _ok, _fail = kill_processes([p["pid"] for p in _left])
+            if _ok:
+                logf("[%s] ✅ 已自动结束 %d 个残留训练进程，可正常加载模型。" % (label, len(_ok)))
+            if _fail:
+                logf("[%s] ⚠ %d 个进程结束失败（%s），若仍卡在加载请手动在任务管理器结束 python.exe 或重启电脑。" % (label, len(_fail), ",".join(str(x) for x in _fail)))
+            return len(_ok)
+        logf("[%s] 空闲内存充足，不自动结束；若训练仍卡住请手动清理。" % label)
+        return 0
+    except Exception:
+        return 0
+
+
 def _resolve_krea2_swap(vram_gb, gc_on=True, ram_gb=None):
     """Krea2 blocks_to_swap / H2D-only 档位（显存取整判断）。
 
@@ -2485,6 +2560,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     if _ram_gb:
         logf(f"[Krea2] 系统内存: {_ram_gb:.0f}G")
     _warn_low_ram(logf, _ram_gb, "Krea2")
+    _cleanup_leftover_trainers(logf, "Krea2")
     files = krea2_model_files()
     missing = krea2_missing_models()
     if missing:
@@ -2660,13 +2736,18 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     logf(f"[Krea2] 量化={_quant} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 搬运加速(pinned)={'开' if (h2d_only and vram_gb is not None and vram_gb >= 15.5) else '关'} | 梯度检查点={'开' if gc_on else '关'} | torch.compile={'开' if _compile_ok else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
     # 训练中采样出图预览（musubi 原生 --sample_every_n_steps + --sample_prompts；低显存只警告不硬关）
     if _sample_preview_enabled(params, vram_gb):
-        _sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="musubi")
+        # ≤16.5G 采样分辨率压到 512：按训练分辨率(768~1024)+块交换采样极易 OOM，
+        # musubi 采样无容错会直接中断训练（2026-09-03 反馈：Krea2 输出文件夹里都没有预览图）
+        _sp_res = int(resolution or 1024)
+        if vram_gb is not None and vram_gb <= 16.5:
+            _sp_res = min(_sp_res, 512)
+        _sp = _write_sample_prompts(output_name, params, mode, resolution=_sp_res, engine="musubi")
         if _sp:
             cmd += ["--sample_every_n_steps=100", f"--sample_prompts={_sp}", "--text_encoder", files["te"]]
             if vram_gb is not None and vram_gb < 10:
                 logf("[Krea2] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
             elif vram_gb is not None and vram_gb <= 16.5:
-                logf("[Krea2] ⚠ 16G 显存开采样预览：每 100 步采样会残留显存、训练越跑越慢（4080S 实测 13.9→54s/it）；强烈建议取消勾选「训练中采样预览」")
+                logf("[Krea2] ⚠ 16G 显存开采样预览：已把采样分辨率压到 512 防 OOM（每 100 步采样仍会略拖慢，4080S 实测 13.9→54s/it）；若仍异常请取消勾选「训练中采样预览」")
             else:
                 logf("[Krea2] 采样预览：每 100 步出一张预览图（输出目录）")
 
@@ -2739,6 +2820,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     if _ram_gb:
         logf(f"[FLUX.2] 系统内存: {_ram_gb:.0f}G")
     _warn_low_ram(logf, _ram_gb, "FLUX.2")
+    _cleanup_leftover_trainers(logf, "FLUX.2")
     files = flux2_model_files()
     missing = flux2_missing_models()
     if missing:
@@ -4078,19 +4160,24 @@ def write_fizgig_dataset_config(image_dir, cache_dir, config_path, resolution=51
         f.write('cache_directory = "%s"\n' % str(cache_dir).replace("\\", "/"))
 
 
-def _fizgig_quant_swap(vram_gb, requested):
-    """Fizgig Krea2 量化档 + blocks_to_swap（Fizgig 官方 VRAM 表）。
+def _fizgig_quant_swap(vram_gb, requested, backend=None):
+    """Fizgig Krea2 量化档 + blocks_to_swap（Fizgig 官方 VRAM 表；AMD ROCm 另有实测）。
 
     NF4 4bit（--quantize_4bit）冻结底模 ~5.6GB，10-12G 卡主路径，强制关闭块交换；
-    INT8 W8A8（--quant_int8 bf16）需 24G+，最快；默认动态 fp8 + blocks_to_swap。
+    INT8 W8A8（--quant_int8 bf16）；官方：16G+ 可跑（配合块交换），显存常驻需 ~18G；默认动态 fp8 + blocks_to_swap。
+    AMD ROCm（backend="amd-rocm"）：块交换 H2D 搬运在 ROCm 上无官方加速、动态 fp8 也慢，
+    7900 XT 用户实测 auto（fp8+块交换）很慢，int8 + blocks_to_swap=0 最快 → AMD ≥18G 的 auto 档直接给 int8+0。
     返回 (quant_flags, swap, detail)。
     """
     q = str(requested or "auto").strip().lower()
     if q in ("nf4", "4bit", "4-bit", "4"):
         return (["--quantize_4bit"], 0, "NF4 4bit（冻结底模 ~5.6GB，12G 以下推荐）")
     if q in ("int8",):
-        return (["--quant_int8", "bf16"], 0, "INT8 W8A8（需 24G+，最快）")
+        return (["--quant_int8", "bf16"], 0, "INT8 W8A8（~18G 显存常驻，最快）")
     tier = round(vram_gb) if vram_gb is not None else None
+    if backend == "amd-rocm" and tier is not None and tier >= 18:
+        # 7900 XT（20G）实测：auto 默认的 fp8+块交换在 ROCm 上很慢；int8 常驻 + 关块交换最快
+        return (["--quant_int8", "bf16"], 0, "INT8 W8A8 + blocks_to_swap=0（AMD ROCm ≥18G auto：7900 XT 实测最快）")
     if tier is None or tier >= 32:
         swap = 0
     elif tier >= 24:
@@ -4153,6 +4240,8 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     if _ram_gb:
         logf(f"[Krea2(Fizgig)] 系统内存: {_ram_gb:.0f}G")
     _warn_low_ram(logf, _ram_gb, "Krea2(Fizgig)")
+    # 训练前残留进程/内存自检：残留孤儿训练进程占满内存 → 新训练加载 26GB 模型卡死（自动清理）
+    _cleanup_leftover_trainers(logf, "Krea2(Fizgig)")
     # AMD ROCm：设置运行时环境（bnb DLL / hipinfo / MIOpen），对齐 Fizgig 官方启动器
     _fz_env = None
     if backend == "amd-rocm":
@@ -4223,12 +4312,17 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
             pass
     out_dir = data_sub("output", proj)
     output_name = str(params.get("output_name") or "krea2_fizgig_lora").strip() or "krea2_fizgig_lora"
-    quant_flags, swap, quant_detail = _fizgig_quant_swap(vram_gb, params.get("quant_mode", "auto"))
+    quant_flags, swap, quant_detail = _fizgig_quant_swap(vram_gb, params.get("quant_mode", "auto"), backend=backend)
     _manual_swap = str(params.get("blocks_to_swap") or "").strip()
     if _manual_swap.isdigit():
         swap = int(_manual_swap)
         logf(f"[Krea2(Fizgig)] 高级参数手动指定 blocks_to_swap={swap}")
     logf(f"[Krea2(Fizgig)] 量化: {quant_detail}")
+    if quant_detail.startswith("动态 fp8"):
+        # fp8+块交换是 Fizgig 官方推荐（模型部分在内存、按需换入），训练中显存占用偏低属正常；
+        # 曾有用户误以为没生效而主动关闭，留下孤儿进程占内存导致下次加载卡死（勿关闭）
+        logf("[Krea2(Fizgig)] 说明：auto 档 = fp8 + 块交换（官方表），模型一部分在内存、显存占用偏低属正常，"
+             "训练中请勿关闭（会残留进程占内存、导致下次加载卡死）。5s/it 左右步速正常。")
     cmd = [
         vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "krea2_train.py"),
         "--dataset_config", cfg_path,
@@ -4248,12 +4342,31 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     # torch.compile：Fizgig 默认 auto 会自己权衡；默认关（Windows triton 需 MSVC 构建工具，缺失自动降级）
     _k2_compile = str(params.get("compile") or "").lower() in ("1", "true", "on", "开")
     cmd += ["--compile_blocks", "auto" if _k2_compile else "off"]
-    # AMD ROCm：bitsandbytes 8-bit 优化器在 ROCm 上最不稳（工具全局 AMD 策略就是避开 bnb），
-    # Fizgig 默认 adamw8bit 会卡在优化器/首步（2026-09-02 AMD 7900 XT 用户 int8 驻留显存后无输出），
-    # 强制纯 PyTorch AdamW（显存占用略高但稳定）。
-    if backend == "amd-rocm":
-        cmd += ["--optimizer_type", "adamw"]
-        logf("[Krea2(Fizgig)] AMD ROCm：优化器强制 AdamW（避开 bitsandbytes 8-bit）")
+    # ---- 训练中采样出图预览（Fizgig 原生：每 N epoch 用 fp8 Turbo + 当前 LoRA 出图到 output/sample/）----
+    # 需 models/krea2/turbo.safetensors（约 13GB fp8 Turbo，软件内可下载）；RAW 底模 8 步采样是未蒸馏糊图，不能直接预览。
+    # 旧版完全没接采样参数 → 勾了「训练中采样预览」也不出图（2026-09-03 反馈：Krea2 输出文件夹里都没有预览图）。
+    if _sample_preview_enabled(params, vram_gb):
+        _sample_turbo = files.get("turbo")
+        if not _sample_turbo:
+            logf("[Krea2(Fizgig)] ⚠ 已开启「训练中采样预览」，但 models/krea2/ 缺少 turbo.safetensors（fp8 Turbo，约 13GB，预览必需），本次训练不采样。\n"
+                 "下载：软件内「下载Krea2模型」勾选 Turbo，或直链 " + KREA2_MODEL_LINKS["turbo"][2])
+        else:
+            _fz_sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="fizgig")
+            if _fz_sp:
+                _per_ep = max(1, per_epoch)
+                _s_ep = min(max(1, int(round(100.0 / _per_ep))), max(1, epochs))
+                cmd += ["--turbo_dit", _sample_turbo,
+                        "--vae", files["vae"],
+                        "--text_encoder", files["te"],
+                        "--sample_prompts", _fz_sp,
+                        "--sample_every_n_epochs", str(_s_ep)]
+                _s_res = int(resolution or 512)
+                if vram_gb is not None and vram_gb <= 16.5:
+                    _s_res = min(_s_res, 512)
+                    cmd += ["--preview_int8"]
+                    logf("[Krea2(Fizgig)] ⚠ 16G 档开采样预览：预览分辨率已压到 512 + int8（Fizgig 预览失败会自动停用、不影响训练）；想更稳可取消勾选「训练中采样预览」")
+                cmd += ["--sample_width", str(_s_res), "--sample_height", str(_s_res)]
+                logf(f"[Krea2(Fizgig)] 采样预览：每 {_s_ep} epoch（约每 {_s_ep * _per_ep} 步）用 Turbo + 当前 LoRA 出一张预览图 → {os.path.join(out_dir, 'sample')}")
     # 首次运行提示：AMD 需加载/量化 26GB 底模并编译内核，LoRA 创建后到首个步数可能几分钟无输出
     logf("[Krea2(Fizgig)] 提示：首次运行需加载并量化 26GB 底模、编译内核，前几分钟可能无步数输出，属正常现象，请耐心等待。")
     logf(f"[Krea2(Fizgig)] 底模(RAW): {files['raw']}")
@@ -5236,10 +5349,14 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     _style_cap = (params.get("style_caption") or "").strip()
     # 采样预览：画风模式把「画风描述词」带进提示词，预览才贴近实际风格
     sample_prompt = (", ".join(x for x in (trig, _style_cap) if x) + ", ") if (trig or _style_cap) else ""
-    # 16G 档采样极易 OOM（模型本身 ~13GB 占满显存），默认关闭，训练完再测 LoRA
-    sample_on = bool(params.get("sample_preview", True))
-    if vram_gb is not None and vram_gb <= 16:
-        sample_on = False
+    # 采样预览开关：与其他引擎一致——≤16G 默认关（用户勾选才开），>16G 默认开。
+    # 旧逻辑是 ≤16G 一律硬关、不理会勾选 → 16G 用户永远没有预览图（2026-09-03 反馈：Krea2 全都没预览）。
+    sample_on = _sample_preview_enabled(params, vram_gb)
+    _sp_res = int(reso or 768)
+    if sample_on and vram_gb is not None and vram_gb <= 16:
+        # 16G 档模型 ~13GB 已近占满：采样分辨率压到 512 防 OOM（ai-toolkit 采样失败可能中断训练）
+        _sp_res = min(_sp_res, 512)
+        logf("[Krea2(AT)] ⚠ 16G 档开采样预览：采样分辨率已压到 512 防 OOM；采样仍可能拖慢/卡顿，若异常请取消勾选「训练中采样预览」（训练完再测 LoRA 更稳）")
     text = (
         "job: extension\n"
         "config:\n"
@@ -5293,11 +5410,12 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
         + (("      sample:\n"
             "        sampler: \"flowmatch\"\n"
             "        sample_every: 250\n"
-            "        width: " + str(reso) + "\n"
-            "        height: " + str(reso) + "\n"
+            "        width: " + str(_sp_res) + "\n"
+            "        height: " + str(_sp_res) + "\n"
             "        num_frames: 1\n"
             "        prompts:\n"
             "          - " + _yq(sample_prompt + "a high quality detailed portrait, masterpiece, best quality") + "\n"
+            "        negative_prompt: \"\"\n"
             "        seed: 42\n"
             "        walk_seed: true\n"
             "        guidance_scale: 4.0\n"
@@ -5415,6 +5533,7 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
     if _ram_gb:
         logf(f"[Krea2] 系统内存: {_ram_gb:.0f}G（建议 ≥32G，避免 offload 换页变慢）")
     _warn_low_ram(logf, _ram_gb, "Krea2")
+    _cleanup_leftover_trainers(logf, "Krea2")
     # 数据集：Krea2/Qwen-Image/Z-Image 预处理统一写 train_character（即使画风子模式）
     _sub_mode = params.get("at_sub_mode") or "character"
     train_dir = dataset_train_dir("character", params.get("project"))
@@ -5921,6 +6040,56 @@ def _is_training_proc_name(name):
     return ("python" in n) or ("accelerate" in n) or ("musubi" in n)
 
 
+_TRAIN_CMD_SIGNATURES = (
+    "krea2_train", "krea2_cache_latents", "krea2_cache_text",
+    "anima_train", "sdxl_train", "train_network", "flux_train",
+    "musubi_train", "cache_latents", "cache_text_encoder",
+    "ai-toolkit", "fizgig", "\run.py",
+)
+
+
+def _wmi_training_procs():
+    """WMI 枚举 python 进程命令行，匹配训练脚本签名（NVIDIA/AMD 通用，不依赖 nvidia-smi）。"""
+    out = []
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" | "
+             "ForEach-Object { $_.ProcessId.ToString() + '|' + $_.Name + '|' + $_.CommandLine }"],
+            capture_output=True, timeout=40)
+        for _ln in (r.stdout or b"").decode("utf-8", errors="replace").splitlines():
+            _p = _ln.split("|", 2)
+            if len(_p) < 3 or not _p[0].strip().isdigit():
+                continue
+            _cmd = _p[2] or ""
+            if any(_k in _cmd.lower() for _k in _TRAIN_CMD_SIGNATURES):
+                out.append({"pid": int(_p[0].strip()), "name": _p[1].strip(), "cmd": _cmd, "mem_mb": 0})
+    except Exception:
+        pass
+    return out
+
+
+def _training_procs_all():
+    """扫描「训练系」残留进程：NVIDIA 走 nvidia-smi 计算进程 + 通用 WMI 命令行匹配（AMD 也能用）。
+    排除当前程序与当前活跃训练子进程。返回 [{pid,name,cmd,mem_mb}]。"""
+    cur = os.getpid()
+    active = set(active_process_pids())
+    seen = set()
+    out = []
+    for _pid, _name, _mem in _nvidia_compute_apps():
+        if _pid == cur or _pid in active or _pid in seen:
+            continue
+        if _is_training_proc_name(_name):
+            seen.add(_pid)
+            out.append({"pid": _pid, "name": _name, "cmd": "", "mem_mb": _mem})
+    for _p in _wmi_training_procs():
+        if _p["pid"] == cur or _p["pid"] in active or _p["pid"] in seen:
+            continue
+        seen.add(_p["pid"])
+        out.append(_p)
+    return out
+
+
 def _nvidia_compute_apps():
     """nvidia-smi 占用计算显存的进程原始行：[(pid, name, mem_mb)]。失败返回 []。"""
     r = safe_nvidia_smi(["--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader"])
@@ -5952,23 +6121,10 @@ def nvidia_vram_used_mb():
 
 
 def vram_residual_processes():
-    """小工具·清理显存：返回可杀的残留训练进程 [{pid,name,mem_mb}]。
-    规则：占用计算显存 + 进程名训练系 + 非当前程序 + 非当前活跃训练子进程（防一边训练一边误杀）。"""
-    cur = os.getpid()
-    active = set(active_process_pids())
-    out = []
-    for pid, name, mem in _nvidia_compute_apps():
-        if pid == cur or pid in active:
-            continue
-        if _is_training_proc_name(name):
-            out.append({"pid": pid, "name": name, "mem_mb": mem})
-    seen = set()
-    dedup = []
-    for x in out:
-        if x["pid"] not in seen:
-            seen.add(x["pid"])
-            dedup.append(x)
-    return dedup
+    """小工具·清理显存：返回可杀的残留训练进程 [{pid,name,cmd,mem_mb}]。
+    规则：训练系进程 + 非当前程序 + 非当前活跃训练子进程（防一边训练一边误杀）。
+    NVIDIA 走 nvidia-smi 计算进程；AMD/其他走 WMI 命令行匹配（不依赖 nvidia-smi）。"""
+    return _training_procs_all()
 
 
 def kill_processes(pids):
@@ -6951,16 +7107,72 @@ def _http_status(url, timeout=20):
         return None
 
 
+def _http_range_probe(url, timeout=20, direct=False):
+    """Range 探测源可用性与断点续传能力（请求 bytes=0-0）。
+
+    返回 (status, total, resumable)：
+      status     : 206 / 200 / HTTP 错误码 / None（网络异常，不阻塞下载，交给 curl 实测）
+      total      : 文件总大小（字节）；206 时从 Content-Range 解析，失败返回 None
+      resumable  : status == 206（服务器支持 Range 续传）
+    背景：魔搭 resolve 直链不支持 Range/HEAD（对 Range 请求回 200 而非 206，HEAD 常 404），
+    携带旧 .part 用 curl -C - 续传必然 curl 33 反复空等；SJTU/阿里云镜像回 206 支持续传。
+    """
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Range": "bytes=0-0"})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({})) if direct else urllib.request.build_opener()
+        with opener.open(req, timeout=timeout) as r:
+            status = getattr(r, "status", 200)
+            if status == 206:
+                m = re.search(r"/(\d+)\s*$", r.headers.get("Content-Range") or "")
+                return 206, (int(m.group(1)) if m else None), True
+            cl = r.headers.get("Content-Length")
+            return status, (int(cl) if cl else None), False
+    except urllib.error.HTTPError as e:
+        return e.code, None, False
+    except Exception:
+        return None, None, False
+
+
 def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False):
     """用 curl 断点续传下载大文件（repo.radeon.com 网络不稳时关键，断了可续传）。
 
     返回 True=成功。优先 curl（Windows 自带，支持 -C - 续传 + 重试）；否则 urllib 分段下载。
     progress_cb(size_bytes, total_bytes_or_None) 可选：下载期间周期性回调已下载大小，
     供界面显示进度（curl 是 -sS 静默模式，不回调的话界面上完全看不到进度）。
+
+    断点续传安全策略（修复 torch 大轮子下载死循环）：
+    1) 先 Range 探测源是否支持续传 + 拿远端总大小（HEAD 在部分镜像拿不到 Content-Length）；
+    2) 源不可用（HTTP 4xx/5xx）直接跳过，不再 curl --retry 空等；
+    3) 本地已达远端完整大小的缓存不重复下载、也不删——是否损坏由调用方完整性校验决定，
+       校验不过时由调用方（_preinstall_torch / 源码下载循环）删除残片并换源整包重下；
+    4) 服务器不支持 Range（如魔搭，对 Range 回 200）：带 .part 用 -C - 必然 curl 33 → 删除后整包重下；
+    5) curl 加 --fail：HTTP 404/5xx 时不再把错误页当“下载成功”存成 .part；
+    6) curl 退出码 33 兜底：删除残片后不带 -C - 整包重下一次。
     """
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     curl = shutil.which("curl")
-    total = _http_total_size(url, direct=direct)
+    _st, _total, _resumable = _http_range_probe(url, direct=direct)
+    total = _total if _total else _http_total_size(url, direct=direct)
+    have = os.path.getsize(dest) if os.path.isfile(dest) else 0
+    if have > 0:
+        if _st is not None and _st >= 400:
+            # 探测已确认源不可用：不浪费 curl --retry 空等，直接换源（残片保留，交给下一源续传）
+            logf("[下载] 源不可用（HTTP %s），跳过该源: %s" % (_st, url))
+            return False
+        if _total is not None and have >= _total:
+            # 本地已达远端完整大小：不再重复下载、也不删缓存——是否损坏由调用方校验决定。
+            # 损坏时调用方会删除并换源整包重下；这里若删会误伤“已完整可用”的缓存
+            # （引擎源码 zip 等调用方会带着完整缓存再次进来）。
+            logf("[下载] 本地缓存已达完整大小，交由完整性校验…")
+            return True
+        if _st == 200:
+            # 服务器对 Range 回 200 = 不支持断点续传：带 .part 用 -C - 必然 curl 33 卡死 → 整包重下
+            logf("[下载] 该源不支持断点续传，删除旧残片后整包重新下载…")
+            try:
+                os.remove(dest)
+            except Exception:
+                pass
+            have = 0
     stop_mon = threading.Event()
     if progress_cb is not None:
         def _monitor():
@@ -6982,21 +7194,49 @@ def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False)
         if curl and os.path.isfile(curl):
             # Windows 自带 curl 版本差异：--retry-all-errors 需 curl 8.0+，老系统（7.x）不识别该参数，
             # 会直接 “option --retry-all-errors: is unknown” 拒绝执行，导致 torch 大轮子下载永远失败。
-            base = [curl, "-sS", "-L", "-C", "-", "--retry", "5", "--retry-delay", "5"]
+            base = [curl, "-sS", "-L", "--fail", "--retry", "5", "--retry-delay", "5"]
             if _curl_supports_retry_all_errors(curl):
                 base.append("--retry-all-errors")
             base += ["--connect-timeout", "20", "--max-time", "10800", "--speed-limit", "20480", "--speed-time", "120"]
+            # 仅真正续传时才带 -C -；整包重下省略，避免不支持 Range 的源触发 curl 33
+            if have > 0:
+                base += ["-C", "-"]
             cmd = list(base)
             if not direct:
                 _px = system_proxy()
                 if _px:
                     cmd = list(base) + ["--proxy", _px]
             cmd += ["-o", dest, url]
-            return run_stream(cmd, env=(build_direct_env() if direct else build_env()), logf=logf) == 0
+            _env = build_direct_env() if direct else build_env()
+            rc = run_stream(cmd, env=_env, logf=logf)
+            if rc == 33:
+                # 兜底：探测漏判（源实际对 Range 回 200）→ 删残片，不带 -C - 整包重下一次
+                logf("[下载] 服务器不支持断点续传（curl 33），删除旧残片后整包重新下载…")
+                try:
+                    os.remove(dest)
+                except Exception:
+                    pass
+                base2 = [x for x in base if x not in ("-C", "-")]
+                cmd2 = list(base2)
+                if not direct:
+                    _px = system_proxy()
+                    if _px:
+                        cmd2 = list(base2) + ["--proxy", _px]
+                cmd2 += ["-o", dest, url]
+                return run_stream(cmd2, env=_env, logf=logf) == 0
+            return rc == 0
         # urllib 兜底：Range 断点续传
         import urllib.request
         tmp = dest + ".part"
         exist = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
+        if exist > 0 and _st == 200:
+            # 与 curl 分支一致：不支持 Range 的源不续传，删除后整包重下
+            logf("[下载] 该源不支持断点续传，删除旧残片后整包重新下载…")
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            exist = 0
         try:
             req = urllib.request.Request(url, headers={"Range": "bytes=%d-" % exist} if exist else {})
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({})) if direct else urllib.request.build_opener()

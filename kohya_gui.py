@@ -2912,7 +2912,7 @@ class App:
             self.tools_view_box = self._tools_result_box(body, 130)
 
             # ② 清理显存（仅 N 卡）
-            s2 = _sec("② 清理显存（仅 N 卡）", "结束残留的训练进程释放显存；正在跑的训练会自动排除")
+            s2 = _sec("② 清理残留训练进程", "结束残留的训练进程释放显存/内存（N 卡 + AMD 通用）；正在跑的训练会自动排除")
             self.btn_tools_kill = ctk.CTkButton(s2, text="结束所选", width=104, height=26, fg_color="transparent",
                                                 hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
                                                 corner_radius=6, font=ui_font(FONT_HINT), command=self._tools_kill_vram)
@@ -2924,13 +2924,13 @@ class App:
             # 勾选列表框：有残留进程时才显示（pack），平时隐藏避免空框把下面模块挤下去
             self.tools_vram_list = ctk.CTkFrame(body, fg_color="transparent")
             self.tools_vram_box = self._tools_result_box(body, 90)
-            if _vendor != "nvidia":
+            if _vendor not in ("nvidia", "amd"):
                 for _b in (self.btn_tools_scan, self.btn_tools_kill):
                     try:
                         _b.configure(state="disabled")
                     except Exception:
                         pass
-                self._tools_set_text(self.tools_vram_box, "「清理显存」仅支持 N 卡（当前：%s）；其他工具不受影响。" % _vendor)
+                self._tools_set_text(self.tools_vram_box, "「清理残留进程」当前不可用（未知显卡：%s）；其他工具不受影响。" % _vendor)
 
             # ③ 清理内存
             s3 = _sec("③ 清理内存", "对所有进程压缩工作集（安全），显示前后空闲内存")
@@ -3125,9 +3125,14 @@ class App:
             try:
                 ok, fail = core.kill_processes(pids)
                 after = core.nvidia_vram_used_mb()
-                text = "清理前已用显存: %s MB\n已结束 %d 个进程，失败 %d 个%s\n清理后已用显存: %s MB" % (
-                    before, len(ok), len(fail),
-                    ("：" + ",".join(str(p) for p in fail)) if fail else "", after)
+                if before is None and after is None:
+                    text = "已结束 %d 个进程，失败 %d 个%s" % (
+                        len(ok), len(fail),
+                        ("：" + ",".join(str(p) for p in fail)) if fail else "")
+                else:
+                    text = "清理前已用显存: %s MB\n已结束 %d 个进程，失败 %d 个%s\n清理后已用显存: %s MB" % (
+                        before, len(ok), len(fail),
+                        ("：" + ",".join(str(p) for p in fail)) if fail else "", after)
             except Exception as e:
                 text = "执行失败：%s" % e
             def done():
