@@ -1,5 +1,15 @@
 ﻿## 下版本（未发布）
 
+### 修复：训练中采样预览被“100% 收尾看门狗”误杀（第 2 次预览时自动停止）
+- 根因：TrainMonitor 把 Fizgig 预览进度行（sampling: n/m）误当训练步，污染监控 step/total，
+  看门狗误以为“已达 100%”并在后续较长采样期间触发自动停止（AMD 7900 XT 用户：第 2 次预览到 5/8 被杀）。
+- 已修：监控忽略 sampling:/rendering previews 等预览行，训练步/看门狗只认真实训练进度。
+
+### 新增：第四引擎（Fizgig）断点续训接入
+- Fizgig 状态目录是 {name}-NNNNNN-state（按 epoch），旧逻辑只认 kohya 的 -stepNNNNNN-state，导致“找不到断点、只能从头训”。
+- 已修：识别 Fizgig 断点目录（含 training_state.json、最终 LoRA 未生成才算中断）；
+  训练入口把 --resume 传给 krea2_train.py，监控按断点步数续上；跑完的不会误提示续训。
+
 ### 修复：画风模式自动打标自检（避免整批“统一兜底句”被误当正常结果）
 - 画风模式没填「画风描述词」时应逐张 WD14/内置打标；老版本曾把固定的兜底描述（anime cel-shading…）整批写死，
   新版已在重跑时自愈清除并重新打标。

@@ -232,6 +232,33 @@ def test_anima_ckpt():
     assert (nkeep, ndrop) == (2, 1), (nkeep, ndrop)
     assert ac.checkpoint_kind(out) == "pure"
 
+def test_monitor_sampling_and_fizgig_resume():
+    """采样预览进度不污染训练监控（防看门狗误杀）+ Fizgig 断点查找。"""
+    import Kohya一键工具 as core
+    mon = core.TrainMonitor()
+    mon.start(total=3800)
+    mon.on_line("steps:   8%| | 304/3800 [00:10<02:00, 4.17s/it, avr_loss=0.1]")
+    s1 = mon.snapshot()
+    assert s1.get("step") == 304 and s1.get("total") == 3800, s1
+    mon.on_line("sampling:  62%| | 5/8 [01:25<00:59, 19.67s/it]")
+    s2 = mon.snapshot()
+    assert s2.get("step") == 304 and s2.get("total") == 3800, "采样行污染了监控: %s" % s2
+    mon.on_line("rendering previews (epoch 2) on the fp8 Turbo...")
+    s3 = mon.snapshot()
+    assert s3.get("step") == 304, s3
+    # Fizgig 断点查找：{name}-NNNNNN-state；有最终 LoRA 视为跑完不提示
+    import tempfile, os as _os, json
+    d = tempfile.mkdtemp()
+    for ep in ("000001", "000002"):
+        st = _os.path.join(d, "krea2_fizgig_lora-%s-state" % ep)
+        _os.makedirs(st, exist_ok=True)
+        with open(_os.path.join(st, "training_state.json"), "w", encoding="utf-8") as f:
+            json.dump({"epoch": int(ep), "global_step": int(ep) * 152}, f)
+    found = core.find_fizgig_state(d, "krea2_fizgig_lora")
+    assert found and found.endswith("krea2_fizgig_lora-000002-state"), found
+    open(_os.path.join(d, "krea2_fizgig_lora.safetensors"), "wb").write(b"x")
+    assert core.find_fizgig_state(d, "krea2_fizgig_lora") is None, "跑完仍提示续训"
+
 
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
@@ -242,6 +269,7 @@ def main():
     check("下载模型配置（FLUX/Anima/Krea2）", test_download_models)
     check("标签管理 v1 · 离线词典核心链路", test_tagging)
     check("Anima 合并包识别/剥离/缓存", test_anima_ckpt)
+    check("采样预览不污染监控 + Fizgig 断点查找", test_monitor_sampling_and_fizgig_resume)
     print("-" * 40)
     if FAILED:
         print("✘ 失败 %d 项: %s" % (len(FAILED), "、".join(FAILED)))

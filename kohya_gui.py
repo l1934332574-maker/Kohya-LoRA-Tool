@@ -4782,7 +4782,11 @@ class App:
         # params 里通常没有 project 字段（_collect_params 不生成），直接用 self.current_project。
         _proj = (self.current_project or "").strip() or (params.get("project") or "").strip()
         _odir = core.data_sub("output", _proj) if _proj else core.data_sub("output")
-        state = core.find_latest_state(_odir, output_name)
+        # 第四引擎（Fizgig）断点目录是 {name}-NNNNNN-state（按 epoch），用专门查找
+        if params.get("mode") == "krea2_fz":
+            state = core.find_fizgig_state(_odir, output_name)
+        else:
+            state = core.find_latest_state(_odir, output_name)
         if state:
             return state if messagebox.askyesno(
                 core.APP_NAME,

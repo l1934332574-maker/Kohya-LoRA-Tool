@@ -293,6 +293,10 @@ class TrainMonitor:
             # run_stream 打印的命令行回显（"$ ..."）不参与阶段判定
             if low.startswith("$ "):
                 return False
+            # 训练中采样/预览进度（sampling: n/m …、rendering previews）不是训练步：
+            # 忽略，避免把预览进度当训练步（污染监控后，“100% 卡死”看门狗会误杀，2026-09 AMD/Fizgig 用户）
+            if re.match(r"^\s*sampling", low) or "rendering previews" in low or ("pre-encoding" in low and "sample" in low):
+                return True
             with self._lock:
                 self.last_activity = time.time()
             # 缓存阶段检测
@@ -4336,7 +4340,14 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
         "--seed", "42",
     ] + quant_flags
     if resume_from:
-        logf("[Krea2(Fizgig)] ⚠ Fizgig 断点续训暂未接入（二期），本次从头开始")
+        _rs = resume_step_from(resume_from)
+        if progress is not None:
+            try:
+                progress.set_step(_rs)
+            except Exception:
+                pass
+        logf("[Krea2(Fizgig)] 断点续训：从 %s 继续（已完成 %d 步，监控已续上）" % (resume_from, _rs))
+        cmd += ["--resume", resume_from]
     if swap > 0:
         cmd += ["--blocks_to_swap", str(swap)]
     # torch.compile：Fizgig 默认 auto 会自己权衡；默认关（Windows triton 需 MSVC 构建工具，缺失自动降级）
@@ -7745,6 +7756,31 @@ def find_latest_state(output_dir, output_name):
         m = re.search(r"-step(\d+)-state", os.path.basename(p))
         return int(m.group(1)) if m else -1
     return max(cands, key=_step_no)
+
+
+def find_fizgig_state(output_dir, output_name):
+    """找 Fizgig 断点状态目录（{name}-NNNNNN-state，按 epoch 命名，内含 training_state.json）。
+    若最终 LoRA（{name}.safetensors）已生成说明训练已跑完，不提示续训。找不到返回 None。"""
+    if not os.path.isdir(output_dir):
+        return None
+    if os.path.isfile(os.path.join(output_dir, output_name + ".safetensors")):
+        return None
+    pat = re.compile(r"^" + re.escape(output_name) + r"-(\d{6})-state$")
+    best, best_no = None, -1
+    for _d in (output_dir, os.path.join(output_dir, "snapshots")):
+        if not os.path.isdir(_d):
+            continue
+        for f in os.listdir(_d):
+            m = pat.match(f)
+            if not m:
+                continue
+            p = os.path.join(_d, f)
+            if not os.path.isdir(p) or not os.path.isfile(os.path.join(p, "training_state.json")):
+                continue
+            no = int(m.group(1))
+            if no > best_no:
+                best, best_no = p, no
+    return best
 
 
 def resume_step_from(resume_from):
