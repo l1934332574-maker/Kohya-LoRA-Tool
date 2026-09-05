@@ -42,7 +42,8 @@ def test_syntax():
              "gui/__init__.py", "gui/tag_tools.py",
              "kohya_core/tagging/__init__.py", "kohya_core/tagging/dictionary.py",
              "kohya_core/tagging/normalize.py", "kohya_core/tagging/translate.py",
-             "kohya_core/tagging/complete.py", "kohya_core/tagging/test_tagging.py"]
+             "kohya_core/tagging/complete.py", "kohya_core/tagging/test_tagging.py",
+             "kohya_core/anima_ckpt.py", "test_anima_ckpt.py"]
     for f in files:
         py_compile.compile(os.path.join(ROOT, f), doraise=True)
 
@@ -203,6 +204,34 @@ def test_tagging():
         raise AssertionError("英文补全缺 blue_hair")
     import gui.tag_tools  # GUI 辅助模块可正常导入
 
+def test_anima_ckpt():
+    """Anima 合并包剥离工具：识别/剥离/缓存（合成 safetensors，零依赖）。"""
+    import json, os, struct, tempfile
+    from kohya_core import anima_ckpt as ac
+
+    def _w(path, keys):
+        h = {"__metadata__": {}}
+        off, payload = 0, b""
+        for i, k in enumerate(keys):
+            h[k] = {"dtype": "F32", "shape": [1], "data_offsets": [off, off + 4]}
+            payload += struct.pack("<f", float(i + 1))
+            off += 4
+        blob = json.dumps(h, separators=(",", ":")).encode("utf-8")
+        with open(path, "wb") as f:
+            f.write(struct.pack("<Q", len(blob)) + blob + payload)
+
+    d = tempfile.mkdtemp()
+    pure = os.path.join(d, "pure.safetensors")
+    merged = os.path.join(d, "merged.safetensors")
+    _w(pure, ["net.0.weight", "net.1.weight"])
+    _w(merged, ["net.0.weight", "net.1.weight", "cond_stage_model.qwen3_06b.w"])
+    assert ac.checkpoint_kind(pure) == "pure"
+    assert ac.checkpoint_kind(merged) == "merged"
+    out = os.path.join(d, "out.safetensors")
+    nkeep, ndrop = ac.strip_to_dit(merged, out, ref_path=pure, logf=lambda *a: None)
+    assert (nkeep, ndrop) == (2, 1), (nkeep, ndrop)
+    assert ac.checkpoint_kind(out) == "pure"
+
 
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
@@ -212,6 +241,7 @@ def main():
     check("yaml 生成可解析", test_yaml)
     check("下载模型配置（FLUX/Anima/Krea2）", test_download_models)
     check("标签管理 v1 · 离线词典核心链路", test_tagging)
+    check("Anima 合并包识别/剥离/缓存", test_anima_ckpt)
     print("-" * 40)
     if FAILED:
         print("✘ 失败 %d 项: %s" % (len(FAILED), "、".join(FAILED)))

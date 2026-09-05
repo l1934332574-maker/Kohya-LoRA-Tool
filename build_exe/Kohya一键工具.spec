@@ -38,6 +38,7 @@ a = Analysis(
         'kohya_core.tagging', 'kohya_core.tagging.dictionary',
         'kohya_core.tagging.normalize', 'kohya_core.tagging.translate',
         'kohya_core.tagging.complete',
+        'kohya_core.anima_ckpt',
     ],
     hookspath=[],
     hooksconfig={},

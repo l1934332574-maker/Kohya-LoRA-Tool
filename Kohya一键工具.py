@@ -8830,6 +8830,19 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     _tf_logs_dir = _tf_safe_logging_dir(_logs_dir)
     if _tf_logs_dir != _logs_dir:
         logf(f"[训练] 数据目录含中文路径，TensorBoard 日志已重定向到 {_tf_logs_dir}（避免 TensorFlow 中文路径崩溃）")
+    # Anima：合并包（内置 Qwen3 文本编码器的推理/Semi 包）→ 自动剥离 DiT 缓存后训练。
+    # sd-scripts anima_train_network 只收纯 DiT，带 cond_stage_model.* 会报 Unexpected keys。
+    if family == "anima":
+        try:
+            from kohya_core import anima_ckpt as _ack
+            _use_base, _ak = _ack.resolve_train_base(base_model, logf=logf)
+            if _ak in ("merged_stripped", "merged_cached"):
+                logf(f"[训练] Anima 使用剥离后的纯 DiT 底模（合并包→DiT）：{_use_base}")
+            elif _ak == "invalid":
+                logf("[训练] ⚠ Anima 底模文件无法解析；若训练报 Unexpected/Missing keys，请换纯 DiT 底模")
+            base_model = _use_base
+        except Exception as _ae:
+            logf(f"[训练] Anima 底模预处理跳过（{_ae}）")
     cmd = [
         *accel, "--num_cpu_threads_per_process", "2", script,
         f"--pretrained_model_name_or_path={base_model}",

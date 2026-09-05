@@ -1685,6 +1685,29 @@ def main():
         if n_fill:
             print(f"[INFO] 最终兜底：为 {n_fill} 张缺失/空标签的图片补写了 caption")
 
+    # 画风模式自检：没填画风描述词时，若整批标签高度一致（<=2 种）说明自动打标没生效/全走兜底，显眼提醒
+    if mode == "style" and (ok + skipped) and not (style_caption or "").strip() and not args.no_caption:
+        try:
+            _caps = set()
+            for _f in sorted(os.listdir(output_dir)):
+                if os.path.splitext(_f)[1].lower() not in IMAGE_EXTS:
+                    continue
+                _t = os.path.join(output_dir, os.path.splitext(_f)[0] + ".txt")
+                if os.path.isfile(_t):
+                    try:
+                        with open(_t, "r", encoding="utf-8") as _fh:
+                            _c = _fh.read().strip()
+                    except Exception:
+                        _c = ""
+                    if _c:
+                        _caps.add(_c)
+            if len(_caps) == 1 and list(_caps)[0] == DEFAULT_CAPTION:
+                print("[WARN] 画风模式自动打标未生效：所有标签都是统一的兜底描述（anime cel-shading…），请检查上方 WD14/内置打标日志；否则学不到逐张画风特征，效果会差。")
+            elif len(_caps) <= 2:
+                print("[WARN] 画风模式标签高度一致（%d 种），疑似自动打标未逐张生效；建议确认 WD14 正常后再训。" % len(_caps))
+        except Exception:
+            pass
+
     print()
     print("=" * 60)
     print(f"  处理成功: {ok}  |  跳过(已存在): {skipped}  |  重复: {dups}")

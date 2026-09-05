@@ -4038,6 +4038,8 @@ class App:
             if not params["base_model"]:
                 messagebox.showwarning(core.APP_NAME, "请先选择底模（步骤③）。")
                 return
+        if not self._anima_merged_ok(params):
+            return
         if not self._warn_no_nvidia():
             return
         if not self._warn_low_vram(params):
@@ -4120,6 +4122,8 @@ class App:
             if not params["base_model"]:
                 messagebox.showwarning(core.APP_NAME, "请先选择底模（步骤③）。")
                 return
+        if not self._anima_merged_ok(params):
+            return
         _need_trigger = (self.mode == "character") or (self.mode == "concept") or \
             (self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2") and self._at_sub_label() in ("character", "concept"))
         if _need_trigger and not params["trigger"]:
@@ -4785,6 +4789,27 @@ class App:
                 f"发现上次中断留下的训练进度快照：\n{os.path.basename(state)}\n\n"
                 "要不要从上次断点继续训练？（选否则从头重新训练）") else None
         return None
+
+    def _anima_merged_ok(self, params):
+        """Anima 合并包底模提示：确认后训练端自动剥离 DiT 并缓存。返回 False=用户取消。"""
+        try:
+            if params.get("base_type") != "anima":
+                return True
+            base = (params.get("base_model") or "").strip()
+            if not base or not os.path.isfile(base):
+                return True
+            from kohya_core import anima_ckpt as _ack
+            if _ack.checkpoint_kind(base) != "merged":
+                return True
+        except Exception:
+            return True
+        return messagebox.askyesno(
+            core.APP_NAME,
+            "检测到合并版 Anima 底模（内含 Qwen3 文本编码器，适合推理/出图）。\n\n"
+            "Anima 训练需要「纯 DiT」底模，直接用这个文件训练会报 Unexpected keys 错误。\n\n"
+            "是否自动剥离 DiT 并缓存后再训练？\n"
+            "（推荐；大文件首次剥离约 1~3 分钟，之后自动复用缓存）\n"
+            "选「否」将取消本次训练，请改用纯 DiT 底模（如 anima-base-v1.0）。")
 
     def _confirm_training(self, params, resume=None):
         if params.get("mode") in ("krea2", "krea2_fz", "krea2_at"):
