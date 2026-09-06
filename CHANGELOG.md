@@ -1,9 +1,21 @@
-﻿## 下版本（未发布）
+﻿## v0.15.3（2026-09-06）
 
 ### 新增：训练完成后按项目名命名成品 LoRA
 - 之前各引擎成品名是写死的（anime_style_lora / krea2_lora / h3_video_lora…），多项目时从 output 拷出来的文件分不清谁是谁；
 - 现在训练正常结束后自动把输出目录里最新的成品 .safetensors 复制一份命名为 <项目名>.safetensors（snapshots/sample 等子目录不参与挑选，最后一次写出的就是本次成品）；
 - 是「复制」不是「改名」：断点续训/「已完成不再提示续训」检测仍按引擎原文件名工作，原文件保留不受影响；没开项目（共享 output/）时不导出。
+
+### 修复：训练中采样预览不再被「100% 收尾看门狗」误杀（AMD 用户 v0.15.1 后仍复现）
+- 根因 1：采样行还有漏网格式（Generating baseline samples / Generating Samples: 0/1…）会把监控 total 覆盖成预览图数，触发收尾看门狗；
+- 根因 2：采样行即便被忽略也不算「进程活动」，训练走满 100% 后的收尾采样超过 grace 会被当卡死自动停止；
+- 已修：采样标志扩展 + on_line 先推进 last_activity 再忽略；看门狗改为「无新步 且 无新日志活动」超时才停（真静默卡在保存仍会兜底自动停止）。
+
+### 修复：训练完成（kohya/musubi）后不再误弹「断点续训」
+- find_latest_state 增加完成判定（与 Fizgig 一致）：输出目录顶层已有更新的成品 .safetensors 视为已跑完，不提示续训；真中断（无成品）仍会提示。
+
+### 修复：预处理自愈遇到 Anaconda 环境不再空转
+- 自愈 pip 补装补 --force-reinstall（原同版本 wheel 被 pip 跳过=假强制）；
+- 增加 ctypes 前置探测：标准库 ctypes 都无法导入（典型 Anaconda 建 venv 后脱离 conda 运行）时，直接提示用官方独立 Python 重建训练环境，不再误报「缺少 numpy」。
 
 ## v0.15.2（2026-09-06）
 
