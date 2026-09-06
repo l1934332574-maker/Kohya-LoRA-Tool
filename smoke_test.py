@@ -287,6 +287,16 @@ def test_monitor_sampling_and_fizgig_resume():
     mon.on_line("rendering previews (epoch 2) on the fp8 Turbo...")
     s3 = mon.snapshot()
     assert s3.get("step") == 304, s3
+    # 基线/收尾采样（Generating Samples: 0/1 …）同样不能污染步数，且必须推进 last_activity
+    #（否则训练 100% 后的收尾采样超过 grace 会被"卡死看门狗"误杀，2026-09 AMD 用户复现）
+    import time as _t
+    t0 = s3.get("last_activity") or 0
+    _t.sleep(0.05)
+    mon.on_line("Generating baseline samples before training (step 304)")
+    mon.on_line("Generating Samples:   0%|          | 0/1 [00:00<?, ?it/s]")
+    s4 = mon.snapshot()
+    assert s4.get("step") == 304 and s4.get("total") == 3800, "Generating Samples 污染监控: %s" % s4
+    assert (s4.get("last_activity") or 0) > t0, "采样行未记为进程活动（看门狗会误杀）"
     # Fizgig 断点查找：{name}-NNNNNN-state；有最终 LoRA 视为跑完不提示
     import tempfile, os as _os, json
     d = tempfile.mkdtemp()
@@ -299,6 +309,17 @@ def test_monitor_sampling_and_fizgig_resume():
     assert found and found.endswith("krea2_fizgig_lora-000002-state"), found
     open(_os.path.join(d, "krea2_fizgig_lora.safetensors"), "wb").write(b"x")
     assert core.find_fizgig_state(d, "krea2_fizgig_lora") is None, "跑完仍提示续训"
+    # kohya/musubi 断点：有 -step…-state 且无成品 → 提示续训；成品已生成 → 不提示
+    import tempfile as _tf2, os as _os2
+    d2 = _tf2.mkdtemp()
+    st2 = _os2.path.join(d2, "character_lora-step00000400-state")
+    _os2.makedirs(st2, exist_ok=True)
+    assert core.find_latest_state(d2, "character_lora") is not None, "中断点应提示续训"
+    _os2.utime(st2, (2000, 2000))
+    with open(_os2.path.join(d2, "character_lora.safetensors"), "wb") as f:
+        f.write(b"x")
+    _os2.utime(_os2.path.join(d2, "character_lora.safetensors"), (3000, 3000))
+    assert core.find_latest_state(d2, "character_lora") is None, "跑完仍提示续训(kohya)"
 
 
 def test_lora_naming():

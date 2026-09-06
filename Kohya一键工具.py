@@ -218,6 +218,11 @@ class TrainMonitor:
         "latents are cached", "latent are cached", "text encoder outputs are cached",
         "caching finished", "finished caching",
     )
+    # 采样/预览行标志：这些不是训练步（会把 total 覆盖成预览图数 0/1、1/5，触发
+    # "100% 收尾看门狗"误杀——2026-09 AMD 用户仍复现）。行会被忽略但仍算进程活动。
+    _SAMPLE_MARKERS = (
+        "sampling", "rendering preview", "generating sample", "baseline sample", "pre-encoding",
+    )
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -294,12 +299,13 @@ class TrainMonitor:
             # run_stream 打印的命令行回显（"$ ..."）不参与阶段判定
             if low.startswith("$ "):
                 return False
-            # 训练中采样/预览进度（sampling: n/m …、rendering previews）不是训练步：
-            # 忽略，避免把预览进度当训练步（污染监控后，“100% 卡死”看门狗会误杀，2026-09 AMD/Fizgig 用户）
-            if re.match(r"^\s*sampling", low) or "rendering previews" in low or ("pre-encoding" in low and "sample" in low):
-                return True
+            # 训练中采样/预览进度不是训练步：先记活动再忽略。忽略行不污染 total/step，
+            # 但仍要算进程活动——看门狗靠 last_activity 区分「正在跑采样」与「真卡在收尾」，
+            # 否则训练走满 100% 后的收尾采样超过 grace 会被当卡死误杀（2026-09 AMD 用户仍复现）。
             with self._lock:
                 self.last_activity = time.time()
+            if any(_m in low for _m in self._SAMPLE_MARKERS):
+                return True
             # 缓存阶段检测
             if any(m in low for m in self._CACHE_MARKERS):
                 with self._lock:
@@ -2487,9 +2493,12 @@ def _start_train_stuck_watchdog(progress, logf, grace=150):
                     s2 = progress.snapshot()
                     if not s2.get("running"):
                         return
-                    if s2.get("step", last_step) > last_step:
-                        last_step = s2["step"]
-                        stalled = time.time()
+                    st = s2.get("step", last_step)
+                    la = s2.get("last_activity") or 0
+                    if st > last_step or (la and la > stalled):
+                        # 有新步，或有新的日志活动（如收尾采样/预览在逐行输出）→ 不算卡死，重置计时
+                        last_step = st
+                        stalled = la if (la and la > stalled) else time.time()
                         continue
                     if not active_process_pids():
                         return          # 进程已正常退出，无需处理
@@ -7801,7 +7810,19 @@ def find_latest_state(output_dir, output_name):
     def _step_no(p):
         m = re.search(r"-step(\d+)-state", os.path.basename(p))
         return int(m.group(1)) if m else -1
-    return max(cands, key=_step_no)
+    best = max(cands, key=_step_no)
+    # 完成判定（与 Fizgig find_fizgig_state 一致）：输出目录顶层已有更新的成品
+    # .safetensors → 上次训练已正常跑完，不应提示续训（否则每次跑完都会误弹）。
+    # 若成品比中断点旧（旧完成 + 新一次中断）→ 仍提示续训。
+    try:
+        tops = [os.path.join(output_dir, n) for n in os.listdir(output_dir)
+                if n.lower().endswith(".safetensors")]
+        tops = [t for t in tops if os.path.isfile(t)]
+        if tops and max(os.path.getmtime(t) for t in tops) >= os.path.getmtime(best):
+            return None
+    except OSError:
+        pass
+    return best
 
 
 def find_fizgig_state(output_dir, output_name):
