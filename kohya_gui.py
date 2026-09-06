@@ -2278,11 +2278,19 @@ class App:
         try:
             _adv = getattr(self, "_adv_frames", {})
             _use_steps = self.mode in ("video", "qwen_image", "zimage")
+            _show_reso = self.mode in ("qwen_image", "zimage")   # AI 图像：按步训练但分辨率可调（8G 建议 512，训练端会自动钳制）
             for _k in ("repeats", "max_epochs", "resolution"):
                 _f = _adv.get(_k)
                 if _f is not None:
                     try:
-                        if _use_steps:
+                        if _k == "resolution":
+                            if _show_reso:
+                                _f.grid()          # Qwen/Z-Image 显示分辨率
+                            elif _use_steps:
+                                _f.grid_remove()   # 视频模式仍隐藏分辨率
+                            else:
+                                _f.grid()
+                        elif _use_steps:
                             _f.grid_remove()
                         else:
                             _f.grid()

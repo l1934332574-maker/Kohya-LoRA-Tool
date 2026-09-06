@@ -143,6 +143,30 @@ def test_yaml():
         d = yaml.safe_load(open(cfg, encoding="utf-8"))
         if d["config"]["process"][0]["model"]["arch"] != core.AT_IMAGE_MODELS[mode]["arch"]:
             raise AssertionError("%s yaml arch 不符" % mode)
+    # Z-Image 8G 快跑档（2026-09-06）：分辨率钳到 512 + 关采样 + 量化 TE + weighted（官方 zimage 预设）
+    cfg = os.path.join(tmp, "zimage_8g.yaml")
+    core.write_at_image_yaml(dict(params, resolution="1024"), core.AT_IMAGE_MODELS["zimage"], vd, tmp, cfg, vram_gb=8)
+    d = yaml.safe_load(open(cfg, encoding="utf-8"))
+    p0 = d["config"]["process"][0]
+    _ram8 = core.detect_ram_gb() or 0
+    _exp8 = 384 if _ram8 < 32 else 512
+    if p0["datasets"][0]["resolution"] != [_exp8, _exp8]:
+        raise AssertionError("Z-Image 8G 分辨率钳制不符: %s (ram %sG)" % (p0["datasets"][0]["resolution"], _ram8))
+    if p0["train"].get("disable_sampling") is not True:
+        raise AssertionError("Z-Image 8G 未关闭采样")
+    if p0["train"].get("timestep_type") != "weighted":
+        raise AssertionError("Z-Image 8G timestep 非 weighted")
+    if p0["model"].get("quantize_te") is not True or p0["model"].get("qtype_te") != "qfloat8":
+        raise AssertionError("Z-Image 8G TE 未量化")
+    if p0["model"].get("layer_offloading") is not True or p0["model"].get("layer_offloading_transformer_percent") != 0.6:
+        raise AssertionError("Z-Image 8G 未开层交换")
+    # 16G 不启用快跑档（保持原行为，避免误伤现有配置）
+    cfg = os.path.join(tmp, "zimage_16g.yaml")
+    core.write_at_image_yaml(dict(params, resolution="1024"), core.AT_IMAGE_MODELS["zimage"], vd, tmp, cfg, vram_gb=16)
+    d = yaml.safe_load(open(cfg, encoding="utf-8"))
+    p0 = d["config"]["process"][0]
+    if p0["datasets"][0]["resolution"] != [1024, 1024] or p0["train"].get("disable_sampling") is True or p0["model"].get("layer_offloading") is True:
+        raise AssertionError("Z-Image 16G 误启用快跑档")
     # H3 yaml
     cfg = os.path.join(tmp, "h3.yaml")
     core.write_h3_train_yaml(params, vd, tmp, cfg)

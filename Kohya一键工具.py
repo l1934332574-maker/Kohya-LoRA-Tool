@@ -4961,6 +4961,20 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
     steps = max(100, min(6000, int(params.get("video_steps", 2000))))
     trig = params.get("trigger") or ""
     reso = int(params.get("resolution", 1024))
+    # ⚡ 8G 快跑档（Z-Image 第三引擎，2026-09-06）：分辨率钳到 512 + 关采样 + 量化 TE + 官方 weighted 时间步
+    # 8G 用户日志：512/qfloat8/low_vram 下模型可正常加载，卡在训练前 baseline 采样；
+    # disable_sampling 是官方开关（BaseSDTrainProcess 里 step0 也算采样步），必须显式关闭才能让 8G 直接进入训练。
+    _fast8_tier = (info.get("arch") == "zimage") and (vram_gb is not None) and (vram_gb < 10)
+    _at8g_train_yaml = _at8g_model_yaml = ""
+    if _fast8_tier:
+        reso = min(int(reso), 384 if (detect_ram_gb() or 0) < 32 else 512)
+        _at8g_train_yaml = "        \"disable_sampling\": true\n"
+        # 2026-09-06 实测：8G 纯 qfloat8+low_vram 时 fp8 DiT 全量驻留显存(~7.8G)，无激活余量，训练起不来；
+        # 必须开官方 layer_offloading 层交换（引擎会自动把 qfloat8 降为 float8 逐层换入），512 才能跑通。
+        _at8g_model_yaml = ("        \"quantize_te\": true\n"
+                            "        \"qtype_te\": \"qfloat8\"\n"
+                            "        \"layer_offloading\": true\n"
+                            "        \"layer_offloading_transformer_percent\": 0.6\n")
     train_dir = os.path.abspath(train_dir).replace("\\", "/")
     out_dir = os.path.abspath(out_dir).replace("\\", "/")
     if vpy:
@@ -4983,6 +4997,8 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
         _low_vram = False
     logf(f"[{info.get('label', 'AI 图像')}] low_vram={'开' if _low_vram else '关'}"
           f"（显存 {vram_gb if vram_gb is not None else '未知'}G" + ("，驻留需 %.0fG" % _need if vram_gb is not None else "，默认开保险") + "）")
+    if _fast8_tier:
+        logf(f"[{info.get('label', 'AI 图像')}] ⚡8G 快跑档生效：分辨率 {reso}、已关闭训练采样、文本编码器量化、timestep=weighted")
     text = (
         "job: extension\n"
         "config:\n"
@@ -5014,20 +5030,22 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
         "        train_text_encoder: false\n"
         "        gradient_checkpointing: true\n"
         "        noise_scheduler: \"flowmatch\"\n"
-        "        timestep_type: 'linear'\n"
+        "        timestep_type: " + ("'weighted'" if _fast8_tier else "'linear'") + "\n"
         "        optimizer: " + _yq(_opt_yaml) + "\n"
         "        lr: " + repr(lr) + "\n"
         "        optimizer_params:\n"
         "          weight_decay: 1e-4\n"
         "        dtype: bf16\n"
         "        cache_text_embeddings: true\n"
-        "      model:\n"
+        + _at8g_train_yaml
+        + "      model:\n"
         "        name_or_path: " + _yq(info["model_id"]) + "\n"
         "        arch: '" + info["arch"] + "'\n"
         "        quantize: true\n"
         "        qtype: \"qfloat8\"\n"
         "        low_vram: " + ("true" if _low_vram else "false") + "\n"
-        "      sample:\n"
+        + _at8g_model_yaml
+        + "      sample:\n"
         "        sampler: \"flowmatch\"\n"
         "        sample_every: 250\n"
         "        width: " + str(reso) + "\n"

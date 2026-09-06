@@ -247,7 +247,7 @@ DATASET_TIPS = {
     "flux2": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 FLUX.2 模型放进 models/flux2/（DiT+Qwen3 文本编码器+VAE，约 16GB，国内镜像）。8G 显存可跑（自动开省显存），推荐 12G+。",
     "video": "📌 视频数据集提示：准备 3~10 段 3~10 秒的同角色/同风格视频（mp4），每段配一个同名 .txt 字幕描述内容。H3 模型 40GB+，训练推荐 24G 显存（NVIDIA）。",
     "qwen_image": "📌 数据集提示：15~30 张同一人物/风格图片。Qwen-Image 是 20B 大模型：16G 显存起步、24G 舒服（推荐）；首次训练自动下载模型约 40GB（国内镜像）。",
-    "zimage": "📌 数据集提示：15~30 张同一人物/风格图片。Z-Image 是 8B 轻量模型：12G 显存起步、16G 舒服；首次训练自动下载模型约 16GB（国内镜像）。",
+    "zimage": "📌 数据集提示：15~30 张同一人物/风格图片。Z-Image 是 8B 轻量模型：8G 可用（自动开快跑档）、12G 起步、16G 舒服；首次训练自动下载模型约 16GB（国内镜像）。",
 }
 
 OUTPUT_NAMES = {"style": "anime_style_lora", "character": "character_lora", "concept": "concept_lora", "krea2": "krea2_lora", "krea2_at": "krea2_at_lora", "krea2_fz": "krea2_fizgig_lora", "flux2": "flux2_lora", "video": "h3_video_lora", "qwen_image": "qwen_image_lora", "zimage": "zimage_lora"}
@@ -355,7 +355,7 @@ GUIDE_STEPS = {
         {"id": "at", "label": "② 安装第三引擎", "btn": "去安装", "check": "at", "act": "cmd_install_at",
          "tip": "安装第三引擎 AI Toolkit（Qwen-Image / Z-Image 模式需要，只需一次，需 NVIDIA 显卡）。"},
         {"id": "at_model", "label": "③ Z-Image 模型", "btn": "查看说明", "check": "at_model", "act": "cmd_at_model_help",
-         "tip": "Z-Image 是 8B 轻量模型：12G 显存起步、16G 舒服。首次训练自动下载约 16GB（国内镜像）；训练用基础版，出图可配 Turbo。"},
+         "tip": "Z-Image 是 8B 轻量模型：8G 可用（自动开快跑档）、12G 起步、16G 舒服。首次训练自动下载约 16GB（国内镜像）；训练用基础版，出图可配 Turbo。"},
         {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
          "tip": "选择原始图片文件夹（15~30 张同一人物/风格）。"},
     ],
