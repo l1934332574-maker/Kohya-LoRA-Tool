@@ -236,6 +236,7 @@ class TrainMonitor:
         """锁内复位（避免 start() 里嵌套获取同一把非重入锁导致死锁）。"""
         self.step = 0
         self.total = 0
+        self.resume_base = 0        # 断点续训基数：引擎按“剩余步数”从 0 重数时映射回绝对步
         self.loss = None
         self.loss_prev = None
         self.loss_history = []
@@ -273,6 +274,7 @@ class TrainMonitor:
         with self._lock:
             self.step = step
             self._last_step = step
+            self.resume_base = step
 
     def set_lr(self, lr):
         """预填学习率（kohya 的 tqdm 日志里通常不输出 lr 字段，
@@ -348,11 +350,20 @@ class TrainMonitor:
                 if self.phase != "train":
                     # 兜底：tqdm 总数与已设置的总步数一致 → 视为训练 tqdm
                     #（覆盖"短训练全程只有 tqdm、没有 steps: 日志"的场景，如 sd-scripts <200 步）
-                    if is_tqdm and total and total > 0 and self.total and total == self.total:
+                    if is_tqdm and total and total > 0 and self.total and (
+                            total == self.total
+                            or (self.resume_base and (self.resume_base + total) == self.total)):
                         self.phase = "train"
                         self.phase_label = None
                     else:
                         return True
+                # 断点续训映射：kohya/musubi 等引擎续训后 tqdm 按“剩余步数”从 0 重数
+                #（sd-scripts 训练循环是 range(max_train_steps - initial_step)）。若已 set_step(基数)
+                # 且解析 total == 剩余步数（基数+total==完整总步数），把 step 映射回绝对步；
+                # 否则会被 0/小数字 覆盖，监控就“回不到原来的步数”（2026-09 用户反馈）。
+                if self.resume_base and total and total > 0 and self.total and                         (self.resume_base + total) == self.total:
+                    step = self.resume_base + step
+                    total = self.total
                 self.step = step
                 if total and total > 0:
                     self.total = total

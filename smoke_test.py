@@ -297,6 +297,16 @@ def test_monitor_sampling_and_fizgig_resume():
     s4 = mon.snapshot()
     assert s4.get("step") == 304 and s4.get("total") == 3800, "Generating Samples 污染监控: %s" % s4
     assert (s4.get("last_activity") or 0) > t0, "采样行未记为进程活动（看门狗会误杀）"
+    # 断点续训：引擎按“剩余步数”从 0 重数（sd-scripts: range(max-initial)）→ 映射回绝对步
+    mon2 = core.TrainMonitor()
+    mon2.start(total=2000)
+    mon2.set_step(800)
+    mon2.on_line("steps:   6%| | 120/1200 [00:20<04:00, 4.17s/it, loss=0.12]")
+    s5 = mon2.snapshot()
+    assert s5.get("step") == 920 and s5.get("total") == 2000, "续训监控未映射回绝对步: %s" % s5
+    mon2.on_line("steps:  50%| | 600/1200 [00:20<04:00, 4.17s/it, loss=0.11]")
+    s6 = mon2.snapshot()
+    assert s6.get("step") == 1400 and s6.get("total") == 2000, s6
     # Fizgig 断点查找：{name}-NNNNNN-state；有最终 LoRA 视为跑完不提示
     import tempfile, os as _os, json
     d = tempfile.mkdtemp()
