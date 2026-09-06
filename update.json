@@ -2,5 +2,5 @@
   "version": "v0.15.3",
   "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.15.3/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.15.3 更新（2026-09-03）：\n    · 修复：PyTorch 大轮子国内下载死循环——魔搭不支持断点续传致 curl 33 反复空等、坏缓存反复装失败；自动探测续传/删损坏残片整包重下 + pip 判坏缓存自动清除（第二引擎装不上）；\n    · 修复：Krea2 训练中采样预览（第二/三/四引擎）——16G 不再硬关、低显存采样自动压 512；第四引擎接入（需 turbo.safetensors）；\n    · 优化：第四引擎 AMD ROCm auto 档改 int8 + 关块交换（7900 XT 实测最快）；AMD 优化器回归官方默认；\n    · 优化：训练前自动清理残留训练进程（防占满内存卡死）；工具页「清理残留训练进程」N 卡 + AMD 通用。"
+  "notes": "v0.15.3 更新（2026-09-06）：\n    · 修复：训练中采样预览不再被「100% 收尾看门狗」误杀——扩展采样行识别（Generating Samples/baseline 等），采样也算进程活动，看门狗改为「无新步且无新日志」才停（AMD 用户复现）；\n    · 修复：kohya/musubi 训练跑完后不再误弹「断点续训」（输出已有成品=已跑完）；真中断仍提示；\n    · 修复：预处理自愈遇到 Anaconda 环境不再空转——补装加 --force-reinstall，ctypes 无法导入时直接提示用官方独立 Python 重建训练环境；\n    · 新增：训练完成后按项目名导出成品 <项目名>.safetensors（复制不改名，断点续训不受影响）。"
 }
