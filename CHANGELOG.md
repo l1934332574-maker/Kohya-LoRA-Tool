@@ -1,4 +1,12 @@
-﻿## v0.15.3（2026-09-06）
+﻿## v0.15.4（2026-09-06）
+
+### 修复：断点续训后监控步数映射回绝对步
+- 根因：kohya/musubi 引擎续训后 tqdm 按“剩余步数”从 0 重数（sd-scripts: range(max_train_steps - initial_step)），
+  会把工具预填的断点步（如 800）覆盖回小数字，监控看起来“没回到原来的步数”；
+- 已修：TrainMonitor 记录 resume_base，解析到 total==剩余步数（基数+total==完整总步数）时把 step 映射回绝对步，total 保持完整值；
+- 非续训与引擎本就按绝对步输出的场景不受影响。
+
+## v0.15.3（2026-09-06）
 
 ### 新增：训练完成后按项目名命名成品 LoRA
 - 之前各引擎成品名是写死的（anime_style_lora / krea2_lora / h3_video_lora…），多项目时从 output 拷出来的文件分不清谁是谁；
