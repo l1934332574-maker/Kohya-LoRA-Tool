@@ -1629,6 +1629,7 @@ class App:
             "mode": params.get("mode", self.mode),
             "base_type": params.get("base_type", self.base_type),
             "at_sub_mode": params.get("at_sub_mode") or "character",
+            "fast_tier": params.get("fast_tier") or "auto",
             "base_model": params.get("base_model") or "",
             "raw_dir": params.get("raw_dir") or "",
             "trigger": params.get("trigger") or "",
@@ -1678,6 +1679,11 @@ class App:
             try:
                 _sub = data.get("at_sub_mode") or "character"
                 self.at_sub_var.set(core.AT_SUB_LABELS.get(_sub, core.AT_SUB_LABELS["character"]))
+            except Exception:
+                pass
+            try:
+                _ft = data.get("fast_tier") or "auto"
+                self.fast_tier_var.set(core.FAST_TIER_LABELS.get(_ft, core.FAST_TIER_LABELS["auto"]))
             except Exception:
                 pass
             self.trigger_var.set(data.get("trigger") or "")
@@ -1827,6 +1833,23 @@ class App:
         self.at_sub_hint = ctk.CTkLabel(self.at_sub_row, text="人物=保留全部标签；画风=过滤人物标签；概念=形态/种族（trigger 吸收原型）", font=ui_font(FONT_HINT), text_color=HINT)
         self.at_sub_hint.pack(side="left", padx=(12, 0))
         self.at_sub_row.pack_forget()
+        # Z-Image 专属：⚡ 快跑档手动开关（8G 自动触发，可强制开/关；默认隐藏仅 zimage 显示）
+        self.fast_tier_row = ctk.CTkFrame(card2, fg_color="transparent")
+        ctk.CTkLabel(self.fast_tier_row, text="⚡ 快跑档", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
+        self.fast_tier_var = tk.StringVar(value=core.FAST_TIER_LABELS["auto"])
+        self.fast_tier_menu = ctk.CTkComboBox(
+            self.fast_tier_row, values=list(core.FAST_TIER_LABELS.values()),
+            width=150, height=30, variable=self.fast_tier_var, state="readonly",
+            fg_color=CARD2, border_color=BORDER, text_color=TXT,
+            button_color="#3a4150", button_hover_color="#454d5e",
+            dropdown_fg_color=CARD, dropdown_text_color=TXT, dropdown_hover_color="#2b303a",
+            font=ui_font(FONT_BODY), command=lambda _e: None)
+        self.fast_tier_menu.pack(side="left", padx=(12, 0))
+        self.fast_tier_hint = ctk.CTkLabel(self.fast_tier_row,
+            text="自动=仅 ≤8G 显存生效；开=强制（分辨率 384/512 + 层交换 + 关采样）；关=完全按常规参数",
+            font=ui_font(FONT_HINT), text_color=HINT)
+        self.fast_tier_hint.pack(side="left", padx=(12, 0))
+        self.fast_tier_row.pack_forget()
         r2 = ctk.CTkFrame(card2, fg_color="transparent"); r2.pack(fill="x", padx=22, pady=(0, 4))
         ctk.CTkLabel(r2, text="Trigger 触发词", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
         self.trigger_entry = ctk.CTkEntry(r2, width=200, height=30, textvariable=self.trigger_var,
@@ -2142,6 +2165,16 @@ class App:
                 self.at_sub_row.pack(fill="x", padx=22, pady=(0, 6))
             else:
                 self.at_sub_row.pack_forget()
+            # ⚡ 快跑档手动开关：仅 Z-Image 模式显示
+            try:
+                _fr = getattr(self, "fast_tier_row", None)
+                if _fr is not None:
+                    if self.mode == "zimage":
+                        _fr.pack(fill="x", padx=22, pady=(0, 6))
+                    else:
+                        _fr.pack_forget()
+            except Exception:
+                pass
         except Exception:
             pass
         try:
@@ -3476,6 +3509,8 @@ class App:
             "mode": self.mode,
             "base_type": self.base_type,
             "at_sub_mode": self._at_sub_label(),
+            "fast_tier": (core.fast_tier_code(self.fast_tier_var.get())
+                          if getattr(self, "fast_tier_var", None) is not None else "auto"),
             "trigger": self.trigger_var.get().strip(),
             "strong_bind": bool(self.strong_bind_var.get()),
             "sample_preview": bool(self.sample_preview_var.get()),
@@ -4860,6 +4895,10 @@ class App:
                 f"训练步数    : {params.get('video_steps', 2000)}\n"
                 f"Trigger     : {params['trigger'] or '（未填写）'}"
             )
+            if params.get("mode") == "zimage":
+                _ftv = params.get("fast_tier") or "auto"
+                _ft_txt = {"auto": "自动（仅 8G 显存生效）", "on": "开（强制快跑档）", "off": "关（常规）"}.get(str(_ftv), str(_ftv))
+                msg += f"快跑档      : {_ft_txt}\n"
         else:
             base = core.BASE_TYPE_LABELS.get(params["base_type"], params["base_type"])
             msg = (

@@ -167,6 +167,23 @@ def test_yaml():
     p0 = d["config"]["process"][0]
     if p0["datasets"][0]["resolution"] != [1024, 1024] or p0["train"].get("disable_sampling") is True or p0["model"].get("layer_offloading") is True:
         raise AssertionError("Z-Image 16G 误启用快跑档")
+    # 手动开关：16G 强制开（fast_tier=on）→ 快跑档生效；8G 强制关（fast_tier=off）→ 完全常规
+    cfg = os.path.join(tmp, "zimage_16g_on.yaml")
+    core.write_at_image_yaml(dict(params, resolution="1024", fast_tier="on"), core.AT_IMAGE_MODELS["zimage"], vd, tmp, cfg, vram_gb=16)
+    d = yaml.safe_load(open(cfg, encoding="utf-8"))
+    p0 = d["config"]["process"][0]
+    if p0["train"].get("disable_sampling") is not True or p0["model"].get("layer_offloading") is not True:
+        raise AssertionError("Z-Image 16G fast_tier=on 未生效")
+    if p0["datasets"][0]["resolution"] != [_exp8, _exp8]:
+        raise AssertionError("Z-Image 16G fast_tier=on 分辨率钳制不符")
+    cfg = os.path.join(tmp, "zimage_8g_off.yaml")
+    core.write_at_image_yaml(dict(params, resolution="1024", fast_tier="off"), core.AT_IMAGE_MODELS["zimage"], vd, tmp, cfg, vram_gb=8)
+    d = yaml.safe_load(open(cfg, encoding="utf-8"))
+    p0 = d["config"]["process"][0]
+    if p0["train"].get("disable_sampling") is True or p0["model"].get("layer_offloading") is True:
+        raise AssertionError("Z-Image 8G fast_tier=off 误启用快跑档")
+    if p0["datasets"][0]["resolution"] != [1024, 1024]:
+        raise AssertionError("Z-Image 8G fast_tier=off 分辨率被误钳制")
     # H3 yaml
     cfg = os.path.join(tmp, "h3.yaml")
     core.write_h3_train_yaml(params, vd, tmp, cfg)

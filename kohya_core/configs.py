@@ -26,6 +26,20 @@ AT_SUB_LABELS = {
     "concept": "概念（形态/种族）",
 }
 
+# Z-Image 8G 快跑档开关（自动/开/关；仅 Z-Image 训练生效，见 write_at_image_yaml）
+FAST_TIER_LABELS = {
+    "auto": "自动（8G）",
+    "on": "开（强制）",
+    "off": "关",
+}
+
+def fast_tier_code(text):
+    """界面文本 -> 档位 key（auto/on/off）。未知回退 auto。"""
+    for _k, _v in FAST_TIER_LABELS.items():
+        if _v == text:
+            return _k
+    return "auto"
+
 # 架构注册表（对标秋叶：SD1.5 / SDXL / FLUX.1 / Anima）
 # family: sd=U-Net 架构；flux=DiT；anima=DiT+Qwen3
 # tokenizers: [(model_id, kind)] kind='clip'=CLIPTokenizer, 'auto'=AutoTokenizer
