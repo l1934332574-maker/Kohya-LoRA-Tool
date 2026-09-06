@@ -39,6 +39,7 @@ a = Analysis(
         'kohya_core.tagging.normalize', 'kohya_core.tagging.translate',
         'kohya_core.tagging.complete',
         'kohya_core.anima_ckpt',
+        'kohya_core.lora_naming',
     ],
     hookspath=[],
     hooksconfig={},

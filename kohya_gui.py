@@ -4120,6 +4120,11 @@ class App:
             else:
                 core.train(self._log, base_model=params["base_model"], mode=params["mode"],
                            params=params, vram_gb=vram, resume_from=resume, progress=self._train_mon)
+            try:
+                core.export_project_named_lora(params.get("mode"), params.get("project") or "",
+                                               logf=self._log, prefer_prefix=params.get("output_name"))
+            except Exception as _exp_e:
+                self._log(f"[导出] 按项目名导出成品失败（忽略）：{_exp_e}")
             self._log("[OK] 训练完成，模型在 output 文件夹")
         except core.StopRequested:
             if getattr(self._train_mon, "nan_detected", False):

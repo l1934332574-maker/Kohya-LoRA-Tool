@@ -190,6 +190,7 @@ from kohya_core.utils import *  # noqa: E402,F401（通用工具函数）
 from kohya_core.musubi_quant_patch import patch_musubi_quant_base  # noqa: E402（INT8/NF4 量化底模补丁）
 from kohya_core.paths import *  # noqa: E402,F401（路径与项目管理）
 from kohya_core.gpu import *  # noqa: E402,F401（显卡检测）
+from kohya_core.lora_naming import export_project_named_lora  # noqa: E402,F401（训练完成按项目名导出成品）
 
 
 # 模式注册表配置已迁移到 kohya_core/configs.py（下方 import * 导入）
@@ -5760,6 +5761,25 @@ def _ensure_preprocess_deps(vpy, kdir, logf=print, force=False):
 
     if not force and _deps_importable():
         return True
+    # 解释器级前置校验：连标准库 ctypes 都 import 不了 → venv 的基础 Python 环境坏了
+    # （典型：用 Anaconda 的 python 建 venv 后脱离 conda 激活直接运行，_ctypes 运行库
+    # 对不上，import numpy 时会先在 numpy -> ctypes 处崩）。此时重装 numpy/Pillow 永远
+    # 修不好，直接给明确指引，别再空转两轮后误报"缺少 numpy"。2026-09-06 yanyan 用户实证。
+    def _ctypes_ok():
+        try:
+            r = subprocess.run([vpy, "-c", "import ctypes; print('ctypes-ok')"],
+                               capture_output=True, text=True, timeout=120)
+            return r.returncode == 0 and "ctypes-ok" in (r.stdout or "")
+        except Exception:
+            return False
+    if not _ctypes_ok():
+        logf("[预处理] ⚠ 训练 venv 的 Python 基础环境异常：标准库 ctypes 都无法导入"
+             f"（{os.path.basename(vpy)}）。常见原因：用 Anaconda 的 python 创建训练环境后，"
+             "脱离 conda 激活环境直接运行（_ctypes 运行库对不上），并非缺少 numpy。")
+        logf("[预处理] 补装 numpy/Pillow 无法解决。请安装官方独立 Python（非 Anaconda）后，"
+             "重跑【② 安装训练内核】自动重建训练环境；手动验证命令：")
+        logf(f'  {vpy} -c "import ctypes"')
+        return False
     logf("[预处理] kohya venv 的 Pillow/numpy 不可用（或强制重装），正在自动补装…")
     env = build_env()
     for _round in range(2):
@@ -5767,14 +5787,20 @@ def _ensure_preprocess_deps(vpy, kdir, logf=print, force=False):
         _wheels = _wheels_for_python(_bundled_pip_wheels(), vpy)
         if _wheels:
             logf("[预处理] 使用内置离线 wheel 安装 Pillow/numpy（%d 个，离线零联网）…" % len(_wheels))
-            if run_stream([vpy, "-m", "pip", "install", "--no-input", "--no-index"] + _wheels,
-                          cwd=kdir, env=env, logf=logf) == 0:
+            _pip_args = [vpy, "-m", "pip", "install", "--no-input", "--no-index"]
+            if force:
+                # 真·强制：不加 --force-reinstall 时，同版本 wheel 会被 pip 判定
+                # "already installed" 直接跳过，等于白装（2026-09-06 实测日志佐证）。
+                _pip_args.append("--force-reinstall")
+            if run_stream(_pip_args + _wheels, cwd=kdir, env=env, logf=logf) == 0:
                 _ok = True
         if not _ok:
             for _idx in ("https://mirrors.aliyun.com/pypi/simple/",
                          "https://pypi.tuna.tsinghua.edu.cn/simple"):
-                if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
-                               "--index-url", _idx, "pillow==12.3.0", "numpy==2.1.3"],
+                _pip_args = [vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120"]
+                if force:
+                    _pip_args.append("--force-reinstall")
+                if run_stream(_pip_args + ["--index-url", _idx, "pillow==12.3.0", "numpy==2.1.3"],
                               cwd=kdir, env=env, logf=logf) == 0:
                     _ok = True
                     break
@@ -6501,7 +6527,7 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         # 这里强制补装一轮（不依赖快速校验，内置 wheel 覆盖 cp310/311/312）并自动重试一次，
         # 避免卡在 preprocess.py 的原始报错。
         if not _ensure_preprocess_deps(vpy, get_kohya_dir(), logf, force=True):
-            raise RuntimeError("预处理失败：venv 的 Pillow/numpy 强制补装后仍不可用，请查看上方日志")
+            raise RuntimeError("预处理失败：训练环境自愈后仍不可用，请查看上方日志（若提示 ctypes/Anaconda 基础环境异常，请安装官方独立 Python 后重跑【② 安装训练内核】重建训练环境）")
         logf("[预处理] 已补装依赖（强制），自动重试预处理…")
         rc = run_stream(cmd, logf=logf)
     if rc != 0:

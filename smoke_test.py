@@ -301,6 +301,23 @@ def test_monitor_sampling_and_fizgig_resume():
     assert core.find_fizgig_state(d, "krea2_fizgig_lora") is None, "跑完仍提示续训"
 
 
+def test_lora_naming():
+    """训练完成按项目名导出成品：挑最新成品、复制为 <项目名>.safetensors、原文件保留。"""
+    import tempfile
+    from kohya_core import lora_naming as ln
+
+    d = tempfile.mkdtemp()
+    for name, m in (("krea2_lora-000006.safetensors", 1000), ("krea2_lora-000008.safetensors", 2000)):
+        p = os.path.join(d, name)
+        with open(p, "wb") as f:
+            f.write(b"\0" * 16)
+        os.utime(p, (m, m))
+    logs = []
+    got = ln.export_project_named_lora("krea2", "测试项目", logf=logs.append, out_dir=d)
+    assert got == os.path.join(d, "测试项目.safetensors") and os.path.isfile(got), logs
+    assert os.path.isfile(os.path.join(d, "krea2_lora-000008.safetensors"))  # 原文件保留（续训/已完成检测仍认它）
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -311,6 +328,7 @@ def main():
     check("标签管理 v1 · 离线词典核心链路", test_tagging)
     check("Anima 合并包识别/剥离/缓存", test_anima_ckpt)
     check("采样预览不污染监控 + Fizgig 断点查找", test_monitor_sampling_and_fizgig_resume)
+    check("训练完成按项目名导出成品", test_lora_naming)
     print("-" * 40)
     if FAILED:
         print("✘ 失败 %d 项: %s" % (len(FAILED), "、".join(FAILED)))
