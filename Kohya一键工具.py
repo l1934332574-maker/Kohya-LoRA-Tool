@@ -2725,6 +2725,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         logf(f"[Krea2] 高级参数手动指定 blocks_to_swap={swap}")
     # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
     per_epoch = int(params.get("repeats", 5)) * _flat_n
+    _save_ep = _resolve_save_every_epochs(params)   # 与中间保存快照对齐（采样预览同节奏）
     if per_epoch * epochs > KREA2_MAX_STEPS:
         new_epochs = max(1, int(KREA2_MAX_STEPS / max(1, per_epoch)))
         logf(f"[Krea2] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
@@ -2749,7 +2750,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         "--max_data_loader_n_workers", "1",
         "--network_module", "networks.lora_krea2", "--network_dim", str(rank), "--network_alpha", str(alpha),
         "--max_train_epochs", str(epochs),
-        "--save_every_n_epochs", str(_resolve_save_every_epochs(params)),
+        "--save_every_n_epochs", str(_save_ep),
         "--save_state",
         "--seed", "42",
         "--output_dir", out_dir, "--output_name", output_name,
@@ -2807,7 +2808,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
             _sp_res = min(_sp_res, 512)
         _sp = _write_sample_prompts(output_name, params, mode, resolution=_sp_res, engine="musubi")
         if _sp:
-            cmd += ["--sample_every_n_steps=100", f"--sample_prompts={_sp}", "--text_encoder", files["te"]]
+            cmd += ["--sample_every_n_steps=%d" % max(1, per_epoch * _save_ep), f"--sample_prompts={_sp}", "--text_encoder", files["te"]]   # 采样与中间保存快照同节奏
             if vram_gb is not None and vram_gb < 10:
                 logf("[Krea2] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
             elif vram_gb is not None and vram_gb <= 16.5:
@@ -2959,6 +2960,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         logf(f"[FLUX.2] 高级参数手动指定 blocks_to_swap={swap}")
     # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
     per_epoch = int(params.get("repeats", 2)) * _flat_n
+    _save_ep = _resolve_save_every_epochs(params)   # 与中间保存快照对齐（采样预览同节奏）
     if per_epoch * epochs > FLUX2_MAX_STEPS:
         new_epochs = max(1, int(FLUX2_MAX_STEPS / max(1, per_epoch)))
         logf(f"[FLUX.2] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
@@ -2984,7 +2986,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         "--max_data_loader_n_workers", "1",
         "--network_module", "networks.lora_flux_2", "--network_dim", str(rank), "--network_alpha", str(alpha),
         "--max_train_epochs", str(epochs),
-        "--save_every_n_epochs", str(_resolve_save_every_epochs(params)),
+        "--save_every_n_epochs", str(_save_ep),
         "--save_state",
         "--seed", "42",
         "--output_dir", out_dir, "--output_name", output_name,
@@ -3038,7 +3040,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     if _sample_preview_enabled(params, vram_gb):
         _sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="musubi")
         if _sp:
-            cmd += ["--sample_every_n_steps=100", f"--sample_prompts={_sp}"]
+            cmd += ["--sample_every_n_steps=%d" % max(1, per_epoch * _save_ep), f"--sample_prompts={_sp}"]   # 采样与中间保存快照同节奏
             if vram_gb is not None and vram_gb < 10:
                 logf("[FLUX.2] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
             elif vram_gb is not None and vram_gb <= 16.5:
@@ -9162,7 +9164,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     if _sample_preview_enabled(params, vram_gb):
         _sp = _write_sample_prompts(output_name, params, mode)
         if _sp:
-            cmd += ["--sample_every_n_steps=100", f"--sample_prompts={_sp}"]
+            cmd += [f"--sample_every_n_steps={save_every}", f"--sample_prompts={_sp}"]   # 采样与中间保存快照同节奏
             if vram_gb is not None and vram_gb < 10:
                 logf("[训练] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
             else:
