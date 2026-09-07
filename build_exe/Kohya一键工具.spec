@@ -40,6 +40,8 @@ a = Analysis(
         'kohya_core.tagging.complete',
         'kohya_core.anima_ckpt',
         'kohya_core.lora_naming',
+        'kohya_core.queue',
+        'gui.queue_window',
     ],
     hookspath=[],
     hooksconfig={},
