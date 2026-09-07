@@ -1667,6 +1667,7 @@ class App:
                 "repeats": params.get("repeats"),
                 "max_epochs": params.get("max_epochs"),
                 "save_every": params.get("save_every"),
+                "sample_interval": params.get("sample_interval") or 0,
                 "optimizer": params.get("optimizer") or "auto",
                 "strong_bind": bool(params.get("strong_bind", True)),
                 "crop_ratio": params.get("crop_ratio") or "",
@@ -3335,6 +3336,22 @@ class App:
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
         self._adv_entries["save_every"] = _se
         self._adv_frames["save_every"] = sf
+        # 采样预览间隔：0/留空=跟随保存快照；填 N=固定每 N 步（kohya/Krea2/FLUX.2 生效）
+        sf2 = ctk.CTkFrame(g, fg_color="transparent")
+        sf2.grid(row=2, column=0, columnspan=9, sticky="w", padx=10, pady=(0, 8))
+        ctk.CTkLabel(sf2, text="采样预览间隔(步)", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        _iv = self.param_vars.setdefault("sample_interval", tk.StringVar())
+        try:
+            _iv.trace_add("write", lambda *a: self._schedule_autosave())
+        except Exception:
+            pass
+        _ie = ctk.CTkEntry(sf2, width=80, height=28, justify="center", textvariable=_iv,
+                           fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
+        _ie.pack(side="left", padx=(10, 8))
+        ctk.CTkLabel(sf2, text="（0/留空=跟随保存快照；填 N=固定每 N 步出预览；kohya/Krea2/FLUX.2 生效）",
+                     font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        self._adv_entries["sample_interval"] = _ie
+        self._adv_frames["sample_interval"] = sf2
         cb = ctk.CTkFrame(self.adv_body, fg_color="transparent"); cb.pack(anchor="w", pady=(4, 0))
         self.chk_unet_only = ctk.CTkCheckBox(cb, text="只训练 UNet（不训练文本编码器）", variable=self.unet_only_var,
                                              fg_color=ACC, hover_color=ACC_H, text_color=TXT, font=ui_font(FONT_BODY),
@@ -3546,6 +3563,7 @@ class App:
             "resolution": int(float(_getv("resolution", "1024" if self.mode in ("krea2", "krea2_fz", "krea2_at", "flux2") else str(core.RESOLUTIONS.get(self.base_type, 512))))),
             "video_steps": int(float(_getv("video_steps", "2000"))),
             "save_every": (lambda _s: int(_s) if str(_s).isdigit() else None)(_getv("save_every", "")),
+            "sample_interval": (lambda _s: int(_s) if str(_s).isdigit() and int(_s) > 0 else 0)(_getv("sample_interval", "")),
             "train_text_encoder": not self.unet_only_var.get(),
             "style_caption": getattr(self, "style_caption_var", tk.StringVar()).get().strip(),
             "global_pos": self.global_pos_var.get().strip(),

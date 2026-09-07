@@ -2808,7 +2808,9 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
             _sp_res = min(_sp_res, 512)
         _sp = _write_sample_prompts(output_name, params, mode, resolution=_sp_res, engine="musubi")
         if _sp:
-            cmd += ["--sample_every_n_steps=%d" % max(1, per_epoch * _save_ep), f"--sample_prompts={_sp}", "--text_encoder", files["te"]]   # 采样与中间保存快照同节奏
+            _si = int(params.get("sample_interval") or 0)
+            _sample_n = _si if _si >= 10 else max(1, per_epoch * _save_ep)
+            cmd += ["--sample_every_n_steps=%d" % _sample_n, f"--sample_prompts={_sp}", "--text_encoder", files["te"]]   # 跟随保存快照 / 自选固定步数
             if vram_gb is not None and vram_gb < 10:
                 logf("[Krea2] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
             elif vram_gb is not None and vram_gb <= 16.5:
@@ -3040,7 +3042,9 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     if _sample_preview_enabled(params, vram_gb):
         _sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="musubi")
         if _sp:
-            cmd += ["--sample_every_n_steps=%d" % max(1, per_epoch * _save_ep), f"--sample_prompts={_sp}"]   # 采样与中间保存快照同节奏
+            _si = int(params.get("sample_interval") or 0)
+            _sample_n = _si if _si >= 10 else max(1, per_epoch * _save_ep)
+            cmd += ["--sample_every_n_steps=%d" % _sample_n, f"--sample_prompts={_sp}"]   # 跟随保存快照 / 自选固定步数
             if vram_gb is not None and vram_gb < 10:
                 logf("[FLUX.2] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
             elif vram_gb is not None and vram_gb <= 16.5:
@@ -9164,7 +9168,9 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     if _sample_preview_enabled(params, vram_gb):
         _sp = _write_sample_prompts(output_name, params, mode)
         if _sp:
-            cmd += [f"--sample_every_n_steps={save_every}", f"--sample_prompts={_sp}"]   # 采样与中间保存快照同节奏
+            _si = int(params.get("sample_interval") or 0)
+            _sample_n = _si if _si >= 10 else int(save_every)
+            cmd += [f"--sample_every_n_steps={_sample_n}", f"--sample_prompts={_sp}"]   # 跟随保存快照 / 自选固定步数
             if vram_gb is not None and vram_gb < 10:
                 logf("[训练] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
             else:
