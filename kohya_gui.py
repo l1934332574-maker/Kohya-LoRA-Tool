@@ -5478,7 +5478,7 @@ class LabelEditorWindow:
         lf.pack(fill="both", expand=True, padx=8, pady=(0, 10))
         self.listbox = tk.Listbox(lf, bg=CARD2, fg=TXT, selectbackground=SELBAR, selectforeground="#ffffff",
                                   font=ui_font(FONT_BODY), highlightthickness=0, borderwidth=0,
-                                  activestyle="none", exportselection=False)
+                                  activestyle="none", exportselection=False, selectmode="extended")
         self.listbox.pack(side="left", fill="both", expand=True)
         sb = ctk.CTkScrollbar(lf, command=self.listbox.yview)
         sb.pack(side="right", fill="y")
@@ -5596,7 +5596,7 @@ class LabelEditorWindow:
         sel = self.listbox.curselection()
         if not sel:
             return
-        idx = int(sel[0])
+        idx = int(sel[-1])   # 多选时以最后选中项预览
         if idx >= len(self.records):
             return
         if self._current is not None and self._current in self._dirty:
@@ -5651,38 +5651,58 @@ class LabelEditorWindow:
             messagebox.showerror("保存失败", f"写入失败：{e}")
 
     def _do_delete_image(self):
-        """删除当前选中的图片及其同名 txt/npz（把质量差的训练图移出数据集）。"""
-        if self._current is None:
-            messagebox.showinfo("删除图片", "请先在左侧选中要删除的图片。")
+        """删除选中的一张或多张图片（左侧可 Ctrl/Shift 多选），连同同名 txt/npz。"""
+        try:
+            sel = [int(i) for i in self.listbox.curselection() if 0 <= int(i) < len(self.records)]
+        except Exception:
+            sel = []
+        if not sel:
+            messagebox.showinfo("删除图片", "请先在左侧选中要删除的图片（可 Ctrl/Shift 多选）。")
             return
-        it = self.records[self._current]
-        disp = os.path.join(it["rel"], os.path.basename(it["img"])) if it["rel"] else os.path.basename(it["img"])
-        if not messagebox.askyesno("删除图片", f"确定从数据集删除这张图吗？\n\n{disp}\n\n同时会删除它的标签文件（.txt）。此操作不可恢复。"):
+        names = []
+        for i in sel:
+            it = self.records[i]
+            names.append(os.path.join(it["rel"], os.path.basename(it["img"])) if it["rel"] else os.path.basename(it["img"]))
+        shown = "\n".join(names[:8]) + ("\n…" if len(names) > 8 else "")
+        if not messagebox.askyesno("删除图片",
+                f"确定从数据集删除选中的 {len(sel)} 张图吗？\n\n{shown}\n\n"
+                "同时会删除对应标签文件（.txt）。此操作不可恢复。"):
             return
-        removed = []
-        for cand in (it["img"], it["txt"]):
+        done, failed = 0, []
+        for i in sorted(sel, reverse=True):
             try:
-                if os.path.isfile(cand):
-                    os.remove(cand)
-                    removed.append(os.path.basename(cand))
-            except Exception as e:
-                messagebox.showerror("删除失败", f"{cand}\n{e}")
-                return
-        # 同名 npz 缓存一并删除
-        stem = os.path.splitext(it["img"])[0]
-        for fn in list(os.listdir(os.path.dirname(it["img"]))):
-            if fn.startswith(os.path.basename(stem)) and fn.lower().endswith(".npz"):
-                try:
-                    os.remove(os.path.join(os.path.dirname(it["img"]), fn))
-                except Exception:
-                    pass
-        self._set_status(f"已删除：{'、'.join(removed)}")
-        self._log_app(f"[标签] 已删除 {disp}" + ("（含 npz 缓存）" if removed else ""))
-        self._dirty.discard(self._current)
+                self._remove_record(i)
+                done += 1
+            except Exception as exc:
+                failed.append(os.path.basename(self.records[i]["img"]) + "(" + str(exc) + ")")
+        if failed:
+            messagebox.showerror("删除图片", "部分删除失败：\n" + "\n".join(failed[:8]))
+        self._set_status(("已删除 %d 张图" % done) + ("，" + str(len(failed)) + " 张失败" if failed else ""))
         self._current = None
         self.refresh()
 
-    # ---------- 批量操作 ----------
+    def _remove_record(self, idx):
+        """删除单条 record：img/txt/同名 npz 缓存。失败抛异常。"""
+        it = self.records[idx]
+        removed = []
+        for cand in (it["img"], it["txt"]):
+            if os.path.isfile(cand):
+                os.remove(cand)
+                removed.append(os.path.basename(cand))
+        stem = os.path.splitext(it["img"])[0]
+        try:
+            _dir = os.path.dirname(it["img"])
+            for fn in list(os.listdir(_dir)):
+                if fn.startswith(os.path.basename(stem)) and fn.lower().endswith(".npz"):
+                    try:
+                        os.remove(os.path.join(_dir, fn))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        self._log_app("[标签] 已删除 " + os.path.basename(it["img"]) + ("（含 npz 缓存）" if removed else ""))
+        return removed
+
     def _do_remove(self):
         tags = self.del_entry.get().strip()
         if not tags:
@@ -5763,23 +5783,62 @@ class LabelEditorWindow:
             return
         w = ctk.CTkToplevel(self.win)
         w.title("标签统计")
-        w.geometry("580x660")
+        w.geometry("640x680")
         w.transient(self.win)
         w.configure(fg_color=BG)
-        ctk.CTkLabel(w, text="标签出现频率（点击「删除」可从全部标签中移除该词）", font=ui_font(FONT_BODY), text_color=TITLE_C).pack(anchor="w", padx=16, pady=(14, 6))
-        scroll = ctk.CTkScrollableFrame(w, fg_color=CARD, corner_radius=8)
-        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+        top = ctk.CTkFrame(w, fg_color="transparent"); top.pack(fill="x", padx=16, pady=(14, 6))
+        ctk.CTkLabel(top, text="标签出现频率（Ctrl/Shift 多选 → 删除选中，从全部图片移除）",
+                     font=ui_font(FONT_BODY), text_color=TITLE_C).pack(side="left")
+        ctk.CTkButton(top, text="🗑 删除选中标签", width=132, height=28, fg_color="#4a3535", hover_color="#5a4141",
+                      border_width=1, border_color="#5a4141", text_color="#e0b0b0", corner_radius=6,
+                      font=ui_font(FONT_HINT), command=lambda: self._stats_delete_selected(w)).pack(side="right")
+        lf = ctk.CTkFrame(w, fg_color=CARD, corner_radius=8); lf.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+        lb = tk.Listbox(lf, bg=CARD2, fg=TXT, selectbackground=SELBAR, selectforeground="#ffffff",
+                        font=ui_font(FONT_BODY), highlightthickness=0, borderwidth=0,
+                        activestyle="none", exportselection=False, selectmode="extended")
+        lb.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
+        sb = ctk.CTkScrollbar(lf, command=lb.yview)
+        sb.pack(side="right", fill="y", padx=(0, 8), pady=10)
+        lb.configure(yscrollcommand=sb.set)
+        w._lb = lb
+        w._tags = []
+        _zd = self.get_tagdict()
         for tag, cnt in stats:
-            row = ctk.CTkFrame(scroll, fg_color="transparent"); row.pack(fill="x", padx=6, pady=2)
-            ctk.CTkLabel(row, text=f"{cnt:4d} 次", font=ui_font(FONT_HINT), text_color=ACC, width=64, anchor="w").pack(side="left")
-            ctk.CTkLabel(row, text=tag, font=ui_font(FONT_BODY), text_color=TXT, anchor="w").pack(side="left", padx=(6, 0))
-            _zd = self.get_tagdict()
-            _zh = _zd.to_zh(tag) if _zd else None
-            if _zh and _zh != tag:
-                ctk.CTkLabel(row, text="/ " + _zh, font=ui_font(FONT_HINT), text_color=HINT, anchor="w").pack(side="left", padx=(2, 0))
-            ctk.CTkButton(row, text="删除", width=56, height=24, fg_color="#4a3535", hover_color="#5a4141",
-                          corner_radius=6, font=ui_font(FONT_HINT),
-                          command=lambda t=tag, win=w: self._stats_delete(t, win)).pack(side="right")
+            zh = _zd.to_zh(tag) if _zd else None
+            line = "%4d  %s" % (cnt, tag)
+            if zh and zh != tag:
+                line += "   / " + zh
+            lb.insert("end", line)
+            w._tags.append(tag)
+        w.protocol("WM_DELETE_WINDOW", w.destroy)
+
+    def _stats_delete_selected(self, win):
+        try:
+            tags = [win._tags[i] for i in win._lb.curselection()]
+        except Exception:
+            tags = []
+        if not tags:
+            messagebox.showinfo("标签统计", "请先选中要删除的标签（可 Ctrl/Shift 多选）。")
+            return
+        shown = "、".join(tags[:10]) + ("…" if len(tags) > 10 else "")
+        if not messagebox.askyesno("删除标签",
+                f"确定从全部图片中删除选中的 {len(tags)} 个标签吗？\n\n{shown}"):
+            return
+        total_files = total_removed = 0
+        for tag in tags:
+            try:
+                files, removed = core.batch_remove_tags(self.train_dir, tag, logf=self._log_app)
+                total_files += int(files or 0)
+                total_removed += int(removed or 0)
+            except Exception as e:
+                self._log_app(f"[标签] 删除「{tag}」失败：{e}")
+        self._log_app(f"[标签] 统计窗批量删除 {len(tags)} 个标签：涉及 {total_files} 个文件，移除 {total_removed} 个词")
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        self._set_status(f"已删除 {len(tags)} 个标签")
+        self._show_stats()
 
     def _stats_delete(self, tag, win):
         try:
