@@ -630,6 +630,12 @@ class App:
                 self.mon_step_var.set("正在缓存数据集…（非训练进度）")
                 self.mon_eta_var.set("预计剩余: --")
                 return
+            # 训练未运行（跑完/停止后监控区还开着）：不再做任何轮询/扫盘/重绘。
+            # 否则 _train_mon 不置空时，每 ~5s 主线程同步 nvidia-smi + 每帧 os.walk 输出目录，
+            # 后台开游戏（驱动繁忙）时会把 UI 卡到秒级甚至"未响应"（2026-09 用户反馈）。
+            if not snap.get("running"):
+                self.mon_step_var.set("训练未运行")
+                return
             # 无进展超时提示：训练已启动但长时间没有任何新日志/loss
             # （如 CPU 训练极慢、子进程卡死/静默退出），给出明确提示而不是一直挂着"等待训练数据"。
             if snap.get("running") and phase in ("idle", "train") and (snap.get("loss") is None) and (snap.get("step") or 0) == 0:
@@ -663,23 +669,38 @@ class App:
             else:
                 self.mon_speed_var.set(f"速度: {1.0 / sp:.2f} s/it")
             self.mon_eta_var.set("预计剩余: " + core.format_eta(snap.get("eta")))
-            # 显存（N 卡）：用安全 nvidia-smi 封装（驱动缺失/损坏时首次失败后不再调用，
-            # 避免每 ~1s 刷一次监控就弹一次「应用程序错误」+ GUI 线程卡死）+ 5 秒节流
+            # 显存（N 卡）：nvidia-smi 放后台线程（驱动繁忙/游戏运行时可能卡 1~3s，不能占主线程），
+            # 5 秒节流；主线程只读缓存结果刷标签。
             if self._gpu_info.get("vendor") == "nvidia" and time.time() - getattr(self, "_mon_vram_last", 0) >= 5:
                 self._mon_vram_last = time.time()
-                try:
-                    r = core.safe_nvidia_smi(["--query-gpu=memory.used,memory.total",
-                                              "--format=csv,noheader,nounits"], timeout=3)
-                    if r and r.returncode == 0:
-                        parts = [p.strip() for p in r.stdout.strip().split(",")]
-                        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-                            self.mon_vram_var.set(f"显存: {int(parts[0])/1024:.1f}/{int(parts[1])/1024:.1f} GB")
-                except Exception:
-                    pass
+                self._probe_vram_async()
+            _vt = getattr(self, "_mon_vram_text", None)
+            if _vt:
+                self.mon_vram_var.set(_vt)
             self._draw_loss_curve(snap.get("loss_history") or [])
             self._refresh_sample_preview()
         except Exception:
             pass
+
+    def _probe_vram_async(self):
+        """后台线程探测显存：nvidia-smi 在驱动繁忙/后台游戏时可能卡 1~3s，不能放在主线程。"""
+        if getattr(self, "_vram_probing", False):
+            return
+        self._vram_probing = True
+        def _w():
+            try:
+                r = core.safe_nvidia_smi(["--query-gpu=memory.used,memory.total",
+                                          "--format=csv,noheader,nounits"], timeout=3)
+                if r and r.returncode == 0:
+                    parts = [x.strip() for x in (r.stdout or "").strip().split(",")]
+                    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                        self._mon_vram_text = "显存: %s/%s GB" % (
+                            "%.1f" % (int(parts[0]) / 1024.0), "%.1f" % (int(parts[1]) / 1024.0))
+            except Exception:
+                pass
+            finally:
+                self._vram_probing = False
+        threading.Thread(target=_w, daemon=True).start()
 
     def _is_sample_file(self, fname, dirname):
         """判断是否训练采样图：ai-toolkit sample_xxx.png / kohya·musubi sample/ 子目录 + <name>_<step>_...png。"""
