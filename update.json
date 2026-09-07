@@ -2,5 +2,5 @@
   "version": "v0.15.7",
   "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.15.7/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.15.7 更新（2026-09-03）：\n    · 修复：PyTorch 大轮子国内下载死循环——魔搭不支持断点续传致 curl 33 反复空等、坏缓存反复装失败；自动探测续传/删损坏残片整包重下 + pip 判坏缓存自动清除（第二引擎装不上）；\n    · 修复：Krea2 训练中采样预览（第二/三/四引擎）——16G 不再硬关、低显存采样自动压 512；第四引擎接入（需 turbo.safetensors）；\n    · 优化：第四引擎 AMD ROCm auto 档改 int8 + 关块交换（7900 XT 实测最快）；AMD 优化器回归官方默认；\n    · 优化：训练前自动清理残留训练进程（防占满内存卡死）；工具页「清理残留训练进程」N 卡 + AMD 通用。"
+  "notes": "v0.15.7 更新（2026-09-08）：\n    · 新增：训练队列 v1——主页「⏳ 训练队列」多选已保存项目入队，逐项「预处理→训练」（跨第 1~4 引擎）；失败项保留可重跑，停止=停当前项并中止整队；仅运行期有效，H3 视频暂不入队；\n    · 新增：标签编辑器多选——图片 Ctrl/Shift 多选删除（含同名 txt/npz）；标签统计窗多选批量删除标签；\n    · 修复：训练队列窗口字体（ui_font 包装，点「训练队列」不再报错）。"
 }
