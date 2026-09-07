@@ -1854,7 +1854,7 @@ class App:
         self.at_sub_hint = ctk.CTkLabel(self.at_sub_row, text="人物=保留全部标签；画风=过滤人物标签；概念=形态/种族（trigger 吸收原型）", font=ui_font(FONT_HINT), text_color=HINT)
         self.at_sub_hint.pack(side="left", padx=(12, 0))
         self.at_sub_row.pack_forget()
-        # Z-Image 专属：⚡ 快跑档手动开关（8G 自动触发，可强制开/关；默认隐藏仅 zimage 显示）
+        # ⚡ 快跑档手动开关（全模式通用：自动=按显存自动启用，开=强制快跑档，关=常规）
         self.fast_tier_row = ctk.CTkFrame(card2, fg_color="transparent")
         ctk.CTkLabel(self.fast_tier_row, text="⚡ 快跑档", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
         self.fast_tier_var = tk.StringVar(value=core.FAST_TIER_LABELS["auto"])
@@ -1867,7 +1867,7 @@ class App:
             font=ui_font(FONT_BODY), command=lambda _e: None)
         self.fast_tier_menu.pack(side="left", padx=(12, 0))
         self.fast_tier_hint = ctk.CTkLabel(self.fast_tier_row,
-            text="自动=仅 ≤8G 显存生效；开=强制（分辨率 384/512 + 层交换 + 关采样）；关=完全按常规参数",
+            text="自动=按显存自动启用；开=强制快跑（低分辨率/省显存/关采样）；关=完全按常规参数",
             font=ui_font(FONT_HINT), text_color=HINT)
         self.fast_tier_hint.pack(side="left", padx=(12, 0))
         self.fast_tier_row.pack_forget()
@@ -2186,14 +2186,11 @@ class App:
                 self.at_sub_row.pack(fill="x", padx=22, pady=(0, 6))
             else:
                 self.at_sub_row.pack_forget()
-            # ⚡ 快跑档手动开关：仅 Z-Image 模式显示
+            # ⚡ 快跑档手动开关：所有模式都显示
             try:
                 _fr = getattr(self, "fast_tier_row", None)
                 if _fr is not None:
-                    if self.mode == "zimage":
-                        _fr.pack(fill="x", padx=22, pady=(0, 6))
-                    else:
-                        _fr.pack_forget()
+                    _fr.pack(fill="x", padx=22, pady=(0, 6))
             except Exception:
                 pass
         except Exception:

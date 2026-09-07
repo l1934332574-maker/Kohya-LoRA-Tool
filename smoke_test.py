@@ -184,6 +184,20 @@ def test_yaml():
         raise AssertionError("Z-Image 8G fast_tier=off 误启用快跑档")
     if p0["datasets"][0]["resolution"] != [1024, 1024]:
         raise AssertionError("Z-Image 8G fast_tier=off 分辨率被误钳制")
+    # 通用快跑档 helper（全模式）：开=低分辨率+关采样+按 8G 档；自动/关=原样
+    _p2, _v2 = core._fast_tier_apply({"mode":"krea2","resolution":"1024","sample_preview":True,"fast_tier":"on"}, 24.0, "krea2")
+    assert _v2 == 8.0 and _p2.get("sample_preview") is False and _p2.get("resolution") == "512", (_v2,_p2)
+    _p3, _v3 = core._fast_tier_apply({"resolution":"1024","fast_tier":"auto"}, 24.0, "krea2")
+    assert _v3 == 24.0 and "sample_preview" not in _p3, (_v3,_p3)
+    # Qwen-Image fast_tier=on：强制快跑档生效 + 分辨率 512
+    cfg = os.path.join(tmp, "qwen_16g_on.yaml")
+    core.write_at_image_yaml(dict(params, resolution="1024", fast_tier="on"), core.AT_IMAGE_MODELS["qwen_image"], vd, tmp, cfg, vram_gb=16)
+    d = yaml.safe_load(open(cfg, encoding="utf-8"))
+    p0 = d["config"]["process"][0]
+    if p0["train"].get("disable_sampling") is not True or p0["model"].get("layer_offloading") is not True:
+        raise AssertionError("Qwen fast_tier=on 未生效")
+    if p0["datasets"][0]["resolution"] != [512, 512]:
+        raise AssertionError("Qwen fast_tier=on 分辨率钳制不符")
     # H3 yaml
     cfg = os.path.join(tmp, "h3.yaml")
     core.write_h3_train_yaml(params, vd, tmp, cfg)

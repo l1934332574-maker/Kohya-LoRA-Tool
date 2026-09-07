@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.15.6"
+APP_VERSION = "0.15.7"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2570,6 +2570,33 @@ def _attach_train_monitor(logf, progress, lr=None):
     return _wrapped
 
 
+# ---- 通用“⚡ 快跑档”（全模式）：开 = 强制走该引擎最省显存的 ~8G 档 + 关采样 + 分辨率上限 ----
+# 自动 = 维持各引擎原有按显存自动规则；关 = 完全常规。只影响“跑得动/快”维度，不改训练步数。
+_FAST_RESO_CAP = {
+    "style": 768, "character": 768, "concept": 768,
+    "krea2": 512, "flux2": 512, "krea2_at": 512, "krea2_fz": 512,
+    "qwen_image": 512, "zimage": 384,
+}
+
+
+def _fast_tier_apply(params, vram_gb, mode):
+    """快跑档=开：返回 (params副本, 生效显存)。on 时强制低分辨率 + 关采样 + 按 ~8G 走该引擎最省配置。"""
+    if str((params or {}).get("fast_tier") or "auto").lower() != "on":
+        return params, vram_gb
+    p = dict(params or {})
+    p["sample_preview"] = False
+    cap = _FAST_RESO_CAP.get(mode or "")
+    if cap:
+        try:
+            p["resolution"] = str(min(int(p.get("resolution") or cap), cap))
+        except Exception:
+            p["resolution"] = str(cap)
+    eff = 8.0
+    if vram_gb is not None and vram_gb < eff:
+        eff = vram_gb
+    return p, eff
+
+
 def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from=None, progress=None):
     """Krea2 图像 LoRA 训练（第二引擎 musubi-tuner）。
 
@@ -2577,6 +2604,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     模型需放入 models/krea2/（国内镜像下载，见 krea2_missing_models）。
     """
     params = params or {}
+    params, vram_gb = _fast_tier_apply(params, vram_gb, mode)
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
     _warn_alloc_conf(logf)
@@ -2837,6 +2865,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     模型需放入 models/flux2/（国内镜像下载，见 flux2_missing_models）。
     """
     params = params or {}
+    params, vram_gb = _fast_tier_apply(params, vram_gb, mode)
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
     _warn_alloc_conf(logf)
@@ -4279,6 +4308,7 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     模型复用 models/krea2/（raw / qwen_image_vae / qwen3vl_4b_bf16），无需重复下载。
     """
     params = params or {}
+    params, vram_gb = _fast_tier_apply(params, vram_gb, mode)
     _log_tail = deque(maxlen=400)
     logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
     _warn_alloc_conf(logf)
@@ -4787,6 +4817,7 @@ def _patch_minimax_h3_processor(kdir, logf=print):
 def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from=None, progress=None):
     """MiniMax H3 视频 LoRA 训练（第三引擎 AI Toolkit，T2V）。"""
     params = params or {}
+    params, vram_gb = _fast_tier_apply(params, vram_gb, mode)
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     _check_at_train_driver(logf)
     ok, detail, vpy = ai_toolkit_engine_status()
@@ -5014,11 +5045,14 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
     # 8G 用户日志：512/qfloat8/low_vram 下模型可正常加载，卡在训练前 baseline 采样；
     # disable_sampling 是官方开关（BaseSDTrainProcess 里 step0 也算采样步），必须显式关闭才能让 8G 直接进入训练。
     _ft_switch = str(params.get("fast_tier") or "auto").lower()   # auto/on/off 手动开关（界面 ⚡快跑档）
-    _fast8_tier = (info.get("arch") == "zimage") and (
-        _ft_switch == "on" or (_ft_switch != "off" and vram_gb is not None and vram_gb < 10))
+    _fast_arch = info.get("arch") in ("zimage", "qwen_image")       # Qwen/Z-Image 共用 AI Toolkit 图像通路
+    _fast8_tier = _fast_arch and (
+        _ft_switch == "on" or (_ft_switch != "off" and info.get("arch") == "zimage"
+                               and vram_gb is not None and vram_gb < 10))
     _at8g_train_yaml = _at8g_model_yaml = ""
     if _fast8_tier:
-        reso = min(int(reso), 384 if (detect_ram_gb() or 0) < 32 else 512)
+        reso = min(int(reso), 512 if info.get("arch") == "qwen_image"
+                    else (384 if (detect_ram_gb() or 0) < 32 else 512))
         _at8g_train_yaml = "        \"disable_sampling\": true\n"
         # 2026-09-06 实测：8G 纯 qfloat8+low_vram 时 fp8 DiT 全量驻留显存(~7.8G)，无激活余量，训练起不来；
         # 必须开官方 layer_offloading 层交换（引擎会自动把 qfloat8 降为 float8 逐层换入），512 才能跑通。
@@ -5574,6 +5608,7 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
     适合 4080S/4070Ti/3090/A5000 这类 16G 卡（比 musubi 块交换更快更稳）。
     """
     params = params or {}
+    params, vram_gb = _fast_tier_apply(params, vram_gb, mode)
     _log_tail = deque(maxlen=400)
     logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
     _check_at_train_driver(logf)
@@ -5679,6 +5714,7 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
 def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, resume_from=None, progress=None):
     """AI Toolkit 图像 LoRA 训练（Qwen-Image / Z-Image，第三引擎）。"""
     params = params or {}
+    params, vram_gb = _fast_tier_apply(params, vram_gb, mode)
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
     _check_at_train_driver(logf)
@@ -8723,6 +8759,7 @@ def _sample_preview_enabled(params, vram_gb):
 
 def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, resume_from=None, progress=None):
     params = params or {}
+    params, vram_gb = _fast_tier_apply(params, vram_gb, mode)
     # v0.11.4：Krea2 底模不能在第一引擎（kohya 画风/人物）训练——误选会按 FLUX 加载导致架构错误/OOM，提前拦截并引导
     _k2base = base_model or str(params.get("base_model") or "")
     if _k2base and _looks_like_krea2(_k2base):
