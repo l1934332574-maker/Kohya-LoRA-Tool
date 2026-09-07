@@ -1098,6 +1098,13 @@ class App:
                                              font=ui_font(FONT_BODY), command=self.cmd_new_project)
         self.btn_new_project.pack(side="right")
         self._home_widgets.append(self.btn_new_project)
+        self.btn_train_queue = ctk.CTkButton(head, text="⏳ 训练队列", width=122, height=32,
+                                             fg_color="transparent", hover_color="#252a36",
+                                             border_width=1, border_color=ACC, text_color=ACC,
+                                             corner_radius=6, font=ui_font(FONT_BODY),
+                                             command=self.cmd_train_queue)
+        self.btn_train_queue.pack(side="right", padx=(0, 8))
+        self._home_widgets.append(self.btn_train_queue)
         self.btn_data_dir = ctk.CTkButton(head, text="💾 数据目录", width=104, height=32,
                                             fg_color="transparent", hover_color="#252a36",
                                             border_width=1, border_color=BORDER, text_color=SUB,
@@ -1403,6 +1410,22 @@ class App:
             self._show_home()
 
     # ---------- 新建 / 打开 / 重命名 / 删除 ----------
+    def cmd_train_queue(self):
+        """打开训练队列窗口（多选项目 → 逐项预处理+训练）。"""
+        _qw = getattr(self, "_queue_win", None)
+        if _qw is not None:
+            try:
+                _qw.win.lift()
+                _qw.win.focus_force()
+                return
+            except Exception:
+                self._queue_win = None
+        try:
+            import gui.queue_window
+            self._queue_win = gui.queue_window.TrainQueueWindow(self.root, self)
+        except Exception as e:
+            messagebox.showerror(core.APP_NAME, "打开训练队列失败：%s" % e)
+
     def _reset_project_ui(self):
         """新建项目前清空上一次项目遗留的界面状态，避免新项目继承旧配置/旧图集路径。
 
@@ -1657,6 +1680,7 @@ class App:
             "reg_dir": params.get("reg_dir") or "",
             "global_pos": params.get("global_pos") or "",
             "global_neg": params.get("global_neg") or "",
+            "style_caption": params.get("style_caption") or "",
             "unet_only": params.get("train_text_encoder") is False,
             "train_env": params.get("train_env") or "",
             "params": {
@@ -1713,6 +1737,10 @@ class App:
             self.raw_dir_var.set(data.get("raw_dir") or "")
             self.global_pos_var.set(data.get("global_pos") or "")
             self.global_neg_var.set(data.get("global_neg") or "")
+            try:
+                self.style_caption_var.set(data.get("style_caption") or "")
+            except Exception:
+                pass
             bm = data.get("base_model") or ""
             if not isinstance(bm, str):
                 bm = ""
