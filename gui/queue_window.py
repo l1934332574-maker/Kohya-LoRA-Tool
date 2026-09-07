@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """训练队列窗口：多选已保存项目 → 入队 → 逐项“预处理→训练”自动跑。
 
 仅运行期有效；失败项保留在队列里可重新开始；停止 = 停当前项并中止整队。
@@ -34,7 +34,10 @@ class TrainQueueWindow:
             self.BG = G.BG; self.CARD = G.CARD; self.CARD2 = G.CARD2; self.TXT = G.TXT
             self.SUB = G.SUB; self.HINT = G.HINT; self.ACC = G.ACC; self.ACC_H = G.ACC_H
             self.BORDER = G.BORDER; self.SELBAR = G.SELBAR; self.TITLE_C = G.TITLE_C
-            self.FONT_BODY = G.FONT_BODY; self.FONT_HINT = G.FONT_HINT; self.FONT_TITLE = G.FONT_TITLE
+            # 必须像主界面一样用 ui_font() 包装（FONT_* 是字体链元组，直接给 CTk 会把字符串当字号）
+            self.FONT_BODY = G.ui_font(G.FONT_BODY)
+            self.FONT_HINT = G.ui_font(G.FONT_HINT)
+            self.FONT_TITLE = G.ui_font(G.FONT_TITLE)
         except Exception:
             self.BG="#20232a"; self.CARD="#272b34"; self.CARD2="#2b303a"; self.TXT="#d6dae3"
             self.SUB="#9aa0ad"; self.HINT="#7c8290"; self.ACC="#6d7f99"; self.ACC_H="#7c8fa8"
