@@ -3885,7 +3885,9 @@ class App:
     def _refresh_at_status(self):
         try:
             info = core.AT_IMAGE_MODELS.get(self.mode, {})
-            ok_e = core.ai_toolkit_engine_status()[0]
+            # 秒级 marker 检查：不要在这里跑权威 import（ai_toolkit_engine_status 慢 10s+，
+            # 会卡主线程；权威校验只在真正开始训练前做）。2026-09 用户反馈“点哪都卡”。
+            ok_e = core._at_marker_ok()
             ok_m = core.at_image_model_ready(self.mode)
             label = info.get("label", "")
             if not ok_e:
@@ -3963,7 +3965,8 @@ class App:
 
     def _refresh_h3_status(self):
         try:
-            ok, detail, _ = core.ai_toolkit_engine_status()
+            # 秒级 marker：勿在状态行跑权威 import（慢 10s+ 会卡主线程）
+            ok = core._at_marker_ok()
             _files = core.h3_model_files()
             _miss_parts = []
             if not (_files.get("dit") or _files.get("dit_nvfp4")):

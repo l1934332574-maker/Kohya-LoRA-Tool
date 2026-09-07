@@ -1,4 +1,15 @@
-﻿## v0.15.5（2026-09-07）
+﻿## v0.15.6（2026-09-07）
+
+### 修复：界面卡顿/未响应真正根因——状态刷新在主线程跑重型引擎检测
+- 现象：0.15.3 起“每点一下卡几秒”、0.15.4/0.15.5 更严重“刚打开就卡、点哪都未响应”（后台游戏与否都卡）；
+  实测 musubi_engine_status=24s、ai_toolkit_engine_status=12s（每次真 import venv 的 torch/musubi_tuner）。
+- 根因：启动 _build_badges/_update_mode_ui、切模式、新建项目等都在主线程同步调用这两个重型检测且无缓存。
+- 已修：
+  · 界面状态行/徽章/切模式改用秒级 marker 检查（musubi/_at_marker_ok），重型权威校验只保留到真正开始训练前；
+  · 重型 engine_status 加 25s TTL 缓存 + clear_status_cache 一并清空，避免重复触发；
+  · （0.15.5）监控区轮询 nvidia-smi/os.walk 也只在训练运行时做、nvidia-smi 改后台线程。
+
+## v0.15.5（2026-09-07）
 
 ### 修复：监控区主线程轮询导致界面卡顿/未响应（0.15.3 起用户反馈）
 - 根因：训练结束/停止后监控区若仍可见，每 ~1s 主线程仍执行 _refresh_monitor，其中每 ~5s 同步调

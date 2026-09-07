@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.15.5"
+APP_VERSION = "0.15.6"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1370,6 +1370,17 @@ def _musubi_torch_pair_check(vpy):
 
 
 def musubi_engine_status():
+    """第二引擎状态（25s TTL 缓存；权威 import 校验见 _musubi_engine_status_impl）。"""
+    _c = _ENGINE_STATUS_CACHE.get("musubi")
+    if _c and time.time() - _c[0] < 25:
+        return _c[1]
+    _res = _musubi_engine_status_impl()
+    _ENGINE_STATUS_CACHE["musubi"] = (time.time(), _res)
+    return _res
+
+
+def _musubi_engine_status_impl():
+
     """第二训练引擎（musubi-tuner）状态：返回 (ok, detail, venv_python)。
 
     独立 musubi-venv（不碰 kohya venv，避免 transformers 版本冲突）。
@@ -3372,10 +3383,16 @@ def _at_dirs():
             os.path.join(kdir, "ai-toolkit"))
 
 
+# 重型引擎状态检测（会真 import venv 的 torch/musubi_tuner，慢则 10~24s）TTL 缓存：
+# 界面刷新/切模式只该走秒级 marker；这里缓存兜底避免同一动作内重复触发重型检测。
+_ENGINE_STATUS_CACHE = {}
+
+
 def clear_status_cache():
     """清空环境检测缓存（安装/导入完成后调用，让界面立即反映最新状态）。"""
     _SYSTEM_STATUS_CACHE["t"] = 0.0
     _SYSTEM_STATUS_CACHE["data"] = None
+    _ENGINE_STATUS_CACHE.clear()
 
 
 def _at_marker_ok():
@@ -3387,6 +3404,17 @@ def _at_marker_ok():
 
 
 def ai_toolkit_engine_status():
+    """第三引擎状态（25s TTL 缓存；权威 import 校验见 _ai_toolkit_engine_status_impl）。"""
+    _c = _ENGINE_STATUS_CACHE.get("at")
+    if _c and time.time() - _c[0] < 25:
+        return _c[1]
+    _res = _ai_toolkit_engine_status_impl()
+    _ENGINE_STATUS_CACHE["at"] = (time.time(), _res)
+    return _res
+
+
+def _ai_toolkit_engine_status_impl():
+
     """第三训练引擎（AI Toolkit）状态：返回 (ok, detail, venv_python)。支持用户导入的自定义目录。"""
     vpy, at_dir = _at_dirs()
     if not os.path.isfile(vpy):
