@@ -1,39 +1,24 @@
-﻿## v0.15.7（2026-09-07）
+﻿## v0.15.5（2026-09-07）
 
 ### 新增：全模式「⚡ 快跑档」（自动 / 开 / 关）
 - 所有可训练模式（画风/人物/概念、Krea2、FLUX.2、H3、Krea2AT、Qwen-Image、Z-Image、Krea2Fizgig）
   卡片②统一显示「⚡ 快跑档」下拉；
 - 开 = 强制该引擎走最省显存/最快档：低分辨率（Krea2/FLUX.2→512、Qwen→512、Z-Image→384/512、
   1 引擎 sdxl/flux/anima→768）+ 关训练采样 + 按 ~8G 档量化/块交换/层交换/检查点；
-- 自动 = 维持各引擎原有按显存自动规则（当前 Z-Image ≤8G 自动生效）；关 = 完全按常规参数；
-- 不改变训练步数/epoch，只动“跑得动/快”的维度。
+- 自动 = 维持各引擎原有按显存自动规则（Z-Image ≤8G 自动生效）；关 = 完全按常规参数；不改训练步数。
 
-## v0.15.6（2026-09-07）
-
-### 修复：界面卡顿/未响应真正根因——状态刷新在主线程跑重型引擎检测
-- 现象：0.15.3 起“每点一下卡几秒”、0.15.4/0.15.5 更严重“刚打开就卡、点哪都未响应”（后台游戏与否都卡）；
-  实测 musubi_engine_status=24s、ai_toolkit_engine_status=12s（每次真 import venv 的 torch/musubi_tuner）。
-- 根因：启动 _build_badges/_update_mode_ui、切模式、新建项目等都在主线程同步调用这两个重型检测且无缓存。
-- 已修：
-  · 界面状态行/徽章/切模式改用秒级 marker 检查（musubi/_at_marker_ok），重型权威校验只保留到真正开始训练前；
-  · 重型 engine_status 加 25s TTL 缓存 + clear_status_cache 一并清空，避免重复触发；
-  · （0.15.5）监控区轮询 nvidia-smi/os.walk 也只在训练运行时做、nvidia-smi 改后台线程。
-
-## v0.15.5（2026-09-07）
-
-### 修复：监控区主线程轮询导致界面卡顿/未响应（0.15.3 起用户反馈）
-- 根因：训练结束/停止后监控区若仍可见，每 ~1s 主线程仍执行 _refresh_monitor，其中每 ~5s 同步调
-  nvidia-smi（timeout 3s）+ 每帧 os.walk 输出目录 + 重绘曲线；后台开游戏（驱动繁忙）时 nvidia-smi
-  被拖慢到秒级 → 界面每几秒卡一次，严重时“点哪都未响应”（0.15.4 更明显）。
-- 已修：训练未运行（running=False）时直接停止轮询/扫盘/重绘；nvidia-smi 改到后台线程，主线程只读缓存。
-
-## v0.15.4（2026-09-06）
+### 修复：界面卡顿 / 未响应（0.15.3 起用户反馈，严重时“刚打开就卡、点哪都未响应”）
+- 根因 1（主要）：启动 / 切模式 / 新建项目在主线程同步跑重型引擎检测——实测
+  musubi_engine_status≈24s、ai_toolkit_engine_status≈12s（每次真 import venv 的 torch/musubi_tuner）且无缓存；
+- 根因 2：训练结束/停止后监控区仍可见时，每 ~1s 主线程 _refresh_monitor，其中每 ~5s 同步 nvidia-smi、
+  每帧 os.walk 输出目录 + 重绘曲线（后台开游戏时 nvidia-smi 被拖慢到秒级）；
+- 已修：状态行/徽章/切模式改秒级 marker 检查；重型 engine_status 加 25s TTL 缓存；
+  监控轮询只在训练运行时做，nvidia-smi 挪到后台线程、主线程只读缓存。
 
 ### 修复：断点续训后监控步数映射回绝对步
-- 根因：kohya/musubi 引擎续训后 tqdm 按“剩余步数”从 0 重数（sd-scripts: range(max_train_steps - initial_step)），
-  会把工具预填的断点步（如 800）覆盖回小数字，监控看起来“没回到原来的步数”；
-- 已修：TrainMonitor 记录 resume_base，解析到 total==剩余步数（基数+total==完整总步数）时把 step 映射回绝对步，total 保持完整值；
-- 非续训与引擎本就按绝对步输出的场景不受影响。
+- kohya/musubi 续训后 tqdm 按“剩余步数”从 0 重数（sd-scripts: range(max_train_steps - initial_step)），
+  会把预填的断点步（如 800）覆盖回小数字；已按 resume_base 把 step 映射回绝对步（800+120=920），
+  total 保持完整值；非续训与按绝对步输出的引擎不受影响。
 
 ## v0.15.3（2026-09-06）
 
