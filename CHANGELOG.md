@@ -1,4 +1,10 @@
-﻿## v0.15.8（2026-09-08）
+﻿## v0.15.9（2026-09-08）
+
+### 修复：Krea2AT 采样提示词负向为空导致 bool 拼接崩溃（0.15.8 线上复现）
+- ai-toolkit 把空 negative_prompt 当 False/None，而 Krea2 text_encoder 无条件 `前缀+prompt` 拼接 → 训练前 cache_sample_prompts 崩；
+- Krea2AT yaml 的 negative_prompt 改为默认非空负向词（lowres, bad anatomy…），采样开/关都稳。
+
+## v0.15.8（2026-09-08）
 
 ### 修复：Krea2AT 16G 初始化 OOM / 关采样崩溃 / 快跑档过度交换
 - Krea2AT ≤20G 不再量化文本编码器：DiT qint8≈13GB 已占满 16G，TE 量化是初始化峰值（5070 Ti 实测 OOM）；

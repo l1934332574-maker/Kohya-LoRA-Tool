@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.15.8"
+APP_VERSION = "0.15.9"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -5534,7 +5534,7 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
             "        num_frames: 1\n"
             "        prompts:\n"
             "          - " + _yq(sample_prompt + "a high quality detailed portrait, masterpiece, best quality") + "\n"
-            "        negative_prompt: \"\"\n"
+            "        negative_prompt: " + _yq("lowres, bad anatomy, worst quality, low quality, blurry, jpeg artifacts, signature, watermark") + "\n"
             "        seed: 42\n"
             "        walk_seed: true\n"
             "        guidance_scale: 4.0\n"

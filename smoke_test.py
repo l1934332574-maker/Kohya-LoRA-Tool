@@ -225,6 +225,9 @@ def test_yaml():
                 raise AssertionError("Krea2(AT) 16G 未压到 768")
             if p0["train"].get("disable_sampling") is not True or "sample" not in p0:
                 raise AssertionError("Krea2(AT) 16G 需保留 sample 段 + disable_sampling（引擎 cache_sample_prompts 会崩）")
+            if p0.get("sample", {}).get("negative_prompt") != "lowres, bad anatomy, worst quality, low quality, blurry, jpeg artifacts, signature, watermark":
+                raise AssertionError("Krea2(AT) 负向提示词不应为空(空串会被引擎当 bool 崩)")
+
             if p0["model"].get("quantize_te") is not None:
                 raise AssertionError("Krea2(AT) 16G 不应量化文本编码器（初始化 OOM 峰值）")
             cfg = os.path.join(tmp, "krea2_at24.yaml")
