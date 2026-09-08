@@ -8848,6 +8848,34 @@ def _diagnose_optimizer_failure(opt_k, log_text, logf=print):
     return True
 
 
+def _ensure_kohya_bnb(vpy, logf=print):
+    """第一引擎（kohya）可选 AdamW8bit：venv 缺 bitsandbytes 时自动补装。
+
+    装不上只提示不中断（训练自动降级 Lion/AdamW）。"""
+    try:
+        r = subprocess.run([vpy, "-c", "import importlib.util,sys;sys.exit(0 if importlib.util.find_spec('bitsandbytes') else 1)"],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            return True
+    except Exception:
+        return False
+    logf("[环境] 未检测到 bitsandbytes（AdamW8bit 需要），自动补装（国内镜像；失败不中断，自动降级 Lion/AdamW）…")
+    env = build_direct_env()
+    env["PIP_INDEX_URL"] = "https://mirrors.aliyun.com/pypi/simple/"
+    env.pop("PIP_EXTRA_INDEX_URL", None)
+    for _idx in ("https://mirrors.aliyun.com/pypi/simple/", "https://pypi.tuna.tsinghua.edu.cn/simple"):
+        try:
+            if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                           "--index-url", _idx, "bitsandbytes"], logf=logf) == 0:
+                if _probe_adamw8bit(vpy, logf, timeout=180):
+                    logf("[环境] bitsandbytes 已装好，AdamW8bit 可用")
+                    return True
+        except Exception:
+            pass
+        logf("[环境] bitsandbytes 补装失败，切换备用镜像重试…")
+    logf("[环境] ⚠ bitsandbytes 补装失败（网络/轮子问题），本次用 Lion/AdamW 替代（不影响训练结果，仅速度/显存略差）")
+    return False
+
 def resolve_optimizer(vpy, logf=print, requested="auto", amd_mode=False, allow_lion=True):
     """决定本次训练实际使用的优化器类型。
 
@@ -9242,6 +9270,12 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     gc_on = decide_gradient_checkpointing(params.get("gc", "自动"), vram_gb)
     batch_size = int(params.get("batch_size", 1))
     use_xformers = bool(params.get("use_xformers", False))
+    # AdamW8bit 需要 bitsandbytes：缺失自动补装（失败仅降级不中断；AMD 兼容模式不用 bnb，跳过）
+    if not amd_mode:
+        try:
+            _ensure_kohya_bnb(vpy, logf)
+        except Exception:
+            pass
     optimizer_type, _opt_detail = resolve_optimizer(vpy, logf,
                                                     requested=params.get("optimizer", "auto"),
                                                     amd_mode=amd_mode)
@@ -10259,7 +10293,7 @@ def _download_qwen3_from_modelscope(qwen3_dir, logf=print):
         ("tokenizer.json", 1000000),
         ("tokenizer_config.json", 500),
         ("vocab.json", 100000),
-        ("model.safetensors", 1_400_000_000),
+        ("model.safetensors", 1_000_000_000),
     ]
     for _name, _minsize in _files:
         _dest = os.path.join(qwen3_dir, _name)
@@ -10289,22 +10323,29 @@ def _ensure_anima_components(logf=print):
     qwen3_path, qwen3_base = _anima_find_qwen3_any()
     if qwen3_path is None:
         qwen3_dir = os.path.join(base, "Qwen3-0.6B")
-        # 自愈：目录存在但不完整（下载中断残留 / 手动放置缺权重）→ 备份改名后重新下载，
-        # 避免 snapshot_download 误判"已存在"而跳过，也避免拿残缺目录去训练。
-        if os.path.isdir(qwen3_dir):
+        # 自愈：目录存在但没有标准权重（下载中断/手动放置缺权重）。
+        # 若 config.json 已存在（config/tokenizer 下全了）就保留目录、只续传缺失权重，
+        # 避免把已下好的文件整包备份重下（hf-mirror 半路超时的常见浪费）；
+        # 只有连 config.json 都没有的“乱目录”才整体备份后重新下载。
+        _q3_cfg_ok = os.path.isfile(os.path.join(qwen3_dir, "config.json"))
+        if os.path.isdir(qwen3_dir) and not _q3_cfg_ok:
             _bak = "%s.incomplete_%s" % (qwen3_dir, time.strftime("%Y%m%d_%H%M%S"))
             try:
                 os.rename(qwen3_dir, _bak)
-                logf(f"[Anima] 检测到不完整的 Qwen3-0.6B（缺权重），已备份到 {_bak}，将自动重新下载…")
+                logf(f"[Anima] 检测到不完整的 Qwen3-0.6B（缺 config），已备份到 {_bak}，将自动重新下载…")
             except Exception as _e:
-                logf(f"[Anima] 检测到不完整的 Qwen3-0.6B（缺权重），但自动备份失败（{_e}），将尝试重新下载…")
-        logf("[Anima] 首次使用需要下载 Qwen3-0.6B 文本编码器（约 1.2GB，hf-mirror/魔搭双源）…")
+                logf(f"[Anima] 检测到不完整的 Qwen3-0.6B（缺 config），但自动备份失败（{_e}），将尝试重新下载…")
+        elif os.path.isdir(qwen3_dir):
+            logf("[Anima] 检测到 Qwen3-0.6B 已有 config/tokenizer，仅续传缺失权重（断点续传）…")
+        logf("[Anima] 首次使用需要下载 Qwen3-0.6B 文本编码器（约 1.2GB，魔搭国内直链优先）…")
         try:
             try:
-                _hf_download("Qwen/Qwen3-0.6B", qwen3_dir, logf)
-            except Exception as _hf_e:
-                logf(f"[Anima] hf-mirror 下载失败（{_hf_e}），自动切换魔搭国内直链下载…")
+                # 魔搭直链优先：逐文件断点续传 + 已存在跳过，国内普遍比 hf-mirror 稳；
+                # hf-mirror 仅作兜底（海外/必须走 HF 的场景）
                 _download_qwen3_from_modelscope(qwen3_dir, logf)
+            except Exception as _ms_e:
+                logf(f"[Anima] 魔搭下载失败（{_ms_e}），自动改用 hf-mirror 快照下载…")
+                _hf_download("Qwen/Qwen3-0.6B", qwen3_dir, logf)
             qwen3_path, qwen3_base = _anima_find_qwen3_any()
         except Exception as e:
             raise RuntimeError(
@@ -10314,8 +10355,8 @@ def _ensure_anima_components(logf=print):
                 "2) 只下一个 Qwen3-0.6B 的 .safetensors 权重文件（如 model.safetensors），\n"
                 f"   放到 {os.path.join(base, 'Qwen3-0.6B')} 文件夹里即可（程序会自动用内置配置加载）\n\n"
                 "下载地址（国内镜像，任选）：\n"
-                "· hf-mirror：https://hf-mirror.com/Qwen/Qwen3-0.6B\n"
-                "· 魔搭：https://modelscope.cn/models/Qwen/Qwen3-0.6B")
+                "· 魔搭：https://modelscope.cn/models/Qwen/Qwen3-0.6B\n"
+                "· hf-mirror：https://hf-mirror.com/Qwen/Qwen3-0.6B")
         if qwen3_path is None:
             raise RuntimeError(f"Qwen3-0.6B 仍未就绪，请检查：{os.path.join(base, 'Qwen3-0.6B')}")
     vae_dir = os.path.join(base, "Anima_vae")
