@@ -2580,7 +2580,8 @@ _FAST_RESO_CAP = {
 
 
 def _fast_tier_apply(params, vram_gb, mode):
-    """快跑档=开：返回 (params副本, 生效显存)。on 时强制低分辨率 + 关采样 + 按 ~8G 走该引擎最省配置。"""
+    """快跑档=开：只做“降分辨率 + 关采样”，量化/层交换按真实显存走对应档。
+    不再把显存强压成 8G——16G 卡过度层交换反而更慢且容易初始化 OOM（5070 Ti 实测）。"""
     if str((params or {}).get("fast_tier") or "auto").lower() != "on":
         return params, vram_gb
     p = dict(params or {})
@@ -2591,12 +2592,7 @@ def _fast_tier_apply(params, vram_gb, mode):
             p["resolution"] = str(min(int(p.get("resolution") or cap), cap))
         except Exception:
             p["resolution"] = str(cap)
-    eff = 8.0
-    if vram_gb is not None and vram_gb < eff:
-        eff = vram_gb
-    return p, eff
-
-
+    return p, vram_gb
 def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from=None, progress=None):
     """Krea2 图像 LoRA 训练（第二引擎 musubi-tuner）。
 
@@ -5439,6 +5435,9 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     vae_dir = os.path.join(krea2_at_vae_dir(), "vae").replace("\\", "/")
     # 显存档位：<=16G → qint8（更省显存，社区 16G 主流）+ 768；20G+ → qfloat8（质量更好）+ 1024
     qtype = "qint8" if (vram_gb is not None and vram_gb <= 16) else "qfloat8"
+    # 16~20G：DiT 量化后已 ~13GB 占满显存，再量化 TE（GPU 峰值 +3~5GB）会初始化 OOM（5070 Ti 16G 实测）。
+    # TE 不量化走 CPU+bf16，缓存 embedding 后卸载，消掉初始化峰值。
+    _te_quant = not (vram_gb is not None and vram_gb <= 20)
     _low_vram = True
     if vram_gb is not None and vram_gb >= 20:
         _low_vram = False
@@ -5520,9 +5519,9 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
         "        arch: 'krea2'\n"
         "        quantize: true\n"
         "        qtype: \"" + qtype + "\"\n"
-        "        quantize_te: true\n"
-        "        qtype_te: \"qfloat8\"\n"
-        "        low_vram: " + ("true" if _low_vram else "false") + "\n"
+        + (("        \"quantize_te\": true\n"
+            "        \"qtype_te\": \"qfloat8\"\n") if _te_quant else "")
+        + "        low_vram: " + ("true" if _low_vram else "false") + "\n"
         + _lo_block
         + "        model_kwargs:\n"
         "          text_encoder_path: " + _yq(te_dir) + "\n"

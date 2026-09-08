@@ -184,9 +184,9 @@ def test_yaml():
         raise AssertionError("Z-Image 8G fast_tier=off 误启用快跑档")
     if p0["datasets"][0]["resolution"] != [1024, 1024]:
         raise AssertionError("Z-Image 8G fast_tier=off 分辨率被误钳制")
-    # 通用快跑档 helper（全模式）：开=低分辨率+关采样+按 8G 档；自动/关=原样
+    # 通用快跑档 helper（全模式）：开=低分辨率+关采样（保留真实显存，不再压成 8G）；自动/关=原样
     _p2, _v2 = core._fast_tier_apply({"mode":"krea2","resolution":"1024","sample_preview":True,"fast_tier":"on"}, 24.0, "krea2")
-    assert _v2 == 8.0 and _p2.get("sample_preview") is False and _p2.get("resolution") == "512", (_v2,_p2)
+    assert _v2 == 24.0 and _p2.get("sample_preview") is False and _p2.get("resolution") == "512", (_v2,_p2)
     _p3, _v3 = core._fast_tier_apply({"resolution":"1024","fast_tier":"auto"}, 24.0, "krea2")
     assert _v3 == 24.0 and "sample_preview" not in _p3, (_v3,_p3)
     # Qwen-Image fast_tier=on：强制快跑档生效 + 分辨率 512
@@ -225,12 +225,16 @@ def test_yaml():
                 raise AssertionError("Krea2(AT) 16G 未压到 768")
             if "sample" in p0 or p0["train"].get("disable_sampling") is not True:
                 raise AssertionError("Krea2(AT) 16G 采样未关闭")
+            if p0["model"].get("quantize_te") is not None:
+                raise AssertionError("Krea2(AT) 16G 不应量化文本编码器（初始化 OOM 峰值）")
             cfg = os.path.join(tmp, "krea2_at24.yaml")
             core.write_krea2_at_yaml(dict(params, resolution="1024", sample_preview=True), vd, tmp, cfg, vram_gb=24)
             d = yaml.safe_load(open(cfg, encoding="utf-8"))
             p0 = d["config"]["process"][0]
             if p0["model"]["qtype"] != "qfloat8" or p0["datasets"][0]["resolution"] != [1024, 1024]:
                 raise AssertionError("Krea2(AT) 24G yaml 档位不符")
+            if p0["model"].get("quantize_te") is not True:
+                raise AssertionError("Krea2(AT) 24G 应量化文本编码器")
         finally:
             core.krea2_model_files = _old_files
             core.count_images = _old_count
