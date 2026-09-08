@@ -2221,11 +2221,14 @@ class App:
                 self.at_sub_row.pack(fill="x", padx=22, pady=(0, 6))
             else:
                 self.at_sub_row.pack_forget()
-            # ⚡ 快跑档手动开关：所有模式都显示
+            # ⚡ 快跑档手动开关：仅本身实现快跑档的 Z-Image/Qwen-Image 显示（档位各归各，不套用别的引擎）
             try:
                 _fr = getattr(self, "fast_tier_row", None)
                 if _fr is not None:
-                    _fr.pack(fill="x", padx=22, pady=(0, 6))
+                    if self.mode in ("zimage", "qwen_image"):
+                        _fr.pack(fill="x", padx=22, pady=(0, 6))
+                    else:
+                        _fr.pack_forget()
             except Exception:
                 pass
         except Exception:
