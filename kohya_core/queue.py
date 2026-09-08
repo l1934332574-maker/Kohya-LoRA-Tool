@@ -65,8 +65,8 @@ def run_queue_item(name, logf=print):
     vram = K.detect_vram_gb()
     # 预处理分辨率：与 GUI 一键训练一致
     try:
-        size = int(p.get("resolution") or (K.KREA2_RESOLUTION if mode in ("krea2", "krea2_fz", "krea2_at")
-                                           else K.RESOLUTIONS.get(p.get("base_type"), 512)))
+        size = int(p.get("resolution") or (K.FLUX2FZ_RESOLUTION if mode == "flux2_fz" else (K.KREA2_RESOLUTION if mode in ("krea2", "krea2_fz", "krea2_at")
+                                           else K.RESOLUTIONS.get(p.get("base_type"), 512))))
     except Exception:
         size = 1024
     pp_mode = K.preprocess_mode(mode, p.get("at_sub_mode"))
@@ -90,6 +90,8 @@ def run_queue_item(name, logf=print):
         K.train_krea2_fizgig(logf, mode="krea2_fz", params=p, vram_gb=vram, resume_from=None, progress=None)
     elif mode == "flux2":
         K.train_flux2(logf, mode="flux2", params=p, vram_gb=vram, resume_from=None, progress=None)
+    elif mode == "flux2_fz":
+        K.train_flux2_fizgig(logf, mode="flux2_fz", params=p, vram_gb=vram, resume_from=None, progress=None)
     else:
         if not p.get("base_model"):
             return False, "第一引擎项目缺底模（base_model）"

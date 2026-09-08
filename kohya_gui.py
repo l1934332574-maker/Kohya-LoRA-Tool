@@ -141,11 +141,11 @@ ENGINE_GROUPS = [
     ("第一引擎 · kohya", ("style", "character", "concept")),
     ("第二引擎 · musubi", ("krea2", "flux2")),
     ("第三引擎 · ai-toolkit", ("video", "krea2_at", "qwen_image", "zimage")),
-    ("第四引擎 · fizgig", ("krea2_fz",)),
+    ("第四引擎 · fizgig", ("krea2_fz", "flux2_fz")),
 ]
 SHORT_MODE_LABELS = {
     "style": "画风", "character": "人物", "concept": "概念", "krea2": "Krea2", "flux2": "FLUX.2",
-    "krea2_fz": "Krea2F", "video": "视频H3", "krea2_at": "Krea2AT", "qwen_image": "Qwen", "zimage": "Z-Image",
+    "krea2_fz": "Krea2F", "flux2_fz": "Klein9B", "video": "视频H3", "krea2_at": "Krea2AT", "qwen_image": "Qwen", "zimage": "Z-Image",
 }
 
 class Tooltip:
@@ -824,7 +824,7 @@ class App:
                     self._nav_mode_btns[_mk] = _btn
             else:
                 for _mk in _modes:
-                    _btn = ctk.CTkButton(_rf, text=SHORT_MODE_LABELS.get(_mk, _mk), width=64, height=26,
+                    _btn = ctk.CTkButton(_rf, text=SHORT_MODE_LABELS.get(_mk, _mk), width=(108 if len(_modes) == 2 else 64), height=26,
                                          fg_color=CARD2, hover_color="#3a4150", corner_radius=6,
                                          font=ui_font(FONT_HINT), text_color=TXT,
                                          command=lambda m=_mk: self._nav_select_mode(m))
@@ -953,12 +953,16 @@ class App:
                                           text_color="#ffffff", font=ui_font(FONT_BODY),
                                           command=self.cmd_dl_flux2_models)
         self.btn_flux2_dl.pack(side="left", padx=(4, 4))
-        ctk.CTkLabel(self.flux2_row, text="base 4B 训练 → LoRA 可用于 klein 出图", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(8, 0))
+        ctk.CTkLabel(self.flux2_row, text="4B / Klein 9B 模型都放这里（按模式自动识别）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(8, 0))
         self.btn_flux2_guide = ctk.CTkButton(self.flux2_row, text="📖 使用引导", width=92, height=30,
                                              fg_color="transparent", hover_color="#252a36", border_width=1, border_color=ACC,
                                              text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
                                              command=self._show_flux2_guide)
         self.btn_flux2_guide.pack(side="left", padx=(6, 4))
+        self.btn_fizgig_install_f2 = ctk.CTkButton(self.flux2_row, text="⚙ 安装第四引擎", width=112, height=30,
+                                                 fg_color="transparent", hover_color="#252a36", border_width=1,
+                                                 border_color=ACC, text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
+                                                 command=self.cmd_install_fizgig)
         # MiniMax H3 模型状态（仅视频模式显示，独立一行占满宽度）
         self.h3_row = ctk.CTkFrame(top, fg_color="transparent")
         self.h3_model_var = tk.StringVar(value="")
@@ -1248,6 +1252,8 @@ class App:
                 return not core.krea2_at_missing_models()
             if check == "flux2_models":
                 return not core.flux2_missing_models()
+            if check == "flux2_fz_models":
+                return not core.flux2_fz_missing_models()
             if check == "h3_models":
                 return not core.h3_missing_models()
             if check == "at_model":
@@ -2216,7 +2222,7 @@ class App:
             pass
         # Qwen-Image / Z-Image：显示「画风/人物」训练类型切换；其他模式隐藏
         try:
-            _is_at = self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2")
+            _is_at = self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz")
             if _is_at:
                 self.at_sub_row.pack(fill="x", padx=22, pady=(0, 6))
             else:
@@ -2236,7 +2242,7 @@ class App:
         try:
             if self.mode == "video":
                 _hint = core.TRIGGER_HINT_VIDEO
-            elif self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2"):
+            elif self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz"):
                 if self._at_sub_label() == "concept":
                     _hint = core.TRIGGER_HINT_CONCEPT
                 if self._at_sub_label() == "style":
@@ -2247,6 +2253,8 @@ class App:
                     _hint = core.TRIGGER_HINT_KREA2
                 elif self.mode == "krea2_at":
                     _hint = core.TRIGGER_HINT_KREA2_AT
+                elif self.mode == "flux2_fz":
+                    _hint = core.TRIGGER_HINT_FLUX2_FZ
                 else:
                     _hint = core.TRIGGER_HINT_FLUX2
             elif self.mode == "concept":
@@ -2262,7 +2270,7 @@ class App:
         try:
             _tef = getattr(self, "_adv_frames", {}).get("te_lr")
             if _tef is not None:
-                if self.mode in ("krea2", "krea2_fz", "krea2_at", "flux2", "video", "qwen_image", "zimage"):
+                if self.mode in ("krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz", "video", "qwen_image", "zimage"):
                     _tef.grid_remove()   # Krea2/FLUX.2/视频/AI图像：文本编码器不训练，该参数无效
                 else:
                     try:
@@ -2286,7 +2294,7 @@ class App:
         except Exception:
             pass
         try:
-            _hide_base = self.mode in ("krea2", "krea2_fz", "krea2_at", "flux2", "video", "qwen_image", "zimage")
+            _hide_base = self.mode in ("krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz", "video", "qwen_image", "zimage")
             for w in (self.base_label, self.base_combo, self.btn_pick_base, self.btn_refresh_base, self.btn_download_base):
                 try:
                     if _hide_base:
@@ -2321,9 +2329,18 @@ class App:
             except Exception:
                 pass
             try:
-                if self.mode == "flux2":
+                if self.mode in ("flux2", "flux2_fz"):
                     self._refresh_flux2_status()
                     self.flux2_row.pack(fill="x", pady=(8, 0))
+                    try:
+                        _f2b = getattr(self, "btn_fizgig_install_f2", None)
+                        if _f2b is not None:
+                            if self.mode == "flux2_fz":
+                                _f2b.pack(side="left", padx=(6, 4))
+                            else:
+                                _f2b.pack_forget()
+                    except Exception:
+                        pass
                 else:
                     try:
                         self.flux2_row.pack_forget()
@@ -2431,7 +2448,7 @@ class App:
         # 人物强绑定行：仅「人物」语义的模式显示（人物模式 / AI 图像・Krea2・FLUX.2 的人物子模式）
         try:
             _is_person = (self.mode == "character") or (
-                self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2")
+                self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz")
                 and self._at_sub_label() == "character")
             if _is_person:
                 self.strong_bind_row.pack(fill="x", padx=22, pady=(0, 4))
@@ -3597,7 +3614,7 @@ class App:
             "te_lr": float(_getv("te_lr", "1.5e-4")),
             "repeats": int(float(_getv("repeats", "5"))),
             "max_epochs": int(float(_getv("max_epochs", "8"))),
-            "resolution": int(float(_getv("resolution", "1024" if self.mode in ("krea2", "krea2_fz", "krea2_at", "flux2") else str(core.RESOLUTIONS.get(self.base_type, 512))))),
+            "resolution": int(float(_getv("resolution", str(core.FLUX2FZ_RESOLUTION) if self.mode == "flux2_fz" else ("1024" if self.mode in ("krea2", "krea2_fz", "krea2_at", "flux2") else str(core.RESOLUTIONS.get(self.base_type, 512)))))),
             "video_steps": int(float(_getv("video_steps", "2000"))),
             "save_every": (lambda _s: int(_s) if str(_s).isdigit() else None)(_getv("save_every", "")),
             "sample_interval": (lambda _s: int(_s) if str(_s).isdigit() and int(_s) > 0 else 0)(_getv("sample_interval", "")),
@@ -3669,6 +3686,10 @@ class App:
             messagebox.showerror(core.APP_NAME, f"打开失败：{e}")
 
     def _show_flux2_guide(self):
+        """FLUX.2 图像 LoRA 使用引导：按当前模式显示 4B（第二引擎）或 Klein 9B（Fizgig 引擎）。"""
+        if getattr(self, "mode", None) == "flux2_fz":
+            self._show_flux2_fz_guide()
+            return
         """FLUX.2 图像 LoRA 训练 · 详细逐步引导（小白版）。"""
         w = ctk.CTkToplevel(self.root)
         w.title("FLUX.2 图像 LoRA · 使用引导")
@@ -3711,7 +3732,57 @@ class App:
         txt.insert("1.0", guide)
         txt.configure(state="disabled")
 
+    def _show_flux2_fz_guide(self):
+        """FLUX.2 Klein 9B（Fizgig 引擎）使用引导（小白版）。"""
+        w = ctk.CTkToplevel(self.root)
+        w.title("FLUX.2 Klein 9B 图像 LoRA · 使用引导")
+        w.geometry("780x820")
+        w.transient(self.root)
+        txt = ctk.CTkTextbox(w, fg_color="#16181e", text_color="#c6ccd8", corner_radius=8,
+                             border_width=1, border_color=BORDER, font=ui_font(FONT_BODY), wrap="word")
+        txt.pack(fill="both", expand=True, padx=18, pady=18)
+        f2 = core.FLUX2FZ_MODEL_LINKS
+        guide = (
+            "📖 FLUX.2 Klein 9B 图像 LoRA 训练 · 详细引导（小白版）\n\n"
+            "▍原理一句话\n"
+            "FLUX.2 Klein 9B 是 9B DiT 大模型，用 15~30 张图就能训出「你的角色/风格」LoRA。\n"
+            "训练用 fp8 底模，训完的 LoRA 可用于 FLUX.2 klein 出图。NVIDIA/AMD 双平台。\n\n"
+            "▍第 1 步：安装第四引擎\n"
+            "· 左侧点「② 安装第四引擎」→「去安装」\n"
+            "· Fizgig 自动建独立环境（NVIDIA CUDA / AMD ROCm 均可），只需一次\n\n"
+            "▍第 2 步：下载 Klein 9B 模型（3 个文件，放进 models/flux2/）\n"
+            f"1) {f2['dit'][0]} —— {f2['dit'][1]}\n"
+            f"   国内镜像：{f2['dit'][2]}\n"
+            f"2) {f2['te'][0]} —— {f2['te'][1]}\n"
+            f"   国内镜像：{f2['te'][2]}\n"
+            f"3) {f2['vae'][0]} —— {f2['vae'][1]}\n"
+            f"   国内镜像：{f2['vae'][2]}\n"
+            "· 点「⬇ 下载 FLUX.2 模型」应用内下载（自动识别为 Klein 9B 模式），或点「📂 打开 FLUX.2 模型文件夹」手动放文件\n"
+            "· 顶部状态变成「FLUX.2 Klein 9B 模型：齐全 ✓」即可\n\n"
+            "▍第 3 步：打开项目，切到 Klein 9B 模式\n"
+            "· 侧边栏「第四引擎 · fizgig」点「Klein9B」\n"
+            "· 自动填好推荐参数（rank32 / alpha32 / lr 1e-4 / epochs16 / 分辨率768）\n\n"
+            "▍第 4 步：准备数据 + 一键训练\n"
+            "· 选 15~30 张同一人物/风格的图片文件夹，点「④ 数据预处理」\n"
+            "· 填一个唯一的英文触发词（如 my_k9b_01）\n"
+            "· 点下方「一键开始训练」：自动缓存 latents → 缓存文本编码器 → 训练\n"
+            "· 16G 显存推荐 768px、12G 自动 NF4 + 块交换（较慢），推荐 16G+\n\n"
+            "▍出图\n"
+            "训练完成后模型在 output 文件夹，配 FLUX.2 Klein 底模 + LoRA（权重 0.6~0.9）使用。\n"
+        )
+        txt.insert("1.0", guide)
+        txt.configure(state="disabled")
+
     def cmd_dl_flux2_models(self):
+        """FLUX.2 模型下载对话框：按当前模式区分 4B / Klein 9B。"""
+        if getattr(self, "mode", None) == "flux2_fz":
+            self._build_links_dialog(
+                "下载 FLUX.2 Klein 9B 模型",
+                "FLUX.2 Klein 9B 训练需要以下文件（fp8 DiT 约 9GB + Qwen3-8B 约 15GB + VAE 320MB，应用内下载带断点续传）：",
+                core.FLUX2FZ_MODEL_LINKS, core.flux2_fz_model_files(),
+                "📂 打开 FLUX.2 模型文件夹", self.cmd_open_flux2_models, self.cmd_dl_flux2_models,
+                self._start_flux2_fz_dl, "保存到 models/flux2/（与 FLUX.2 4B 共用目录），下完自动识别。")
+            return
         """FLUX.2 模型下载对话框：DiT+文本编码器+VAE，应用内下载（断点续传）。"""
         self._build_links_dialog(
             "下载 FLUX.2 模型",
@@ -3723,9 +3794,18 @@ class App:
     def _start_flux2_dl(self, key):
         self._start_model_file_dl(key, core.FLUX2_MODEL_LINKS, core.flux2_models_dir(), "flux2", "FLUX.2 模型")
 
+    def _start_flux2_fz_dl(self, key):
+        self._start_model_file_dl(key, core.FLUX2FZ_MODEL_LINKS, core.flux2_models_dir(), "flux2_fz", "FLUX.2 Klein 9B 模型")
+
     def _refresh_flux2_status(self):
         """FLUX.2 模型状态（顶部状态行）。"""
         try:
+            if getattr(self, "mode", None) == "flux2_fz":
+                _f = core.flux2_fz_model_files()
+                _short = {"dit": "DiT", "te": "文本编码器", "vae": "VAE"}
+                _miss = "、".join(_short[k] for k in ("dit", "te", "vae") if not _f.get(k))
+                self.flux2_model_var.set(("FLUX.2 Klein 9B 模型：缺 " + _miss + "（点⬇应用内下载）") if _miss else "FLUX.2 Klein 9B 模型：齐全 ✓")
+                return
             _files = core.flux2_model_files()
             _short = {"dit": "DiT", "te": "文本编码器", "vae": "VAE"}
             _miss = "、".join(_short[k] for k in ("dit", "te", "vae") if not _files.get(k))
@@ -4118,7 +4198,7 @@ class App:
             pp_mode = core.preprocess_mode(params.get("mode"), params.get("at_sub_mode"))
             core.preprocess(
                 self._log, input_dir=params["raw_dir"],
-                size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") in ("krea2", "krea2_fz", "krea2_at") else core.RESOLUTIONS.get(params["base_type"], 512))),
+                size=int(params.get("resolution") or (core.FLUX2FZ_RESOLUTION if params.get("mode") == "flux2_fz" else (core.KREA2_RESOLUTION if params.get("mode") in ("krea2", "krea2_fz", "krea2_at") else core.RESOLUTIONS.get(params["base_type"], 512)))),
                 mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=False, crop_ratio=params.get("crop_ratio") or "",
@@ -4152,6 +4232,9 @@ class App:
                 return
         elif params.get("mode") == "krea2_fz":
             if not self._ensure_krea2_fz_ready():
+                return
+        elif params.get("mode") == "flux2_fz":
+            if not self._ensure_flux2_fz_ready():
                 return
         else:
             if not params["base_model"]:
@@ -4193,6 +4276,9 @@ class App:
             elif params.get("mode") == "flux2":
                 core.train_flux2(self._log, mode="flux2", params=params,
                                  vram_gb=vram, resume_from=resume, progress=self._train_mon)
+            elif params.get("mode") == "flux2_fz":
+                core.train_flux2_fizgig(self._log, mode="flux2_fz", params=params,
+                                       vram_gb=vram, resume_from=resume, progress=self._train_mon)
             else:
                 core.train(self._log, base_model=params["base_model"], mode=params["mode"],
                            params=params, vram_gb=vram, resume_from=resume, progress=self._train_mon)
@@ -4239,6 +4325,9 @@ class App:
         elif params.get("mode") == "krea2_fz":
             if not self._ensure_krea2_fz_ready():
                 return
+        elif params.get("mode") == "flux2_fz":
+            if not self._ensure_flux2_fz_ready():
+                return
         elif params.get("mode") == "flux2":
             if not self._ensure_flux2_ready():
                 return
@@ -4249,7 +4338,7 @@ class App:
         if not self._anima_merged_ok(params):
             return
         _need_trigger = (self.mode == "character") or (self.mode == "concept") or \
-            (self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2") and self._at_sub_label() in ("character", "concept"))
+            (self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz") and self._at_sub_label() in ("character", "concept"))
         if _need_trigger and not params["trigger"]:
             messagebox.showwarning(core.APP_NAME, "人物模式建议填写 Trigger 触发词（步骤②）。")
             return
@@ -4267,7 +4356,7 @@ class App:
             pp_mode = core.preprocess_mode(params.get("mode"), params.get("at_sub_mode"))
             core.preprocess(
                 self._log, input_dir=params["raw_dir"],
-                size=int(params.get("resolution") or (core.KREA2_RESOLUTION if params.get("mode") in ("krea2", "krea2_fz", "krea2_at") else core.RESOLUTIONS.get(params["base_type"], 512))),
+                size=int(params.get("resolution") or (core.FLUX2FZ_RESOLUTION if params.get("mode") == "flux2_fz" else (core.KREA2_RESOLUTION if params.get("mode") in ("krea2", "krea2_fz", "krea2_at") else core.RESOLUTIONS.get(params["base_type"], 512)))),
                 mode=pp_mode, trigger=params["trigger"],
                 reg_dir=params["reg_dir"], repeats=params["repeats"],
                 dedup=True, wd14=True, square_crop=False, crop_ratio=params.get("crop_ratio") or "",
@@ -4747,6 +4836,30 @@ class App:
             return False
         return True
 
+    def _ensure_flux2_fz_ready(self):
+        """FLUX.2 Klein 9B(Fizgig) 模式训练前检查：第四引擎已装 + Klein 9B 模型齐全。返回是否可继续。"""
+        try:
+            ok, detail, _, _ = core.fizgig_engine_status()
+        except Exception as e:
+            ok, detail = False, str(e)
+        if not ok:
+            messagebox.showwarning(core.APP_NAME,
+                                   "第四训练引擎未安装。\n请点「⚙ 安装第四引擎」安装。\n\n" + detail)
+            return False
+        missing = core.flux2_fz_missing_models()
+        if missing:
+            d = core.flux2_models_dir()
+            if messagebox.askyesno(core.APP_NAME,
+                    "FLUX.2 Klein 9B 模式还缺少模型文件，需要先下载放入 models/flux2/：\n\n" + "\n".join(missing) +
+                    f"\n\n是否现在打开「应用内下载」对话框？（带断点续传，下完自动识别）"):
+                try:
+                    os.makedirs(d, exist_ok=True)
+                except Exception:
+                    pass
+                self.cmd_dl_flux2_models()
+            return False
+        return True
+
     def _ensure_flux2_ready(self):
         """FLUX.2 模式训练前检查：第二引擎已装 + FLUX.2 模型齐全。返回是否可继续。"""
         try:
@@ -4833,7 +4946,7 @@ class App:
 
     def _warn_no_nvidia(self):
         """显卡兼容检查：N 卡直接放行；AMD 卡走兼容模式；其他保持原警告。返回 True=继续。"""
-        if getattr(self, "mode", None) == "krea2_fz":
+        if getattr(self, "mode", None) in ("krea2_fz", "flux2_fz"):
             return True   # Fizgig 双平台（NVIDIA/AMD ROCm），不强制 AMD 兼容模式
         try:
             if core.detect_nvidia_gpu():
@@ -4884,6 +4997,9 @@ class App:
         elif params.get("mode") == "krea2_fz":
             need = 10
             label = "Krea 2（Fizgig 引擎，NF4 最低 8G）"
+        elif params.get("mode") == "flux2_fz":
+            need = 16
+            label = "FLUX.2 Klein 9B（Fizgig 引擎，fp8 底模）"
         elif params.get("mode") in ("krea2", "krea2_fz", "krea2_at"):
             need = 16
             label = "Krea 2（12.9B）"
@@ -4907,7 +5023,7 @@ class App:
         _proj = (self.current_project or "").strip() or (params.get("project") or "").strip()
         _odir = core.data_sub("output", _proj) if _proj else core.data_sub("output")
         # 第四引擎（Fizgig）断点目录是 {name}-NNNNNN-state（按 epoch），用专门查找
-        if params.get("mode") == "krea2_fz":
+        if params.get("mode") in ("krea2_fz", "flux2_fz"):
             state = core.find_fizgig_state(_odir, output_name)
         else:
             state = core.find_latest_state(_odir, output_name)
@@ -4951,6 +5067,20 @@ class App:
                 f"repeats     : {params['repeats']}\n"
                 f"最大 epoch  : {params['max_epochs']}\n"
                 f"分辨率      : {params.get('resolution', 1024)}px\n"
+                f"Trigger     : {params['trigger'] or '（未填写）'}"
+            )
+        elif params.get("mode") == "flux2_fz":
+            _files = core.flux2_fz_model_files()
+            msg = (
+                "即将开始 FLUX.2 Klein 9B 训练（Fizgig 引擎），请确认以下参数：\n\n"
+                f"模式        : {core.MODE_LABELS.get(params['mode'], params['mode'])}\n"
+                f"底模(DiT)   : {os.path.basename(_files.get('dit') or '？')}\n"
+                f"文本编码器: {os.path.basename(_files.get('te') or '？')}\n"
+                f"rank / alpha: {params['rank']} / {params['alpha']}\n"
+                f"学习率      : {params['unet_lr']}\n"
+                f"repeats     : {params['repeats']}\n"
+                f"最大 epoch  : {params['max_epochs']}\n"
+                f"分辨率      : {params.get('resolution', 768)}px\n"
                 f"Trigger     : {params['trigger'] or '（未填写）'}"
             )
         elif params.get("mode") == "video":
@@ -5218,6 +5348,10 @@ class App:
                 self._log(f"[FLUX.2] 下载完成：{dest}")
                 self._refresh_flux2_status()
                 messagebox.showinfo(core.APP_NAME, f"FLUX.2 模型下载完成：\n{os.path.basename(dest)}\n\n已自动识别（状态已刷新）。")
+            elif kind == "flux2_fz":
+                self._log(f"[FLUX.2 Klein 9B] 下载完成：{dest}")
+                self._refresh_flux2_status()
+                messagebox.showinfo(core.APP_NAME, f"FLUX.2 Klein 9B 模型下载完成：\n{os.path.basename(dest)}\n\n已自动识别（状态已刷新）。")
             else:
                 self._log(f"[底模] 下载完成：{dest}")
                 self._scan_base_models()

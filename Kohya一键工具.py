@@ -1664,6 +1664,51 @@ def flux2_missing_models():
             pass
     return missing
 
+
+# ---------- FLUX.2 Klein 9B 图像 LoRA（第四引擎 Fizgig：train.py / klein-base-9b） ----------
+# 背景：FLUX.2 家族分 4B（第二引擎 musubi）与 Klein 9B（第四引擎 Fizgig 原生支持）。
+# 9B 用 Fizgig 通用脚本（train.py / cache_latents.py / cache_text.py），模型仍放 models/flux2/：
+#   dit = flux-2-klein-base-9b-fp8.safetensors（BFL fp8 预量化 base，约 8.9GB，训练官方推荐）
+#   te  = qwen_3_8b.safetensors（Qwen3-8B 文本编码器，约 15GB）
+#   vae = flux2-vae.safetensors（320MB，与 4B/Comfy repack 同一个 AE，共用）
+FLUX2FZ_MODEL_VERSION = "klein-base-9b"   # Fizgig train.py --model_version
+FLUX2FZ_RESOLUTION = 768                  # 默认训练分辨率（9B 更吃显存，768 平衡；16G 再降 512）
+FLUX2FZ_MAX_STEPS = 9000                  # 自动约束最大总步数（防过拟合）
+FLUX2FZ_TRAIN_SCRIPT = "src/fizgig/scripts/train.py"
+FLUX2FZ_CACHE_LATENTS_SCRIPT = "src/fizgig/scripts/cache_latents.py"
+FLUX2FZ_CACHE_TEXT_SCRIPT = "src/fizgig/scripts/cache_text.py"
+
+# Klein 9B 模型文件（放 models/flux2/，与 4B 共用目录；国内镜像直链）
+FLUX2FZ_MODEL_LINKS = {
+    "dit": ("flux-2-klein-base-9b-fp8.safetensors", "FLUX.2 Klein 9B DiT 底模（fp8 base，约 8.9GB，训练必需）",
+            "https://modelscope.cn/models/black-forest-labs/FLUX.2-klein-base-9b-fp8/resolve/master/flux-2-klein-base-9b-fp8.safetensors"),
+    "te": ("qwen_3_8b.safetensors", "Qwen3-8B 文本编码器（约 15GB，训练必需）",
+           "https://modelscope.cn/models/Comfy-Org/flux2-klein-9B/resolve/master/split_files/text_encoders/qwen_3_8b.safetensors"),
+    "vae": ("flux2-vae.safetensors", "FLUX.2 AE/VAE（约 320MB，与 4B 共用，训练必需）",
+            "https://modelscope.cn/models/Comfy-Org/flux2-klein-9B/resolve/master/split_files/vae/flux2-vae.safetensors"),
+}
+
+
+def flux2_fz_model_files():
+    """扫描 models/flux2 中的 Klein 9B 三件套，返回 {dit,te,vae} 路径或 None（与 4B 共用目录/VAE）。"""
+    d = flux2_models_dir()
+    out = {}
+    for key, (fname, _desc, _url) in FLUX2FZ_MODEL_LINKS.items():
+        p = os.path.join(d, fname)
+        if os.path.isfile(p):
+            out[key] = p
+    return out
+
+
+def flux2_fz_missing_models():
+    """返回缺失的 Klein 9B 模型说明列表（含国内镜像直链）。"""
+    files = flux2_fz_model_files()
+    missing = []
+    for key, (fname, desc, url) in FLUX2FZ_MODEL_LINKS.items():
+        if not files.get(key):
+            missing.append(f"\u00b7 {desc}\n  文件: {fname}\n  下载: {url}")
+    return missing
+
 def write_musubi_dataset_config(image_dir, cache_dir, config_path, resolution=1024,
                                 num_repeats=1, keep_tokens=1, caption_extension=".txt"):
     """musubi-tuner 数据集配置（与 kohya 不同：image_directory / cache_directory）。
@@ -3759,7 +3804,7 @@ def install_ai_toolkit_engine(logf=print):
 
 FIZGIG_VERSION = "v5.0.0"          # 钉死版本（Fizgig 更新节奏快，不追 master）
 FIZGIG_SRC_MARKER = "src/fizgig/scripts/krea2_train.py"
-FIZGIG_SRC_REQUIRED = ("requirements.txt", FIZGIG_SRC_MARKER)
+FIZGIG_SRC_REQUIRED = ("requirements.txt", FIZGIG_SRC_MARKER, "src/fizgig/scripts/train.py", "src/fizgig/scripts/cache_latents.py", "src/fizgig/scripts/cache_text.py")
 
 # NVIDIA 路径（Fizgig 主推平台）：torch 2.10.0+cu128，Blackwell 原生支持，驱动 555+
 FIZGIG_TORCH_VERSION = "2.10.0"
@@ -4250,6 +4295,30 @@ def _fizgig_quant_swap(vram_gb, requested, backend=None):
     return ([], swap, "动态 fp8 + blocks_to_swap=%d" % swap)
 
 
+def _fizgig_klein_quant_swap(vram_gb, requested, dit_prequant=True, backend=None):
+    """Fizgig Klein 9B 量化档 + blocks_to_swap。
+
+    Klein 与 Krea2 不同：官方下载即 fp8 预量化底模（9GB），load_dit 自动识别保持常驻，
+    不支持 krea2 那套 --quant_int8；可手动 NF4（--quant_4bit，~5.6GB，12G 以下）。
+    若用户放的是 bf16 原版（~17GB），自动加 --fp8_base 在内存量化成 fp8。
+    返回 (quant_flags, swap, detail)。"""
+    q = str(requested or "auto").strip().lower()
+    if q in ("nf4", "4bit", "4-bit", "4"):
+        return (["--quant_4bit"], 0, "NF4 4bit（冻结底模 ~5.6GB，12G 以下推荐）")
+    if q not in ("auto", "fp8"):
+        q = "auto"
+    tier = round(vram_gb) if vram_gb is not None else None
+    if q == "auto" and tier is not None and tier < 12:
+        return (["--quant_4bit"], 0, "NF4 4bit（<12G 自动切换，冻结底模 ~5.6GB）")
+    if tier is None or tier >= 16:
+        swap = 0 if (tier is None or tier >= 24) else 10
+    else:
+        swap = 16
+    if not dit_prequant:
+        return (["--fp8_base"], swap, "bf16 底模自动转 fp8（--fp8_base）+ blocks_to_swap=%d" % swap)
+    return ([], swap, "fp8 预量化底模常驻（~9GB）+ blocks_to_swap=%d" % swap)
+
+
 def _fizgig_rocm_env(fz_dir, vpy):
     """AMD ROCm 运行时环境（对齐 Fizgig 官方 run_fizgig_rocm.bat / write_rocm_env.py）。
 
@@ -4444,6 +4513,170 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
         raise RuntimeError("Krea2(Fizgig) 训练失败，退出码 %d，请查看上方日志。" % rc)
     logf(f"[Krea2(Fizgig)] 训练完成：{os.path.join(out_dir, output_name)}")
     return out_dir
+def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, resume_from=None, progress=None):
+    """FLUX.2 Klein 9B 图像 LoRA 训练（第四引擎 Fizgig，NVIDIA/AMD 双平台）。
+
+    流程：校验 Fizgig 环境→ 校验 Klein 9B 模型→ 写 Fizgig 数据集配置→
+    缓存 latents/文本编码器→ train.py（model_version=klein-base-9b）训练。
+    模型放 models/flux2/（fp8 底模 / qwen_3_8b 文本编码器 / flux2-vae 共用）。"""
+    params = params or {}
+    _log_tail = deque(maxlen=400)
+    logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
+    _warn_alloc_conf(logf)
+    ok, detail, vpy, backend = fizgig_engine_status()
+    if not ok:
+        raise RuntimeError("第四训练引擎（Fizgig）未安装，请先点「⚙ 安装第四引擎」。\n" + detail)
+    kdir = get_kohya_dir()
+    fz_dir = os.path.join(kdir, "fizgig")
+    # Klein 9B 需要 Fizgig train.py / cache_latents.py / cache_text.py（过旧版本缺失则提示重装）
+    for _rel in ("src/fizgig/scripts/train.py",
+                 "src/fizgig/scripts/cache_latents.py",
+                 "src/fizgig/scripts/cache_text.py"):
+        if not os.path.isfile(os.path.join(fz_dir, _rel)):
+            raise RuntimeError("当前 Fizgig 源码缺少 Klein 9B 训练脚本（%s）。\n请点「⚙ 安装第四引擎」升级到 v5.0.0 后重试。" % _rel)
+    if not _ensure_fizgig_deps(vpy, fz_dir, logf):
+        raise RuntimeError("Fizgig 依赖补装失败（网络不稳或镜像不可达）。请检查网络后重试，或点「⚙ 安装第四引擎」重装。")
+    _ram_gb = detect_ram_gb()
+    if _ram_gb:
+        logf(f"[FLUX.2(Fizgig)] 系统内存: {_ram_gb:.0f}G")
+    _warn_low_ram(logf, _ram_gb, "FLUX.2 Klein 9B(Fizgig)")
+    _cleanup_leftover_trainers(logf, "FLUX.2 Klein 9B(Fizgig)")
+    _fz_env = None
+    if backend == "amd-rocm":
+        _fz_env = _fizgig_rocm_env(fz_dir, vpy)
+        logf("[FLUX.2(Fizgig)] AMD ROCm 运行时环境已设置（rocm7.15 / BNB_ROCM_VERSION=715）")
+    files = flux2_fz_model_files()
+    missing = flux2_fz_missing_models()
+    if missing:
+        raise RuntimeError(
+            "FLUX.2 Klein 9B 训练缺少模型文件，请下载放入 models/flux2/ 文件夹：\n\n" + "\n".join(missing) +
+            "\n\n（在软件里点「打开 FLUX.2 模型文件夹」，用浏览器打开上面的国内镜像直链下载后放进去）")
+    # 完整性检查（下载中断常见）
+    for _k, _desc in (("dit", "DiT 底模"), ("vae", "VAE"), ("te", "文本编码器")):
+        _p = files.get(_k)
+        if _p and not _safetensors_complete(_p):
+            raise RuntimeError(
+                f"检测到 FLUX.2 Klein 9B {_desc} 文件损坏/不完整：{_p}\n"
+                "（safetensors 头部与数据不一致，常见于下载中断）\n\n"
+                "请删除该文件后重新下载（软件内「下载 FLUX.2 模型」，魔搭国内直连 + 断点续传）。")
+    dit_prequant = _safetensors_is_prequantized(files.get("dit"))
+    logf(f"[FLUX.2(Fizgig)] DiT: {os.path.basename(files['dit'])}" + ("（fp8 预量化）" if dit_prequant else "（bf16 原版，自动 fp8）"))
+    _sub_mode = params.get("at_sub_mode") or "character"
+    train_dir = dataset_train_dir("character", params.get("project"))
+    if count_images(train_dir) == 0:
+        raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
+    if _sub_mode == "character" and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+        try:
+            import preprocess as _pp
+            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
+            for _w in _warns:
+                logf(f"[FLUX.2(Fizgig)] ⚠ {_w}")
+        except Exception as _e:
+            logf(f"[FLUX.2(Fizgig)] 人物强绑定失败（忽略）: {_e}")
+    proj = _sanitize_dirname(params.get("project")) or "flux2_fz"
+    cfg_path = os.path.join(KIT_DIR, "configs", "fizgig_flux2_dataset_config.toml")
+    cache_dir = os.path.join(data_dir(), "dataset", proj, "fizgig_klein_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    resolution = int(params.get("resolution") or FLUX2FZ_RESOLUTION or 768)
+    write_fizgig_dataset_config(train_dir, cache_dir, cfg_path, resolution=resolution,
+                                num_repeats=int(params.get("repeats", 1)))
+    logf(f"[FLUX.2(Fizgig)] 数据集: {train_dir}（{resolution}px, repeats={params.get('repeats', 1)}）")
+    logf("[FLUX.2(Fizgig)] 缓存 latents（Fizgig AE）…")
+    if run_stream([vpy, os.path.join(fz_dir, *FLUX2FZ_CACHE_LATENTS_SCRIPT.split("/")),
+                   "--dataset_config", cfg_path, "--vae", files["vae"],
+                   "--model_version", FLUX2FZ_MODEL_VERSION, "--skip_existing"],
+                  cwd=fz_dir, env=_fz_env, logf=logf) != 0:
+        raise RuntimeError("latents 缓存失败，请查看上方日志")
+    _te_fp8 = (vram_gb is None or vram_gb <= 24)
+    logf("[FLUX.2(Fizgig)] 缓存文本编码器输出 …" + ("（fp8 省显存）" if _te_fp8 else ""))
+    _te_cache_cmd = [vpy, os.path.join(fz_dir, *FLUX2FZ_CACHE_TEXT_SCRIPT.split("/")),
+                     "--dataset_config", cfg_path, "--text_encoder", files["te"],
+                     "--model_version", FLUX2FZ_MODEL_VERSION, "--skip_existing"]
+    if _te_fp8:
+        _te_cache_cmd.append("--fp8_text_encoder")
+    if run_stream(_te_cache_cmd, cwd=fz_dir, env=_fz_env, logf=logf) != 0:
+        raise RuntimeError("文本编码器缓存失败，请查看上方日志")
+    rank = int(params.get("rank", 32))
+    alpha = int(params.get("alpha", 32))
+    lr = params.get("unet_lr", 1e-4)
+    epochs = int(params.get("max_epochs", 16))
+    per_epoch = int(params.get("repeats", 1)) * count_images(train_dir)
+    if per_epoch * epochs > FLUX2FZ_MAX_STEPS:
+        new_epochs = max(1, int(FLUX2FZ_MAX_STEPS / max(1, per_epoch)))
+        logf(f"[FLUX.2(Fizgig)] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
+        epochs = new_epochs
+    if progress is not None:
+        try:
+            progress.set_total(per_epoch * epochs)
+        except Exception:
+            pass
+    out_dir = data_sub("output", proj)
+    output_name = str(params.get("output_name") or "flux2_fizgig_lora").strip() or "flux2_fizgig_lora"
+    quant_flags, swap, quant_detail = _fizgig_klein_quant_swap(vram_gb, params.get("quant_mode", "auto"), dit_prequant=dit_prequant, backend=backend)
+    _manual_swap = str(params.get("blocks_to_swap") or "").strip()
+    if _manual_swap.isdigit():
+        swap = int(_manual_swap)
+        logf(f"[FLUX.2(Fizgig)] 高级参数手动指定 blocks_to_swap={swap}")
+    logf(f"[FLUX.2(Fizgig)] 量化: {quant_detail}")
+    cmd = [
+        vpy, os.path.join(fz_dir, *FLUX2FZ_TRAIN_SCRIPT.split("/")),
+        "--dataset_config", cfg_path,
+        "--model_version", FLUX2FZ_MODEL_VERSION,
+        "--mixed_precision", "bf16",
+        "--dit", files["dit"],
+        "--vae", files["vae"],
+        "--text_encoder", files["te"],
+        "--output_dir", out_dir, "--output_name", output_name,
+        "--network_module", "fizgig.networks.lora_klein",
+        "--network_dim", str(rank), "--network_alpha", str(alpha),
+        "--learning_rate", str(lr),
+        "--max_train_epochs", str(epochs),
+        "--save_every_n_epochs", str(_resolve_save_every_epochs(params)),
+        "--save_state", "--save_state_on_train_end", "--keep_last_n_states", "2",
+        "--seed", "42",
+        "--timestep_sampling", "flux2_shift",
+        "--sdpa", "--gradient_checkpointing",
+        "--optimizer_type", "adamw8bit",
+        "--lr_scheduler", "cosine", "--lr_warmup_steps", "120",
+        "--max_data_loader_n_workers", "1",
+    ] + quant_flags
+    if resume_from:
+        _rs = resume_step_from(resume_from)
+        if progress is not None:
+            try:
+                progress.set_step(_rs)
+            except Exception:
+                pass
+        logf("[FLUX.2(Fizgig)] 断点续训：从 %s 继续（已完成 %d 步，监控已续上）" % (resume_from, _rs))
+        cmd += ["--resume", resume_from]
+    if swap > 0:
+        cmd += ["--blocks_to_swap", str(swap)]
+    # ---- 训练中采样出图预览（Fizgig Klein 原生：每 N epoch 用当前 LoRA 出图到 output/sample/）----
+    # 不需额外下载 distilled 模型：直接用训练底模采样（约 20 步，比 4 步 distilled 慢但可用）。
+    if _sample_preview_enabled(params, vram_gb):
+        _fz_sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="musubi")
+        if _fz_sp:
+            _per_ep = max(1, per_epoch)
+            _s_ep = min(max(1, int(round(100.0 / _per_ep))), max(1, epochs))
+            cmd += ["--sample_prompts", _fz_sp, "--sample_every_n_epochs", str(_s_ep)]
+            if _te_fp8:
+                cmd.append("--fp8_text_encoder")
+            _s_res = int(resolution or FLUX2FZ_RESOLUTION or 512)
+            if vram_gb is not None and vram_gb <= 16.5:
+                _s_res = min(_s_res, 512)
+                logf("[FLUX.2(Fizgig)] ⚠ 16G 档采样预览已压到 512 + fp8 文本编码器（预览失败会自动停用、不影响训练）")
+            logf(f"[FLUX.2(Fizgig)] 采样预览：每 {_s_ep} epoch（约每 {_s_ep * _per_ep} 步）用当前 LoRA 出一张预览图→ {os.path.join(out_dir, 'sample')}")
+    logf("[FLUX.2(Fizgig)] 提示：首次运行需加载 fp8 9B 底模（~9GB）并编译内核，前几分钟可能无步数输出，属正常现象。")
+    logf(f"[FLUX.2(Fizgig)] 底模(DiT): {files['dit']}")
+    logf(f"[FLUX.2(Fizgig)] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 1)}")
+    logf(f"[FLUX.2(Fizgig)] 引擎后端: {backend} | 量化={quant_detail} | blocks_to_swap={swap}")
+    rc = run_stream(cmd, cwd=fz_dir, env=_fz_env, logf=logf, collect=_log_tail)
+    if rc != 0:
+        _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
+        raise RuntimeError("FLUX.2 Klein 9B(Fizgig) 训练失败，退出码 %d，请查看上方日志。" % rc)
+    logf(f"[FLUX.2(Fizgig)] 训练完成：{os.path.join(out_dir, output_name)}")
+    return out_dir
+
 def scan_video_dataset(folder):
     """扫描视频数据集文件夹，返回 (视频文件列表, 总时长秒, 无字幕视频数)。
 
