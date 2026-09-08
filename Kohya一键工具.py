@@ -5423,7 +5423,7 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     reso = int(params.get("resolution", 1024))
     steps = _krea2_at_steps(params, train_dir)
     if vram_gb is not None and vram_gb <= 16:
-        reso = min(reso, 768)   # 16G 安全上限 768（1024 频繁 OOM）
+        reso = min(reso, 512)   # 16G 快档默认 512（0.13 实测：512+qint8+采样关 ≈2s/it；768 易 OOM）
         # 16G 档：rank/alpha 仍为旧默认 16/16 时，自动升到社区激进档 32/32
         if rank == 16 and alpha == 16:
             rank, alpha = 32, 32
@@ -5435,9 +5435,6 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     vae_dir = os.path.join(krea2_at_vae_dir(), "vae").replace("\\", "/")
     # 显存档位：<=16G → qint8（更省显存，社区 16G 主流）+ 768；20G+ → qfloat8（质量更好）+ 1024
     qtype = "qint8" if (vram_gb is not None and vram_gb <= 16) else "qfloat8"
-    # 16~20G：DiT 量化后已 ~13GB 占满显存，再量化 TE（GPU 峰值 +3~5GB）会初始化 OOM（5070 Ti 16G 实测）。
-    # TE 不量化走 CPU+bf16，缓存 embedding 后卸载，消掉初始化峰值。
-    _te_quant = not (vram_gb is not None and vram_gb <= 20)
     _low_vram = True
     if vram_gb is not None and vram_gb >= 20:
         _low_vram = False
@@ -5519,8 +5516,8 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
         "        arch: 'krea2'\n"
         "        quantize: true\n"
         "        qtype: \"" + qtype + "\"\n"
-        + (("        \"quantize_te\": true\n"
-            "        \"qtype_te\": \"qfloat8\"\n") if _te_quant else "")
+        + "        \"quantize_te\": true\n"
+        "        \"qtype_te\": \"qfloat8\"\n"
         + "        low_vram: " + ("true" if _low_vram else "false") + "\n"
         + _lo_block
         + "        model_kwargs:\n"

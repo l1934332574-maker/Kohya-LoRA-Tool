@@ -410,6 +410,12 @@ class App:
             self._gpu_info = core.detect_gpu_info()
         except Exception:
             self._gpu_info = {"vendor": "unknown", "name": None, "vram_gb": None}
+        try:
+            # 16G 档 Krea2/FLUX.2 默认关采样（0.13 快档配方；需预览可手动勾选）
+            if (self._gpu_info or {}).get("vram_gb") is not None and (self._gpu_info or {}).get("vram_gb") <= 16.5:
+                self.sample_preview_var.set(False)
+        except Exception:
+            pass
 
         self._build_ui()
         self._scan_base_models()

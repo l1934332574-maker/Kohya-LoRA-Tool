@@ -221,15 +221,15 @@ def test_yaml():
             p0 = d["config"]["process"][0]
             if p0["model"]["arch"] != "krea2" or p0["model"]["qtype"] != "qint8":
                 raise AssertionError("Krea2(AT) 16G yaml 档位不符")
-            if p0["datasets"][0]["resolution"] != [768, 768]:
-                raise AssertionError("Krea2(AT) 16G 未压到 768")
+            if p0["datasets"][0]["resolution"] != [512, 512]:
+                raise AssertionError("Krea2(AT) 16G 未按快档压到 512")
             if p0["train"].get("disable_sampling") is not True or "sample" not in p0:
                 raise AssertionError("Krea2(AT) 16G 需保留 sample 段 + disable_sampling（引擎 cache_sample_prompts 会崩）")
             if p0.get("sample", {}).get("negative_prompt") != "lowres, bad anatomy, worst quality, low quality, blurry, jpeg artifacts, signature, watermark":
                 raise AssertionError("Krea2(AT) 负向提示词不应为空(空串会被引擎当 bool 崩)")
 
-            if p0["model"].get("quantize_te") is not None:
-                raise AssertionError("Krea2(AT) 16G 不应量化文本编码器（初始化 OOM 峰值）")
+            if p0["model"].get("quantize_te") is not True:
+                raise AssertionError("Krea2(AT) 16G 应量化文本编码器（0.13 快档配方）")
             cfg = os.path.join(tmp, "krea2_at24.yaml")
             core.write_krea2_at_yaml(dict(params, resolution="1024", sample_preview=True), vd, tmp, cfg, vram_gb=24)
             d = yaml.safe_load(open(cfg, encoding="utf-8"))
