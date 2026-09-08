@@ -1,5 +1,12 @@
 ﻿## v0.15.10（2026-09-08）
 
+### 新增：第四引擎接入 FLUX.2 Klein 9B（flux2_fz 模式）
+- 侧边栏「第四引擎 · fizgig」新增 Klein9B 入口（Fizgig 原生 train.py · klein-base-9b），与 Krea2F 并列；
+- 模型放 models/flux2/（fp8 DiT ~9GB + Qwen3-8B ~15GB + 共用 VAE 320MB），应用内下载（魔搭国内直链，断点续传）；
+- 训练链路：cache_latents / cache_text（≤24G 文本编码器 fp8 省显存）→ train.py（lora_klein / flux2_shift / sdpa / gradient checkpoint / adamw8bit / bf16）；
+- 显存档位：<12G 自动 NF4（--quant_4bit）；fp8 预量化底模常驻 + 按显存块交换；bf16 原版自动 --fp8_base；
+- 断点续训（--save_state + 快照识别）、训练中采样预览（直接用训练底模，16G 压 512 + fp8 文本编码器）、训练队列均已接好；
+
 ### 修复：断点续训提示被“旧成品”误吞（第1/2/4引擎，2026-09-08）
 - 根因：完成判定一刀切——“存在最终 .safetensors 就不提示续训”。若项目以前跑完过、这次又中断，旧成品
   会让新中断不弹续训，用户点训练后从头开始（Fizgig 用户实测：停掉后再跑重头来）；第1/2引擎还会把
