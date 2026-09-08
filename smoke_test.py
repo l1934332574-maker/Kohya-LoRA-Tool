@@ -223,8 +223,8 @@ def test_yaml():
                 raise AssertionError("Krea2(AT) 16G yaml 档位不符")
             if p0["datasets"][0]["resolution"] != [768, 768]:
                 raise AssertionError("Krea2(AT) 16G 未压到 768")
-            if "sample" in p0 or p0["train"].get("disable_sampling") is not True:
-                raise AssertionError("Krea2(AT) 16G 采样未关闭")
+            if p0["train"].get("disable_sampling") is not True or "sample" not in p0:
+                raise AssertionError("Krea2(AT) 16G 需保留 sample 段 + disable_sampling（引擎 cache_sample_prompts 会崩）")
             if p0["model"].get("quantize_te") is not None:
                 raise AssertionError("Krea2(AT) 16G 不应量化文本编码器（初始化 OOM 峰值）")
             cfg = os.path.join(tmp, "krea2_at24.yaml")

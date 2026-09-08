@@ -5526,7 +5526,7 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
         + "        model_kwargs:\n"
         "          text_encoder_path: " + _yq(te_dir) + "\n"
         "          vae_path: " + _yq(vae_dir) + "\n"
-        + (("      sample:\n"
+        + ("      sample:\n"
             "        sampler: \"flowmatch\"\n"
             "        sample_every: 250\n"
             "        width: " + str(_sp_res) + "\n"
@@ -5538,7 +5538,7 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
             "        seed: 42\n"
             "        walk_seed: true\n"
             "        guidance_scale: 4.0\n"
-            "        sample_steps: 20\n") if sample_on else "")
+            "        sample_steps: 20\n")
         + "meta:\n"
         "  name: " + _yq(name) + "\n"
         "  version: '1.0'\n"
