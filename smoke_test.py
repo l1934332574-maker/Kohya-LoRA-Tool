@@ -335,6 +335,14 @@ def test_monitor_sampling_and_fizgig_resume():
     assert found and found.endswith("krea2_fizgig_lora-000002-state"), found
     open(_os.path.join(d, "krea2_fizgig_lora.safetensors"), "wb").write(b"x")
     assert core.find_fizgig_state(d, "krea2_fizgig_lora") is None, "跑完仍提示续训"
+    # 旧成品 + 更新的新断点 → 仍应提示（修 find_fizgig_state 一刀切 bug，2026-09-08）
+    st3 = _os.path.join(d, "krea2_fizgig_lora-000003-state")
+    _os.makedirs(st3, exist_ok=True)
+    with open(_os.path.join(st3, "training_state.json"), "w", encoding="utf-8") as f:
+        json.dump({"epoch": 3, "global_step": 456}, f)
+    _os.utime(st3, (9000, 9000))
+    _os.utime(_os.path.join(d, "krea2_fizgig_lora.safetensors"), (1000, 1000))
+    assert core.find_fizgig_state(d, "krea2_fizgig_lora") is not None, "旧成品+新断点未提示续训"
     # kohya/musubi 断点：有 -step…-state 且无成品 → 提示续训；成品已生成 → 不提示
     import tempfile as _tf2, os as _os2
     d2 = _tf2.mkdtemp()
@@ -346,6 +354,9 @@ def test_monitor_sampling_and_fizgig_resume():
         f.write(b"x")
     _os2.utime(_os2.path.join(d2, "character_lora.safetensors"), (3000, 3000))
     assert core.find_latest_state(d2, "character_lora") is None, "跑完仍提示续训(kohya)"
+    # 旧成品 + 更新的新中断 → 仍应提示（只看最终成品 vs 断点 mtime）
+    _os2.utime(st2, (9000, 9000))
+    assert core.find_latest_state(d2, "character_lora") is not None, "旧成品+新中断未提示续训(kohya)"
 
 
 def test_lora_naming():

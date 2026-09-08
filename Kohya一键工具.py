@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.15.9"
+APP_VERSION = "0.15.10"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -7834,11 +7834,16 @@ def organize_dataset_repeats(train_dir, repeats, name):
 
 
 def find_latest_state(output_dir, output_name):
-    """在输出目录找最新的 kohya 训练状态目录（断点续训用）。
+    """在输出目录找最新的 kohya/musubi 训练状态目录（断点续训用）。
 
     只找带 step 的目录（如 character_lora-step00000200-state），这些才是中断点；
-    纯 '<name>-state' 是训练正常完成时 kohya 保存的最终状态，不代表中断，
-    不用于续训提示（否则每次跑完都会误问要不要续训）。"""
+    纯 '<name>-state' 是训练正常完成时保存的最终状态，不代表中断，不用于续训提示。
+
+    完成判定（2026-09-08 修）：只看【最终成品 {name}.safetensors】与最新断点的修改时间——
+    - 成品比断点新/相等 → 上次已正常跑完，不提示续训；
+    - 成品比断点旧（旧完成 + 新一次中断；或中断后还没写过成品）→ 仍提示续训。
+    注意不能拿“任一顶层 .safetensors”判断：中间 step/epoch 模型文件也会让中断误判成已完成。
+    """
     if not os.path.isdir(output_dir):
         return None
     cands = []
@@ -7854,31 +7859,29 @@ def find_latest_state(output_dir, output_name):
                 cands.append(p)
     if not cands:
         return None
+
     # 按 step 号取最大（比 mtime 可靠）
     def _step_no(p):
         m = re.search(r"-step(\d+)-state", os.path.basename(p))
         return int(m.group(1)) if m else -1
     best = max(cands, key=_step_no)
-    # 完成判定（与 Fizgig find_fizgig_state 一致）：输出目录顶层已有更新的成品
-    # .safetensors → 上次训练已正常跑完，不应提示续训（否则每次跑完都会误弹）。
-    # 若成品比中断点旧（旧完成 + 新一次中断）→ 仍提示续训。
     try:
-        tops = [os.path.join(output_dir, n) for n in os.listdir(output_dir)
-                if n.lower().endswith(".safetensors")]
-        tops = [t for t in tops if os.path.isfile(t)]
-        if tops and max(os.path.getmtime(t) for t in tops) >= os.path.getmtime(best):
-            return None
+        final = os.path.join(output_dir, output_name + ".safetensors")
+        if os.path.isfile(final) and os.path.getmtime(final) >= os.path.getmtime(best):
+            return None  # 成品比最新断点新/等 → 已正常跑完
     except OSError:
         pass
     return best
 
-
 def find_fizgig_state(output_dir, output_name):
     """找 Fizgig 断点状态目录（{name}-NNNNNN-state，按 epoch 命名，内含 training_state.json）。
-    若最终 LoRA（{name}.safetensors）已生成说明训练已跑完，不提示续训。找不到返回 None。"""
+
+    完成判定（2026-09-08 修）：不能因为“存在最终 LoRA”就一刀切不提示——
+    旧一次跑完留下的成品会吞掉“新一次中断”的续训提示，导致用户点训练后从头开始。
+    改为：成品比最新断点新/相等 → 已跑完不提示；成品比断点旧 → 仍提示（新中断）。
+    找不到断点返回 None。
+    """
     if not os.path.isdir(output_dir):
-        return None
-    if os.path.isfile(os.path.join(output_dir, output_name + ".safetensors")):
         return None
     pat = re.compile(r"^" + re.escape(output_name) + r"-(\d{6})-state$")
     best, best_no = None, -1
@@ -7895,8 +7898,14 @@ def find_fizgig_state(output_dir, output_name):
             no = int(m.group(1))
             if no > best_no:
                 best, best_no = p, no
+    if best is not None:
+        try:
+            final = os.path.join(output_dir, output_name + ".safetensors")
+            if os.path.isfile(final) and os.path.getmtime(final) >= os.path.getmtime(best):
+                return None  # 成品比最新断点新/等 → 已跑完
+        except OSError:
+            pass
     return best
-
 
 def resume_step_from(resume_from):
     """从断点快照解析已完成的训练步数（kohya/musubi 状态目录名 -stepNNNNNN-state）。
