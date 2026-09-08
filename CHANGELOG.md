@@ -4,6 +4,11 @@
 - ai-toolkit 把空 negative_prompt 当 False/None，而 Krea2 text_encoder 无条件 `前缀+prompt` 拼接 → 训练前 cache_sample_prompts 崩；
 - Krea2AT yaml 的 negative_prompt 改为默认非空负向词（lowres, bad anatomy…），采样开/关都稳。
 
+### 修复：Krea2AT 16G 对齐 0.13 快档配方；引擎档位不再串用
+- 16G 默认改回 0.13 实证可跑的配置：分辨率上限 512 + qint8 + 采样默认关 + 文本编码器量化 + 层交换 0.3（恢复 TE 量化，撤销 0.15.8 一刀切不量化）；GUI ≤16.5G 采样预览默认关；
+- 回滚 0.15.7「全模式快跑档」的统一注入（_fast_tier_apply/_FAST_RESO_CAP），各引擎档位独立、不再互相影响；
+- 「⚡ 快跑档」仅 Z-Image / Qwen-Image 显示（各自 writer 内实现）。
+
 ## v0.15.8（2026-09-08）
 
 ### 修复：Krea2AT 16G 初始化 OOM / 关采样崩溃 / 快跑档过度交换
