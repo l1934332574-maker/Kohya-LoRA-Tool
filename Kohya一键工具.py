@@ -2823,7 +2823,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         _sp_res = int(resolution or 1024)
         if vram_gb is not None and vram_gb <= 16.5:
             _sp_res = min(_sp_res, 512)
-        _sp = _write_sample_prompts(output_name, params, mode, resolution=_sp_res, engine="musubi")
+        _sp = _write_sample_prompts(output_name, params, mode, resolution=_sp_res, engine="musubi", train_dir=train_dir)
         if _sp:
             _si = int(params.get("sample_interval") or 0)
             _sample_n = _si if _si >= 10 else max(1, per_epoch * _save_ep)
@@ -3056,7 +3056,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     logf(f"[FLUX.2] 量化={'int8' if _flux2_int8 else 'fp8'} | blocks_to_swap={swap} | H2D单向交换={'开' if h2d_only else '关'} | 搬运加速(pinned)={'开' if (h2d_only and vram_gb is not None and vram_gb >= 15.5) else '关'} | 梯度检查点={'开' if gc_on else '关'} | torch.compile={'开' if _flux2_compile_ok else '关'}（显存 {vram_gb if vram_gb else '?'}GB 智能适配）")
     # 训练中采样出图预览（musubi 原生 --sample_every_n_steps + --sample_prompts；低显存只警告不硬关）
     if _sample_preview_enabled(params, vram_gb):
-        _sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="musubi")
+        _sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="musubi", train_dir=train_dir)
         if _sp:
             _si = int(params.get("sample_interval") or 0)
             _sample_n = _si if _si >= 10 else max(1, per_epoch * _save_ep)
@@ -4486,7 +4486,7 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
             logf("[Krea2(Fizgig)] ⚠ 已开启「训练中采样预览」，但 models/krea2/ 缺少 turbo.safetensors（fp8 Turbo，约 13GB，预览必需），本次训练不采样。\n"
                  "下载：软件内「下载Krea2模型」勾选 Turbo，或直链 " + KREA2_MODEL_LINKS["turbo"][2])
         else:
-            _fz_sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="fizgig")
+            _fz_sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="fizgig", train_dir=train_dir)
             if _fz_sp:
                 _per_ep = max(1, per_epoch)
                 _s_ep = min(max(1, int(round(100.0 / _per_ep))), max(1, epochs))
@@ -4654,7 +4654,7 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
     # ---- 训练中采样出图预览（Fizgig Klein 原生：每 N epoch 用当前 LoRA 出图到 output/sample/）----
     # 不需额外下载 distilled 模型：直接用训练底模采样（约 20 步，比 4 步 distilled 慢但可用）。
     if _sample_preview_enabled(params, vram_gb):
-        _fz_sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="musubi")
+        _fz_sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="musubi", train_dir=train_dir)
         if _fz_sp:
             _per_ep = max(1, per_epoch)
             _s_ep = min(max(1, int(round(100.0 / _per_ep))), max(1, epochs))
@@ -5279,8 +5279,9 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
         _opt_k = "AdamW"
     _opt_yaml = _optimizer_yaml_name(_opt_k)
     _style_cap = (params.get("style_caption") or "").strip()
+    _subj = _guess_sample_subject(train_dir) if str(params.get("at_sub_mode") or "character") == "character" else ""
     # 采样预览：画风模式把「画风描述词」带进提示词，预览才贴近实际风格
-    sample_prompt = (", ".join(x for x in (trig, _style_cap) if x) + ", ") if (trig or _style_cap) else ""
+    sample_prompt = (", ".join(x for x in (trig, _style_cap, _subj) if x) + ", ") if (trig or _style_cap or _subj) else ""
     # low_vram 显存感知（v0.11.3）：官方默认开（模型放 CPU 按需搬显存，省显存但每步有搬运开销）。
     # 显存足够装下量化模型+激活时关掉提速（2026-08-28 A6000 48G 跑 Qwen-Image 20B 实测：
     # 硬开 low_vram 9.76s/it，关掉后预计回到 5~7s/it）。
@@ -5669,8 +5670,9 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
         _opt_k = "AdamW8bit"
     _opt_yaml = _optimizer_yaml_name(_opt_k)
     _style_cap = (params.get("style_caption") or "").strip()
+    _subj = _guess_sample_subject(train_dir) if str(params.get("at_sub_mode") or "character") == "character" else ""
     # 采样预览：画风模式把「画风描述词」带进提示词，预览才贴近实际风格
-    sample_prompt = (", ".join(x for x in (trig, _style_cap) if x) + ", ") if (trig or _style_cap) else ""
+    sample_prompt = (", ".join(x for x in (trig, _style_cap, _subj) if x) + ", ") if (trig or _style_cap or _subj) else ""
     # 采样预览开关：与其他引擎一致——≤16G 默认关（用户勾选才开），>16G 默认开。
     # 旧逻辑是 ≤16G 一律硬关、不理会勾选 → 16G 用户永远没有预览图（2026-09-03 反馈：Krea2 全都没预览）。
     sample_on = _sample_preview_enabled(params, vram_gb)
@@ -8920,7 +8922,39 @@ def fix_cpu_torch(vpy, kdir, logf=print):
     return False, "cu128 PyTorch 重装后 CUDA 仍不可用：请更新 NVIDIA 驱动，或重跑【② 安装训练内核】重建环境。"
 
 
-def _write_sample_prompts(output_name, params, mode, resolution=None, engine="kohya"):
+def _guess_sample_subject(train_dir):
+    """从训练集标签猜测采样主体：1girl/1boy（多数一方 + solo），不足/平手返回空串。
+
+    默认采样词只有 portrait 没有主体词时，底模会把无主体的“人像”先验成老头/路人（反馈：除 Anima 外各引擎预览常出老头/不明物体）。
+    按数据集里 1girl/1boy 的多数给一个 solo 主体可显著改善；非人物/画风无性别标签时自然返回空、不干预。"""
+    girl = boy = 0
+    if not train_dir or not os.path.isdir(train_dir):
+        return ""
+    try:
+        for _root, _dirs, _files in os.walk(train_dir):
+            for _f in _files:
+                if not _f.lower().endswith(".txt"):
+                    continue
+                try:
+                    with open(os.path.join(_root, _f), encoding="utf-8", errors="ignore") as _fh:
+                        _text = _fh.read()
+                except Exception:
+                    continue
+                for _tok in re.split(r"[,,\s]+", _text):
+                    _t = _tok.strip().lower()
+                    if _t in ("1girl", "girl", "female", "woman"):
+                        girl += 1
+                    elif _t in ("1boy", "boy", "male", "man"):
+                        boy += 1
+    except Exception:
+        return ""
+    if girl >= 3 and girl > boy:
+        return "1girl, solo"
+    if boy >= 3 and boy > girl:
+        return "1boy, solo"
+    return ""
+
+def _write_sample_prompts(output_name, params, mode, resolution=None, engine="kohya", train_dir=None):
     """生成 kohya/musubi 训练采样提示词文件；返回路径或 None（未开启/失败）。
 
     engine="musubi" 时追加 musubi 采样专属参数 --w/--h（kohya 引擎不支持该后缀）：
@@ -8936,15 +8970,35 @@ def _write_sample_prompts(output_name, params, mode, resolution=None, engine="ko
     else:
         trig = (params.get("trigger") or "").strip()
         style_cap = (params.get("style_caption") or "").strip()
-        # 采样提示词：画风模式用「画风描述词」，预览才贴近实际风格（此前写死 portrait 完全对不上）；
-        # 否则用 portrait 偏向面部（降低早期未训练好的全身/不雅出图概率）；不写死 1girl/solo。
-        if mode == "concept":
-            # 概念/形态：trigger 吸收原型，采样直接 trigger 出图，不要 portrait 偏向（会出半身人脸而非完整形态）
-            prompt = ((trig + ", ") if trig else "") + "masterpiece, best quality"
+        _sub_mode = str(params.get("at_sub_mode") or "").strip()
+        _is_concept = (mode == "concept") or (_sub_mode == "concept")
+        # 自然语言大模型引擎（Krea2/FLUX.2/Fizgig）吃描述性长句；第一引擎 kohya 保持标签式
+        _nl = engine in ("musubi", "fizgig")
+        # 人物/画风：按数据集标签自动猜 1girl/1boy 主体（避免无主体 portrait 出“老头”）
+        _subj = _guess_sample_subject(train_dir) if (train_dir and not _is_concept) else ""
+        if _is_concept:
+            # 概念/形态：不要 portrait 偏向（会出半身人脸而非完整形态）；新模型引擎给全身+细节
+            _base = [trig] if trig else []
+            if _nl:
+                _base += ["full body", "highly detailed"]
+            _base += ["masterpiece", "best quality"]
+            prompt = ", ".join(x for x in _base if x)
         elif style_cap:
-            prompt = (f"{trig}, " if trig else "") + style_cap + ", masterpiece, best quality"
+            # 画风描述词：带进提示词预览才贴近实际风格；新模型引擎补“highly detailed”
+            _base = ([trig] if trig else []) + [style_cap]
+            if _nl:
+                _base.append("highly detailed")
+            _base += ["masterpiece", "best quality"]
+            prompt = ", ".join(x for x in _base if x)
         else:
-            prompt = (f"{trig}, portrait, masterpiece, best quality" if trig else "masterpiece, best quality")
+            # 人物类（含画风未填描述词）：portrait 偏向面部；新模型引擎用更贴描述式出图的写法
+            _parts = ([trig] if trig else [])
+            if _subj:
+                _parts.append(_subj)
+            if trig or _subj:
+                _parts.append("detailed close-up portrait" if _nl else "portrait")
+            _parts += ["masterpiece", "best quality"]
+            prompt = ", ".join(x for x in _parts if x)
     if engine == "musubi":
         res = int(resolution or 1024)
         prompt += f" --w {res} --h {res} --s 20"
@@ -9374,7 +9428,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         _start_anima_latent_nan_watcher(dataset_dir, vpy, logf)
     # 训练中采样出图预览（kohya 引擎原生 --sample_every_n_steps + --sample_prompts；低显存只警告不硬关）
     if _sample_preview_enabled(params, vram_gb):
-        _sp = _write_sample_prompts(output_name, params, mode)
+        _sp = _write_sample_prompts(output_name, params, mode, train_dir=train_dir)
         if _sp:
             _si = int(params.get("sample_interval") or 0)
             _sample_n = _si if _si >= 10 else int(save_every)
