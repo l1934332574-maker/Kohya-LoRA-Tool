@@ -1,4 +1,19 @@
-﻿## v0.15.10（2026-09-08）
+﻿## v0.15.11（2026-09-08）
+
+### 新增：静默下载显示进度条
+- 引擎安装/更新等原本“只打日志”的文件下载（torch/ROCM 大轮子、引擎源码、更新包）现在会自动弹小进度窗：文件名 + MB + 百分比，下完自动关闭；
+
+### 优化：采样预览默认提示词
+- 人物/画风类按训练集标签自动加 1girl/1boy 主体，避免无主体 portrait 出“老头/路人”；
+- Krea2/FLUX.2/Fizgig 等新模型引擎：概念模式改 full body、人物改 detailed close-up portrait、画风描述补 highly detailed，更贴模型；
+
+### 修复：Anima Qwen3-0.6B 下载卡死
+- 下载改魔搭国内直链优先（逐文件断点续传），hf-mirror 仅作兜底；已有 config/tokenizer 时只续传缺失权重，不再整包重下；权重完整性阈值按实际大小校正；
+
+### 修复/优化：kohya 自动补 bitsandbytes
+- 第一引擎缺 bitsandbytes 时训练前自动补装（AdamW8bit 可用），失败仅降级 Lion/AdamW；AMD 模式跳过不装；
+
+## v0.15.10（2026-09-08）
 
 ### 新增：第四引擎接入 FLUX.2 Klein 9B（flux2_fz 模式）
 - 侧边栏「第四引擎 · fizgig」新增 Klein9B 入口（Fizgig 原生 train.py · klein-base-9b），与 Krea2F 并列；
