@@ -353,6 +353,8 @@ class App:
         self._base_items = []
         self._dl = None
         self._dl_kind = "base"          # 当前下载任务类型：base=底模 / h3=H3模型
+        self._sdl_win = None               # 静默下载进度窗（引擎安装无回调下载）
+        self._sdl_after = None             # 进度轮询 after id
         self.ui_proc = None
         self._label_editor = None
         # ---- 项目化管理状态 ----
@@ -556,6 +558,22 @@ class App:
                 self.btn_stop.pack(fill="x", padx=14, pady=(4, 2), before=self._sidebar_spacer)
             else:
                 self.btn_stop.pack_forget()
+        except Exception:
+            pass
+
+        # 静默下载进度轮询：忙碌时监听后台无回调的文件下载（引擎安装轮子等）
+        try:
+            if v:
+                if getattr(self, "_sdl_after", None) is None:
+                    self._sdl_after = self.root.after(200, self._poll_silent_dl)
+            else:
+                self._hide_silent_dl()
+                if getattr(self, "_sdl_after", None) is not None:
+                    try:
+                        self.root.after_cancel(self._sdl_after)
+                    except Exception:
+                        pass
+                    self._sdl_after = None
         except Exception:
             pass
 
@@ -5322,6 +5340,62 @@ class App:
             self.dl_status_var.set(status)
         except Exception:
             pass
+
+    def _poll_silent_dl(self):
+        """轮询“静默下载”进度（引擎安装等无进度回调的文件下载），用小进度窗显示。"""
+        try:
+            self._sdl_after = None
+            if getattr(self, "dl_win", None) is not None:
+                self._hide_silent_dl()
+            else:
+                st = core.current_download()
+                if st.get("active") and st.get("name"):
+                    self._show_silent_dl(st)
+                else:
+                    self._hide_silent_dl()
+        except Exception:
+            pass
+        try:
+            self._sdl_after = self.root.after(800, self._poll_silent_dl)
+        except Exception:
+            self._sdl_after = None
+
+    def _show_silent_dl(self, st):
+        name = st.get("name") or ""
+        done = float(st.get("done") or 0)
+        total = float(st.get("total") or 0)
+        if self._sdl_win is None:
+            w = ctk.CTkToplevel(self.root)
+            w.title("下载进度")
+            w.geometry("480x150")
+            w.resizable(False, False)
+            w.transient(self.root)
+            self._sdl_status = tk.StringVar(value="下载中…")
+            ctk.CTkLabel(w, textvariable=self._sdl_status, font=ui_font(FONT_BODY), text_color=TXT,
+                         justify="left", anchor="w", wraplength=440).pack(padx=16, pady=(14, 8), fill="x")
+            self._sdl_prog = ctk.CTkProgressBar(w, height=12, fg_color=CARD2, progress_color=ACC)
+            self._sdl_prog.pack(fill="x", padx=16, pady=(0, 6))
+            ctk.CTkLabel(w, text="后台正在下载…完成后自动关闭（支持断点续传）",
+                         font=ui_font(FONT_HINT), text_color=HINT).pack(padx=16, pady=(0, 12), anchor="w")
+            self._sdl_win = w
+        try:
+            if total > 0:
+                pct = max(0.0, min(100.0, done * 100.0 / total))
+                self._sdl_prog.set(pct / 100.0)
+                self._sdl_status.set("%s  %s / %s MB（%.0f%%）" % (name, done / 1048576.0, total / 1048576.0, pct))
+            else:
+                self._sdl_prog.set(0)
+                self._sdl_status.set("%s  已下载 %s MB…（大小未知）" % (name, done / 1048576.0))
+        except Exception:
+            pass
+
+    def _hide_silent_dl(self):
+        try:
+            if self._sdl_win is not None:
+                self._sdl_win.destroy()
+        except Exception:
+            pass
+        self._sdl_win = None
 
     def _handle_dl_done(self, ok, dest):
         self._downloading = False

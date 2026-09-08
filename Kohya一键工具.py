@@ -7482,6 +7482,23 @@ def _http_range_probe(url, timeout=20, direct=False):
         return None, None, False
 
 
+# 静默下载全局进度（引擎安装等不传 progress_cb 的文件下载，由主界面轮询显示进度条）
+_DL_STATE = {"name": "", "done": 0, "total": 0, "active": False}
+
+def _dl_state_push(name, done, total, active=True):
+    _DL_STATE["name"] = name or ""
+    _DL_STATE["done"] = max(0, int(done or 0))
+    _DL_STATE["total"] = max(0, int(total or 0))
+    _DL_STATE["active"] = bool(active)
+
+def current_download():
+    """返回正在进行的“静默下载”进度（无回调的 _download_with_resume 会更新）。
+    返回 {name, done, total, active}；无下载时 active=False。界面轮询用。"""
+    try:
+        return dict(_DL_STATE)
+    except Exception:
+        return {"name": "", "done": 0, "total": 0, "active": False}
+
 def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False):
     """用 curl 断点续传下载大文件（repo.radeon.com 网络不稳时关键，断了可续传）。
 
@@ -7523,22 +7540,25 @@ def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False)
                 pass
             have = 0
     stop_mon = threading.Event()
-    if progress_cb is not None:
-        def _monitor():
-            last = -1
-            while not stop_mon.is_set():
+    _dl_name = os.path.basename(dest) or url
+    _dl_state_push(_dl_name, have or 0, total or 0, True)
+    def _monitor():
+        last = -1
+        while not stop_mon.is_set():
+            try:
+                size = os.path.getsize(dest) if os.path.isfile(dest) else 0
+            except Exception:
+                size = 0
+            if size != last:
+                last = size
                 try:
-                    size = os.path.getsize(dest) if os.path.isfile(dest) else 0
-                except Exception:
-                    size = 0
-                if size != last:
-                    last = size
-                    try:
+                    _dl_state_push(_dl_name, size, total or 0, True)
+                    if progress_cb is not None:
                         progress_cb(size, total)
-                    except Exception:
-                        pass
-                stop_mon.wait(1)
-        threading.Thread(target=_monitor, daemon=True).start()
+                except Exception:
+                    pass
+            stop_mon.wait(1)
+    threading.Thread(target=_monitor, daemon=True).start()
     try:
         if curl and os.path.isfile(curl):
             # Windows 自带 curl 版本差异：--retry-all-errors 需 curl 8.0+，老系统（7.x）不识别该参数，
@@ -7607,6 +7627,7 @@ def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False)
             return False
     finally:
         stop_mon.set()
+        _DL_STATE["active"] = False
 
 
 def run_pip_in_venv(venv_dir, args, logf=print):
