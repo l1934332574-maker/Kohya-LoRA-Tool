@@ -1703,6 +1703,7 @@ class App:
             "mode": params.get("mode", self.mode),
             "base_type": params.get("base_type", self.base_type),
             "at_sub_mode": params.get("at_sub_mode") or "character",
+            "concept_type": params.get("concept_type") or "form",
             "fast_tier": params.get("fast_tier") or "auto",
             "base_model": params.get("base_model") or "",
             "raw_dir": params.get("raw_dir") or "",
@@ -1755,6 +1756,11 @@ class App:
             try:
                 _sub = data.get("at_sub_mode") or "character"
                 self.at_sub_var.set(core.AT_SUB_LABELS.get(_sub, core.AT_SUB_LABELS["character"]))
+            except Exception:
+                pass
+            try:
+                _ct = core.concept_type_code(data.get("concept_type"))
+                self.concept_type_var.set(core.CONCEPT_TYPE_LABELS.get(_ct, core.CONCEPT_TYPE_LABELS["form"]))
             except Exception:
                 pass
             try:
@@ -1913,6 +1919,21 @@ class App:
         self.at_sub_hint = ctk.CTkLabel(self.at_sub_row, text="人物=保留全部标签；画风=过滤人物标签；概念=形态/种族（trigger 吸收原型）", font=ui_font(FONT_HINT), text_color=HINT)
         self.at_sub_hint.pack(side="left", padx=(12, 0))
         self.at_sub_row.pack_forget()
+        # 概念模式专属：概念类型（形态/服装/物品/身体部位）——只影响提示文案与采样预览提示词
+        self.concept_type_var = tk.StringVar(value=core.CONCEPT_TYPE_LABELS["form"])
+        self.concept_type_row = ctk.CTkFrame(card2, fg_color="transparent")
+        ctk.CTkLabel(self.concept_type_row, text="概念类型", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
+        self.concept_type_combo = ctk.CTkComboBox(
+            self.concept_type_row, values=list(core.CONCEPT_TYPE_LABELS.values()),
+            width=250, height=30, variable=self.concept_type_var, state="readonly",
+            fg_color=CARD2, border_color=BORDER, text_color=TXT,
+            button_color="#3a4150", button_hover_color="#454d5e",
+            dropdown_fg_color=CARD, dropdown_text_color=TXT, dropdown_hover_color="#2b303a",
+            font=ui_font(FONT_BODY), command=lambda _e: self._on_concept_type_change())
+        self.concept_type_combo.pack(side="left", padx=(12, 0))
+        self.concept_type_hint = ctk.CTkLabel(self.concept_type_row, text="", font=ui_font(FONT_HINT), text_color=HINT)
+        self.concept_type_hint.pack(side="left", padx=(12, 0))
+        self.concept_type_row.pack_forget()
         # ⚡ 快跑档手动开关（全模式通用：自动=按显存自动启用，开=强制快跑档，关=常规）
         self.fast_tier_row = ctk.CTkFrame(card2, fg_color="transparent")
         ctk.CTkLabel(self.fast_tier_row, text="⚡ 快跑档", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
@@ -1947,7 +1968,7 @@ class App:
         # 人物强绑定（人物模式显示，默认勾选）
         self.strong_bind_row = ctk.CTkFrame(card2, fg_color="transparent")
         self.chk_strong_bind = ctk.CTkCheckBox(
-            self.strong_bind_row, text="人物强绑定（自动把 trigger + 100% 一致特征词固定到标签开头）",
+            self.strong_bind_row, text="强绑定（自动把 trigger + 训练集 100% 一致的特征词固定到标签开头）",
             variable=self.strong_bind_var, fg_color=ACC, hover_color=ACC_H,
             text_color=TXT, font=ui_font(FONT_BODY))
         self.chk_strong_bind.pack(side="left")
@@ -2176,6 +2197,37 @@ class App:
         except Exception:
             return "character"
 
+    def _concept_type_key(self):
+        """概念模式的概念类型 key（form/outfit/object/bodypart）。"""
+        try:
+            return core.concept_type_code(self.concept_type_var.get())
+        except Exception:
+            return "form"
+
+    def _concept_type_noun(self):
+        """概念类型的中文名词，用于卡片标题。"""
+        return {"form": "形态/种族", "outfit": "服装", "object": "物品",
+                "bodypart": "身体部位"}.get(self._concept_type_key(), "概念")
+
+    def _is_concept_ctx(self):
+        """当前是否处于「概念」语义（独立概念模式，或图像模型的概念子模式）。"""
+        try:
+            if self.mode == "concept":
+                return True
+            if self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz"):
+                return self._at_sub_label() == "concept"
+        except Exception:
+            pass
+        return False
+
+    def _on_concept_type_change(self):
+        """概念类型切换：刷新提示文案 + 自动保存。"""
+        try:
+            self._update_mode_ui()
+        except Exception:
+            pass
+        self._schedule_autosave()
+
     def _on_at_sub_change(self):
         """Qwen-Image / Z-Image 的画风/人物切换：刷新提示与自动保存。"""
         try:
@@ -2245,6 +2297,21 @@ class App:
                 self.at_sub_row.pack(fill="x", padx=22, pady=(0, 6))
             else:
                 self.at_sub_row.pack_forget()
+            # 概念类型：仅「概念」语义下显示；提示随类型变
+            try:
+                _ctr = getattr(self, "concept_type_row", None)
+                if _ctr is not None:
+                    if self._is_concept_ctx():
+                        try:
+                            self.concept_type_hint.configure(
+                                text=core.CONCEPT_TYPE_DATASET_HINT.get(self._concept_type_key(), ""))
+                        except Exception:
+                            pass
+                        _ctr.pack(fill="x", padx=22, pady=(0, 6))
+                    else:
+                        _ctr.pack_forget()
+            except Exception:
+                pass
             # ⚡ 快跑档手动开关：仅本身实现快跑档的 Z-Image/Qwen-Image 显示（档位各归各，不套用别的引擎）
             try:
                 _fr = getattr(self, "fast_tier_row", None)
@@ -2439,20 +2506,28 @@ class App:
                 self.trig_card_title.configure(text="② 设置触发词（视频模式）")
             elif self.mode in ("qwen_image", "zimage"):
                 self.card1_title.configure(text="① 准备图片数据")
-                self.card1_hint.configure(text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好")
-                self.trig_card_title.configure(text="② 设置触发词（" + ("画风模式，一个词即可激活画风" if self._at_sub_label() == "style" else "人物模式") + "）")
+                if self._at_sub_label() == "concept":
+                    self.card1_hint.configure(text=core.CONCEPT_TYPE_DATASET_HINT.get(self._concept_type_key(), ""))
+                    self.trig_card_title.configure(text="② 设置触发词（概念模式：一个词绑定" + self._concept_type_noun() + "）")
+                else:
+                    self.card1_hint.configure(text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好")
+                    self.trig_card_title.configure(text="② 设置触发词（" + ("画风模式，一个词即可激活画风" if self._at_sub_label() == "style" else "人物模式") + "）")
             elif self.mode == "concept":
                 self.card1_title.configure(text="① 准备图片数据")
-                self.card1_hint.configure(text="15~30 张同一形态/种族（如美人鱼/半人马），刻意混不同画风/3D/实拍，避免 trigger 把画风一起吸进去")
-                self.trig_card_title.configure(text="② 设置触发词（概念模式：一个词绑定整个形态/种族）")
+                self.card1_hint.configure(text=core.CONCEPT_TYPE_DATASET_HINT.get(self._concept_type_key(), ""))
+                self.trig_card_title.configure(text="② 设置触发词（概念模式：一个词绑定" + self._concept_type_noun() + "）")
             elif self.mode == "style":
                 self.card1_title.configure(text="① 准备图片数据")
                 self.card1_hint.configure(text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好")
                 self.trig_card_title.configure(text="② 设置触发词（画风模式，一个词即可激活画风）")
             else:
                 self.card1_title.configure(text="① 准备图片数据")
-                self.card1_hint.configure(text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好")
-                self.trig_card_title.configure(text="② 设置触发词（人物模式）")
+                if self._is_concept_ctx():
+                    self.card1_hint.configure(text=core.CONCEPT_TYPE_DATASET_HINT.get(self._concept_type_key(), ""))
+                    self.trig_card_title.configure(text="② 设置触发词（概念模式：一个词绑定" + self._concept_type_noun() + "）")
+                else:
+                    self.card1_hint.configure(text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好")
+                    self.trig_card_title.configure(text="② 设置触发词（人物模式）")
         except Exception:
             pass
         # 画风描述词行：仅画风模式显示
@@ -2465,9 +2540,9 @@ class App:
             pass
         # 人物强绑定行：仅「人物」语义的模式显示（人物模式 / AI 图像・Krea2・FLUX.2 的人物子模式）
         try:
-            _is_person = (self.mode == "character") or (
+            _is_person = (self.mode in ("character", "concept")) or (
                 self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz")
-                and self._at_sub_label() == "character")
+                and self._at_sub_label() in ("character", "concept"))
             if _is_person:
                 self.strong_bind_row.pack(fill="x", padx=22, pady=(0, 4))
             else:
@@ -2650,6 +2725,7 @@ class App:
             "mode": cfg.get("mode"),
             "base_type": cfg.get("base_type"),
             "at_sub_mode": cfg.get("at_sub_mode") or "character",
+            "concept_type": cfg.get("concept_type") or "form",
             "trigger": cfg.get("trigger") or "",
             "global_pos": cfg.get("global_pos") or "",
             "global_neg": cfg.get("global_neg") or "",
@@ -3616,6 +3692,7 @@ class App:
             "mode": self.mode,
             "base_type": self.base_type,
             "at_sub_mode": self._at_sub_label(),
+            "concept_type": self._concept_type_key(),
             "fast_tier": (core.fast_tier_code(self.fast_tier_var.get())
                           if getattr(self, "fast_tier_var", None) is not None else "auto"),
             "trigger": self.trigger_var.get().strip(),

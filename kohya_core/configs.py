@@ -27,6 +27,51 @@ AT_SUB_LABELS = {
     "concept": "概念（形态/种族）",
 }
 
+# 概念模式的「概念类型」：只影响【数据集提示 + 采样预览提示词】，不影响训练逻辑。
+# 训练逻辑对所有类型都一样：把训练集里唯一一致的东西绑定到 trigger。
+CONCEPT_TYPE_LABELS = {
+    "form": "🧜 形态/种族（美人鱼·半人马）",
+    "outfit": "👗 服装（同款衣服）",
+    "object": "🗿 物品（道具/武器）",
+    "bodypart": "👁 身体部位（异色瞳/翅膀）",
+}
+CONCEPT_TYPE_KEYS = ["form", "outfit", "object", "bodypart"]
+
+# 每种概念类型的数据集准备提示
+CONCEPT_TYPE_DATASET_HINT = {
+    "form": "15~30 张同一形态/种族（美人鱼/半人马/木偶人）：混不同画风/3D/实拍，只有形态保持一致",
+    "outfit": "15~40 张同一款服装：务必换不同人脸/发色/画风/姿势/背景，只让这件衣服保持一致",
+    "object": "15~40 张同一物品：换不同角度/光照/背景/画风，只让这个物品保持一致",
+    "bodypart": "15~40 张同一身体部位（异色瞳/翅膀/尾巴等）：混不同脸型/发型/画风，只让该部位一致",
+}
+
+# 每种概念类型的采样预览提示词策略
+#   subject=True  -> 按训练集标签自动补 1girl/1boy 主体
+#   extra        -> 额外补词（人物系补 full body，部位系补 close-up，纯物品不加主体）
+CONCEPT_TYPE_SAMPLE = {
+    "form":     {"subject": True,  "extra": ["full body"]},
+    "outfit":   {"subject": True,  "extra": ["full body"]},
+    "bodypart": {"subject": True,  "extra": ["close-up"]},
+    "object":   {"subject": False, "extra": []},
+}
+
+
+def concept_type_code(text):
+    """界面文本 / 旧值 -> key；未知回退 form（兼容 key 直接传入）。"""
+    t = (text or "").strip()
+    if t in CONCEPT_TYPE_KEYS:
+        return t
+    for k, v in CONCEPT_TYPE_LABELS.items():
+        if t == v:
+            return k
+    return "form"
+
+
+def concept_type_sample(text):
+    """取该概念类型的采样预览策略（未知回退 form）。"""
+    return dict(CONCEPT_TYPE_SAMPLE.get(concept_type_code(text), CONCEPT_TYPE_SAMPLE["form"]))
+
+
 # Z-Image 8G 快跑档开关（自动/开/关；仅 Z-Image 训练生效，见 write_at_image_yaml）
 FAST_TIER_LABELS = {
     "auto": "自动（8G）",
@@ -270,7 +315,7 @@ TRIGGER_HINT_AT = ("💡提示：填一个网上很少见到的英文单词（�
 DATASET_TIPS = {
     "style": "📌 数据集提示：建议 20~60 张图片，尽量多不同人物、不同姿态，避免五官固化。画风模式自动过滤强人物五官标签；可填画风专属触发词，不需要正则图。",
     "character": "📌 数据集提示：建议 15~30 张同一人物，多角度、不同服装，推荐设置唯一 trigger 触发词；可配合正则数据集防过拟合。",
-    "concept": "📌 数据集提示：15~30 张同一形态/种族（如美人鱼/半人马/木偶人），刻意混不同画风/3D/实拍，避免 trigger 把画风一起吸进去；trigger 是唯一共同元素，描述只写每张的变体。",
+    "concept": "📌 数据集提示：15~40 张「同一个概念」的图——形态/种族、同款服装、同一物品、同一身体部位都算；刻意混不同画风/人脸/姿势/背景，只有这个概念保持一致；trigger 是唯一共同元素，描述只写每张的变体。",
     "krea2": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Krea 2 模型放进 models/krea2/（RAW+VAE+文本编码器）。推荐 12G+ 显存。",
     "krea2_at": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前把 Krea 2 RAW 底模放进 models/krea2/（26GB，bf16 原版），文本编码器/VAE 首次训练自动下载。推荐 16G+ 显存（16G 自动 768+int8+分层交换优化）。",
     "krea2_fz": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Krea 2 模型放进 models/krea2/（RAW+VAE+文本编码器）。NVIDIA/AMD 双平台，8G 显存自动 NF4、12G+ 用 fp8。",

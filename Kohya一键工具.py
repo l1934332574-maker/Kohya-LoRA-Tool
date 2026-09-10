@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.15.11"
+APP_VERSION = "0.16.0"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2674,7 +2674,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     train_dir = dataset_train_dir("character", params.get("project"))
     _flat_n = _musubi_dataset_precheck(train_dir, "Krea2", logf)
     # 人物强绑定：trigger + 100% 一致特征固定前缀（musubi 不吃 keep_tokens，靠第一行不 shuffle 保护）
-    if _sub_mode == "character" and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+    if _sub_mode in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
             _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
@@ -2918,7 +2918,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     train_dir = dataset_train_dir("character", params.get("project"))
     _flat_n = _musubi_dataset_precheck(train_dir, "FLUX.2", logf)
     # 人物强绑定：trigger + 100% 一致特征固定前缀（musubi 不吃 keep_tokens，靠第一行不 shuffle 保护）
-    if _sub_mode == "character" and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+    if _sub_mode in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
             _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
@@ -4398,7 +4398,7 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     train_dir = dataset_train_dir("character", params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
-    if _sub_mode == "character" and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+    if _sub_mode in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
             _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
@@ -4565,7 +4565,7 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
     train_dir = dataset_train_dir("character", params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
-    if _sub_mode == "character" and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+    if _sub_mode in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
             _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
@@ -5863,7 +5863,7 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
     train_dir = dataset_train_dir("character", params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
-    if _sub_mode == "character" and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+    if _sub_mode in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
             _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
@@ -5944,7 +5944,7 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】或【一键开始训练】")
     # 人物强绑定：trigger + 100% 一致特征固定前缀（ai-toolkit 支持 keep_tokens 语义较弱，靠第一行前置）
-    if (params.get("at_sub_mode") or "character") == "character" and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+    if (params.get("at_sub_mode") or "character") in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
             _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
@@ -6543,6 +6543,11 @@ _CFG_AT_LABEL_TO_KEY = {v: k for k, v in AT_SUB_LABELS.items()}
 _CFG_AT_LABEL_TO_KEY.update({"画风": "style", "人物": "character", "风格": "style"})  # 兼容手写短标签
 
 
+def _cfg_concept_type_key(params):
+    """concept_type 兼容 key 与中文标签，统一转 key（默认 form）。"""
+    return concept_type_code((params or {}).get("concept_type"))
+
+
 def _cfg_at_sub_key(params):
     """at_sub_mode 兼容 key 与中文标签，统一转 key。"""
     val = params.get("at_sub_mode") or "character"
@@ -6565,6 +6570,7 @@ def export_config_json(params, include_prompts=False):
         "config_version": 1,
         "mode": params.get("mode") or "character",
         "at_sub_mode": _cfg_at_sub_key(params),
+        "concept_type": _cfg_concept_type_key(params),
         "base_type": params.get("base_type") or "sdxl",
         "base_model": os.path.basename(str(bm).replace("\\", "/")) if bm else "",
         "unet_only": bool(params.get("unet_only", params.get("train_text_encoder") is False)),
@@ -6604,6 +6610,8 @@ def parse_config_json(text):
         cfg["at_sub_mode"] = _CFG_AT_LABEL_TO_KEY[sub]
     else:
         cfg["at_sub_mode"] = "character"
+    summary["applied"] += 1
+    cfg["concept_type"] = concept_type_code(raw.get("concept_type"))
     summary["applied"] += 1
     bm = raw.get("base_model") or ""
     cfg["base_model"] = os.path.basename(str(bm).replace("\\", "/")) if isinstance(bm, str) and bm else ""
@@ -9021,15 +9029,19 @@ def _write_sample_prompts(output_name, params, mode, resolution=None, engine="ko
         style_cap = (params.get("style_caption") or "").strip()
         _sub_mode = str(params.get("at_sub_mode") or "").strip()
         _is_concept = (mode == "concept") or (_sub_mode == "concept")
+        # 概念类型（形态/服装/物品/身体部位）：决定要不要补主体词、补什么词
+        _ct = concept_type_sample(params.get("concept_type"))
         # 自然语言大模型引擎（Krea2/FLUX.2/Fizgig）吃描述性长句；第一引擎 kohya 保持标签式
         _nl = engine in ("musubi", "fizgig")
-        # 人物/画风：按数据集标签自动猜 1girl/1boy 主体（避免无主体 portrait 出“老头”）
-        _subj = _guess_sample_subject(train_dir) if (train_dir and not _is_concept) else ""
+        # 按数据集标签自动猜 1girl/1boy 主体（避免无主体出“老头/路人”）
+        #   概念模式下按概念类型决定：形态/服装/身体部位需要主体，纯物品不要
+        _want_subj = (not _is_concept) or bool(_ct.get("subject"))
+        _subj = _guess_sample_subject(train_dir) if (train_dir and _want_subj) else ""
         if _is_concept:
-            # 概念/形态：不要 portrait 偏向（会出半身人脸而非完整形态）；新模型引擎给全身+细节
-            _base = [trig] if trig else []
+            # 概念：不做 portrait 偏向（避免出半身人脸而非完整形态）；补词按概念类型
+            _base = ([trig] if trig else []) + ([_subj] if _subj else [])
             if _nl:
-                _base += ["full body", "highly detailed"]
+                _base += list(_ct.get("extra") or []) + ["highly detailed"]
             _base += ["masterpiece", "best quality"]
             prompt = ", ".join(x for x in _base if x)
         elif style_cap:
@@ -9224,7 +9236,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
                 logf(f"[训练] trigger 标签同步失败（忽略）: {_e}")
             # 人物强绑定：自动把 trigger + 100% 一致身份特征固定到标签开头，
             # keep_tokens 覆盖整组 → kohya 打乱/丢弃标签时不动前缀，一个词绑定一个人物。
-            if mode == "character" and params.get("strong_bind", True):
+            if mode in ("character", "concept") and params.get("strong_bind", True):
                 try:
                     import preprocess as _pp
                     _kt, _warns = _pp.apply_strong_binding(train_dir, _trig, logf)

@@ -1,6 +1,6 @@
 {
-  "version": "v0.15.11",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.15.11/Setup.exe",
+  "version": "v0.16.0",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.16.0/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.15.11 更新（2026-09-08）：\n    · 新增：静默下载显示进度条——引擎安装/更新的 torch/ROCM 大轮子、引擎源码、更新包下载自动弹小进度窗（文件名+MB+百分比，下完自动关闭）；\n    · 优化：采样预览默认提示词——人物/画风按训练集自动加 1girl/1boy 主体（不再无主体 portrait 出老头/路人）；Krea2/FLUX.2/Fizgig 概念改 full body、人物改 detailed close-up portrait、画风补 highly detailed；\n    · 修复：Anima Qwen3-0.6B 下载卡死——魔搭国内直链优先（逐文件断点续传），hf-mirror 仅兜底；已有 config/tokenizer 只续传缺失权重；\n    · 修复/优化：kohya 训练前自动补装 bitsandbytes（AdamW8bit 可用），失败自动降级 Lion/AdamW；AMD 模式跳过。"
+  "notes": "v0.16.0 更新（2026-09-10）：\n    · 新增：概念模式新增「概念类型」——🧜 形态/种族 / 👗 服装 / 🗿 物品 / 👁 身体部位；只影响数据集提示与采样预览提示词，训练逻辑不变；\n    · 优化：概念模式采样预览按类型补词——服装/形态/身体部位自动补 1girl 主体与 full body/close-up，物品不补主体（修掉「飘着的衣服/畸形人物」）；\n    · 优化：概念模式数据集提示按类型显示，服装/物品明确提示「换不同人脸、不同画风、不同姿势，只让服装/物品保持一致」；\n    · 修复：概念模式强绑定守卫不一致——预处理会做强绑定但训练入口被跳过（改 trigger 后前缀不重算）；现已与人物模式统一；\n    · 兼容：项目配置 / 分享配置新增 concept_type，旧配置自动回退「形态/种族」。"
 }
