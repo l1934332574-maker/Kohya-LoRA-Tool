@@ -225,6 +225,21 @@ def test_yaml():
 
             if p0["model"].get("quantize_te") is not True:
                 raise AssertionError("Krea2(AT) 16G 应量化文本编码器（0.13 快档配方）")
+            # 死区回归：16.0x / 17~23G 也必须拿到省显存组合。
+            # 历史 bug：判定写 vram_gb <= 16，16 卡若报成 16.01 就退化成
+            # qfloat8 + 1024 + 无 layer_offloading（16G 必 OOM，且连重试兜底都拿不到）。
+            for _v in (16.01, 16.6, 17, 18.9):
+                cfg = os.path.join(tmp, "krea2_at_%s.yaml" % _v)
+                core.write_krea2_at_yaml(dict(params, resolution="1024", sample_preview=False),
+                                         vd, tmp, cfg, vram_gb=_v)
+                d = yaml.safe_load(open(cfg, encoding="utf-8"))
+                p0 = d["config"]["process"][0]
+                if p0["model"]["qtype"] != "qint8" or p0["datasets"][0]["resolution"] != [512, 512]:
+                    raise AssertionError("Krea2(AT) %sG 未走省显存档（阈值悬崖）" % _v)
+                if p0["model"].get("layer_offloading") is not True:
+                    raise AssertionError("Krea2(AT) %sG 缺少 layer_offloading（死区）" % _v)
+                if p0["model"].get("layer_offloading_transformer_percent") is None:
+                    raise AssertionError("Krea2(AT) %sG 分层交换比例缺失" % _v)
             cfg = os.path.join(tmp, "krea2_at24.yaml")
             core.write_krea2_at_yaml(dict(params, resolution="1024", sample_preview=True), vd, tmp, cfg, vram_gb=24)
             d = yaml.safe_load(open(cfg, encoding="utf-8"))

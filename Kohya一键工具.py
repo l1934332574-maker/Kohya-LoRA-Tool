@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.16.4"
+APP_VERSION = "0.16.5"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -5633,7 +5633,12 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     trig = params.get("trigger") or ""
     reso = int(params.get("resolution", 1024))
     steps = _krea2_at_steps(params, train_dir)
-    if vram_gb is not None and vram_gb <= 16:
+    # 显存档位按「取整后的 GB」分档：16G 卡 DXGI 常报 15.6~15.9，也可能报 16.0x，
+    # 直接用 vram_gb <= 16 会让 16.01 掉进「qfloat8 + 1024 + 无分层交换」的死区（必 OOM）。
+    # 与 musubi(_resolve_krea2_swap) / Fizgig(_fizgig_quant_swap) 一致，统一用 round() 取整。
+    _tier = round(vram_gb) if vram_gb is not None else None
+    _is_low = _tier is not None and _tier <= 19     # 16G 档 + 17~19G 中间档（含 16.0x 误报）
+    if _is_low:
         reso = min(reso, 512)   # 16G 快档默认 512（0.13 实测：512+qint8+采样关 ≈2s/it；768 易 OOM）
         # 16G 档：rank/alpha 仍为旧默认 16/16 时，自动升到社区激进档 32/32
         if rank == 16 and alpha == 16:
@@ -5644,27 +5649,28 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     raw_path = (krea2_model_files().get("raw") or "").replace("\\", "/")
     te_dir = krea2_at_te_dir().replace("\\", "/")
     vae_dir = os.path.join(krea2_at_vae_dir(), "vae").replace("\\", "/")
-    # 显存档位：<=16G → qint8（更省显存，社区 16G 主流）+ 768；20G+ → qfloat8（质量更好）+ 1024
-    qtype = "qint8" if (vram_gb is not None and vram_gb <= 16) else "qfloat8"
-    _low_vram = True
-    if vram_gb is not None and vram_gb >= 20:
-        _low_vram = False
-    # 显存适配：16G 档加 layer_offloading（DiT 分层交换 30%）——社区激进兜底；
-    # ai-toolkit offload_percent 语义 = 该比例的层按需流式（其余常驻显存）；
-    # qint8 DiT 约 12~13GB：0.3 时 70% 常驻 ≈9GB，16G Windows 处临界线（可用约 14.5GB），
-    # 启动 OOM 是显存抖动的随机问题（实测 512@2s/768@5s 可跑，偶尔启动 OOM）；保留 0.3 保速度，
-    # 启动 OOM 由训练侧「自动重试一次」兜底（模拟重开即好）；24G+ 关闭保速度（同 H3 做法）。
+    # 显存档位：低显存档（≤19G，含 16G 卡报成 16.0x）→ qint8 + 512；
+    # 20G 以上保持原行为（qfloat8 + 1024 + low_vram 关），避免影响本来能跑的机器。
+    qtype = "qint8" if _is_low else "qfloat8"
+    _low_vram = not (vram_gb is not None and vram_gb >= 20)   # 与原实现完全一致（用原始值，不取整）
+    # 分层交换（ai-toolkit offload_percent = 该比例的层按需流式、其余常驻显存）：
+    #   · 低显存档：16G 及以下 0.3（社区已跑通，保速度）；17~19G 中间档 0.4
+    #     （原先这一档完全没有分层交换 = 死区，16G 卡报成 16.0x 就必 OOM）；
+    #   · 20G+：默认仍不启用（保持原行为不动）；
+    #   · force_offload 非空时（启动 OOM 的重试兜底）无视档位强制写入。
     _lo_block = ""
     _off_pct = None
-    if vram_gb is not None and vram_gb <= 16:
+    if _is_low or force_offload is not None:
         _off_pct = force_offload if force_offload is not None else 0.3
+        if force_offload is None and _tier is not None and _tier >= 17:
+            _off_pct = 0.4
         _lo_block = (
             "        layer_offloading: true\n"
             "        layer_offloading_transformer_percent: %.1f\n" % _off_pct
         )
-        logf("[Krea2(AT)] 显存 %sGB：启用 layer_offloading（DiT 分层交换 %.0f%%，启动 OOM 自动重试兜底）" % (vram_gb, _off_pct * 100))
+        logf("[Krea2(AT)] 显存 %sGB（取整 %sG）：启用 layer_offloading（DiT 分层交换 %.0f%%，启动 OOM 自动重试兜底）" % (vram_gb, _tier, _off_pct * 100))
     elif vram_gb is not None:
-        logf("[Krea2(AT)] 显存 %sGB：不启用分层交换，保速度" % vram_gb)
+        logf("[Krea2(AT)] 显存 %sGB（取整 %sG）：不启用分层交换，保速度" % (vram_gb, _tier))
     if vpy:
         try:
             _opt_k, _od = resolve_optimizer(vpy, logf, requested=params.get("optimizer", "auto"))
@@ -5803,11 +5809,13 @@ def _check_at_train_driver(logf=print):
 def _log_mentions_start_oom(tail):
     """训练子进程日志是否出现「启动阶段」CUDA OOM（16G 边界显存抖动，重开即好）。
 
-    仅当出现 OOM 且还没有任何已完成训练步（avr_loss）时判定为启动 OOM → 自动重试一次；
+    仅当出现 OOM 且还没有任何已完成训练步（avr_loss）时判定为启动 OOM → 自动重试；
     训练中途 OOM（已有步数/avr_loss）不重试，避免浪费已跑进度。
+    只认明确的 OOM 关键字：原先连泛指的 "CUDA error" 也算，任何 CUDA 异常都会白重试 3 次
+    （每次都要重新加载并量化 26GB 底模，几分钟起，用户会以为卡死）。
     """
     blob = "\n".join(tail or [])
-    if not any(m in blob for m in ("out of memory", "CUDA error", "cudaErrorMemoryAllocation")):
+    if not any(m in blob for m in ("out of memory", "OutOfMemoryError", "cudaErrorMemoryAllocation")):
         return False
     if "avr_loss" in blob:
         return False
@@ -5877,7 +5885,9 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
         except Exception as _e:
             logf(f"[Krea2] 人物强绑定失败（忽略）: {_e}")
     if vram_gb is not None and vram_gb <= 16:
-        logf(f"[Krea2] ⚠ 显存 {vram_gb}GB（16G 档）：自动 qint8 + 768 长边 + low_vram + 关闭采样（训练完再测 LoRA）")
+        logf(f"[Krea2] ⚠ 显存 {vram_gb}GB（16G 档）：自动 qint8 + 512 长边 + low_vram + 分层交换（训练完再测 LoRA）")
+    elif vram_gb is not None and vram_gb < 20:
+        logf(f"[Krea2] 显存 {vram_gb}GB（中间档）：自动 qint8 + 512 + low_vram + 分层交换 0.4（原死区，已补省显存配置）")
     proj = _sanitize_dirname(params.get("project")) or "krea2_at"
     out_dir = data_sub("output", proj)
     os.makedirs(out_dir, exist_ok=True)
@@ -5903,10 +5913,15 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
     for _at in range(_at_attempts):
         if _at > 0:
             _log_tail.clear()
-            logf("[Krea2] ⚠ 启动阶段 CUDA OOM（16G 边界显存抖动），自动重试（%d/%d）…" % (_at + 1, _at_attempts))
-            if _at == _at_attempts - 1 and vram_gb is not None and vram_gb <= 16:
-                logf("[Krea2] 仍 OOM，改用更大分层交换（50%%，会稍慢）最后兜底一次…")
-                write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=vpy, logf=logf, vram_gb=vram_gb, force_offload=0.5)
+            logf("[Krea2] ⚠ 启动阶段 CUDA OOM（边界显存抖动），自动重试（%d/%d）…" % (_at + 1, _at_attempts))
+            # 逐步加大分层交换兜底（0.3 → 0.4 → 0.5），而不是用同一份配置重跑 3 次
+            # （原逻辑只有最后一次才加大，且要求 vram_gb <= 16 → 16.0x 的卡连兜底都拿不到）。
+            # 24G+ 本就不开分层交换，无需加大。
+            if vram_gb is not None and vram_gb < 24:
+                _new_off = min(0.3 + 0.1 * _at, 0.5)
+                logf("[Krea2] 仍 OOM，改用更大分层交换（%.0f%%，会稍慢）最后兜底…" % (_new_off * 100))
+                write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=vpy, logf=logf,
+                                    vram_gb=vram_gb, force_offload=_new_off)
         rc = run_stream([vpy, os.path.join(at_dir, "run.py"), cfg_path], cwd=at_dir, env=env, logf=logf, collect=_log_tail)
         if rc == 0:
             break
@@ -9096,7 +9111,9 @@ def _sample_preview_enabled(params, vram_gb):
     文本编码器出图，采样后残留显存 → 后续训练换页、越跑越慢（4080S 实测第 100 步后
     13.9→54s/it，2026-08-28）。故 16G 档默认关；用户可手动勾选开启，接受变慢。
     """
-    if vram_gb is not None and vram_gb <= 16.5:
+    # 阈值与 write_krea2_at_yaml 的分档一致（<20G 视为低显存档，默认不开采样）；
+    # 原来写 16.5，与训练侧 16G 档判定不一致：16.6 的卡会出现「训练按 16G 优化、采样却按高档默认开」。
+    if vram_gb is not None and vram_gb < 20:
         return bool(params.get("sample_preview", False))
     return bool(params.get("sample_preview", True))
 

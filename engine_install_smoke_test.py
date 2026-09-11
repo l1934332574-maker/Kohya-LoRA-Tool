@@ -2594,7 +2594,9 @@ def test_official_source_option(base: Path):
     assert "https://huggingface.co/" in gsrc, "GUI 缺 HuggingFace 直连"
     assert "_download_qwen3_from_modelscope" in src, "缺 Qwen3 魔搭兜底函数"
     assert "modelscope.cn/models/Qwen/Qwen3-0.6B" in src, "缺 Qwen3 魔搭直链"
-    assert "自动切换魔搭" in src, "缺 hf-mirror→魔搭切换"
+    # v0.15.11 后下载策略反转为「魔搭直链优先、hf-mirror 仅兜底」，文案随之改动；
+    # 断言跟着改为匹配当前实现（原断言 "自动切换魔搭" 已过期，会中断整个测试套件）。
+    assert "自动改用 hf-mirror" in src, "缺魔搭→hf-mirror 切换（魔搭优先、hf-mirror 兜底）"
     print("OFFICIAL_SOURCE_OPTION_OK")
 
 
@@ -3062,4 +3064,4 @@ def test_musubi_dataset_precheck(base: Path):
 
 if __name__ == "__main__":
     main()
-
+
