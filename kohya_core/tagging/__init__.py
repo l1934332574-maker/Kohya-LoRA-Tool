@@ -7,10 +7,10 @@ kohya_core.tagging
 ├─ complete   : 补全建议（离线词典 + 数据集已有标签）
 └─ normalize  : 标签文本规范化 / 拆分 / 拼接
 """
-from .dictionary import TagDict, default_dict_path, cat_label
+from .dictionary import TagDict, default_dict_path, cat_label, shared_dict
 from . import normalize, translate, complete
 
 __all__ = [
-    "TagDict", "default_dict_path", "cat_label",
+    "TagDict", "default_dict_path", "cat_label", "shared_dict",
     "normalize", "translate", "complete",
 ]

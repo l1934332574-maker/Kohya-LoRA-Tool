@@ -440,6 +440,11 @@ class App:
             self.root.after(8000, self._auto_check_update)
         except Exception:
             pass
+        # 闲时后台预热离线词典（约 1.2s 后开线程，不占主线程）
+        try:
+            self.root.after(1200, self._preload_tag_dict)
+        except Exception:
+            pass
 
     # ---------- 日志 ----------
     def _log(self, text):
@@ -470,6 +475,15 @@ class App:
         if tag:
             self.log.tag_add(tag, "end-2l", "end-1l")
         self.log.see("end")
+
+    # ---------- 离线词典预热 ----------
+    def _preload_tag_dict(self):
+        """启动后闲时在后台线程预热离线词典（17 万条），避免首次打开词典卡顿/白屏。"""
+        try:
+            import gui.tag_tools
+            gui.tag_tools.preload_async()
+        except Exception:
+            pass
 
     # ---------- 线程 / 队列 ----------
     def _poll(self):
@@ -3150,9 +3164,9 @@ class App:
                 """一张功能卡片，返回 (卡片, 标题行)——标题行用来放右侧按钮。"""
                 card = ctk.CTkFrame(body, fg_color=CARD, corner_radius=10,
                                     border_width=1, border_color=BORDER)
-                card.pack(fill="x", pady=(0, 10))
+                card.pack(fill="x", pady=(0, 8))
                 head = ctk.CTkFrame(card, fg_color="transparent")
-                head.pack(fill="x", padx=14, pady=(11, 0))
+                head.pack(fill="x", padx=14, pady=(9, 0))
                 ctk.CTkLabel(head, text=title, font=ui_font(FONT_BODY),
                              text_color=TXT).pack(side="left")
                 if hint:
@@ -3165,7 +3179,7 @@ class App:
                 var = tk.StringVar(value=text)
                 lbl = ctk.CTkLabel(card, textvariable=var, font=ui_font(FONT_HINT), text_color=HINT,
                                    anchor="w", justify="left", wraplength=690)
-                lbl.pack(fill="x", padx=14, pady=(6, 11))
+                lbl.pack(fill="x", padx=14, pady=(5, 9))
                 return var, lbl
 
             # ---------- ① 显卡状态 ----------
@@ -3180,7 +3194,7 @@ class App:
                 "小工具·查看显卡", str))
 
             # ---------- ② 清理残留训练进程 ----------
-            c2, h2 = _card("🧹 清理残留训练进程", "释放显存/内存；正在跑的训练会自动排除")
+            c2, h2 = _card("🧹 清理残留训练进程", "释放显存/内存；正在跑的训练自动排除")
             self.btn_tools_kill = ctk.CTkButton(h2, text="结束所选", width=104, height=26, fg_color="transparent",
                                                 hover_color="#252a36", border_width=1, border_color=BORDER,
                                                 text_color=SUB, corner_radius=6, font=ui_font(FONT_HINT),
@@ -3213,7 +3227,7 @@ class App:
                 "小工具·清理内存", self._fmt_mem, self._short_mem))
 
             # ---------- ④ 清理临时缓存 ----------
-            c4, h4 = _card("🗑 清理临时缓存", "只清可再生缓存（更新包/采样提示词/临时文件），不动模型·数据集·输出·断点")
+            c4, h4 = _card("🗑 清理临时缓存", "只清可再生缓存，不动模型·数据集·输出·断点")
             self.btn_tools_cache = ctk.CTkButton(h4, text="🧹 清理缓存", width=104, height=26, fg_color="transparent",
                                                  hover_color="#252a36", border_width=1, border_color=BORDER,
                                                  text_color=SUB, corner_radius=6, font=ui_font(FONT_HINT))
@@ -3232,8 +3246,13 @@ class App:
             self.tools_all_var, _al = _status(c5, "待执行")
 
             # ---------- ⑥ 下载源 ----------
-            c6, h6 = _card("🌐 下载源", "国内镜像太慢/失败时改用官方源（PyTorch 官方 / GitHub / HuggingFace，需开代理）")
+            c6, h6 = _card("🌐 下载源", "国内镜像太慢/失败时改用官方源（需开代理）")
             self.var_official_src = tk.BooleanVar(value=bool(core._load_app_settings().get("download_official_first")))
+
+            def _src_status_text():
+                return ("影响 torch 大轮子 / 引擎源码 / 底模下载，立即生效 · 当前：%s" %
+                        ("官方源优先（PyTorch/GitHub/HuggingFace）" if self.var_official_src.get()
+                         else "国内镜像优先（魔搭/阿里/清华，官方源备用）"))
 
             def _toggle_official_src():
                 try:
@@ -3244,21 +3263,25 @@ class App:
                               ("已启用" if self.var_official_src.get() else "已关闭，恢复"))
                 except Exception as _e:
                     self._log("[下载源] 保存设置失败：%s" % _e)
+                try:
+                    self.tools_src_var.set(_src_status_text())
+                except Exception:
+                    pass
 
             self.chk_official_src = ctk.CTkCheckBox(
-                h6, text="国内镜像太慢时改用官方源（需开代理）", variable=self.var_official_src,
+                h6, text="官方源优先", variable=self.var_official_src,
                 command=_toggle_official_src, font=ui_font(FONT_HINT), text_color=TXT,
                 fg_color=ACC, hover_color=ACC_H, checkbox_width=18, checkbox_height=18)
             self.chk_official_src.pack(side="right")
-            ctk.CTkLabel(c6, text="影响 torch 大轮子 / 引擎源码 / 底模下载，立即生效", font=ui_font(FONT_HINT),
-                         text_color=HINT, anchor="w").pack(fill="x", padx=14, pady=(6, 11))
+            self.tools_src_var, _sl = _status(c6, _src_status_text())
 
             # ---------- ⑦ 离线标签词典 ----------
-            c7, h7 = _card("📖 离线标签词典", "内置 17 万+ 条中英标签（纯离线）；查词、看热度、复制、标签篮")
+            c7, h7 = _card("📖 离线标签词典", "内置 17 万+ 条中英标签（纯离线）")
             ctk.CTkButton(h7, text="📖 打开词典", width=104, height=26, fg_color="transparent",
                           hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
                           corner_radius=6, font=ui_font(FONT_HINT),
                           command=self.cmd_open_tag_dict).pack(side="right")
+            self.tools_dict_var, _dl = _status(c7, "在独立窗口查词/看热度/复制/标签篮（首次已后台预热，秒开）")
 
             # ---------- 详细输出（默认折叠，共用一份） ----------
             dhead = ctk.CTkFrame(body, fg_color="transparent")
@@ -5967,8 +5990,9 @@ class LabelEditorWindow:
         self._thumbs = {}
         self._current = None      # 当前选中的 record 下标
         self._dirty = set()       # 有未保存修改的 record 下标
-        self._tagdict = None      # 离线中英词典（惰性加载，词典窗/统计共用）
+        self._tagdict = None      # 离线中英词典（进程级共享单例，词典窗/统计共用）
         self._dict_win = None     # 中英词典窗引用（避免重复开多个）
+        self._ver = 0             # 标签内容版本号（词典窗频率缓存失效用）
         self._build_ui()
         self.refresh()
 
@@ -6089,6 +6113,7 @@ class LabelEditorWindow:
             else:
                 self._dirty.discard(self._current)
         self.records = core.list_dataset_images(self.train_dir)
+        self._ver = getattr(self, "_ver", 0) + 1
         self._thumbs = {}
         self._dirty = set()
         self._current = None
@@ -6164,6 +6189,7 @@ class LabelEditorWindow:
         try:
             core.save_caption(it["txt"], text)
             it["caption"] = text
+            self._ver = getattr(self, "_ver", 0) + 1
             self._dirty.discard(self._current)
             if not quiet:
                 self._set_status(f"已保存: {os.path.basename(it['txt'])}")
@@ -6406,17 +6432,21 @@ class LabelEditorWindow:
 
     # ---------- 中英词典（v1 离线词条） ----------
     def get_tagdict(self):
-        """惰性加载离线中英词典（编辑器/统计/词典窗共用，进程内只解析一次）。"""
+        """取进程级共享离线中英词典（编辑器/统计/词典窗/预热线程共用，全进程只解析一次）。"""
         if self._tagdict is None:
             try:
-                from kohya_core.tagging import TagDict
-                self._tagdict = TagDict()
+                from kohya_core.tagging import shared_dict
+                self._tagdict = shared_dict()
                 self._log_app("[标签] 已加载离线中英词典：%d 条" % len(self._tagdict))
             except Exception as e:
                 self._log_app("[标签] 加载离线词典失败：%s" % e)
                 self._tagdict = False
         td = self._tagdict
         return td if td is not None and td is not False else None
+
+    def records_version(self):
+        """数据集标签内容版本号（refresh / 保存 / 插入时自增），供词典窗频率缓存失效。"""
+        return getattr(self, "_ver", 0)
 
     def insert_tag_to_caption(self, en_tag):
         """把词典选中的英文标签追加到当前图片标签末尾（已存在则跳过）。
@@ -6435,6 +6465,7 @@ class LabelEditorWindow:
         new = (base + ", " + tag) if base.strip() else tag
         self.caption.delete("1.0", "end")
         self.caption.insert("1.0", new + "\n")
+        self._ver = getattr(self, "_ver", 0) + 1
         self._mark_dirty()
         self._set_status("已把「%s」加入当前图片标签" % tag)
         self._log_app("[标签] 词典插入: %s" % tag)
@@ -6491,4 +6522,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
+

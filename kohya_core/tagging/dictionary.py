@@ -15,6 +15,7 @@
 import os
 import sys
 import bisect
+import threading
 
 try:
     from kohya_core import KIT_DIR
@@ -59,6 +60,8 @@ class TagDict(object):
         self._zh_uniq = None     # 排序后的唯一中文列表（前缀 bisect）
         self._zh_cache = {}
         self._loaded = False
+        # 预热线程与 UI 线程可能共用同一实例，载入过程串行化（可重入：_ensure_zh 会调 _ensure）
+        self._load_lock = threading.RLock()
 
     # ---------- 载入 ----------
     def available(self):
@@ -72,52 +75,61 @@ class TagDict(object):
     def _ensure(self):
         if self._loaded:
             return
-        if not os.path.isfile(self.path):
-            self._loaded = True  # 缺文件时表现为空词典，界面提示由调用方处理
-            return
-        en2zh, counts, cats = {}, {}, {}
-        with open(self.path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.rstrip("\r\n")
-                if not line:
-                    continue
-                parts = line.split("\t")
-                if len(parts) < 4:
-                    continue
-                name = parts[0].strip()
-                if not name:
-                    continue
-                cn = parts[3].strip()
-                try:
-                    cat = int(parts[1])
-                except Exception:
-                    cat = 0
-                try:
-                    cnt = int(parts[2])
-                except Exception:
-                    cnt = 0
-                en2zh[name] = cn
-                counts[name] = cnt
-                cats[name] = cat
-        self.en2zh = en2zh
-        self.counts = counts
-        self.cats = cats
-        self._names = sorted(en2zh.keys())
-        self._loaded = True
+        with self._load_lock:
+            if self._loaded:
+                return
+            if not os.path.isfile(self.path):
+                self._loaded = True  # 缺文件时表现为空词典，界面提示由调用方处理
+                return
+            en2zh, counts, cats = {}, {}, {}
+            with open(self.path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.rstrip("\r\n")
+                    if not line:
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) < 4:
+                        continue
+                    name = parts[0].strip()
+                    if not name:
+                        continue
+                    cn = parts[3].strip()
+                    try:
+                        cat = int(parts[1])
+                    except Exception:
+                        cat = 0
+                    try:
+                        cnt = int(parts[2])
+                    except Exception:
+                        cnt = 0
+                    en2zh[name] = cn
+                    counts[name] = cnt
+                    cats[name] = cat
+            self.en2zh = en2zh
+            self.counts = counts
+            self.cats = cats
+            self._names = sorted(en2zh.keys())
+            self._loaded = True
 
     def _ensure_zh(self):
         self._ensure()
         if self._zh_map is not None:
             return
-        zmap = {}
-        for name, cn in self.en2zh.items():
-            if not cn:
-                continue
-            zmap.setdefault(cn, []).append((self.counts.get(name, 0), name))
-        for cn in zmap:
-            zmap[cn].sort(key=lambda kv: (-kv[0], kv[1]))
-        self._zh_map = zmap
-        self._zh_uniq = sorted(zmap.keys())
+        with self._load_lock:
+            if self._zh_map is not None:
+                return
+            zmap = {}
+            for name, cn in self.en2zh.items():
+                if not cn:
+                    continue
+                zmap.setdefault(cn, []).append((self.counts.get(name, 0), name))
+            for cn in zmap:
+                zmap[cn].sort(key=lambda kv: (-kv[0], kv[1]))
+            uniq = sorted(zmap.keys())
+            # 先写 _zh_uniq 再写 _zh_map：读线程看到 _zh_map 非 None 时 _zh_uniq 必已就绪
+            # （预热线程与 UI 线程并发时不会读到半成品状态）
+            self._zh_uniq = uniq
+            self._zh_map = zmap
 
     # ---------- 英→中 ----------
     def to_zh(self, name):
@@ -228,3 +240,18 @@ class TagDict(object):
     def __len__(self):
         self._ensure()
         return len(self.en2zh)
+
+
+# ---------- 进程级共享单例 ----------
+_SHARED = None
+_SHARED_LOCK = threading.Lock()
+
+
+def shared_dict():
+    """进程级共享词典单例（标签编辑器 / 词典窗 / 预热线程共用，避免重复解析 17 万条）。"""
+    global _SHARED
+    if _SHARED is None:
+        with _SHARED_LOCK:
+            if _SHARED is None:
+                _SHARED = TagDict()
+    return _SHARED
