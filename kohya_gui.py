@@ -390,6 +390,11 @@ class App:
         self.crop_ratio_var = tk.StringVar(value="不裁切（保比例）")
         # Qwen-Image / Z-Image 的画风/人物子模式（AT_SUB_LABELS 见类级常量）
         self.at_sub_var = tk.StringVar(value="人物（保留全部标签）")
+        # 概念模式：概念类型 + 自动清洗概念标签
+        # ⚠ 必须建在 __init__：主页「创建项目」会在主卡片（_build_main_cards 延迟加载）之前
+        #   调用 _collect_project_data() -> _collect_params()，变量若只在卡片里建就会 AttributeError
+        self.concept_type_var = tk.StringVar(value=core.CONCEPT_TYPE_LABELS["form"])
+        self.clean_concept_var = tk.BooleanVar(value=True)
         self.reg_var = tk.StringVar()
         self.global_pos_var = tk.StringVar()
         self.global_neg_var = tk.StringVar()
@@ -1927,7 +1932,7 @@ class App:
         self.at_sub_hint.pack(side="left", padx=(12, 0))
         self.at_sub_row.pack_forget()
         # 概念模式专属：概念类型（形态/服装/物品/身体部位）——只影响提示文案与采样预览提示词
-        self.concept_type_var = tk.StringVar(value=core.CONCEPT_TYPE_LABELS["form"])
+        # （concept_type_var / clean_concept_var 在 __init__ 里创建，这里只建控件）
         self.concept_type_row = ctk.CTkFrame(card2, fg_color="transparent")
         ctk.CTkLabel(self.concept_type_row, text="概念类型", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
         self.concept_type_combo = ctk.CTkComboBox(
@@ -1942,7 +1947,6 @@ class App:
         self.concept_type_hint.pack(side="left", padx=(12, 0))
         self.concept_type_row.pack_forget()
         # 概念模式：自动清洗「概念本身」的标签（默认开；关掉会导致单独用 trigger 出不来衣服）
-        self.clean_concept_var = tk.BooleanVar(value=True)
         self.clean_concept_row = ctk.CTkFrame(card2, fg_color="transparent")
         self.clean_concept_cb = ctk.CTkCheckBox(
             self.clean_concept_row, text="自动清洗概念标签（推荐）",
@@ -1955,7 +1959,8 @@ class App:
             text="删掉描述这个概念本身的标签（如 black jacket / long sleeves / zipper），让触发词独占它",
             font=ui_font(FONT_HINT), text_color=HINT)
         self.clean_concept_hint.pack(side="left", padx=(10, 0))
-        self.clean_concept_row.pack_forget()        # ⚡ 快跑档手动开关（全模式通用：自动=按显存自动启用，开=强制快跑档，关=常规）
+        self.clean_concept_row.pack_forget()
+        # ⚡ 快跑档手动开关（全模式通用：自动=按显存自动启用，开=强制快跑档，关=常规）
         self.fast_tier_row = ctk.CTkFrame(card2, fg_color="transparent")
         ctk.CTkLabel(self.fast_tier_row, text="⚡ 快跑档", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
         self.fast_tier_var = tk.StringVar(value=core.FAST_TIER_LABELS["auto"])
@@ -2240,6 +2245,13 @@ class App:
         except Exception:
             pass
         return False
+
+    def _clean_concept_flag(self):
+        """概念标签自动清洗开关（主卡片未构建时也安全，默认 True）。"""
+        try:
+            return bool(self.clean_concept_var.get())
+        except Exception:
+            return True
 
     def _on_concept_type_change(self):
         """概念类型切换：刷新提示文案 + 自动保存。"""
@@ -3720,7 +3732,7 @@ class App:
             "base_type": self.base_type,
             "at_sub_mode": self._at_sub_label(),
             "concept_type": self._concept_type_key(),
-            "clean_concept": bool(self.clean_concept_var.get()),
+            "clean_concept": self._clean_concept_flag(),
             "fast_tier": (core.fast_tier_code(self.fast_tier_var.get())
                           if getattr(self, "fast_tier_var", None) is not None else "auto"),
             "trigger": self.trigger_var.get().strip(),

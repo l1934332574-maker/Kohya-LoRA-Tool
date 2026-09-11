@@ -1,6 +1,6 @@
 {
-  "version": "v0.16.1",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.16.1/Setup.exe",
+  "version": "v0.16.2",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.16.2/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "notes": "v0.16.1 更新（2026-09-10）：\n    · 新增：概念模式新增「概念类型」——🧜 形态/种族 / 👗 服装 / 🗿 物品 / 👁 身体部位；只影响数据集提示与采样预览提示词，训练逻辑不变；\n    · 优化：概念模式采样预览按类型补词——服装/形态/身体部位自动补 1girl 主体与 full body/close-up，物品不补主体（修掉「飘着的衣服/畸形人物」）；\n    · 优化：概念模式数据集提示按类型显示，服装/物品明确提示「换不同人脸、不同画风、不同姿势，只让服装/物品保持一致」；\n    · 修复：概念模式强绑定守卫不一致——预处理会做强绑定但训练入口被跳过（改 trigger 后前缀不重算）；现已与人物模式统一；\n    · 兼容：项目配置 / 分享配置新增 concept_type，旧配置自动回退「形态/种族」。"
+  "notes": "v0.16.2 更新（2026-09-10）：\n    · 新增：概念模式新增「概念类型」——🧜 形态/种族 / 👗 服装 / 🗿 物品 / 👁 身体部位；只影响数据集提示与采样预览提示词，训练逻辑不变；\n    · 优化：概念模式采样预览按类型补词——服装/形态/身体部位自动补 1girl 主体与 full body/close-up，物品不补主体（修掉「飘着的衣服/畸形人物」）；\n    · 优化：概念模式数据集提示按类型显示，服装/物品明确提示「换不同人脸、不同画风、不同姿势，只让服装/物品保持一致」；\n    · 修复：概念模式强绑定守卫不一致——预处理会做强绑定但训练入口被跳过（改 trigger 后前缀不重算）；现已与人物模式统一；\n    · 兼容：项目配置 / 分享配置新增 concept_type，旧配置自动回退「形态/种族」。"
 }
