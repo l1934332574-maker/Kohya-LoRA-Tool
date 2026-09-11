@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.16.0"
+APP_VERSION = "0.16.1"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2677,7 +2677,8 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     if _sub_mode in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
-            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
+            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf,
+                                                   trigger_only=((params.get("at_sub_mode") or "character") == "concept"))
             for _w in _warns:
                 logf(f"[Krea2] ⚠ {_w}")
         except Exception as _e:
@@ -2921,7 +2922,8 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     if _sub_mode in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
-            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
+            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf,
+                                                   trigger_only=((params.get("at_sub_mode") or "character") == "concept"))
             for _w in _warns:
                 logf(f"[FLUX.2] ⚠ {_w}")
         except Exception as _e:
@@ -4401,7 +4403,8 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     if _sub_mode in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
-            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
+            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf,
+                                                   trigger_only=((params.get("at_sub_mode") or "character") == "concept"))
             for _w in _warns:
                 logf(f"[Krea2(Fizgig)] ⚠ {_w}")
         except Exception as _e:
@@ -4568,7 +4571,8 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
     if _sub_mode in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
-            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
+            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf,
+                                                   trigger_only=((params.get("at_sub_mode") or "character") == "concept"))
             for _w in _warns:
                 logf(f"[FLUX.2(Fizgig)] ⚠ {_w}")
         except Exception as _e:
@@ -5866,7 +5870,8 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
     if _sub_mode in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
-            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
+            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf,
+                                                   trigger_only=((params.get("at_sub_mode") or "character") == "concept"))
             for _w in _warns:
                 logf(f"[Krea2] ⚠ {_w}")
         except Exception as _e:
@@ -5947,7 +5952,8 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     if (params.get("at_sub_mode") or "character") in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
-            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf)
+            _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf,
+                                                   trigger_only=((params.get("at_sub_mode") or "character") == "concept"))
             for _w in _warns:
                 logf(f"[{info['label']}] ⚠ {_w}")
         except Exception as _e:
@@ -6536,7 +6542,7 @@ def gpu_status_text():
 # ---------- 配置导出 / 导入（可分享；不含本机路径与提示词，提示词可选） ----------
 _CFG_PARAM_INT_KEYS = ("rank", "alpha", "repeats", "max_epochs", "resolution", "video_steps")
 _CFG_PARAM_FLOAT_KEYS = ("unet_lr", "te_lr")
-_CFG_PARAM_BOOL_KEYS = ("strong_bind", "sample_preview", "compile")
+_CFG_PARAM_BOOL_KEYS = ("strong_bind", "clean_concept", "sample_preview", "compile")
 _CFG_PARAM_STR_KEYS = ("optimizer", "quant_mode", "blocks_to_swap", "save_every", "crop_ratio")
 _CFG_PROMPT_KEYS = ("trigger", "style_caption", "sample_prompt", "global_pos", "global_neg")
 _CFG_AT_LABEL_TO_KEY = {v: k for k, v in AT_SUB_LABELS.items()}
@@ -6751,7 +6757,7 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
                reg_dir=None, repeats=5, dedup=False, wd14=True,
                square_crop=False, crop_ratio=None, min_size=0, blur_threshold=0.0, report=None,
                keep_tokens=None, project=None, style_caption="", dataset_mode=None,
-               strong_bind=True):
+               strong_bind=True, concept_type="", clean_concept=True):
     """strong_bind：人物模式自动强绑定（trigger + 100% 一致特征 → 固定前缀，keep_tokens 覆盖整组）。"""
     # 旧调用方不传 strong_bind -> 人物模式默认开启（增量功能，不破坏旧流程）
     if strong_bind is None:
@@ -6804,6 +6810,13 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
             cmd.append("--dedup")
         if not wd14:
             cmd.append("--no-wd14")
+        if concept_type:
+            cmd += ["--concept-type", str(concept_type)]
+            if not clean_concept:
+                cmd.append("--no-clean-concept")
+            _cn = {"form": "形态/种族", "outfit": "服装", "object": "物品", "bodypart": "身体部位"}.get(str(concept_type), concept_type)
+            logf(f"[预处理] 概念模式（{_cn}）：自动清洗概念标签 = {'开（推荐）' if clean_concept else '关'}"
+                 + ("" if clean_concept else "（关闭后 trigger 可能被标签架空，单独用 trigger 出不来）"))
     else:
         if trigger:
             cmd += ["--trigger", trigger]
@@ -9239,7 +9252,8 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
             if mode in ("character", "concept") and params.get("strong_bind", True):
                 try:
                     import preprocess as _pp
-                    _kt, _warns = _pp.apply_strong_binding(train_dir, _trig, logf)
+                    _kt, _warns = _pp.apply_strong_binding(train_dir, _trig, logf,
+                                                           trigger_only=(mode == "concept"))
                     for _w in _warns:
                         logf(f"[训练] ⚠ {_w}")
                     if _kt:
@@ -11792,6 +11806,8 @@ class App:
             repeats=params["repeats"],
             dedup=(_mode == "character"),
             wd14=True,
+            concept_type=params.get("concept_type") or "",
+            clean_concept=bool(params.get("clean_concept", True)),
         ), "数据预处理")
 
     def cmd_start_ui(self):
@@ -11903,6 +11919,8 @@ class App:
                 crop_ratio=params.get("crop_ratio") or "",
                 min_size=256, blur_threshold=30.0, report=report,
                 keep_tokens=None,
+                concept_type=params.get("concept_type") or "",
+                clean_concept=bool(params.get("clean_concept", True)),
             )
             stats = {}
             if os.path.isfile(report):

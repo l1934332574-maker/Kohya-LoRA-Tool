@@ -1725,6 +1725,7 @@ class App:
                 "sample_interval": params.get("sample_interval") or 0,
                 "optimizer": params.get("optimizer") or "auto",
                 "strong_bind": bool(params.get("strong_bind", True)),
+                "clean_concept": bool(params.get("clean_concept", True)),
                 "crop_ratio": params.get("crop_ratio") or "",
                 "sample_prompt": params.get("sample_prompt") or "",
             },
@@ -1821,6 +1822,12 @@ class App:
                 if k == "strong_bind":
                     try:
                         self.strong_bind_var.set(bool(v))
+                    except Exception:
+                        pass
+                    continue
+                if k == "clean_concept":
+                    try:
+                        self.clean_concept_var.set(bool(v))
                     except Exception:
                         pass
                     continue
@@ -1934,7 +1941,21 @@ class App:
         self.concept_type_hint = ctk.CTkLabel(self.concept_type_row, text="", font=ui_font(FONT_HINT), text_color=HINT)
         self.concept_type_hint.pack(side="left", padx=(12, 0))
         self.concept_type_row.pack_forget()
-        # ⚡ 快跑档手动开关（全模式通用：自动=按显存自动启用，开=强制快跑档，关=常规）
+        # 概念模式：自动清洗「概念本身」的标签（默认开；关掉会导致单独用 trigger 出不来衣服）
+        self.clean_concept_var = tk.BooleanVar(value=True)
+        self.clean_concept_row = ctk.CTkFrame(card2, fg_color="transparent")
+        self.clean_concept_cb = ctk.CTkCheckBox(
+            self.clean_concept_row, text="自动清洗概念标签（推荐）",
+            variable=self.clean_concept_var, font=ui_font(FONT_BODY),
+            fg_color=ACC, hover_color=ACC_H, text_color=TXT,
+            checkbox_width=18, checkbox_height=18)
+        self.clean_concept_cb.pack(side="left")
+        self.clean_concept_hint = ctk.CTkLabel(
+            self.clean_concept_row,
+            text="删掉描述这个概念本身的标签（如 black jacket / long sleeves / zipper），让触发词独占它",
+            font=ui_font(FONT_HINT), text_color=HINT)
+        self.clean_concept_hint.pack(side="left", padx=(10, 0))
+        self.clean_concept_row.pack_forget()        # ⚡ 快跑档手动开关（全模式通用：自动=按显存自动启用，开=强制快跑档，关=常规）
         self.fast_tier_row = ctk.CTkFrame(card2, fg_color="transparent")
         ctk.CTkLabel(self.fast_tier_row, text="⚡ 快跑档", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
         self.fast_tier_var = tk.StringVar(value=core.FAST_TIER_LABELS["auto"])
@@ -2310,6 +2331,12 @@ class App:
                         _ctr.pack(fill="x", padx=22, pady=(0, 6))
                     else:
                         _ctr.pack_forget()
+                _ccr = getattr(self, "clean_concept_row", None)
+                if _ccr is not None:
+                    if self._is_concept_ctx():
+                        _ccr.pack(fill="x", padx=22, pady=(0, 6))
+                    else:
+                        _ccr.pack_forget()
             except Exception:
                 pass
             # ⚡ 快跑档手动开关：仅本身实现快跑档的 Z-Image/Qwen-Image 显示（档位各归各，不套用别的引擎）
@@ -3693,6 +3720,7 @@ class App:
             "base_type": self.base_type,
             "at_sub_mode": self._at_sub_label(),
             "concept_type": self._concept_type_key(),
+            "clean_concept": bool(self.clean_concept_var.get()),
             "fast_tier": (core.fast_tier_code(self.fast_tier_var.get())
                           if getattr(self, "fast_tier_var", None) is not None else "auto"),
             "trigger": self.trigger_var.get().strip(),
@@ -4301,7 +4329,9 @@ class App:
                 keep_tokens=None, project=self.current_project,
                 style_caption=params.get("style_caption") or "",
                 dataset_mode="character" if params.get("mode") != "style" else None,
-                strong_bind=params.get("strong_bind", True))
+                strong_bind=params.get("strong_bind", True),
+                concept_type=params.get("concept_type") or "",
+                clean_concept=bool(params.get("clean_concept", True)))
             self._log("[OK] 预处理完成")
         except core.StopRequested:
             self._log("[停止] 预处理已手动停止")
@@ -4459,7 +4489,9 @@ class App:
                 keep_tokens=None, project=self.current_project,
                 style_caption=params.get("style_caption") or "",
                 dataset_mode="character" if params.get("mode") != "style" else None,
-                strong_bind=params.get("strong_bind", True))
+                strong_bind=params.get("strong_bind", True),
+                concept_type=params.get("concept_type") or "",
+                clean_concept=bool(params.get("clean_concept", True)))
             stats = {}
             if os.path.isfile(report):
                 try:

@@ -78,7 +78,9 @@ def run_queue_item(name, logf=print):
                  min_size=256, blur_threshold=30.0, report=None, keep_tokens=None,
                  project=name, style_caption=p.get("style_caption") or "",
                  dataset_mode="character" if mode != "style" else None,
-                 strong_bind=p.get("strong_bind", True))
+                 strong_bind=p.get("strong_bind", True),
+                 concept_type=p.get("concept_type") or "",
+                 clean_concept=bool(p.get("clean_concept", True)))
     logf("[队列] 预处理完成，开始训练…")
     if mode in ("qwen_image", "zimage"):
         K.train_at_image(logf, mode=mode, params=p, vram_gb=vram, resume_from=None, progress=None)

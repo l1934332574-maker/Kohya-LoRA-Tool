@@ -144,6 +144,95 @@ def filter_character_tags(text: str) -> str:
     return ", ".join(kept)
 
 
+# ============================================================
+# 概念模式：清洗「描述概念本身」的标签（2026-09-11）
+#
+# 原理：概念 = 训练集里唯一不变的东西。
+#   如果 WD14 把概念本身拆成了通用标签（黑夹克 / 长袖 / 有领子 / 有扣子…），
+#   基础模型靠这些标签就能把衣服画出来 → trigger 被架空 → 单独写 trigger 出不来。
+#   所以概念模式必须把这些标签删掉，让 trigger 独占概念。
+#
+# 策略分两类：
+#   · 服装 / 形态  —— 概念词可枚举，用词表精准删；
+#   · 物品 / 身体部位 —— 无法穷举，改删「训练集里 100% 一致」的标签
+#     （调用前已排除通用/姿势/场景词，见 CONCEPT_KEEP_TAGS）。
+# ============================================================
+
+CONCEPT_FILTER_WORDS = {
+    # 服装：衣服本体 + 穿着部位 + 服装配件（不含帽子/眼镜/包等可独立控制的配饰）
+    "outfit": (
+        r"dress|skirt|shirt|blouse|jacket|coat|hoodie|sweater|cardigan|vest|waistcoat|"
+        r"pants|jeans|shorts|trousers|leggings|stockings|thighhighs|kneesocks|socks|"
+        r"boots?|shoes?|sneakers?|sandals?|gloves?|mittens?|"
+        r"tie|necktie|bowtie|belt|sash|apron|collar|sailor collar|"
+        r"uniform|school uniform|armor|costume|cosplay|"
+        r"swimsuit|bikini|underwear|bra|panties|lingerie|"
+        r"one-piece|jumpsuit|overalls|kimono|yukata|qipao|hanfu|"
+        r"cape|cloak|capelet|poncho|shawl|tunic|"
+        r"sleeves?|sleeved|sleeveless|long sleeves|short sleeves|puffy sleeves|"
+        r"buttons?|buttoned|zippers?|zippered|pockets?|frills?|frilled|lace|pleats?|pleated|"
+        r"collars?|collared|necklines?|hem|lapels?"
+    ),
+    # 形态 / 种族：身体形态本身（尾巴/翅膀/角/獠牙…）
+    "form": (
+        r"mermaid|mermaid tail|fish tail|fins?|centaur|lamia|"
+        r"monster girl|dragon|dragon girl|demon|demon girl|angel|"
+        r"slime|slime girl|puppet|marionette|doll|ball-jointed doll|"
+        r"cyborg|android|robot|mecha|tentacles?|"
+        r"scales|feathers|fur|furry|"
+        r"horns?|wings?|tails?|multiple tails|kitsune|"
+        r"animal ears|cat ears|fox ears"
+    ),
+}
+
+_CONCEPT_FILTER_RE = {
+    k: re.compile(r"\b(" + v + r")\b", re.IGNORECASE) for k, v in CONCEPT_FILTER_WORDS.items()
+}
+
+# 「100% 一致标签」删除路径下，永不自动删除的标签（姿势 / 场景 / 视角 / 交互）
+# —— 这些即使 100% 一致也不属于「概念本身」，删了会被 trigger 反吸收
+CONCEPT_KEEP_TAGS = frozenset({
+    "standing", "sitting", "kneeling", "lying", "lying on back", "lying on stomach",
+    "squatting", "crouching", "crawling", "walking", "running", "jumping", "dancing",
+    "posing", "pose", "arms up", "arms behind back", "crossed arms", "hand on hip",
+    "hands on hips", "hand in pocket", "hands in pockets", "pointing", "thumbs up",
+    "peace sign", "victory sign", "spread legs", "legs up", "on back", "on stomach",
+    "all fours", "bent over", "straddling", "girl on top", "cowgirl position",
+    "bed", "on bed", "bed sheet", "indoors", "outdoors", "water", "bathroom", "forest",
+    "city", "street", "classroom", "window", "night", "day", "sunlight", "sky",
+    "from above", "from below", "from side", "from behind", "profile", "pov",
+    "upper body", "lower body", "full body", "portrait", "close-up",
+})
+
+# 概念类型 -> 中文名（日志用）
+CONCEPT_TYPE_CN = {"form": "形态/种族", "outfit": "服装", "object": "物品", "bodypart": "身体部位"}
+
+
+def filter_concept_tags(text, concept_type, extra_remove=None):
+    """概念模式：删除「描述概念本身」的标签，让 trigger 独占这个概念。
+
+    - 服装 / 形态：走 CONCEPT_FILTER_WORDS 词表；
+    - 物品 / 身体部位：词表不可穷举，由 extra_remove 传入「100% 一致标签」集合；
+    - 返回 (新 caption, 被删标签列表)。
+    """
+    if not text:
+        return "", []
+    ct = (concept_type or "").strip().lower()
+    pattern = _CONCEPT_FILTER_RE.get(ct)
+    extra = {_norm_tag(t) for t in (extra_remove or [])}
+    kept, removed = [], []
+    for raw in text.split(","):
+        s = raw.strip()
+        if not s:
+            continue
+        n = _norm_tag(s)
+        if n in extra or (pattern is not None and pattern.search(n)):
+            removed.append(n)
+        else:
+            kept.append(s)
+    return ", ".join(kept), removed
+
+
 def insert_trigger(caption: str, trigger: str) -> str:
     """人物模式：把 trigger 触发词插入 caption 第一行。
 
@@ -252,7 +341,7 @@ def analyze_caption_features(train_dir, trigger=""):
             "has_separator": has_sep}
 
 
-def apply_strong_binding(train_dir, trigger, logf=print):
+def apply_strong_binding(train_dir, trigger, logf=print, trigger_only=False):
     """人物 LoRA 自动强绑定：把 trigger + 100% 一致身份特征拼成固定前缀。
 
     - 无 trigger / 无标签 -> 返回 (0, [])（不强绑）。
@@ -260,6 +349,9 @@ def apply_strong_binding(train_dir, trigger, logf=print):
       keep_tokens = 固定区标签数；写回时去掉 |||。
     - 否则自动模式：前缀 = trigger + 100% 一致特征；重写每张 caption 使前缀在开头；
       keep_tokens = 前缀标签数（幂等：已以完整前缀开头则跳过）。
+    - trigger_only=True（概念模式）：固定前缀【只放 trigger】，不把 100% 一致标签
+      锁进前缀——服装/物品这类概念若把描述标签一起锁进去，trigger 会被架空；
+      这些标签改为给用户「一致性警告」，让用户自己决定加多样性还是保留。
     - 返回 (keep_tokens, warnings)。
     """
     trigger = (trigger or "").strip()
@@ -311,8 +403,19 @@ def apply_strong_binding(train_dir, trigger, logf=print):
         return max_keep, warnings
 
     # ---- 自动模式 ----
-    prefix = trig_tags + list(info["consistent"])
+    if trigger_only:
+        # 概念模式：前缀只放 trigger；100% 一致的标签只给警告，不锁进前缀
+        prefix = list(trig_tags)
+        for _t in info["consistent"]:
+            warnings.append(
+                f"标签「{_t}」在训练集里 100% 出现——会被 trigger 一起吸收（换场景/换人时可能跟着变）；"
+                "建议增加该维度的多样性，或确认它就是要绑定的概念本身")
+    else:
+        prefix = trig_tags + list(info["consistent"])
     if len(prefix) <= len(trig_tags):
+        if trigger_only and info["consistent"]:
+            logf(f"[强绑定] 概念模式：固定前缀只放 trigger（keep_tokens={max(1, len(trig_tags))}）；"
+                 f"另有 {len(info['consistent'])} 个 100% 一致标签未锁进前缀（已给一致性警告）")
         return max(1, len(trig_tags)), warnings
     prefix_norm = [_norm_tag(t) for t in prefix]
     keep = len(prefix)
@@ -348,8 +451,11 @@ def apply_strong_binding(train_dir, trigger, logf=print):
                 n += 1
             except Exception:
                 pass
-    logf(f"[强绑定] 已把 trigger + {len(info['consistent'])} 个 100% 一致特征拼成固定前缀"
-         f"（keep_tokens={keep}）：{', '.join(prefix)}")
+    if trigger_only:
+        logf(f"[强绑定] 概念模式：固定前缀只放 trigger（keep_tokens={keep}）：{', '.join(prefix)}")
+    else:
+        logf(f"[强绑定] 已把 trigger + {len(info['consistent'])} 个 100% 一致特征拼成固定前缀"
+             f"（keep_tokens={keep}）：{', '.join(prefix)}")
     if n:
         logf(f"[强绑定] 已重写 {n} 张标签，固定前缀置顶")
     return keep, warnings
@@ -1342,6 +1448,10 @@ def main():
                         help="caption 开头保留 token 数（人物模式建议 1 以保护 trigger）")
     parser.add_argument("--no-strong-bind", action="store_true",
                         help="人物模式关闭自动强绑定（默认开：自动把 trigger + 100% 一致特征词固定到标签开头）")
+    parser.add_argument("--concept-type", default="",
+                        help="概念类型：form/outfit/object/bodypart（概念模式用于清洗概念标签）")
+    parser.add_argument("--no-clean-concept", action="store_true",
+                        help="概念模式关闭「自动清洗概念标签」（默认开：删掉描述概念本身的标签，让 trigger 独占）")
     parser.add_argument("--dedup", action="store_true", help="按 MD5 跳过重复图片")
     parser.add_argument("--no-wd14", action="store_true", help="人物模式不自动调用 WD14 打标")
     parser.add_argument("--min-size", type=int, default=0,
@@ -1582,6 +1692,50 @@ def main():
             if cap.strip():
                 with open(os.path.join(output_dir, stem + ".txt"), "w", encoding="utf-8") as f:
                     f.write(cap)
+        # ---- 概念模式：清洗「描述概念本身」的标签（让 trigger 独占概念）----
+        if getattr(args, "concept_type", "") and not getattr(args, "no_clean_concept", False):
+            _ct = args.concept_type
+            _extra = set()
+            if _ct in ("object", "bodypart"):
+                # 词表穷举不了：改删训练集里 100% 一致的标签（已排除通用/姿势/场景词）
+                try:
+                    _info = analyze_caption_features(output_dir, trigger)
+                    _extra = {_norm_tag(t) for t in _info["consistent"]} - set(CONCEPT_KEEP_TAGS)
+                except Exception as _e:
+                    print(f"[概念清洗] 统计 100% 一致标签失败（忽略）: {_e}")
+            _removed_cnt, _n_changed = {}, 0
+            for _f in sorted(os.listdir(output_dir)):
+                if os.path.splitext(_f)[1].lower() not in IMAGE_EXTS:
+                    continue
+                _t = os.path.join(output_dir, os.path.splitext(_f)[0] + ".txt")
+                if not os.path.isfile(_t):
+                    continue
+                try:
+                    with open(_t, "r", encoding="utf-8-sig") as _fh:
+                        _cur = _fh.read()
+                except Exception:
+                    continue
+                _new, _rm = filter_concept_tags(_cur, _ct, extra_remove=_extra)
+                if _new != _cur:
+                    try:
+                        with open(_t, "w", encoding="utf-8") as _fh:
+                            _fh.write(_new)
+                        _n_changed += 1
+                    except Exception:
+                        pass
+                for _r in _rm:
+                    _removed_cnt[_r] = _removed_cnt.get(_r, 0) + 1
+            _cn = CONCEPT_TYPE_CN.get(_ct, _ct)
+            if _removed_cnt:
+                _top = sorted(_removed_cnt.items(), key=lambda kv: -kv[1])[:15]
+                print(f"[概念清洗] {_cn}模式：已改写 {_n_changed} 张标签，删除 {len(_removed_cnt)} 种"
+                      f"「概念本身」的标签（让 trigger 独占它）")
+                print("[概念清洗] 删除清单：" + ", ".join("%s×%d" % (k, v) for k, v in _top)
+                      + (" …" if len(_removed_cnt) > 15 else ""))
+                print("[概念清洗] 若清单里有你不想删的（如想要的配饰），可在界面关闭「自动清洗概念标签」。")
+            else:
+                print(f"[概念清洗] {_cn}模式：没有需要删除的概念标签（标签里本来就没描述它）。")
+
         # 插入 trigger 到每张 txt 第一行
         if trigger:
             n_trig = 0
