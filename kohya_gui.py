@@ -3118,97 +3118,122 @@ class App:
         # 关闭本程序，让安装器覆盖文件
         self.root.after(1500, self.root.destroy)
     # ==================== 🧰 小工具：训练前通用操作 ====================
+    # 布局约定（2026-09-11 重做）：
+    #   · 每个功能 = 一张卡片（卡片之间留白即视觉分隔），不再给每个功能配大日志框；
+    #   · 运行结果写在卡片内的一行「状态」里（跟普通工具一样给结果提示）；
+    #   · 完整输出统一收进底部「详细输出」（默认折叠，点开才展开），
+    #     同时照常写进主日志 —— 用户反馈时的完整日志不受影响。
     def cmd_open_tools(self):
-        """主页 🧰 小工具：训练前通用操作（查看 / 清理显存 / 清理内存 / 清理临时缓存 / 一键清理）。"""
+        """主页 🧰 小工具：训练前通用操作 + 离线标签词典。"""
         try:
             if getattr(self, "_tools_win", None) is not None and self._tools_win.winfo_exists():
                 self._tools_win.lift()
                 return
             w = ctk.CTkToplevel(self.root)
-            w.title("🧰 小工具（训练前通用操作）")
-            w.geometry("840x820")
+            w.title("🧰 小工具")
+            w.geometry("780x700")
             w.transient(self.root)
-            w.minsize(680, 560)
+            w.minsize(640, 520)
             self._tools_win = w
             body = ctk.CTkScrollableFrame(w, fg_color="transparent")
-            body.pack(fill="both", expand=True, padx=16, pady=(12, 12))
+            body.pack(fill="both", expand=True, padx=14, pady=(10, 6))
             self._tool_busy = {}
-            self._vram_rows = []   # [(proc_dict, BooleanVar, row_frame)]
+            self._vram_rows = []
+            self._tools_last_detail = ""
 
             try:
                 _vendor = core.detect_gpu_info().get("vendor") or "unknown"
             except Exception:
                 _vendor = "unknown"
 
-            def _sec(title, hint=""):
-                f = ctk.CTkFrame(body, fg_color="transparent")
-                f.pack(fill="x", pady=(0, 10))
-                ctk.CTkLabel(f, text=title, font=ui_font(FONT_BODY), text_color=TXT).pack(side="left")
+            def _card(title, hint=""):
+                """一张功能卡片，返回 (卡片, 标题行)——标题行用来放右侧按钮。"""
+                card = ctk.CTkFrame(body, fg_color=CARD, corner_radius=10,
+                                    border_width=1, border_color=BORDER)
+                card.pack(fill="x", pady=(0, 10))
+                head = ctk.CTkFrame(card, fg_color="transparent")
+                head.pack(fill="x", padx=14, pady=(11, 0))
+                ctk.CTkLabel(head, text=title, font=ui_font(FONT_BODY),
+                             text_color=TXT).pack(side="left")
                 if hint:
-                    ctk.CTkLabel(f, text=hint, font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
-                return f
+                    ctk.CTkLabel(head, text=hint, font=ui_font(FONT_HINT),
+                                 text_color=HINT).pack(side="left", padx=(10, 0))
+                return card, head
 
-            # ① 查看
-            s1 = _sec("① 查看显卡 / 显存占用")
-            self.btn_tools_view = ctk.CTkButton(s1, text="🔄 刷新", width=84, height=26, fg_color="transparent",
-                                                hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
-                                                corner_radius=6, font=ui_font(FONT_HINT))
+            def _status(card, text="待执行"):
+                """卡片内的结果行（替代原来的大日志框）。"""
+                var = tk.StringVar(value=text)
+                lbl = ctk.CTkLabel(card, textvariable=var, font=ui_font(FONT_HINT), text_color=HINT,
+                                   anchor="w", justify="left", wraplength=690)
+                lbl.pack(fill="x", padx=14, pady=(6, 11))
+                return var, lbl
+
+            # ---------- ① 显卡状态 ----------
+            c1, h1 = _card("🖥 显卡状态", "型号 / 显存占用 / 可用性")
+            self.btn_tools_view = ctk.CTkButton(h1, text="🔄 刷新", width=76, height=26, fg_color="transparent",
+                                                hover_color="#252a36", border_width=1, border_color=BORDER,
+                                                text_color=SUB, corner_radius=6, font=ui_font(FONT_HINT))
             self.btn_tools_view.pack(side="right")
-            self.btn_tools_view.configure(command=lambda: self._tools_run("view", self.btn_tools_view, self.tools_view_box,
-                                                                           core.gpu_status_text, "小工具·查看显卡", str))
-            self.tools_view_box = self._tools_result_box(body, 130)
+            self.tools_view_var, _vl = _status(c1, "读取中…")
+            self.btn_tools_view.configure(command=lambda: self._tools_run(
+                "view", self.btn_tools_view, self.tools_view_var, core.gpu_status_text,
+                "小工具·查看显卡", str))
 
-            # ② 清理显存（仅 N 卡）
-            s2 = _sec("② 清理残留训练进程", "结束残留的训练进程释放显存/内存（N 卡 + AMD 通用）；正在跑的训练会自动排除")
-            self.btn_tools_kill = ctk.CTkButton(s2, text="结束所选", width=104, height=26, fg_color="transparent",
-                                                hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
-                                                corner_radius=6, font=ui_font(FONT_HINT), command=self._tools_kill_vram)
+            # ---------- ② 清理残留训练进程 ----------
+            c2, h2 = _card("🧹 清理残留训练进程", "释放显存/内存；正在跑的训练会自动排除")
+            self.btn_tools_kill = ctk.CTkButton(h2, text="结束所选", width=104, height=26, fg_color="transparent",
+                                                hover_color="#252a36", border_width=1, border_color=BORDER,
+                                                text_color=SUB, corner_radius=6, font=ui_font(FONT_HINT),
+                                                command=self._tools_kill_vram)
             self.btn_tools_kill.pack(side="right")
-            self.btn_tools_scan = ctk.CTkButton(s2, text="🔍 扫描残留", width=96, height=26, fg_color="transparent",
-                                                hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
-                                                corner_radius=6, font=ui_font(FONT_HINT), command=self._tools_scan_vram)
+            self.btn_tools_scan = ctk.CTkButton(h2, text="🔍 扫描残留", width=96, height=26, fg_color="transparent",
+                                                hover_color="#252a36", border_width=1, border_color=BORDER,
+                                                text_color=SUB, corner_radius=6, font=ui_font(FONT_HINT),
+                                                command=self._tools_scan_vram)
             self.btn_tools_scan.pack(side="right", padx=(0, 6))
-            # 勾选列表框：有残留进程时才显示（pack），平时隐藏避免空框把下面模块挤下去
-            self.tools_vram_list = ctk.CTkFrame(body, fg_color="transparent")
-            self.tools_vram_box = self._tools_result_box(body, 90)
+            self.tools_vram_list = ctk.CTkFrame(c2, fg_color="transparent")   # 有残留进程时才 pack
+            self.tools_vram_status, self._vram_status_lbl = _status(c2, "未扫描")
             if _vendor not in ("nvidia", "amd"):
                 for _b in (self.btn_tools_scan, self.btn_tools_kill):
                     try:
                         _b.configure(state="disabled")
                     except Exception:
                         pass
-                self._tools_set_text(self.tools_vram_box, "「清理残留进程」当前不可用（未知显卡：%s）；其他工具不受影响。" % _vendor)
+                self.tools_vram_status.set("当前不可用（未知显卡：%s）" % _vendor)
 
-            # ③ 清理内存
-            s3 = _sec("③ 清理内存", "对所有进程压缩工作集（安全），显示前后空闲内存")
-            self.btn_tools_mem = ctk.CTkButton(s3, text="🧹 清理内存", width=104, height=26, fg_color="transparent",
-                                               hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
-                                               corner_radius=6, font=ui_font(FONT_HINT))
+            # ---------- ③ 清理内存 ----------
+            c3, h3 = _card("🧠 清理内存", "压缩所有进程工作集（安全），返回前后空闲内存")
+            self.btn_tools_mem = ctk.CTkButton(h3, text="🧹 清理内存", width=104, height=26, fg_color="transparent",
+                                               hover_color="#252a36", border_width=1, border_color=BORDER,
+                                               text_color=SUB, corner_radius=6, font=ui_font(FONT_HINT))
             self.btn_tools_mem.pack(side="right")
-            self.btn_tools_mem.configure(command=lambda: self._tools_run("mem", self.btn_tools_mem, self.tools_mem_box,
-                                                                          core.clear_memory, "小工具·清理内存", self._fmt_mem))
-            self.tools_mem_box = self._tools_result_box(body, 84)
+            self.tools_mem_var, _ml = _status(c3, "待执行")
+            self.btn_tools_mem.configure(command=lambda: self._tools_run(
+                "mem", self.btn_tools_mem, self.tools_mem_var, core.clear_memory,
+                "小工具·清理内存", self._fmt_mem, self._short_mem))
 
-            # ④ 清理临时缓存
-            s4 = _sec("④ 清理临时缓存", "只清可再生缓存（更新包/采样提示词/临时文件），绝不动模型·数据集·输出·断点")
-            self.btn_tools_cache = ctk.CTkButton(s4, text="🧹 清理缓存", width=104, height=26, fg_color="transparent",
-                                                 hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
-                                                 corner_radius=6, font=ui_font(FONT_HINT))
+            # ---------- ④ 清理临时缓存 ----------
+            c4, h4 = _card("🗑 清理临时缓存", "只清可再生缓存（更新包/采样提示词/临时文件），不动模型·数据集·输出·断点")
+            self.btn_tools_cache = ctk.CTkButton(h4, text="🧹 清理缓存", width=104, height=26, fg_color="transparent",
+                                                 hover_color="#252a36", border_width=1, border_color=BORDER,
+                                                 text_color=SUB, corner_radius=6, font=ui_font(FONT_HINT))
             self.btn_tools_cache.pack(side="right")
-            self.btn_tools_cache.configure(command=lambda: self._tools_run("cache", self.btn_tools_cache, self.tools_cache_box,
-                                                                           core.clear_temp_cache, "小工具·清理缓存", self._fmt_cache))
-            self.tools_cache_box = self._tools_result_box(body, 84)
+            self.tools_cache_var, _cl = _status(c4, "待执行")
+            self.btn_tools_cache.configure(command=lambda: self._tools_run(
+                "cache", self.btn_tools_cache, self.tools_cache_var, core.clear_temp_cache,
+                "小工具·清理缓存", self._fmt_cache, self._short_cache))
 
-            # ⑤ 一键全部清理
-            s5 = _sec("⑤ 一键全部清理", "结束残留训练进程 → 清内存 → 清缓存（不可用项自动跳过）")
-            self.btn_tools_all = ctk.CTkButton(s5, text="⚡ 一键清理", width=104, height=28, fg_color=ACC,
-                                               hover_color=ACC_H, corner_radius=6, font=ui_font(FONT_BODY), command=self._tools_oneclick)
+            # ---------- ⑤ 一键全部清理 ----------
+            c5, h5 = _card("⚡ 一键全部清理", "结束残留训练进程 → 清内存 → 清缓存（不可用项自动跳过）")
+            self.btn_tools_all = ctk.CTkButton(h5, text="⚡ 一键清理", width=104, height=28, fg_color=ACC,
+                                               hover_color=ACC_H, corner_radius=6, font=ui_font(FONT_BODY),
+                                               command=self._tools_oneclick)
             self.btn_tools_all.pack(side="right")
-            self.tools_all_box = self._tools_result_box(body, 110)
+            self.tools_all_var, _al = _status(c5, "待执行")
 
-            # ⑥ 下载源：国内镜像太慢时切官方源（需代理）
-            s6 = _sec("⑥ 下载源", "国内镜像太慢/失败时，改用官方源（PyTorch 官方 / GitHub / HuggingFace，需开代理）")
-            self.var_official_src = ctk.BooleanVar(value=bool(core._load_app_settings().get("download_official_first")))
+            # ---------- ⑥ 下载源 ----------
+            c6, h6 = _card("🌐 下载源", "国内镜像太慢/失败时改用官方源（PyTorch 官方 / GitHub / HuggingFace，需开代理）")
+            self.var_official_src = tk.BooleanVar(value=bool(core._load_app_settings().get("download_official_first")))
 
             def _toggle_official_src():
                 try:
@@ -3221,35 +3246,122 @@ class App:
                     self._log("[下载源] 保存设置失败：%s" % _e)
 
             self.chk_official_src = ctk.CTkCheckBox(
-                s6, text="国内镜像太慢时改用官方源（需开代理）", variable=self.var_official_src,
-                command=_toggle_official_src, font=ui_font(FONT_BODY), text_color=TXT)
-            self.chk_official_src.pack(side="left", padx=(0, 10))
-            ctk.CTkLabel(
-                s6, text="当前：%s（影响 torch 大轮子 / 引擎源码 / 底模下载，立即生效）" %
-                         ("官方源优先" if self.var_official_src.get() else "国内镜像优先"),
-                font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
-            # 打开窗口自动跑一次「查看」
-            self._tools_run("view", self.btn_tools_view, self.tools_view_box, core.gpu_status_text, "小工具·查看显卡", str)
+                h6, text="国内镜像太慢时改用官方源（需开代理）", variable=self.var_official_src,
+                command=_toggle_official_src, font=ui_font(FONT_HINT), text_color=TXT,
+                fg_color=ACC, hover_color=ACC_H, checkbox_width=18, checkbox_height=18)
+            self.chk_official_src.pack(side="right")
+            ctk.CTkLabel(c6, text="影响 torch 大轮子 / 引擎源码 / 底模下载，立即生效", font=ui_font(FONT_HINT),
+                         text_color=HINT, anchor="w").pack(fill="x", padx=14, pady=(6, 11))
+
+            # ---------- ⑦ 离线标签词典 ----------
+            c7, h7 = _card("📖 离线标签词典", "内置 17 万+ 条中英标签（纯离线）；查词、看热度、复制、标签篮")
+            ctk.CTkButton(h7, text="📖 打开词典", width=104, height=26, fg_color="transparent",
+                          hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
+                          corner_radius=6, font=ui_font(FONT_HINT),
+                          command=self.cmd_open_tag_dict).pack(side="right")
+
+            # ---------- 详细输出（默认折叠，共用一份） ----------
+            dhead = ctk.CTkFrame(body, fg_color="transparent")
+            dhead.pack(fill="x", pady=(2, 4))
+            self.btn_tools_detail = ctk.CTkButton(
+                dhead, text="▸ 详细输出（最近一次操作）", width=210, height=26, fg_color="transparent",
+                hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
+                corner_radius=6, font=ui_font(FONT_HINT), command=self._tools_toggle_detail)
+            self.btn_tools_detail.pack(side="left")
+            self.tools_detail_box = ctk.CTkTextbox(body, height=170, fg_color="#14161c", text_color="#b6bcc9",
+                                                   corner_radius=6, border_width=1, border_color=BORDER,
+                                                   font=ui_font(FONT_LOG), state="disabled", wrap="word")
+            self._tools_detail_open = False
+
+            # 打开时自动刷一次显卡状态
+            self._tools_run("view", self.btn_tools_view, self.tools_view_var, core.gpu_status_text,
+                            "小工具·查看显卡", str)
         except Exception as e:
             messagebox.showerror(core.APP_NAME, "打开小工具失败：%s" % e)
 
-    def _tools_set_text(self, box, text):
+    def cmd_open_tag_dict(self):
+        """主页 🧰 小工具 → 打开独立「离线标签词典」窗。
+
+        独立模式（不传 editor）：没有"当前图片"，动作为「复制到剪贴板」+「标签篮」；
+        与标签编辑器里那个词典窗各自独立、互不影响（词库本身是进程级单例，只解析一次）。
+        """
         try:
-            box.configure(state="normal")
-            box.delete("1.0", "end")
-            box.insert("1.0", text if text else "（无输出）")
-            box.configure(state="disabled")
+            if getattr(self, "_dict_win_tool", None) is not None:
+                try:
+                    self._dict_win_tool.win.lift()
+                    self._dict_win_tool.win.focus_force()
+                    return
+                except Exception:
+                    self._dict_win_tool = None
+            import gui.tag_tools
+            self._dict_win_tool = gui.tag_tools.TagLookupWindow(self.root)
+        except Exception as e:
+            messagebox.showerror(core.APP_NAME, "打开词典失败：%s" % e)
+
+    # ---------- 小工具：结果呈现（卡片状态行 + 共用详细输出） ----------
+    def _tools_toggle_detail(self):
+        """展开/收起底部共用的「详细输出」。"""
+        try:
+            self._tools_detail_open = not getattr(self, "_tools_detail_open", False)
+            if self._tools_detail_open:
+                self.tools_detail_box.pack(fill="x", pady=(0, 10))
+                self.btn_tools_detail.configure(text="▾ 详细输出（最近一次操作）")
+            else:
+                self.tools_detail_box.pack_forget()
+                self.btn_tools_detail.configure(text="▸ 详细输出（最近一次操作）")
         except Exception:
             pass
 
-    def _tools_result_box(self, parent, height=90):
-        box = ctk.CTkTextbox(parent, height=height, fg_color="#14161c", text_color="#b6bcc9", corner_radius=6,
-                             border_width=1, border_color=BORDER, font=ui_font(FONT_LOG), state="disabled", wrap="word")
-        box.pack(fill="x", pady=(4, 0))
-        return box
+    def _tools_set_detail(self, text):
+        """写入共用详细输出（保持折叠状态；用户展开即可看到最近一次完整结果）。"""
+        try:
+            self._tools_last_detail = text or ""
+            box = getattr(self, "tools_detail_box", None)
+            if box is not None:
+                box.configure(state="normal")
+                box.delete("1.0", "end")
+                box.insert("1.0", text or "（无输出）")
+                box.configure(state="disabled")
+        except Exception:
+            pass
 
-    def _tools_run(self, tid, btn, box, fn, label, formatter=None):
-        """后台线程执行一个工具；执行期间禁用按钮，结果回填 + 写主日志。"""
+    @staticmethod
+    def _tools_mb(mb):
+        """MB 数值 → 好读的字符串。"""
+        try:
+            mb = float(mb)
+        except Exception:
+            return "-"
+        if mb >= 1024.0:
+            return "%.2f GB" % (mb / 1024.0)
+        return "%.0f MB" % mb
+
+    def _short_mem(self, res):
+        try:
+            before, after, ok, skip = res
+        except Exception:
+            return "完成"
+        rel = ""
+        try:
+            if before and after and after >= before:
+                rel = " · 释放约 %s" % self._tools_mb(after - before)
+        except Exception:
+            rel = ""
+        return "✅ 已清理 %d 个进程（跳过 %d 个）%s" % (ok, skip, rel)
+
+    def _short_cache(self, res):
+        if not res:
+            return "✅ 没有可清理的缓存"
+        try:
+            tot = sum(mb for _l, _p, mb in res)
+            names = "、".join(str(l) for l, _p, _mb in res[:3])
+            more = "…" if len(res) > 3 else ""
+            return "✅ 已清理 %d 项（%s%s）· 释放 %s" % (len(res), names, more, self._tools_mb(tot))
+        except Exception:
+            return "✅ 已清理 %d 项" % len(res)
+
+    def _tools_run(self, tid, btn, status_var, fn, label, formatter=None, short=None):
+        """后台线程执行一个工具；结果写进卡片状态行 + 共用详细输出 + 主日志。"""
         if self._tool_busy.get(tid):
             return
         self._tool_busy[tid] = True
@@ -3257,19 +3369,28 @@ class App:
             btn.configure(state="disabled")
         except Exception:
             pass
-        self._tools_set_text(box, "执行中…")
+        try:
+            status_var.set("执行中…")
+        except Exception:
+            pass
+
         def work():
             try:
                 res = fn()
                 text = formatter(res) if formatter else str(res)
+                brief = short(res) if short else (text.splitlines()[0] if text else "完成")
             except Exception as e:
                 text = "执行失败：%s" % e
+                brief = "❌ " + text
+
             def done():
                 try:
-                    self._tools_set_text(box, text)
+                    try:
+                        status_var.set(brief)
+                    except Exception:
+                        pass
+                    self._tools_set_detail(text)
                     self._log("[小工具] %s：\n%s" % (label, text))
-                except Exception:
-                    pass
                 finally:
                     self._tool_busy[tid] = False
                     try:
@@ -3280,6 +3401,7 @@ class App:
                 self.root.after(0, done)
             except Exception:
                 self._tool_busy[tid] = False
+
         threading.Thread(target=work, daemon=True).start()
 
     def _fmt_mem(self, res):
@@ -3308,12 +3430,17 @@ class App:
             self.btn_tools_scan.configure(state="disabled")
         except Exception:
             pass
-        self._tools_set_text(self.tools_vram_box, "扫描中…")
+        try:
+            self.tools_vram_status.set("扫描中…")
+        except Exception:
+            pass
+
         def work():
             try:
                 procs = core.vram_residual_processes()
             except Exception:
                 procs = None
+
             def done():
                 try:
                     for _p, _v, row in getattr(self, "_vram_rows", []):
@@ -3324,15 +3451,15 @@ class App:
                     self._vram_rows = []
                     if procs is None:
                         self.tools_vram_list.pack_forget()
-                        self._tools_set_text(self.tools_vram_box, "扫描失败（nvidia-smi 不可用，驱动可能未安装/损坏）")
+                        self.tools_vram_status.set("❌ 扫描失败（nvidia-smi 不可用，驱动可能未安装/损坏）")
                         self.btn_tools_kill.configure(text="结束所选")
                     elif not procs:
                         self.tools_vram_list.pack_forget()
-                        self._tools_set_text(self.tools_vram_box, "没有残留的训练进程占用显存 ✅")
+                        self.tools_vram_status.set("✅ 没有残留的训练进程占用显存")
                         self.btn_tools_kill.configure(text="结束所选")
                     else:
-                        self.tools_vram_list.pack(fill="x", before=self.tools_vram_box)
-                        self._tools_set_text(self.tools_vram_box, "找到 %d 个残留训练进程（已勾选，可取消后点「结束所选」）：" % len(procs))
+                        self.tools_vram_list.pack(fill="x", padx=14, pady=(8, 0),
+                                                  before=getattr(self, "_vram_status_lbl", None))
                         for p in procs:
                             var = tk.BooleanVar(value=True)
                             row = ctk.CTkFrame(self.tools_vram_list, fg_color="transparent")
@@ -3341,7 +3468,14 @@ class App:
                                             variable=var, fg_color=ACC, hover_color=ACC_H, text_color=TXT,
                                             font=ui_font(FONT_HINT)).pack(side="left")
                             self._vram_rows.append((p, var, row))
+                        self.tools_vram_status.set("找到 %d 个残留训练进程（已勾选；取消勾选后点「结束所选」）" % len(procs))
                         self.btn_tools_kill.configure(text="结束所选 %d 个进程" % len(procs))
+                    try:
+                        self._tools_set_detail("\n".join(
+                            "PID %s | %s | %s MiB" % (p["pid"], p["name"], p["mem_mb"])
+                            for p, _v, _r in getattr(self, "_vram_rows", [])) or "（无残留进程）")
+                    except Exception:
+                        pass
                 finally:
                     self._tool_busy["vram"] = False
                     try:
@@ -3352,6 +3486,7 @@ class App:
                 self.root.after(0, done)
             except Exception:
                 self._tool_busy["vram"] = False
+
         threading.Thread(target=work, daemon=True).start()
 
     def _tools_kill_vram(self):
@@ -3368,23 +3503,34 @@ class App:
         except Exception:
             pass
         before = core.nvidia_vram_used_mb()
+
         def work():
             try:
                 ok, fail = core.kill_processes(pids)
                 after = core.nvidia_vram_used_mb()
                 if before is None and after is None:
                     text = "已结束 %d 个进程，失败 %d 个%s" % (
-                        len(ok), len(fail),
-                        ("：" + ",".join(str(p) for p in fail)) if fail else "")
+                        len(ok), len(fail), ("：" + ",".join(str(p) for p in fail)) if fail else "")
+                    brief = "✅ 已结束 %d 个进程%s" % (len(ok), ("，失败 %d 个" % len(fail)) if fail else "")
                 else:
                     text = "清理前已用显存: %s MB\n已结束 %d 个进程，失败 %d 个%s\n清理后已用显存: %s MB" % (
                         before, len(ok), len(fail),
                         ("：" + ",".join(str(p) for p in fail)) if fail else "", after)
+                    rel = ""
+                    try:
+                        if before is not None and after is not None and before > after:
+                            rel = " · 释放 %s" % self._tools_mb(before - after)
+                    except Exception:
+                        rel = ""
+                    brief = "✅ 已结束 %d 个进程%s%s" % (len(ok), ("，失败 %d 个" % len(fail)) if fail else "", rel)
             except Exception as e:
                 text = "执行失败：%s" % e
+                brief = "❌ " + text
+
             def done():
                 try:
-                    self._tools_set_text(self.tools_vram_box, text)
+                    self.tools_vram_status.set(brief)
+                    self._tools_set_detail(text)
                     self._log("[小工具] 清理显存：\n%s" % text)
                     for _p, _v, row in getattr(self, "_vram_rows", []):
                         try:
@@ -3407,6 +3553,7 @@ class App:
                 self.root.after(0, done)
             except Exception:
                 self._tool_busy["vramkill"] = False
+
         threading.Thread(target=work, daemon=True).start()
 
     def _tools_oneclick(self):
@@ -3418,7 +3565,11 @@ class App:
             self.btn_tools_all.configure(state="disabled")
         except Exception:
             pass
-        self._tools_set_text(self.tools_all_box, "执行中…")
+        try:
+            self.tools_all_var.set("执行中…")
+        except Exception:
+            pass
+
         def work():
             parts = []
             try:
@@ -3431,30 +3582,33 @@ class App:
                     procs = core.vram_residual_processes()
                     if procs:
                         ok, fail = core.kill_processes([p["pid"] for p in procs])
-                        parts.append("① 清理显存：结束 %d 个残留训练进程（失败 %d 个）" % (len(ok), len(fail)))
+                        parts.append("① 显存：结束 %d 个残留进程（失败 %d）" % (len(ok), len(fail)))
                     else:
-                        parts.append("① 清理显存：没有残留训练进程")
+                        parts.append("① 显存：没有残留进程")
                 except Exception as e:
-                    parts.append("① 清理显存：失败 %s" % e)
+                    parts.append("① 显存：失败 %s" % e)
             else:
-                parts.append("① 清理显存：当前非 N 卡，跳过")
+                parts.append("① 显存：非 N 卡，跳过")
             # 2) 内存
             try:
                 before, after, ok, skip = core.clear_memory()
-                parts.append("② 清理内存：空闲 %s → %s MB（%d 个进程成功，跳过 %d 个）" % (before, after, ok, skip))
+                parts.append("② 内存：空闲 %s → %s MB" % (before, after))
             except Exception as e:
-                parts.append("② 清理内存：失败 %s" % e)
+                parts.append("② 内存：失败 %s" % e)
             # 3) 缓存
             try:
                 res = core.clear_temp_cache()
                 tot = sum(mb for _l, _p, mb in res)
-                parts.append("③ 清理缓存：%d 项，释放 %.2f MB" % (len(res), tot))
+                parts.append("③ 缓存：%d 项，释放 %s" % (len(res), self._tools_mb(tot)))
             except Exception as e:
-                parts.append("③ 清理缓存：失败 %s" % e)
+                parts.append("③ 缓存：失败 %s" % e)
             text = "\n".join(parts)
+            brief = "✅ " + "；".join(parts)
+
             def done():
                 try:
-                    self._tools_set_text(self.tools_all_box, text)
+                    self.tools_all_var.set(brief)
+                    self._tools_set_detail(text)
                     self._log("[小工具] 一键清理：\n%s" % text)
                 finally:
                     self._tool_busy["all"] = False
@@ -3466,6 +3620,7 @@ class App:
                 self.root.after(0, done)
             except Exception:
                 self._tool_busy["all"] = False
+
         threading.Thread(target=work, daemon=True).start()
 
     def _toggle_adv(self):
