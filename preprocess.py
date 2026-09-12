@@ -784,8 +784,8 @@ def _pip_install(py, pkgs, logf=print, timeout=900):
         _env["no_proxy"] = "*"
         r = subprocess.run([py, "-m", "pip", "install", "--no-input", "--retries", "10",
                             "--timeout", "120", "--index-url",
-                            "https://mirrors.aliyun.com/pypi/simple/",
-                            "--extra-index-url", "https://pypi.tuna.tsinghua.edu.cn/simple"]
+                            "https://mirrors.ustc.edu.cn/pypi/simple/",
+                            "--extra-index-url", "https://repo.huaweicloud.com/repository/pypi/simple/"]
                            + list(pkgs), env=_env,
                            capture_output=True, text=True, timeout=timeout)
         return r.returncode == 0
@@ -1059,7 +1059,7 @@ def _has_torch(py):
 
 
 def _ensure_onnx(py, logf=print):
-    """解释器缺 onnxruntime/onnx 时自动补装（清华源）。返回是否就绪。"""
+    """解释器缺 onnxruntime/onnx 时自动补装（中科大源，2026-09-11 起；原阿里云实测仅 0.12 MB/s）。返回是否就绪。"""
     if _has_wd14_deps(py):
         return True
     try:
@@ -1069,8 +1069,8 @@ def _ensure_onnx(py, logf=print):
         _env["NO_PROXY"] = "*"
         r = subprocess.run([py, "-m", "pip", "install", "--no-input", "--retries", "10",
                             "--timeout", "120", "--index-url",
-                            "https://mirrors.aliyun.com/pypi/simple/",
-                            "--extra-index-url", "https://pypi.tuna.tsinghua.edu.cn/simple",
+                            "https://mirrors.ustc.edu.cn/pypi/simple/",
+                            "--extra-index-url", "https://repo.huaweicloud.com/repository/pypi/simple/",
                             "onnxruntime", "onnx"], env=_env,
                            capture_output=True, text=True, timeout=600)
         if r.returncode == 0 and _has_wd14_deps(py):
@@ -1097,8 +1097,8 @@ def _ensure_hf_hub(py, logf=print):
         _env["NO_PROXY"] = "*"
         r = subprocess.run([py, "-m", "pip", "install", "--no-input", "--retries", "10",
                             "--timeout", "120", "--index-url",
-                            "https://mirrors.aliyun.com/pypi/simple/",
-                            "--extra-index-url", "https://pypi.tuna.tsinghua.edu.cn/simple",
+                            "https://mirrors.ustc.edu.cn/pypi/simple/",
+                            "--extra-index-url", "https://repo.huaweicloud.com/repository/pypi/simple/",
                             "huggingface_hub"], env=_env,
                            capture_output=True, text=True, timeout=600)
         if r.returncode == 0:

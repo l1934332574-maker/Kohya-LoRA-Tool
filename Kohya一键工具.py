@@ -820,7 +820,91 @@ def _release_kohya_install_lock(lock_f):
         pass
 
 
-# PyTorch 大轮子魔搭缓存（钉死版本，国内直连；优先走这里，上海交大/阿里云最后兜底——用户反馈阿里云太慢）
+# ---------- 国内 PyPI 镜像（2026-09-11 实测吞吐，顺序 = 优先级） ----------
+# 本机同一时刻实测：中科大 2.84 / 华为云 2.70 / 清华 2.45 / 上海交大 1.97 / 阿里云 0.12 MB/s。
+# 阿里云由「默认首选」降为最后兜底：用户反馈「镜像都特别慢、经常下不动」，实测它确实是最慢的一档。
+PIP_MIRRORS = (
+    ("中科大", "https://mirrors.ustc.edu.cn/pypi/simple/"),
+    ("华为云", "https://repo.huaweicloud.com/repository/pypi/simple/"),
+    ("清华", "https://pypi.tuna.tsinghua.edu.cn/simple"),
+    ("上海交大", "https://mirror.sjtu.edu.cn/pypi/web/simple"),
+    ("阿里云", "https://mirrors.aliyun.com/pypi/simple/"),
+)
+PIP_INDEX_PRIMARY = PIP_MIRRORS[0][1]     # 默认主源（中科大）
+PIP_INDEX_SECONDARY = PIP_MIRRORS[1][1]   # 备用源（华为云）
+
+
+def pip_mirror_urls(limit=None):
+    """国内 PyPI 镜像 URL 列表（按优先级）；limit 可只取前几个。"""
+    _urls = [u for _n, u in PIP_MIRRORS]
+    return _urls[:limit] if limit else _urls
+
+
+# ---------- 下载源实测测速（大文件下载前挑最快的源） ----------
+# 背景（2026-09-11）：torch 这类 3GB 轮子，写死的源顺序在不同网络下可能正好选中 0.12 MB/s 的源（3GB 要 7 小时）。
+# 下载前对候选源各探 2MB 实测吞吐、从快到慢排序；结果按主机名缓存，同一会话只探一次。
+_SRC_SPEED_CACHE = {}
+
+
+def _probe_source_speed(url, probe_bytes=2 * 1024 * 1024, timeout=6.0, direct=True):
+    """Range 请求实测单个下载源的吞吐（MB/s）；不可用/不支持 Range 返回 0.0。
+
+    只取前 probe_bytes，读 curl 的 %{speed_download}（curl 自己统计的真实速度），
+    所以对 3GB 的轮子只花几秒就能判断该用哪个源。direct=True 表示不走系统代理（国内镜像）。
+    """
+    if not url:
+        return 0.0
+    _host = url.split("//")[-1].split("/")[0]
+    if _host in _SRC_SPEED_CACHE:
+        return _SRC_SPEED_CACHE[_host]
+    curl = shutil.which("curl")
+    if not curl:
+        return 0.0
+    cmd = [curl, "-sL", "-r", "0-%d" % (probe_bytes - 1), "-o", os.devnull,
+           "--max-time", str(int(timeout)),
+           "-w", "%{http_code} %{size_download} %{speed_download}"]
+    if not direct:
+        try:
+            _px = system_proxy()
+        except Exception:
+            _px = None
+        if _px:
+            cmd += ["--proxy", _px]
+    cmd.append(url)
+    spd = 0.0
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 10,
+                           env=(build_direct_env() if direct else build_env()))
+        _parts = (r.stdout or "").strip().split()
+        if len(_parts) >= 3 and _parts[0] == "206" and int(_parts[1]) > 0:
+            spd = float(_parts[2]) / 1048576.0
+    except Exception:
+        spd = 0.0
+    _SRC_SPEED_CACHE[_host] = spd
+    return spd
+
+
+def _order_bases_by_speed(bases, filename, label="", logf=print, probe_bytes=2 * 1024 * 1024):
+    """按实测吞吐把下载源从快到慢排序；探测失败（404/超时）的源保持原相对顺序、排到最后。"""
+    _bases = list(bases)
+    if len(_bases) < 2:
+        return _bases
+    scored = []
+    for _i, _b in enumerate(_bases):
+        _host = _b.split("//")[-1].split("/")[0]
+        _fresh = _host not in _SRC_SPEED_CACHE
+        _spd = _probe_source_speed(_b.rstrip("/") + "/" + filename,
+                                   probe_bytes=probe_bytes,
+                                   direct=("download.pytorch.org" not in _b))
+        if label and _fresh:
+            logf("[%s] 源测速：%s → %s" % (label, _host,
+                                        ("%.2f MB/s" % _spd) if _spd > 0 else "不可用，跳过"))
+        scored.append((-_spd, _i, _b))
+    scored.sort()
+    return [_b for _s, _i, _b in scored]
+
+
+# PyTorch 大轮子魔搭缓存（国内直连；2026-09-11 实测魔搭 2.25 MB/s，且已支持 Range 断点续传）
 MODELSCOPE_PTW_MIRROR = "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/engine_sources/pytorch_wheels/"
 
 def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
@@ -842,8 +926,10 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
         raise RuntimeError("暂不支持该 Python 版本的 PyTorch 预装: %s" % (tag or "未知"))
     _off = _official_source_preferred()
     bases = (["https://download.pytorch.org/whl/%s" % cu] if _off else []) + [
-        MODELSCOPE_PTW_MIRROR,
+        # 2026-09-11 实测（同一个 torch 轮子）：上海交大 2.37 MB/s、魔搭 2.25、官方直连 0.21、阿里云 0.12。
+        # 上海交大提到第一、阿里云降为最后兜底；下面还会按实测吞吐重排，适配不同用户的网络。
         "https://mirror.sjtu.edu.cn/pytorch-wheels/%s" % cu,
+        MODELSCOPE_PTW_MIRROR,
         "https://mirrors.aliyun.com/pytorch-wheels/%s" % cu,
     ]
     if _off:
@@ -906,13 +992,11 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
             logf("[%s] 存在未完成的 .part（%.0f MB），断点续传: %s" % (
                 label, os.path.getsize(part) / 1048576.0, local_name))
         downloaded = False
-        # 断点续传依赖服务器支持 Range（魔搭 resolve 直链不支持：对 Range 请求回 200 而非 206，
-        # 携带 .part 用 curl -C - 会 curl 33 反复空等 5 次才切换源，白白浪费时间）：
-        # 有 .part 需要续传时，把魔搭排到支持 Range 的上海交大/阿里云之后；无 .part 整包新下仍魔搭优先保速度。
-        if os.path.isfile(part) and os.path.getsize(part) > 0:
-            _bases = [b for b in bases if "modelscope.cn" not in b] + [b for b in bases if "modelscope.cn" in b]
-        else:
-            _bases = bases
+        # 2026-09-11：魔搭现已支持 Range 断点续传（实测 resolve 直链对 bytes=0- 回 206，LFS 文件亦然），
+        # 旧版「带 .part 就把魔搭排到最后」的特殊处理已无必要，删除。
+        # 改为下载前按实测吞吐重排候选源：写死的顺序在不同用户网络下可能正好是最差的那个
+        # （阿里云 pytorch-wheels 实测仅 0.12 MB/s）。测速结果按主机缓存，同一会话只探一次。
+        _bases = _order_bases_by_speed(bases, name, label=label, logf=logf)
         for source_idx, base in enumerate(_bases, 1):
             source_name = ("PyTorch 官方" if "download.pytorch.org" in base
                            else ("魔搭" if "modelscope.cn" in base
@@ -953,13 +1037,10 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
     # 本地 wheel 已下载好，但安装时仍需从国内镜像解析 torch 的依赖（filelock/typing-extensions/
     # sympy/networkx/jinja2/fsspec 等）。部分用户网络下清华源不可达/超时，pip 会报
     # "Could not find a version that satisfies the requirement filelock (from versions: none)"。
-    # 因此按 阿里云 -> 清华 -> 上海交大 顺序自动回退，任一成功即完成；全部失败才报错。
+    # 因此按 PIP_MIRRORS（中科大→华为云→清华→上海交大→阿里云）顺序自动回退，任一成功即完成；全部失败才报错。
     _install_ok = False
     _pip_lines = []
-    for _idx_name, _idx_url in (
-            ("阿里云", "https://mirrors.aliyun.com/pypi/simple/"),
-            ("清华", "https://pypi.tuna.tsinghua.edu.cn/simple"),
-            ("上海交大", "https://mirror.sjtu.edu.cn/pypi/web/simple")):
+    for _idx_name, _idx_url in PIP_MIRRORS:
         env["PIP_INDEX_URL"] = _idx_url
         logf("[%s] 本地安装 PyTorch 轮子（依赖走%s镜像）…" % (label, _idx_name))
         if run_stream(cmd, cwd=kdir, env=env, logf=logf, collect=_pip_lines) == 0:
@@ -1188,8 +1269,7 @@ def install_kohya(logf=print):
                               cwd=kdir, env=_env2, logf=logf) == 0:
                     _ok2 = True
             if not _ok2:
-                for _idx2 in ("https://mirrors.aliyun.com/pypi/simple/",
-                              "https://pypi.tuna.tsinghua.edu.cn/simple"):
+                for _idx2 in pip_mirror_urls(3):
                     if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
                                    "--index-url", _idx2, "pillow", "numpy"], cwd=kdir, env=_env2, logf=logf) == 0:
                         _ok2 = True
@@ -1203,9 +1283,9 @@ def install_kohya(logf=print):
             with open(KOHYA_DIR_FILE, "w", encoding="utf-8") as f:
                 f.write(kdir)
             return kdir
-        logf("[Kohya] 设置 pip 镜像源（清华/阿里 PyPI 双国内源，无需代理）…")
+        logf("[Kohya] 设置 pip 镜像源（中科大/华为云等国内多源，无需代理）…")
         subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
-                        "https://mirrors.aliyun.com/pypi/simple/"], capture_output=True, timeout=60)
+                        PIP_INDEX_PRIMARY], capture_output=True, timeout=60)
         # 旧版本可能把已失效的 PyTorch 专用源写进全局配置；PyTorch 现在由本地 wheel 安装。
         subprocess.run([vpy, "-m", "pip", "config", "unset", "global.extra-index-url"],
                        capture_output=True, timeout=60)
@@ -1241,7 +1321,7 @@ def install_kohya(logf=print):
                 logf(f"[Kohya] 清理官方 PyTorch 源失败（继续使用已预装 Torch）：{_e}")
         logf("[Kohya] 安装全部依赖（官方无人值守模式，约 10-30 分钟）…")
         env = build_direct_env([os.path.dirname(git)])
-        env["PIP_INDEX_URL"] = "https://mirrors.aliyun.com/pypi/simple/"
+        env["PIP_INDEX_URL"] = PIP_INDEX_PRIMARY
         env.pop("PIP_EXTRA_INDEX_URL", None)
         if run_stream([vpy, "setup\\setup_windows.py", "--headless"], cwd=kdir, env=env, logf=logf) != 0:
             raise RuntimeError("依赖安装失败，请向上滚动查看 pip 报错")
@@ -1505,9 +1585,9 @@ def install_musubi_engine(logf=print):
         if not pair_ok:
             logf(f"[第二引擎] {pair_detail}；将自动重装 torch {MUSUBI_TORCH_VERSION}+cu128 + "
                  f"torchvision {MUSUBI_TORCHVISION_VERSION}+cu128 …")
-        # 4) 普通依赖使用清华/阿里国内 PyPI；PyTorch 由下方双镜像 wheel 安装。
+        # 4) 普通依赖使用中科大/华为云等国内 PyPI；PyTorch 由下方双镜像 wheel 安装。
         subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
-                        "https://mirrors.aliyun.com/pypi/simple/"], capture_output=True, timeout=60)
+                        PIP_INDEX_PRIMARY], capture_output=True, timeout=60)
         logf("[第二引擎] 升级 pip / setuptools / wheel …")
         if not _upgrade_pip(vpy, kdir, logf, label="第二引擎"):
             raise RuntimeError(
@@ -3773,10 +3853,10 @@ def install_ai_toolkit_engine(logf=print):
         with open(_constraints, "w", encoding="utf-8") as _cf:
             _cf.write("torch==2.13.0\ntorchvision==0.28.0\ntorchaudio==2.11.0\n"
                       "numpy==2.1.3\nscipy==1.15.3\n")
-        logf("[第三引擎] 安装 ai-toolkit 依赖（清华/阿里国内 PyPI，不访问 GitHub，锁定兼容版本）…")
+        logf("[第三引擎] 安装 ai-toolkit 依赖（中科大/华为云国内 PyPI，不访问 GitHub，锁定兼容版本）…")
         if run_stream([vpy, "-m", "pip", "install", "--upgrade", "--no-input", "--retries", "10", "--timeout", "120",
-                       "--index-url", "https://mirrors.aliyun.com/pypi/simple/",
-                       "--extra-index-url", "https://pypi.tuna.tsinghua.edu.cn/simple",
+                       "--index-url", PIP_INDEX_PRIMARY,
+                       "--extra-index-url", PIP_INDEX_SECONDARY,
                        "-c", _constraints, "-r", _req_tmp], cwd=at_dir, env=env, logf=logf) != 0:
             raise RuntimeError("ai-toolkit 依赖安装失败（国内 PyPI 镜像均不可达或依赖冲突）")
         # 验证
@@ -4078,8 +4158,8 @@ def _ensure_fizgig_deps(vpy, fz_dir, logf=print):
     logf("[第四引擎] ⚠ fizgig_venv 缺依赖：%s，自动补装（国内镜像）…" % ", ".join(_pkgs))
     _env = _domestic_pip_env()
     if run_stream([vpy, "-m", "pip", "install", "--no-input", "--no-cache-dir", "--retries", "10", "--timeout", "120",
-                   "--index-url", "https://mirrors.aliyun.com/pypi/simple/",
-                   "--extra-index-url", "https://pypi.tuna.tsinghua.edu.cn/simple"] + _pkgs,
+                   "--index-url", PIP_INDEX_PRIMARY,
+                   "--extra-index-url", PIP_INDEX_SECONDARY] + _pkgs,
                   cwd=fz_dir, env=_env, logf=logf) == 0:
         logf("[第四引擎] Fizgig 依赖补装完成")
         return True
@@ -4239,10 +4319,10 @@ def install_fizgig_engine(logf=print):
         os.makedirs(os.path.dirname(_req_tmp), exist_ok=True)
         with open(_req_tmp, "w", encoding="utf-8") as _rf:
             _rf.write("\n".join(x for x in _deps.split()) + "\n")
-        logf("[第四引擎] 安装 Fizgig 共享依赖（清华/阿里国内 PyPI，锁定兼容版本）…")
+        logf("[第四引擎] 安装 Fizgig 共享依赖（中科大/华为云国内 PyPI，锁定兼容版本）…")
         if run_stream([vpy, "-m", "pip", "install", "--upgrade", "--no-input", "--no-cache-dir", "--retries", "10", "--timeout", "120",
-                       "--index-url", "https://mirrors.aliyun.com/pypi/simple/",
-                       "--extra-index-url", "https://pypi.tuna.tsinghua.edu.cn/simple",
+                       "--index-url", PIP_INDEX_PRIMARY,
+                       "--extra-index-url", PIP_INDEX_SECONDARY,
                        "-r", _req_tmp], cwd=fz_dir, env=env, logf=logf) != 0:
             raise RuntimeError("Fizgig 依赖安装失败（国内 PyPI 镜像均不可达或依赖冲突）")
         _fizgig_verify(vpy, fz_dir, logf, backend=backend)
@@ -6108,8 +6188,7 @@ def _ensure_preprocess_deps(vpy, kdir, logf=print, force=False):
             if run_stream(_pip_args + _wheels, cwd=kdir, env=env, logf=logf) == 0:
                 _ok = True
         if not _ok:
-            for _idx in ("https://mirrors.aliyun.com/pypi/simple/",
-                         "https://pypi.tuna.tsinghua.edu.cn/simple"):
+            for _idx in pip_mirror_urls(3):
                 _pip_args = [vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120"]
                 if force:
                     _pip_args.append("--force-reinstall")
@@ -6269,7 +6348,9 @@ def _ensure_torchvision_deps(vpy, logf=print, label="Kohya", cwd=None):
         ver = "torchvision==0.22.0+cu128"
     logf(f"[{label}] venv 缺 torchvision（torch {tver}），自动补装 {ver}（国内镜像，无需代理）…")
     env = build_env()
-    for _idx in ("https://mirrors.aliyun.com/pytorch-wheels/cu128",
+    # 2026-09-11：上海交大 pytorch-wheels 实测 2.37 MB/s，阿里云仅 0.12 MB/s → 上海交大优先。
+    for _idx in ("https://mirror.sjtu.edu.cn/pytorch-wheels/cu128",
+                 "https://mirrors.aliyun.com/pytorch-wheels/cu128",
                  "https://download.pytorch.org/whl/cu128"):
         rc = run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
                          "--index-url", _idx, ver], cwd=cwd or os.getcwd(), env=env, logf=logf)
@@ -7162,19 +7243,18 @@ def _ensure_venv_pip(vpy, venv_dir, logf=print, label="环境"):
 
 
 def _upgrade_pip(vpy, cwd, logf=print, label="环境"):
-    """升级 pip / setuptools / wheel；主源失败自动切换阿里备用源重试。
+    """升级 pip / setuptools / wheel；主源失败自动按国内镜像优先级换源重试。
 
     用户反馈过 pip 升级报 “Could not find a version that satisfies the requirement
-    wheel (from versions: none)”——这是当前 pip 源（默认清华）不可达或返回空，
-    不是目录占用。这里主源失败后自动切阿里源再试一次，并返回是否成功。"""
+    wheel (from versions: none)”——这是当前 pip 源不可达或返回空，不是目录占用。
+    2026-09-11 起按 PIP_MIRRORS（中科大→华为云→清华→上海交大→阿里云）依次重试。"""
     if not vpy or not os.path.isfile(vpy):
         return False
     common = [vpy, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "-q",
               "--retries", "10", "--timeout", "120"]
-    for idx, source in enumerate(("https://mirrors.aliyun.com/pypi/simple/",
-                                  "https://pypi.tuna.tsinghua.edu.cn/simple"), 1):
+    for idx, source in enumerate(pip_mirror_urls(), 1):
         if idx > 1:
-            logf(f"[{label}] 阿里云镜像失败，切换备用镜像（清华）重试…")
+            logf(f"[{label}] 上一个镜像失败，切换备用镜像重试…")
         if run_stream(common + ["--index-url", source], cwd=cwd,
                       env=build_direct_env(), logf=logf) == 0:
             return True
@@ -7364,9 +7444,14 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
         return True
     logf("[环境] 训练环境需要补装/校正依赖（PIL/numpy/transformers/huggingface_hub/toml 等），正在处理…")
     subprocess.run([vpy, "-m", "pip", "config", "set", "global.index-url",
-                    "https://mirrors.aliyun.com/pypi/simple/"], capture_output=True, timeout=60)
+                    PIP_INDEX_PRIMARY], capture_output=True, timeout=60)
+    # 清掉遗留的 global.extra-index-url：旧版可能写过已失效的 PyTorch 专用源。
+    # 用户 huaf 的日志里 pip 变成「中科大/阿里云 + aliyun pytorch-wheels」双源查询，
+    # 白白拖慢解析（且第 3 轮日志里能看到它混进 --index-url 之外的第二源）。
+    subprocess.run([vpy, "-m", "pip", "config", "unset", "global.extra-index-url"],
+                   capture_output=True, timeout=60)
     env = build_direct_env()
-    env["PIP_INDEX_URL"] = "https://mirrors.aliyun.com/pypi/simple/"
+    env["PIP_INDEX_URL"] = PIP_INDEX_PRIMARY
     env.pop("PIP_EXTRA_INDEX_URL", None)
     _all_wheels = _bundled_pip_wheels()
     wheels = _wheels_for_python(_all_wheels, vpy)
@@ -7382,17 +7467,53 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
             if _r.returncode != 0:
                 logf("[环境] pillow/numpy 离线安装异常，改走镜像…")
                 wheels = []
+    # NumPy/SciPy 配对单独先装（2026-09-12 用户 huaf 日志实测）：
+    #  1) 老 scipy（<=1.5.x）的 `from numpy import (... Inf ...)` 在 NumPy 2.x 直接 ImportError，
+    #     必须把这一对换成验证过的 numpy==2.1.3 + scipy==1.15.3；
+    #  2) 原来它俩和下面 20 个包塞在同一条 pip 命令里 —— 任何别的包解析/下载失败都会连带
+    #     让这个配对也装不上（本次故障就是这样被放大的）；
+    #  3) 更隐蔽的是：pip 本地缓存坏掉时会在**所有镜像上复用同一份坏文件**，日志实测
+    #     3 轮 × 2 镜像共 6 次全部 `IncompleteRead(5352 bytes read, -205 more expected)`，
+    #     这种情况换源完全无效，必须用 --no-cache-dir 绕过本地缓存。
+    _pair = ["numpy==2.1.3", "scipy==1.15.3"]
+    _pair_ok = False
+    for _pair_args, _bypass in (([], False), (["--no-cache-dir"], True)):
+        if _bypass:
+            logf("[环境] NumPy/SciPy 配对安装失败，改用 --no-cache-dir 绕过本地 pip 缓存重试…")
+        for _idx in pip_mirror_urls(3):
+            if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10",
+                           "--timeout", "120"] + _pair_args
+                          + ["--index-url", _idx] + _pair,
+                          cwd=kdir, env=env, logf=logf) == 0:
+                _pair_ok = True
+                break
+        if _pair_ok:
+            break
+    if _pair_ok:
+        logf("[环境] NumPy/SciPy 配对已就绪（numpy==2.1.3 + scipy==1.15.3）")
+    else:
+        logf("[环境] ⚠ NumPy/SciPy 配对安装失败，可复制执行下面这行手动修复：")
+        logf('[环境]   "%s" -m pip install --no-cache-dir numpy==2.1.3 scipy==1.15.3 -i %s'
+             % (vpy, PIP_INDEX_PRIMARY))
+
     # sd-scripts 训练完整依赖（AMD 环境用，不含 bitsandbytes 等 NVIDIA 专属包）
     # transformers/diffusers 钉 kohya 兼容版本，防止装到 5.x/0.39 导致 CLIP 加载失败
-    pkgs = ["transformers==4.54.1", "huggingface-hub", "toml", "voluptuous", "safetensors",
+    # 只补缺、不追新（2026-09-12）：原命令带 --upgrade，会把**已装且可用**的包一起升到最新 ——
+    # 用户 huaf 日志实测：opencv-python 4.10→5.0、safetensors 0.4.5→0.8、huggingface-hub 0.34.3→1.31，
+    # 为修 numpy/scipy 却 churn 整个环境，风险远大于收益（opencv 5.0 / hf-hub 1.x 都属大版本跳变）。
+    # 现在：① 钉住两个会大版本跳变、且别处已验过的包；② **去掉 --upgrade**，已满足的直接跳过。
+    # 注意：显式 == 仍会纠正错误版本（例如 transformers 5.x → 4.54.1、transformers/diffusers 版本校验）。
+    pkgs = ["transformers==4.54.1", "huggingface-hub==0.34.3", "toml", "voluptuous", "safetensors",
             "diffusers==0.32.1", "accelerate", "omegaconf", "imagesize", "rich", "ftfy",
             "lion-pytorch", "schedulefree", "pytorch-optimizer",
-            "prodigy-plus-schedule-free", "prodigyopt", "einops", "opencv-python", "sentencepiece",
-            "numpy==2.1.3", "scipy==1.15.3", "protobuf==5.29.5"]   # 兼容 Python 3.10-3.12、TensorFlow/W&B，避免旧 SciPy 引用 numpy.Inf
+            "prodigy-plus-schedule-free", "prodigyopt", "einops", "opencv-python==4.10.0.84",
+            "sentencepiece",
+            "numpy==2.1.3", "scipy==1.15.3", "protobuf==5.29.5"]   # 兼容 Python 3.10-3.12、TensorFlow/W&B，避免旧 SciPy 引用 numpy.Inf（opencv/hf-hub 与 FIZGIG_SHARED_DEPS 同版本）
     ok = False
     for _round in range(2):
-        for _idx in ("https://mirrors.aliyun.com/pypi/simple/", "https://pypi.tuna.tsinghua.edu.cn/simple"):
-            if run_stream([vpy, "-m", "pip", "install", "--upgrade", "--no-input", "--retries", "10", "--timeout", "120",
+        for _idx in pip_mirror_urls():
+            # 不带 --upgrade：已装且满足的直接跳过，只补缺、只纠正版本不匹配的（见上面 pkgs 处说明）
+            if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
                            "--index-url", _idx] + pkgs, cwd=kdir, env=env, logf=logf) == 0:
                 ok = True
                 break
@@ -7418,7 +7539,15 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
             capture_output=True, text=True, timeout=90)
         if _compat.returncode != 0:
             _detail = ((_compat.stderr or "") + (_compat.stdout or "")).strip()
-            raise RuntimeError("NumPy/SciPy 兼容性校正后仍无法加载：%s" % (_detail[-500:] or "未知错误"))
+            # 报错直接带可复制的自救命令：多数情况是上面某一步 pip 下载失败 /
+            # 本地缓存损坏（换源无效），--no-cache-dir 能绕过坏缓存。
+            raise RuntimeError(
+                "NumPy/SciPy 兼容性校正后仍无法加载：%s\n"
+                "常见原因：上面某一步 pip 下载失败，或 pip 本地缓存损坏（换镜像无效）。\n"
+                "可复制下面这行手动修复，然后重启软件：\n"
+                '  "%s" -m pip install --no-cache-dir numpy==2.1.3 scipy==1.15.3 -i %s\n'
+                "若仍失败，请把本日志完整发给维护者。"
+                % ((_detail[-500:] or "未知错误"), vpy, PIP_INDEX_PRIMARY))
         logf("[环境] NumPy/SciPy 兼容验证通过：" + (_compat.stdout or "").strip())
     except RuntimeError:
         raise
@@ -7674,7 +7803,7 @@ def run_pip_in_venv(venv_dir, args, logf=print):
     cmd = [py, "-m", "pip", "install", "--no-cache-dir", "--retries", "10", "--timeout", "120"] + args
     env = build_direct_env()
     env.setdefault("PIP_NO_INPUT", "1")
-    env.setdefault("PIP_INDEX_URL", "https://mirrors.aliyun.com/pypi/simple/")
+    env.setdefault("PIP_INDEX_URL", PIP_INDEX_PRIMARY)
     return run_stream(cmd, env=env, logf=logf)
 
 
@@ -8658,7 +8787,7 @@ def _ensure_musubi_bnb(mvpy, logf=print, label="Krea2"):
         pass
     logf(f"[{label}] 未检测到 bitsandbytes，自动补装（国内镜像，约 30~100MB）…")
     r = subprocess.run([mvpy, "-m", "pip", "install", "bitsandbytes",
-                        "-i", "https://mirrors.aliyun.com/pypi/simple/",
+                        "-i", PIP_INDEX_PRIMARY,
                         "--timeout", "120", "--retries", "5"],
                        capture_output=True, text=True, timeout=1800)
     if r.returncode == 0:
@@ -8897,9 +9026,9 @@ def _ensure_kohya_bnb(vpy, logf=print):
         return False
     logf("[环境] 未检测到 bitsandbytes（AdamW8bit 需要），自动补装（国内镜像；失败不中断，自动降级 Lion/AdamW）…")
     env = build_direct_env()
-    env["PIP_INDEX_URL"] = "https://mirrors.aliyun.com/pypi/simple/"
+    env["PIP_INDEX_URL"] = PIP_INDEX_PRIMARY
     env.pop("PIP_EXTRA_INDEX_URL", None)
-    for _idx in ("https://mirrors.aliyun.com/pypi/simple/", "https://pypi.tuna.tsinghua.edu.cn/simple"):
+    for _idx in pip_mirror_urls():
         try:
             if run_stream([vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
                            "--index-url", _idx, "bitsandbytes"], logf=logf) == 0:
@@ -9970,43 +10099,6 @@ def scan_base_models():
     return out
 
 
-class Tooltip:
-    """鼠标悬停显示通俗中文说明的小气泡。"""
-
-    def __init__(self, widget, text, wrap=360):
-        self.widget = widget
-        self.text = text
-        self.wrap = wrap
-        self.tip = None
-        widget.bind("<Enter>", self._enter, add="+")
-        widget.bind("<Leave>", self._leave, add="+")
-
-    def _enter(self, _e=None):
-        if self.tip is not None:
-            return
-        try:
-            x = self.widget.winfo_rootx() + 16
-            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
-            self.tip = tk.Toplevel(self.widget)
-            self.tip.wm_overrideredirect(True)
-            self.tip.wm_geometry(f"+{x}+{y}")
-            lbl = tk.Label(self.tip, text=self.text, justify="left", background="#ffffe6",
-                           relief="solid", borderwidth=1, wraplength=self.wrap,
-                           font=("Microsoft YaHei UI", 9), padx=8, pady=6)
-            lbl.pack()
-        except Exception:
-            self.tip = None
-
-    def _leave(self, _e=None):
-        if self.tip is not None:
-            try:
-                self.tip.destroy()
-            except Exception:
-                pass
-            self.tip = None
-
-
-# ---------- 底模类型自动识别 ----------
 
 def _safetensors_keys(path):
     """只读 safetensors 头部 JSON，拿全部张量键名（不加载权重，秒级）。
@@ -10457,1606 +10549,3 @@ def _ensure_anima_components(logf=print):
     logf(f"[Anima] Qwen3: {qwen3_path}")
     logf(f"[Anima] VAE: {vae_file}")
     return qwen3_path, vae_file
-
-
-class App:
-    def __init__(self, root):
-        self.root = root
-        self.q = queue.Queue()
-        self.busy = False
-        self.ui_proc = None
-        self.mode = "style"
-        self.base_type = "sd15"
-        self._manual_override = set()
-        self._applying_preset = False
-        self._env_ok = False
-        self._kohya_ok = False
-        self._base_models = []
-        self._base_items = []
-        self._downloading = False
-        self._dl = None
-        self._btn_anim = {}
-        self._build_ui()
-        self._refresh_status()
-        self._scan_base_models()
-        # 首次打开即创建可写数据目录（output/logs/dataset/tokenizers 重定向到 %APPDATA%）
-        for _sub in ("output", "logs", "dataset", "tokenizers"):
-            data_sub(_sub)
-        self.root.after(100, self._poll)
-
-    def _build_ui(self):
-        self.root.title(APP_NAME)
-        self.root.geometry("1180x860")
-        self.root.minsize(1040, 760)
-
-        style = ttk.Style(self.root)
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
-        self.style = style
-        self.root.configure(bg=ROOT_BG)
-        # 窗口标题栏图标（存在则用）
-        try:
-            ico = os.path.join(KIT_DIR, "app.ico")
-            if os.path.isfile(ico):
-                self.root.iconbitmap(ico)
-        except Exception:
-            pass
-
-        style.configure("TFrame", background=ROOT_BG)
-        style.configure("TLabel", background=ROOT_BG, foreground="#374151")
-        style.configure("TPanedwindow", background=ROOT_BG)
-        style.configure("Header.TLabel", font=("Microsoft YaHei UI", 14, "bold"),
-                        background=ROOT_BG, foreground="#1F2937")
-        style.configure("Hint.TLabel", font=("Microsoft YaHei UI", 9),
-                        background=ROOT_BG, foreground="#6B7280")
-        style.configure("Tip.TLabel", font=("Microsoft YaHei UI", 9),
-                        background=ROOT_BG, foreground="#1a7f37")
-        style.configure("Warn.TLabel", font=("Microsoft YaHei UI", 9),
-                        background=ROOT_BG, foreground="#b3261e")
-        style.configure("Guide.TLabel", font=("Microsoft YaHei UI", 10),
-                        background=ROOT_BG, foreground="#374151")
-
-        # 按钮：主色底白字（clam 圆角平底）
-        style.configure("TButton", font=("Microsoft YaHei UI", 10), padding=(14, 7),
-                        background=INDIGO, foreground="#FFFFFF", borderwidth=0,
-                        focusthickness=0, relief="flat")
-        style.map("TButton", background=[("active", INDIGO_HOVER), ("pressed", INDIGO)],
-                  foreground=[("disabled", "#B8BCC6")], relief=[("pressed", "flat")])
-        # 悬停渐变样式组（5 帧）
-        self._btn_ramp_names = []
-        for i, c in enumerate([_lerp_color(INDIGO, INDIGO_HOVER, t) for t in (i / 4.0 for i in range(5))]):
-            n = f"Accent{i}.TButton"
-            style.configure(n, font=("Microsoft YaHei UI", 10), padding=(14, 7),
-                            background=c, foreground="#FFFFFF", borderwidth=0,
-                            focusthickness=0, relief="flat")
-            self._btn_ramp_names.append(n)
-        style.configure("AccentFlash.TButton", font=("Microsoft YaHei UI", 10), padding=(14, 7),
-                        background="#FFFFFF", foreground=INDIGO, borderwidth=0,
-                        focusthickness=0, relief="flat")
-        # 一键大按钮（12 号加粗，悬停轻微放大）
-        self._big_ramp_names = []
-        for i, c in enumerate([_lerp_color(INDIGO, INDIGO_HOVER, t) for t in (i / 4.0 for i in range(5))]):
-            n = f"BigAccent{i}.TButton"
-            style.configure(n, font=("Microsoft YaHei UI", 12, "bold"), padding=(14 + i * 2, 8 + i * 2),
-                            background=c, foreground="#FFFFFF", borderwidth=0,
-                            focusthickness=0, relief="flat")
-            self._big_ramp_names.append(n)
-        # 禁用态（训练中按钮置灰但保留底色）
-        for n in self._btn_ramp_names + self._big_ramp_names:
-            try:
-                self.style.map(n, background=[("disabled", "#A6A9D8")],
-                               foreground=[("disabled", "#F0F1FF")])
-            except Exception:
-                pass
-        # 提示文字淡入帧
-        for i, fg in enumerate(["#9CA3AF", "#6B7280", "#111827"]):
-            self.style.configure(f"TipFade{i}.TLabel", font=("Microsoft YaHei UI", 9),
-                                 background=ROOT_BG, foreground=fg)
-
-        # LabelFrame：标题加粗、淡边框
-        style.configure("TLabelframe", background=ROOT_BG, bordercolor=BORDER,
-                        relief="solid", borderwidth=1)
-        style.configure("TLabelframe.Label", background=ROOT_BG, foreground="#1F2937",
-                        font=("Microsoft YaHei UI", 10, "bold"))
-        # Combobox / Entry：浅色圆角边框
-        style.configure("TCombobox", fieldbackground="#FFFFFF", background="#FFFFFF",
-                        bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER,
-                        arrowcolor=INDIGO, foreground="#1F2937", padding=4)
-        style.map("TCombobox", fieldbackground=[("readonly", "#FFFFFF")],
-                  selectbackground=[("readonly", "#FFFFFF")])
-        style.configure("TEntry", fieldbackground="#FFFFFF", bordercolor=BORDER,
-                        lightcolor=BORDER, darkcolor=BORDER, foreground="#1F2937", padding=4)
-        style.configure("TCheckbutton", background=ROOT_BG, foreground="#374151")
-        style.map("TCheckbutton", background=[("active", ROOT_BG)])
-        style.configure("TProgressbar", background=INDIGO, troughcolor="#E5E7EB",
-                        bordercolor="#E5E7EB", lightcolor=INDIGO)
-        style.configure("Vertical.TScrollbar", background="#C9CDD6", troughcolor=ROOT_BG,
-                        bordercolor=ROOT_BG, arrowcolor="#6B7280", width=12, relief="flat")
-        style.map("Vertical.TScrollbar", background=[("active", INDIGO)])
-
-        top = ttk.Frame(self.root, padding=(12, 12, 12, 0))
-        top.pack(side="top", fill="x")
-        ttk.Label(top, text=APP_NAME, style="Header.TLabel").pack(anchor="w")
-        self.status_var = tk.StringVar(value="正在检测环境…")
-        self.status_row = ttk.Frame(top)
-        self.status_row.pack(anchor="w", pady=(4, 0))
-        self._status_dots = {}
-        self._status_texts = {}
-        for i, key in enumerate(["git", "python", "kohya", "gpu", "vram"]):
-            if i:
-                ttk.Label(self.status_row, text="|", style="Hint.TLabel").pack(side="left", padx=6)
-            c = tk.Canvas(self.status_row, width=12, height=12, bg=ROOT_BG, highlightthickness=0)
-            c.pack(side="left", padx=(0, 4))
-            self._status_dots[key] = c
-            lbl = ttk.Label(self.status_row, text="", style="Hint.TLabel")
-            lbl.pack(side="left")
-            self._status_texts[key] = lbl
-        ttk.Label(top, textvariable=self.status_var, style="Hint.TLabel").pack(anchor="w", pady=(2, 0))
-
-        # ---- 顶部：训练模式 + 底模选择 ----
-        mode_row = ttk.Frame(top)
-        mode_row.pack(fill="x", pady=(8, 2))
-        ttk.Label(mode_row, text="训练模式：", font=("Microsoft YaHei UI", 10, "bold")).pack(side="left")
-        self.mode_combo = ttk.Combobox(mode_row, state="readonly", width=20,
-                                       values=[MODE_LABELS[k] for k in MODE_KEYS])
-        self.mode_combo.current(0)
-        self.mode_combo.pack(side="left", padx=(0, 10))
-        self.mode_combo.bind("<<ComboboxSelected>>", self._on_mode_change)
-
-        ttk.Label(mode_row, text="底模：", font=("Microsoft YaHei UI", 10, "bold")).pack(side="left")
-        self.base_combo = ttk.Combobox(mode_row, state="readonly", width=16,
-                                       values=[BASE_TYPE_LABELS[k] for k in BASE_TYPE_KEYS])
-        self.base_combo.current(0)
-        self.base_combo.pack(side="left", padx=(0, 6))
-        self.base_combo.bind("<<ComboboxSelected>>", self._on_base_change)
-        self.btn_pick_base = ttk.Button(mode_row, text="选择底模文件…", command=self.cmd_pick_base)
-        self.btn_pick_base.pack(side="left", padx=(0, 6))
-        self.base_model_var = tk.StringVar()
-        self.base_disp_var = tk.StringVar()
-        self.base_disp_var.set("（未选择模型，点【选择底模文件…】或下载）")
-        self.base_model_lbl = ttk.Label(mode_row, textvariable=self.base_disp_var, style="Hint.TLabel",
-                                        width=34, anchor="w")
-        self.base_model_lbl.pack(side="left", padx=(0, 6))
-        self.btn_refresh_base = ttk.Button(mode_row, text="↻ 刷新", command=self.cmd_refresh_base)
-        self.btn_refresh_base.pack(side="left", padx=(0, 4))
-        self.btn_open_base_dir = ttk.Button(mode_row, text="打开模型文件夹", command=self.cmd_open_base_dir)
-        self.btn_open_base_dir.pack(side="left", padx=(0, 4))
-        self.btn_download_base = ttk.Button(mode_row, text="没有模型？点这里下载", command=self.cmd_download_base)
-        self.btn_download_base.pack(side="left", padx=(0, 10))
-        ttk.Button(mode_row, text="↺ 恢复预设", command=self.cmd_reset_presets).pack(side="left")
-
-        # ---- 原始图片文件夹行（一键按钮在左侧新手引导第⑤步） ----
-        data_row = ttk.Frame(top)
-        data_row.pack(fill="x", pady=(6, 2))
-        ttk.Label(data_row, text="原始图片文件夹：").pack(side="left")
-        self.raw_dir_var = tk.StringVar()
-        self.raw_entry = ttk.Entry(data_row, textvariable=self.raw_dir_var, width=58)
-        self.raw_entry.pack(side="left", padx=(0, 6))
-        self.btn_pick_raw = ttk.Button(data_row, text="浏览…", command=self.cmd_pick_raw)
-        self.btn_pick_raw.pack(side="left")
-        ttk.Label(data_row, text="（按左侧新手引导 ①②③④⑤ 顺序操作）", style="Hint.TLabel").pack(side="left", padx=(8, 0))
-
-        # ---- Trigger 触发词（两种模式都显示；人物=角色名，画风=画风专属词） ----
-        self.trig_frame = ttk.LabelFrame(top, text="🔑 Trigger 触发词（可选）", padding=8)
-        r1 = ttk.Frame(self.trig_frame)
-        r1.pack(fill="x")
-        ttk.Label(r1, text="Trigger 触发词：").pack(side="left")
-        self.trigger_var = tk.StringVar()
-        self.trigger_entry = ttk.Entry(r1, textvariable=self.trigger_var, width=30)
-        self.trigger_entry.pack(side="left", padx=(0, 6))
-        ttk.Label(r1, text="（支持逗号分隔多个；自动插入每张标签最开头）", style="Hint.TLabel").pack(side="left")
-        self.trigger_hint_var = tk.StringVar()
-        self.trigger_hint = ttk.Label(self.trig_frame, textvariable=self.trigger_hint_var,
-                                      style="Hint.TLabel", justify="left", wraplength=660)
-        self.trigger_hint.pack(fill="x", pady=(4, 0))
-        self.trig_frame.pack(fill="x", pady=(4, 0))
-
-        # ---- 人物模式专属控件（正则数据集，画风模式自动隐藏，带滑入动画） ----
-        self.char_slide = tk.Canvas(top, height=0, bg=ROOT_BG, highlightthickness=0)
-        self.char_frame = ttk.LabelFrame(self.char_slide, text="👤 人物模式专属设置（正则数据集，画风模式自动隐藏）", padding=8)
-        self._char_win = self.char_slide.create_window((0, 0), window=self.char_frame, anchor="nw")
-        self.char_slide.bind("<Configure>", lambda e: self.char_slide.itemconfigure(self._char_win, width=e.width))
-        r2 = ttk.Frame(self.char_frame)
-        r2.pack(fill="x")
-        ttk.Label(r2, text="正则数据集：").pack(side="left")
-        self.reg_var = tk.StringVar()
-        self.reg_entry = ttk.Entry(r2, textvariable=self.reg_var, width=44)
-        self.reg_entry.pack(side="left", padx=(0, 6))
-        self.btn_pick_reg = ttk.Button(r2, text="选择文件夹…", command=self.cmd_pick_reg)
-        self.btn_pick_reg.pack(side="left")
-        ttk.Label(r2, text="（可选，用于防过拟合）", style="Hint.TLabel").pack(side="left", padx=(6, 0))
-
-        # ---- 全局提示词（两种模式都显示；不写入图片 txt） ----
-        self.global_frame = ttk.LabelFrame(top, text="✨ 附加全局提示词（训练全局参数，不写入图片标签，可留空）", padding=8)
-        gr1 = ttk.Frame(self.global_frame)
-        gr1.pack(fill="x")
-        ttk.Label(gr1, text="正向全局提示词：").pack(side="left")
-        self.global_pos_var = tk.StringVar()
-        self.global_pos_entry = ttk.Entry(gr1, textvariable=self.global_pos_var, width=52)
-        self.global_pos_entry.pack(side="left", padx=(0, 6))
-        ttk.Label(gr1, text="（训练时自动加到每张标签最前面）", style="Hint.TLabel").pack(side="left")
-        gr2 = ttk.Frame(self.global_frame)
-        gr2.pack(fill="x", pady=(6, 0))
-        ttk.Label(gr2, text="负向全局提示词：").pack(side="left")
-        self.global_neg_var = tk.StringVar()
-        self.global_neg_entry = ttk.Entry(gr2, textvariable=self.global_neg_var, width=52)
-        self.global_neg_entry.pack(side="left", padx=(0, 6))
-        ttk.Label(gr2, text="（写入使用模板/参数报告；kohya 训练不使用负向提示词）", style="Hint.TLabel").pack(side="left")
-        self.global_frame.pack(fill="x", pady=(4, 0))
-
-        self.tip_label = ttk.Label(top, textvariable=None, style="Tip.TLabel",
-                                   wraplength=1080, justify="left")
-        self.tip_var = tk.StringVar()
-        self.tip_label.configure(textvariable=self.tip_var)
-        self.tip_label.pack(anchor="w", pady=(2, 4), fill="x")
-
-        main = ttk.Panedwindow(self.root, orient="horizontal")
-        main.pack(fill="both", expand=True, padx=12, pady=(8, 12))
-
-        # ---- 左侧可滚动容器（内容多时自动出现滚动条） ----
-        left_wrap = ttk.Frame(main)
-        main.add(left_wrap, weight=0)
-        self.left_canvas = tk.Canvas(left_wrap, width=410, highlightthickness=0, bg=ROOT_BG)
-        self.left_sb = ttk.Scrollbar(left_wrap, orient="vertical", style="Vertical.TScrollbar",
-                                     command=self.left_canvas.yview)
-        self.left_canvas.configure(yscrollcommand=self.left_sb.set)
-        self.left_canvas.pack(side="left", fill="both", expand=True)
-        self.left_sb.pack(side="right", fill="y")
-        left = ttk.Frame(self.left_canvas, padding=6)
-        self._left_id = self.left_canvas.create_window((0, 0), window=left, anchor="nw")
-
-        def _on_left_configure(_e=None):
-            self.left_canvas.configure(scrollregion=self.left_canvas.bbox("all"))
-
-        def _on_canvas_configure(e):
-            self.left_canvas.itemconfigure(self._left_id, width=e.width)
-
-        def _on_wheel(e):
-            self.left_canvas.yview_scroll(int(-e.delta / 120), "units")
-
-        left.bind("<Configure>", _on_left_configure)
-        self.left_canvas.bind("<Configure>", _on_canvas_configure)
-        self.left_canvas.bind("<MouseWheel>", _on_wheel)
-        left.bind("<MouseWheel>", _on_wheel)
-
-        # ---- 新手引导（按顺序做） ----
-        guide = ttk.LabelFrame(left, text="🎓 新手引导（按顺序做，鼠标悬停看说明）", padding=6)
-        guide.pack(fill="x", pady=(0, 6))
-        self.guide_env = tk.StringVar()
-        self.guide_kohya = tk.StringVar()
-        self.guide_base = tk.StringVar()
-        self.guide_raw = tk.StringVar()
-
-        def _grow(row, text, var, btn_text, cmd, width=10):
-            ttk.Label(guide, text=text, style="Guide.TLabel", anchor="w").grid(
-                row=row, column=0, sticky="w", padx=(0, 6), pady=2)
-            ttk.Label(guide, textvariable=var, width=9, anchor="w").grid(row=row, column=1, sticky="w")
-            b = ttk.Button(guide, text=btn_text, command=cmd, width=width)
-            b.grid(row=row, column=2, sticky="e", pady=2)
-            return b
-
-        self.btn_env = _grow(0, "① 环境准备（Git / Python）", self.guide_env, "去准备", self.cmd_env)
-        self.btn_install = _grow(1, "② 安装训练内核（Kohya-SS）", self.guide_kohya, "去安装", self.cmd_install)
-        self.btn_guide_base = _grow(2, "③ 选择底模 + 训练模式", self.guide_base, "去选底模", self.cmd_pick_base)
-        self.btn_guide_raw = _grow(3, "④ 选择原始图片文件夹", self.guide_raw, "去选文件夹", self.cmd_pick_raw)
-        self.btn_one_click = ttk.Button(guide, text="🚀 一键开始训练（自动预处理+训练）",
-                                        command=self.cmd_one_click_train, style="BigAccent0.TButton")
-        self.btn_one_click.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(6, 2))
-        self.busy_spin = ttk.Label(guide, text="", style="Hint.TLabel", font=("Microsoft YaHei UI", 12))
-        self.busy_spin.grid(row=4, column=3, padx=(6, 0))
-        self.guide_next = tk.StringVar()
-        ttk.Label(guide, textvariable=self.guide_next, style="Tip.TLabel", wraplength=300,
-                  justify="left").grid(row=5, column=0, columnspan=3, sticky="w", pady=(2, 0))
-
-        # ---- 老手 / 附加工具 ----
-        tools = ttk.LabelFrame(left, text="🔧 老手 / 附加工具", padding=6)
-        tools.pack(fill="x", pady=(0, 6))
-        self.btn_pre = ttk.Button(tools, text="③ 数据预处理", command=self.cmd_preprocess)
-        self.btn_pre.grid(row=0, column=0, sticky="ew", padx=2, pady=2)
-        self.btn_train = ttk.Button(tools, text="⑥ 一键训练", command=self.cmd_train)
-        self.btn_train.grid(row=0, column=1, sticky="ew", padx=2, pady=2)
-        self.btn_ui = ttk.Button(tools, text="④ 启动 Web UI", command=self.cmd_start_ui)
-        self.btn_ui.grid(row=1, column=0, sticky="ew", padx=2, pady=2)
-        self.btn_ui_stop = ttk.Button(tools, text="⑤ 停止 Web UI", command=self.cmd_stop_ui)
-        self.btn_ui_stop.grid(row=1, column=1, sticky="ew", padx=2, pady=2)
-        self.btn_readme = ttk.Button(tools, text="⑦ 使用说明", command=self.cmd_readme)
-        self.btn_readme.grid(row=2, column=0, sticky="ew", padx=2, pady=2)
-        self.btn_out = ttk.Button(tools, text="⑧ 输出文件夹", command=self.cmd_open_output)
-        self.btn_out.grid(row=2, column=1, sticky="ew", padx=2, pady=2)
-        self.btn_about = ttk.Button(tools, text="⑨ 关于", command=self.cmd_about)
-        self.btn_about.grid(row=3, column=0, columnspan=2, sticky="ew", padx=2, pady=2)
-        tools.columnconfigure(0, weight=1)
-        tools.columnconfigure(1, weight=1)
-
-        # ---- 高级参数面板（默认收起） ----
-        self.adv = ttk.LabelFrame(left, text="高级参数（老手向，默认收起）", padding=8)
-        adv = self.adv
-        adv.pack(fill="x", pady=(0, 6))
-        self.adv_collapsed = tk.BooleanVar(value=True)
-        ttk.Checkbutton(adv, text="展开高级参数（可手动修改，改过后不再被自动覆盖）",
-                        variable=self.adv_collapsed, command=self._toggle_adv).grid(
-            row=0, column=0, columnspan=4, sticky="w")
-        self.adv_canvas = tk.Canvas(adv, height=0, bg=ROOT_BG, highlightthickness=0)
-        self.adv_canvas.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(4, 0))
-        self.adv_body = ttk.Frame(self.adv_canvas)
-        self._adv_win = self.adv_canvas.create_window((0, 0), window=self.adv_body, anchor="nw")
-        self.adv_canvas.bind("<Configure>", lambda e: self.adv_canvas.itemconfigure(self._adv_win, width=e.width))
-        self.param_vars = {}
-
-        def _mk(key, label, row, col):
-            ttk.Label(self.adv_body, text=label).grid(row=row, column=col * 2, sticky="w", padx=(0, 4), pady=2)
-            var = tk.StringVar()
-            ent = ttk.Entry(self.adv_body, textvariable=var, width=11)
-            ent.grid(row=row, column=col * 2 + 1, sticky="w", pady=2)
-            var.trace_add("write", self._manual_trace(key))
-            Tooltip(ent, PARAM_TIPS.get(key, ""))
-            self.param_vars[key] = var
-            return var
-
-        _mk("rank", "rank（LoRA秩）", 0, 0)
-        _mk("alpha", "alpha（缩放）", 0, 1)
-        _mk("unet_lr", "学习率", 1, 0)
-        _mk("te_lr", "文本编码器学习率", 1, 1)
-        _mk("repeats", "repeats（重复次数）", 2, 0)
-        _mk("max_epochs", "最大 epoch", 2, 1)
-
-        self.unet_only_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(self.adv_body, text="只训练 UNet（不训练文本编码器）",
-                        variable=self.unet_only_var).grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
-        ttk.Label(self.adv_body, text="梯度检查点：").grid(row=4, column=0, sticky="w", pady=(4, 0))
-        self.gc_var = tk.StringVar(value="自动")
-        ttk.Combobox(self.adv_body, textvariable=self.gc_var, state="readonly", width=8,
-                     values=["自动", "开启", "关闭"]).grid(row=4, column=1, columnspan=2, sticky="w", pady=(4, 0))
-
-        self.disclaimer_lbl = ttk.Label(left, text="⚠ 免责：禁止训练版权画师作品、受版权保护的真人素材。\n基于 kohya-ss sd-scripts（Apache-2.0）二次封装，MIT 开源。",
-                                        style="Warn.TLabel", wraplength=300, justify="left")
-        self.disclaimer_lbl.pack(anchor="w", pady=(4, 0))
-        # 滚轮在左侧各面板上也可滚动
-        for _w in (guide, tools, self.adv, self.disclaimer_lbl):
-            try:
-                _w.bind("<MouseWheel>", _on_wheel)
-            except Exception:
-                pass
-
-        right = ttk.Frame(main, padding=6)
-        main.add(right, weight=1)
-        ttk.Label(right, text="运行日志", style="Header.TLabel").pack(anchor="w", pady=(0, 6))
-
-        # ---- 底模下载进度区（默认隐藏） ----
-        self.dl_frame = ttk.LabelFrame(right, text="⬇ 底模下载", padding=6)
-        self.dl_status_var = tk.StringVar(value="")
-        ttk.Label(self.dl_frame, textvariable=self.dl_status_var, style="Hint.TLabel",
-                  wraplength=680, justify="left").pack(anchor="w", fill="x")
-        self.dl_progress = ttk.Progressbar(self.dl_frame, maximum=100, value=0)
-        self.dl_progress.pack(fill="x", pady=(4, 4))
-        self.btn_dl_cancel = ttk.Button(self.dl_frame, text="取消下载", command=self.cmd_dl_cancel)
-        self.btn_dl_cancel.pack(anchor="e")
-
-        log_border = tk.Frame(right, height=2, bg=BORDER)
-        log_border.pack(fill="x", pady=(0, 4))
-        self.txt = scrolledtext.ScrolledText(right, state="disabled", wrap="word",
-                                             font=("Consolas", 9), background=LOG_BG,
-                                             foreground=LOG_FG, borderwidth=0,
-                                             highlightthickness=0, padx=6, pady=6)
-        self.txt.tag_configure("ok", foreground="#9ECE6A")
-        self.txt.tag_configure("warn", foreground="#E0AF68")
-        self.txt.tag_configure("err", foreground="#F7768E")
-        self.txt.tag_configure("train", foreground="#7AA2F7")
-        self.txt.tag_configure("model", foreground="#BB9AF7")
-        self.txt.tag_configure("info", foreground=LOG_FG)
-        self.txt.pack(fill="both", expand=True)
-        try:
-            self.txt.vbar.configure(relief="flat", width=12, bg="#2A2C3A", troughcolor=LOG_BG,
-                                    activebackground=INDIGO, highlightthickness=0, borderwidth=0)
-        except Exception:
-            pass
-
-        self._toggle_adv()
-        self._attach_tooltips()
-        self._refresh_guide()
-        self._on_mode_change()
-        # 引导状态随输入自动刷新（env/kohya 状态由 _refresh_status 更新）
-        self.raw_dir_var.trace_add("write", lambda *a: self._refresh_guide())
-        self.base_model_var.trace_add("write", lambda *a: self._refresh_guide())
-        self._apply_hover_all()
-
-    def _refresh_guide(self):
-        """刷新新手引导各步骤状态与「下一步该做什么」提示。"""
-        try:
-            env_ok = getattr(self, "_env_ok", False)
-            kohya_ok = getattr(self, "_kohya_ok", False)
-            base = self.base_model_var.get().strip()
-            base_ok = bool(base) and os.path.isfile(base)
-            raw = self.raw_dir_var.get().strip()
-            raw_ok = bool(raw) and os.path.isdir(raw) and any(
-                f.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"))
-                for f in os.listdir(raw)) if (raw and os.path.isdir(raw)) else False
-
-            self.guide_env.set("✓ 已完成" if env_ok else "○ 未完成")
-            self.guide_kohya.set("✓ 已完成" if kohya_ok else "○ 未完成")
-            self.guide_base.set("✓ 已选" if base_ok else "○ 未选")
-            self.guide_raw.set("✓ 已选" if raw_ok else "○ 未选")
-
-            if not env_ok:
-                nxt = "① 先点「去准备」安装 Git / Python"
-                target = self.btn_env
-            elif not kohya_ok:
-                nxt = "② 先点「去安装」装好训练内核"
-                target = self.btn_install
-            elif not base_ok:
-                nxt = "③ 在顶部选择底模（会自动识别 SD1.5 / SDXL）"
-                target = self.btn_guide_base
-            elif not raw_ok:
-                nxt = "④ 在顶部选择原始图片文件夹"
-                target = self.btn_guide_raw
-            else:
-                nxt = "⑤ 全部就绪，点【🚀 一键开始训练】！"
-                target = self.btn_one_click
-            self.guide_next.set("▶ 下一步：" + nxt)
-            self._highlight_next(target if not getattr(self, "busy", False) else None)
-        except Exception:
-            pass
-
-    def _tip(self, widget, text):
-        if widget is not None and hasattr(widget, "bind") and text:
-            Tooltip(widget, text)
-
-    def _attach_tooltips(self):
-        """给所有控件挂通俗中文悬停提示。"""
-        tips = [
-            (self.mode_combo, "训练模式：🎨画风=只学绘画风格（不学脸/角色）；👤人物=学某个角色的脸、服饰、特征。切换会自动填好推荐参数。"),
-            (self.base_combo, "底模类型：SD1.5 用 512 分辨率；SDXL 用 1024 分辨率（更吃显存）。点「选择底模文件」选完会自动识别。"),
-            (self.btn_pick_base, "手动浏览选择本机的 .safetensors / .ckpt 底模；选完自动识别类型。"),
-            (self.btn_refresh_base, "重新扫描默认模型文件夹，把新放入的底模列进下拉。"),
-            (self.btn_open_base_dir, "打开默认底模存放文件夹（项目内 models\\base）。"),
-            (self.btn_download_base, "没有底模？点这里选下载方式：推荐「应用内下载」（软件里直接下载，带进度/断点续传/下完自动识别），也可选浏览器极速下载（魔搭）或备用下载（hf-mirror）。"),
-            (self.base_model_lbl, "当前选中的底模文件（显示文件名）。未选择时点【选择底模文件…】或【没有模型？点这里下载】。"),
-            (self.raw_entry, "放原始图片的文件夹（支持 jpg/png/webp/bmp/tif/gif）。"),
-            (self.btn_pick_raw, "选择原始图片文件夹。"),
-            (self.btn_guide_base, "第③步：选择底模（会自动识别 SD1.5 / SDXL）。"),
-            (self.btn_guide_raw, "第④步：选择原始图片文件夹。"),
-            (self.btn_one_click, "小白专用：自动过滤模糊/过小/损坏图 → 正方形裁剪 → 去重 → 打标签 → 开始训练，全程不用管。"),
-            (self.trigger_entry, "触发词：相当于模型的“召唤词”。人物模式=角色名；画风模式=画风专属词。推理时用它唤起。支持多个，用英文逗号分隔（如 ohwx, mychar）。"),
-            (self.reg_entry, "正则图：同一角色的参考图文件夹，训练时防止模型学过头（可选）。"),
-            (self.btn_pick_reg, "选择正则数据集文件夹（人物模式可选）。"),
-            (self.global_pos_entry, "附加全局正向提示词：训练时自动加到每张图片标签最前面（例如 masterpiece），不写进图片的 txt 文件，可留空。"),
-            (self.global_neg_entry, "附加全局负向提示词：会写进使用模板和参数报告；kohya 训练本身不使用负向提示词，可留空。"),
-            (self.unet_only_var, "只训练 UNet（不训练文本编码器）：更省显存、更稳，画风类可以勾选。"),
-            (self.gc_var, "梯度检查点：省显存换速度；「自动」= 按你的显存自动决定开/关。"),
-            (self.btn_env, "第①步：检测并安装 Git 和 Python（项目内置安装包，一般无需手动装）。"),
-            (self.btn_install, "第②步：安装 Kohya-SS 训练内核（内置源码包 + 国内镜像，不需要代理/GitHub）。"),
-            (self.btn_pre, "数据预处理：缩放/去黑边/去水印/打标签。一键开始训练会自动做，老手可单独用。"),
-            (self.btn_ui, "打开 kohya 网页界面（高级用户用）。"),
-            (self.btn_ui_stop, "停止正在运行的网页界面。"),
-            (self.btn_train, "用已经预处理好的数据直接训练（老手流程，⑥）。"),
-            (self.btn_readme, "打开使用说明文档（README）。"),
-            (self.btn_out, "打开输出文件夹：模型、使用模板、参数报告、中间快照。"),
-            (self.btn_about, "开源协议（MIT + kohya Apache-2.0）与免责提示。"),
-        ]
-        for w, t in tips:
-            self._tip(w, t)
-
-    # ---------- 动画 ----------
-    def _apply_hover_all(self):
-        """给所有 ttk.Button 挂悬停渐变。"""
-        def walk(w):
-            for child in w.winfo_children():
-                if isinstance(child, ttk.Button):
-                    self._bind_hover(child, big=(child is self.btn_one_click))
-                walk(child)
-        walk(self.root)
-
-    def _bind_hover(self, btn, big=False):
-        key = id(btn)
-        self._btn_anim[key] = {"names": self._big_ramp_names if big else self._btn_ramp_names,
-                               "idx": 0, "after": None}
-        def _enter(_e=None):
-            if btn is getattr(self, "_guide_flash_btn", None):
-                self._stop_guide_flash()
-            self._anim_btn(btn, 4)
-        def _leave(_e=None):
-            self._anim_btn(btn, 0)
-        btn.bind("<Enter>", _enter, add="+")
-        btn.bind("<Leave>", _leave, add="+")
-
-    def _anim_btn(self, btn, target):
-        key = id(btn)
-        st = self._btn_anim.get(key)
-        if not st:
-            return
-        if st["after"]:
-            try:
-                self.root.after_cancel(st["after"])
-            except Exception:
-                pass
-            st["after"] = None
-        def step():
-            cur = st["idx"]
-            if cur < target:
-                cur += 1
-            elif cur > target:
-                cur -= 1
-            st["idx"] = cur
-            try:
-                btn.configure(style=st["names"][cur])
-            except Exception:
-                pass
-            if cur != target:
-                st["after"] = self.root.after(30, step)
-            else:
-                st["after"] = None
-        step()
-
-    def _start_busy_anim(self):
-        """训练中：按钮文字动态省略号 + 旋转图标。"""
-        self._stop_busy_anim()
-        st = {"dots": 0, "spin": 0, "after": None}
-        self._busy_anim = st
-        self._oneclick_text = self.btn_one_click.cget("text")
-        def tick():
-            st["dots"] = (st["dots"] + 1) % 4
-            try:
-                self.btn_one_click.configure(text="训练中" + "." * st["dots"])
-                self.busy_spin.configure(text="\u25d0\u25d3\u25d1\u25d2"[st["spin"] % 4])
-            except Exception:
-                pass
-            st["spin"] += 1
-            st["after"] = self.root.after(500, tick)
-        tick()
-
-    def _stop_busy_anim(self):
-        st = getattr(self, "_busy_anim", None)
-        if st and st.get("after"):
-            try:
-                self.root.after_cancel(st["after"])
-            except Exception:
-                pass
-        self._busy_anim = None
-        try:
-            self.btn_one_click.configure(text=getattr(self, "_oneclick_text", "🚀 一键开始训练（自动预处理+训练）"))
-            self.busy_spin.configure(text="")
-        except Exception:
-            pass
-
-    def _highlight_next(self, btn):
-        """新手引导“下一步”按钮呼吸闪烁。"""
-        if btn is getattr(self, "_guide_flash_btn", None):
-            return
-        self._stop_guide_flash()
-        if btn is None:
-            return
-        self._guide_flash_btn = btn
-        st = {"on": False, "after": None}
-        self._guide_flash_state = st
-        def tick():
-            st["on"] = not st["on"]
-            try:
-                if btn is self.btn_one_click:
-                    btn.configure(style="BigAccent4.TButton" if st["on"] else "BigAccent0.TButton")
-                else:
-                    btn.configure(style="AccentFlash.TButton" if st["on"] else "Accent0.TButton")
-            except Exception:
-                pass
-            st["after"] = self.root.after(800, tick)
-        tick()
-
-    def _stop_guide_flash(self):
-        st = getattr(self, "_guide_flash_state", None)
-        if st and st.get("after"):
-            try:
-                self.root.after_cancel(st["after"])
-            except Exception:
-                pass
-        self._guide_flash_state = None
-        btn = getattr(self, "_guide_flash_btn", None)
-        self._guide_flash_btn = None
-        if btn is not None:
-            try:
-                btn.configure(style="BigAccent0.TButton" if btn is self.btn_one_click else "Accent0.TButton")
-            except Exception:
-                pass
-
-    def _fade_tip(self):
-        """tip 文字淡入（灰→黑 3 帧）。"""
-        if getattr(self, "_fade_after", None):
-            try:
-                self.root.after_cancel(self._fade_after)
-            except Exception:
-                pass
-        self._fade_step = 0
-        def step():
-            i = self._fade_step
-            try:
-                self.tip_label.configure(style=f"TipFade{i}.TLabel")
-            except Exception:
-                pass
-            self._fade_step += 1
-            if i < 2:
-                self._fade_after = self.root.after(40, step)
-            else:
-                self._fade_after = None
-        step()
-
-    def _slide_char(self, open_):
-        """人物专属面板滑入/滑出。"""
-        if getattr(self, "_char_after", None):
-            try:
-                self.root.after_cancel(self._char_after)
-            except Exception:
-                pass
-            self._char_after = None
-        if open_:
-            self.char_slide.pack(fill="x", pady=(4, 0), before=self.global_frame)
-            target = self.char_frame.winfo_reqheight()
-            if target < 10:
-                target = 140
-            self.char_slide.configure(height=0)
-            cur = 0
-        else:
-            cur = self.char_slide.winfo_height()
-            target = 0
-        steps = 10
-        delta = (target - cur) / steps
-        def step(i=0):
-            h = int(cur + delta * (i + 1))
-            if h < 0:
-                h = 0
-            self.char_slide.configure(height=h)
-            if i < steps - 1:
-                self._char_after = self.root.after(15, lambda: step(i + 1))
-            else:
-                self._char_after = None
-                if not open_:
-                    self.char_slide.pack_forget()
-        step()
-
-    def _anim_adv(self, open_):
-        """高级参数面板平滑展开/收起。"""
-        if getattr(self, "_adv_after", None):
-            try:
-                self.root.after_cancel(self._adv_after)
-            except Exception:
-                pass
-            self._adv_after = None
-        target = self.adv_body.winfo_reqheight() if open_ else 0
-        if target < 10 and open_:
-            target = 160
-        cur = self.adv_canvas.winfo_height() if not open_ else 0
-        steps = 10
-        delta = (target - cur) / steps
-        def step(i=0):
-            h = int(cur + delta * (i + 1))
-            if h < 0:
-                h = 0
-            self.adv_canvas.configure(height=h)
-            if i < steps - 1:
-                self._adv_after = self.root.after(20, lambda: step(i + 1))
-            else:
-                self._adv_after = None
-        step()
-
-    def _toggle_adv(self):
-        open_ = not self.adv_collapsed.get()
-        self._anim_adv(open_)
-
-    def _btn(self, parent, text, cb):
-        b = ttk.Button(parent, text=text, command=cb)
-        b.pack(fill="x", pady=3)
-        return b
-
-    # ---- 模式/底模切换 / 预设 ----
-    def _current_mode(self):
-        try:
-            return MODE_KEYS[self.mode_combo.current()]
-        except Exception:
-            return "style"
-
-    def _current_base_type(self):
-        try:
-            return BASE_TYPE_KEYS[self.base_combo.current()]
-        except Exception:
-            return "sd15"
-
-    def _manual_trace(self, key):
-        def _on_write(*_a):
-            if not getattr(self, "_applying_preset", False):
-                self._manual_override.add(key)
-        return _on_write
-
-    def _apply_presets(self):
-        self._applying_preset = True
-        try:
-            pre = PRESETS[self.mode][self.base_type]
-            for k, v in pre.items():
-                if k not in self._manual_override:
-                    self.param_vars[k].set(v)
-        finally:
-            self._applying_preset = False
-
-    def _on_mode_change(self, _event=None):
-        self.mode = self._current_mode()
-        self._apply_presets()
-        self._update_mode_ui()
-
-    def _on_base_change(self, _event=None):
-        idx = self.base_combo.current()
-        if idx < 0 or not getattr(self, "_base_items", None) or idx >= len(self._base_items):
-            return
-        kind, payload = self._base_items[idx][1], self._base_items[idx][2]
-        if kind == "type":
-            self._set_base_type(payload)
-            model = self._find_model_of_type(payload)
-            if model:
-                self._set_base_model(model[0])
-                self._log(f"[底模] 目录里找到 {BASE_TYPE_LABELS[payload]} 模型：{model[1]}")
-            else:
-                self._set_base_model("")
-                # 延迟弹出，避免在下拉事件里直接弹窗卡界面
-                self.root.after(60, lambda: self._ask_download_or_open(payload, allow_manual=False))
-        elif kind == "file":
-            path = payload
-            self._set_base_model(path)
-            bt = detect_base_type(path)
-            if bt in BASE_TYPE_KEYS:
-                self._set_base_type(bt)
-                self._log(f"[底模] 已选择 {os.path.basename(path)}（{BASE_TYPE_LABELS[bt]}）")
-            else:
-                if _looks_like_krea2(path):
-                    self._log(f"[底模] ⚠ 检测到 Krea2 底模 {os.path.basename(path)}：Krea2 训练请用第二引擎的「Krea2」模式（需先装第二引擎），模型放 models/krea2/raw.safetensors；第一引擎不支持 Krea2，误用会按 FLUX 加载报错。")
-                else:
-                    self._log(f"[底模] 已选择 {os.path.basename(path)}（类型待确认，可点「选择底模文件」重新识别）")
-        self._refresh_guide()
-
-    def _set_base_type(self, bt):
-        """设置底模类型并应用预设（不触发下拉事件）。"""
-        if bt not in BASE_TYPE_KEYS:
-            return
-        self.base_type = bt
-        self._apply_presets()
-        self._update_mode_ui()
-        try:
-            self.base_combo.current(BASE_TYPE_KEYS.index(bt))
-        except Exception:
-            pass
-        self._refresh_guide()
-
-    def _scan_base_models(self):
-        """扫描默认底模目录，填充底模下拉（快捷类型 + 扫描到的模型文件）。"""
-        try:
-            d = base_models_dir()
-            os.makedirs(d, exist_ok=True)
-        except Exception:
-            pass
-        self._base_models = scan_base_models()
-        items = []
-        for bt in BASE_TYPE_KEYS:
-            items.append((BASE_TYPE_LABELS[bt], "type", bt))
-        for p, n, t in self._base_models:
-            label = f"📄 {n}"
-            label += (f"（{BASE_TYPE_LABELS[t]}）" if t else "（待识别）")
-            items.append((label, "file", p))
-        self._base_items = items
-        self.base_combo.configure(values=[i[0] for i in items])
-        cur = self.base_model_var.get().strip()
-        if cur:
-            for i, it in enumerate(items):
-                if it[2] == cur:
-                    self.base_combo.current(i)
-                    break
-            else:
-                self.base_combo.current(BASE_TYPE_KEYS.index(self.base_type))
-        else:
-            self.base_combo.current(BASE_TYPE_KEYS.index(self.base_type))
-        self._refresh_guide()
-
-    def _find_model_of_type(self, bt):
-        for p, n, t in getattr(self, "_base_models", []):
-            if t == bt:
-                return (p, n, t)
-        return None
-
-    def _ask_download_or_open(self, base_type, allow_manual=False):
-        """缺少底模弹窗：跳转下载（国内镜像）/ 打开模型文件夹（训练兜底时可选手动选文件）。"""
-        label = BASE_TYPE_LABELS.get(base_type, "所选类型")
-        dlg = tk.Toplevel(self.root)
-        dlg.title("缺少基础底模")
-        dlg.resizable(False, False)
-        dlg.transient(self.root)
-        fname, fsize = HF_MODEL_INFO.get(base_type, ("模型文件", ""))
-        msg = (f"未检测到对应版本的基础底模（{label}），训练必须要有基础底模。\n\n"
-               f"点击【🚀 极速下载】用阿里魔搭直链下载（{fname}，{fsize}，国内快约 6 倍）；\n"
-               "若太慢可点【备用下载】用 hf-mirror 下载；\n"
-               "点击【打开模型文件夹】打开存放目录，下载完成后把模型文件丢到此文件夹即可。")
-        tk.Label(dlg, text=msg, justify="left", wraplength=400, padx=18, pady=14,
-                 font=("Microsoft YaHei UI", 10)).pack()
-        btns = ttk.Frame(dlg)
-        btns.pack(pady=(0, 14))
-        result = {}
-
-        def _act(k):
-            result["action"] = k
-            dlg.destroy()
-
-        btns1 = ttk.Frame(dlg)
-        btns1.pack(pady=(10, 2))
-        ttk.Button(btns1, text="⬇ 应用内下载", command=lambda: _act("inapp")).pack(side="left", padx=6)
-        ttk.Button(btns1, text="🚀 极速下载（魔搭）", command=lambda: _act("download_fast")).pack(side="left", padx=6)
-        ttk.Button(btns1, text="备用下载（hf-mirror）", command=lambda: _act("download_fallback")).pack(side="left", padx=6)
-        btns2 = ttk.Frame(dlg)
-        btns2.pack(pady=(0, 14))
-        ttk.Button(btns2, text="打开模型文件夹", command=lambda: _act("open")).pack(side="left", padx=6)
-        if allow_manual:
-            ttk.Button(btns2, text="手动选择文件", command=lambda: _act("manual")).pack(side="left", padx=6)
-        else:
-            ttk.Button(btns2, text="取消", command=lambda: _act(None)).pack(side="left", padx=6)
-        dlg.grab_set()
-        self.root.wait_window(dlg)
-        action = result.get("action")
-        if action == "inapp":
-            self.cmd_dl_in_app(base_type)
-        elif action == "download_fast":
-            self._open_download_page(base_type, source="fast")
-        elif action == "download_fallback":
-            self._open_download_page(base_type, source="fallback")
-        elif action == "open":
-            self.cmd_open_base_dir()
-        return action
-
-    def _ensure_base_model(self):
-        """确保已选底模：优先已选；否则用目录里第一个；都没有则弹窗引导。返回路径或 None。"""
-        base = self.base_model_var.get().strip()
-        if base and os.path.isfile(base):
-            return base
-        if getattr(self, "_base_models", None):
-            p, n, t = self._base_models[0]
-            self._set_base_model(p)
-            if t:
-                self._set_base_type(t)
-            self._log(f"[底模] 自动选用目录模型：{n}")
-            return p
-        action = self._ask_download_or_open(self.base_type, allow_manual=True)
-        if action == "manual":
-            f = filedialog.askopenfilename(
-                title="选择底模（.safetensors / .ckpt）",
-                initialdir=base_models_dir(),
-                filetypes=[("模型文件", "*.safetensors *.ckpt"), ("所有文件", "*.*")],
-            )
-            if f:
-                self._set_base_model(f)
-                self._detect_and_apply(f)
-                return f
-        return None
-
-    def cmd_refresh_base(self):
-        self._scan_base_models()
-        self._log(f"[底模] 已刷新模型列表（目录：{base_models_dir()}）")
-
-    def cmd_open_base_dir(self):
-        d = base_models_dir()
-        try:
-            os.makedirs(d, exist_ok=True)
-        except Exception:
-            pass
-        os.startfile(d)  # noqa
-
-    def _open_download_page(self, base_type=None, source="fast"):
-        """打开对应版本底模的下载页。
-
-        source="fast" 用阿里魔搭极速直链；source="fallback" 用 hf-mirror 备用直链。
-        """
-        bt = base_type or self.base_type
-        if source == "fallback":
-            url = HF_MIRROR_URLS.get(bt, HF_MIRROR_URL)
-        else:
-            url = MODELSCOPE_URLS.get(bt, HF_MIRROR_URL)
-        webbrowser.open(url)
-
-    def cmd_download_base(self):
-        """“没有模型？点这里下载”按钮：弹出下载方式选择。"""
-        self._download_choice_dialog()
-
-    def _download_choice_dialog(self, bt=None):
-        bt = bt or self.base_type
-        label = BASE_TYPE_LABELS.get(bt, "底模")
-        fname, fsize = HF_MODEL_INFO.get(bt, ("模型文件", ""))
-        dlg = tk.Toplevel(self.root)
-        dlg.title("下载基础底模")
-        dlg.resizable(False, False)
-        dlg.transient(self.root)
-        tk.Label(dlg, text=(
-            f"当前底模类型：{label}\n"
-            f"将下载：{fname}（{fsize}）\n"
-            f"保存到：{base_models_dir()}\n\n"
-            "推荐用「应用内下载」：软件里直接下载，带进度、断点续传、下完自动识别。"),
-            justify="left", wraplength=440, padx=18, pady=12,
-            font=("Microsoft YaHei UI", 10)).pack()
-        btns = ttk.Frame(dlg)
-        btns.pack(pady=(0, 14))
-        result = {}
-
-        def _act(k):
-            result["action"] = k
-            dlg.destroy()
-
-        ttk.Button(btns, text="⬇ 应用内下载（推荐）", command=lambda: _act("inapp")).pack(side="left", padx=6)
-        ttk.Button(btns, text="🌐 浏览器极速下载", command=lambda: _act("web_fast")).pack(side="left", padx=6)
-        ttk.Button(btns, text="🔁 备用下载", command=lambda: _act("web_fallback")).pack(side="left", padx=6)
-        ttk.Button(btns, text="📂 打开文件夹", command=lambda: _act("open")).pack(side="left", padx=6)
-        dlg.grab_set()
-        self.root.wait_window(dlg)
-        action = result.get("action")
-        if action == "inapp":
-            self.cmd_dl_in_app(bt)
-        elif action == "web_fast":
-            self._open_download_page(bt, source="fast")
-        elif action == "web_fallback":
-            self._open_download_page(bt, source="fallback")
-        elif action == "open":
-            self.cmd_open_base_dir()
-
-    def cmd_dl_in_app(self, bt=None):
-        """应用内下载底模（带进度/断点续传/取消，下完自动识别）。"""
-        if _ModelDownloader is None:
-            messagebox.showerror(APP_NAME, "下载模块加载失败，请使用「浏览器极速下载」。")
-            return
-        if getattr(self, "_downloading", False):
-            messagebox.showinfo(APP_NAME, "已有下载任务在进行中，请先完成或取消。")
-            return
-        bt = bt or self.base_type
-        url = MODELSCOPE_URLS.get(bt) or HF_MIRROR_URLS.get(bt) or HF_MIRROR_URL
-        fname, fsize = HF_MODEL_INFO.get(bt, (os.path.basename(url), ""))
-        dest_dir = base_models_dir()
-        try:
-            os.makedirs(dest_dir, exist_ok=True)
-        except Exception:
-            pass
-        dest = os.path.join(dest_dir, fname)
-        if os.path.isfile(dest):
-            messagebox.showinfo(APP_NAME, f"{fname} 已存在，无需重复下载。")
-            self._scan_base_models()
-            return
-        part = dest + ".part"
-        if os.path.isfile(part) and os.path.getsize(part) > 0:
-            if not messagebox.askyesno(
-                    APP_NAME,
-                    f"发现上次未完成的下载进度（{os.path.getsize(part) / 1048576:.1f} MB）。\n"
-                    "要不要从断点继续下载？"):
-                try:
-                    os.remove(part)
-                except Exception:
-                    pass
-        self._downloading = True
-        self.btn_download_base.configure(state="disabled")
-        self._show_dl_ui(True)
-        self.dl_progress.configure(value=0, maximum=100)
-        self.dl_status_var.set(f"正在准备下载 {fname}（{fsize}）…")
-        self._log(f"[下载] 开始下载底模：{fname}（{fsize}）")
-        self._log(f"[下载] 保存到：{dest}")
-        self._dl = _ModelDownloader(url, dest,
-                                    progress_cb=self._dl_progress_cb,
-                                    done_cb=self._dl_done_cb,
-                                    logf=self._log)
-        self._dl.start()
-
-    def _dl_progress_cb(self, done, total, speed):
-        self.q.put(("DL_PROGRESS", done, total, speed))
-
-    def _dl_done_cb(self, ok, dest):
-        self.q.put(("DL_DONE", ok, dest))
-
-    def _handle_dl_progress(self, done, total, speed):
-        try:
-            pct = (done / total * 100) if total else 0
-            self.dl_progress.configure(value=pct)
-            tot_mb = (total or 0) / 1048576
-            mb = done / 1048576
-            spd = (speed or 0) / 1048576
-            self.dl_status_var.set(f"已下载 {mb:.1f} MB / {tot_mb:.1f} MB（{spd:.1f} MB/s）")
-        except Exception:
-            pass
-
-    def _handle_dl_done(self, ok, dest):
-        self._downloading = False
-        self.btn_download_base.configure(state="normal")
-        self._show_dl_ui(False)
-        if ok:
-            messagebox.showinfo(APP_NAME, f"底模下载完成：\n{dest}\n\n已自动扫描并加入底模列表。")
-            self._scan_base_models()
-        else:
-            messagebox.showwarning(APP_NAME,
-                                   "下载未完成（可能被取消或网络中断）。\n"
-                                   "进度已保留，可再次下载从断点继续。")
-
-    def cmd_dl_cancel(self):
-        if getattr(self, "_dl", None) and self._dl.is_alive():
-            self._dl.cancel()
-            self.dl_status_var.set("正在取消…")
-
-    def _show_dl_ui(self, visible):
-        if visible:
-            self.dl_frame.pack(fill="x", pady=(0, 6), before=self.txt)
-        else:
-            self.dl_frame.pack_forget()
-
-    def _update_mode_ui(self):
-        char_visible = (self.mode == "character")
-        self._slide_char(char_visible)
-        tip = DATASET_TIPS[self.mode]
-        if BASE_TYPE_HINTS.get(self.base_type):
-            tip += "\n" + BASE_TYPE_HINTS[self.base_type]
-        self.tip_var.set(tip)
-        self._fade_tip()
-        if self.mode == "character":
-            self.trigger_hint_var.set(TRIGGER_HINT_CHARACTER)
-            self.btn_pre.configure(text="③ 数据预处理（人物）")
-            self.btn_train.configure(text="⑥ 一键训练（人物 LoRA）")
-        else:
-            self.trigger_hint_var.set(TRIGGER_HINT_STYLE)
-            self.btn_pre.configure(text="③ 数据预处理（画风）")
-            self.btn_train.configure(text="⑥ 一键训练（画风 LoRA）")
-
-    def cmd_reset_presets(self):
-        self._manual_override.clear()
-        self._apply_presets()
-        self._log("已恢复当前模式+底模的全部预设参数（手动修改记录已清空）。")
-
-    def _set_base_model(self, path):
-        """设置当前底模路径，并在界面显示清晰的模型名/占位提示。"""
-        self.base_model_var.set(path or "")
-        p = (path or "").strip()
-        if p and os.path.isfile(p) and p.lower().endswith((".safetensors", ".ckpt")):
-            self.base_disp_var.set(f"📄 {os.path.basename(p)}")
-        elif p:
-            self.base_disp_var.set(f"⚠ {os.path.basename(p)}（不是有效的底模文件）")
-        else:
-            self.base_disp_var.set("（未选择模型，点【选择底模文件…】或下载）")
-
-    def cmd_pick_base(self):
-        d = base_models_dir()
-        try:
-            os.makedirs(d, exist_ok=True)
-        except Exception:
-            pass
-        f = filedialog.askopenfilename(
-            title="选择底模（.safetensors / .ckpt，SD1.5 或 SDXL）",
-            initialdir=d,
-            filetypes=[("模型文件", "*.safetensors *.ckpt"), ("所有文件", "*.*")],
-        )
-        if not f:
-            return
-        if not os.path.isfile(f):
-            messagebox.showwarning(APP_NAME, "请选择一个模型文件（.safetensors 或 .ckpt），不要选择文件夹。")
-            return
-        if not f.lower().endswith((".safetensors", ".ckpt")):
-            messagebox.showwarning(APP_NAME, "请选择 .safetensors 或 .ckpt 格式的底模文件。")
-            return
-        self._set_base_model(f)
-        self._detect_base_async(f)
-
-    def _detect_base_async(self, path):
-        self.status_var.set("正在识别底模类型…")
-        threading.Thread(target=self._detect_base_worker, args=(path,), daemon=True).start()
-
-    def _detect_base_worker(self, path):
-        try:
-            bt = detect_base_type(path)
-        except Exception:
-            bt = None
-        self.q.put(("BASE_DETECTED", path, bt))
-
-    def _detect_and_apply(self, path):
-        """同步识别并应用底模类型（返回识别结果）。"""
-        bt = detect_base_type(path)
-        if bt in BASE_TYPE_KEYS:
-            self._set_base_type(bt)
-            self._log(f"[底模] 自动识别为 {BASE_TYPE_LABELS[bt]}：{os.path.basename(path)}")
-        else:
-            self._log(f"[底模] 未能自动识别：{os.path.basename(path)}，请手动选择底模类型。")
-        return bt
-
-    def _handle_base_detected(self, path, bt):
-        self._refresh_status()
-        if bt in BASE_TYPE_KEYS:
-            self._set_base_type(bt)
-            self._log(f"[底模] 自动识别为 {BASE_TYPE_LABELS[bt]}：{os.path.basename(path)}")
-        else:
-            self._log(f"[底模] 未能自动识别：{os.path.basename(path)}，请手动选择底模类型。")
-            messagebox.showinfo(APP_NAME,
-                                "没能认出这个底模是 SD1.5 还是 SDXL，\n请在「底模」下拉里手动选一下。")
-
-    def cmd_pick_raw(self):
-        d = filedialog.askdirectory(title="选择原始图片文件夹（小白一键流程用）")
-        if d:
-            self.raw_dir_var.set(d)
-
-    def cmd_pick_reg(self):
-        d = filedialog.askdirectory(title="选择正则数据集文件夹（人物模式）")
-        if d:
-            self.reg_var.set(d)
-
-    def _collect_params(self):
-        def _num(key, cast):
-            s = self.param_vars[key].get().strip()
-            try:
-                return cast(s)
-            except Exception:
-                raise ValueError(f"参数「{PARAM_LABELS[key]}」格式错误：{s}")
-
-        return {
-            "mode": self.mode,
-            "base_type": self.base_type,
-            "base_model": self.base_model_var.get().strip() or None,
-            "raw_dir": self.raw_dir_var.get().strip() or None,
-            "rank": _num("rank", int),
-            "alpha": _num("alpha", int),
-            "unet_lr": _num("unet_lr", float),
-            "te_lr": _num("te_lr", float),
-            "repeats": _num("repeats", int),
-            "max_epochs": _num("max_epochs", int),
-            "train_text_encoder": not self.unet_only_var.get(),
-            "gc": self.gc_var.get(),
-            "trigger": self.trigger_var.get().strip(),
-            "reg_dir": self.reg_var.get().strip() or None,
-            "global_pos": self.global_pos_var.get().strip(),
-            "global_neg": self.global_neg_var.get().strip(),
-        }
-
-    def _confirm_training(self, params, base_model, extra=None):
-        lines = [
-            f"即将开始训练：{MODE_LABELS[params['mode']]}",
-            "─" * 44,
-            f"底模            : {os.path.basename(base_model) if base_model else '（未选择）'}",
-            f"底模类型        : {BASE_TYPE_LABELS.get(params.get('base_type', 'sd15'), '')}",
-            f"训练分辨率      : {RESOLUTIONS.get(params.get('base_type', 'sd15'), 512)}px",
-            f"rank / alpha    : {params['rank']} / {params['alpha']}",
-            f"学习率          : {params['unet_lr']}",
-            f"文本编码器学习率: {params['te_lr']}",
-            f"repeats         : {params['repeats']}",
-            f"最大 epoch      : {params['max_epochs']}",
-            f"训练目标        : {'UNet + 文本编码器' if params['train_text_encoder'] else '仅 UNet'}",
-            f"梯度检查点      : {params['gc']}",
-        ]
-        if params.get("batch_size"):
-            lines.append(f"batch_size      : {params['batch_size']}")
-        if params["mode"] == "character":
-            lines.append(f"Trigger         : {params['trigger'] or '（未填写）'}")
-            lines.append(f"正则数据集      : {params['reg_dir'] or '（未使用）'}")
-        lines.append(f"附加全局正向    : {params.get('global_pos') or '（无）'}")
-        lines.append(f"附加全局负向    : {params.get('global_neg') or '（无）'}")
-        lines.append(f"输出模型        : output/{OUTPUT_NAMES[params['mode']]}.safetensors")
-        if extra:
-            lines.append("")
-            lines.extend(str(x) for x in extra)
-        lines.append("")
-        lines.append("是否开始训练？")
-        return messagebox.askyesno(APP_NAME, "\n".join(lines))
-
-    # ---- 日志 ----
-    def _log(self, msg):
-        self.q.put(str(msg))
-
-    def _poll(self):
-        try:
-            while True:
-                item = self.q.get_nowait()
-                if isinstance(item, tuple) and item and item[0] == "DL_PROGRESS":
-                    self._handle_dl_progress(item[1], item[2], item[3])
-                    continue
-                if isinstance(item, tuple) and item and item[0] == "DL_DONE":
-                    self._handle_dl_done(item[1], item[2])
-                    continue
-                if isinstance(item, tuple) and item and item[0] == "BASE_DETECTED":
-                    self._handle_base_detected(*item[1:])
-                    continue
-                if isinstance(item, tuple) and item and item[0] == "AUTO_CONFIRM":
-                    self._handle_auto_confirm(*item[1:])
-                    continue
-                if item == "__DONE__":
-                    self._set_busy(False)
-                    self._refresh_status()
-                    continue
-                self.txt.configure(state="normal")
-                self.txt.insert("end", item + "\n", *self._log_tags(item))
-                self.txt.see("end")
-                self.txt.configure(state="disabled")
-        except queue.Empty:
-            pass
-        self.root.after(100, self._poll)
-
-    def _set_busy(self, busy):
-        self.busy = busy
-        for b in (self.btn_env, self.btn_install, self.btn_pre, self.btn_ui,
-                  self.btn_ui_stop, self.btn_train, self.btn_one_click,
-                  self.btn_guide_base, self.btn_guide_raw,
-                  self.btn_refresh_base, self.btn_open_base_dir, self.btn_download_base):
-            b.configure(state="disabled" if busy else "normal")
-        self.mode_combo.configure(state="disabled" if busy else "readonly")
-        self.base_combo.configure(state="disabled" if busy else "readonly")
-        self.status_var.set("正在运行…" if busy else self.status_var.get())
-        if busy:
-            self._start_busy_anim()
-            self._start_breathe()
-            self._stop_guide_flash()
-        else:
-            self._stop_busy_anim()
-            self._stop_breathe()
-            self._refresh_guide()
-
-    def _refresh_status(self):
-        try:
-            st = system_status()
-            self._env_ok = bool(st.get("git") and st.get("python"))
-            self._kohya_ok = bool(st.get("kohya_ok"))
-            gray = "#9CA3AF"
-            self._set_status_dot("git", SUCCESS if st.get("git") else gray,
-                                 ("✓ Git" if st.get("git") else "✗ Git"))
-            self._set_status_dot("python", SUCCESS if st.get("python") else gray,
-                                 (f"Python {st['python']}" if st.get("python") else "✗ Python"))
-            self._set_status_dot("kohya", SUCCESS if st.get("kohya_ok") else gray,
-                                 ("✓ Kohya-SS" if st.get("kohya_ok") else "✗ Kohya-SS"))
-            gpu = st.get("gpu")
-            gpu_ok = bool(gpu) and gpu != "?"
-            self._set_status_dot("gpu", SUCCESS if gpu_ok else gray,
-                                 (f"GPU {gpu}" if gpu_ok else "✗ GPU"))
-            vram = detect_vram_gb()
-            if vram is not None:
-                self._set_status_dot("vram", SUCCESS, f"显存 {vram:.1f}GB")
-            else:
-                self._set_status_dot("vram", gray, "显存 ?")
-            self.status_var.set("环境检测完成")
-        except Exception as e:
-            self.status_var.set(f"状态检测失败: {e}")
-        self._refresh_guide()
-
-    def _draw_dot(self, canvas, color):
-        canvas.delete("all")
-        canvas.create_oval(1, 1, 11, 11, fill=color, outline=color)
-
-    def _set_status_dot(self, key, color, text):
-        c = self._status_dots.get(key)
-        if c is not None:
-            self._draw_dot(c, color)
-        lbl = self._status_texts.get(key)
-        if lbl is not None:
-            lbl.configure(text=text)
-
-    def _start_breathe(self):
-        """状态圆点蓝色呼吸灯（每 500ms 深浅切换）。"""
-        self._stop_breathe()
-        state = {"on": False}
-        def tick():
-            state["on"] = not state["on"]
-            col = "#60A5FA" if state["on"] else "#3B82F6"
-            for c in self._status_dots.values():
-                self._draw_dot(c, col)
-            state["after"] = self.root.after(500, tick)
-        tick()
-        self._breathe_state = state
-
-    def _stop_breathe(self):
-        st = getattr(self, "_breathe_state", None)
-        if st and st.get("after"):
-            try:
-                self.root.after_cancel(st["after"])
-            except Exception:
-                pass
-        self._breathe_state = None
-        try:
-            self._refresh_status()
-        except Exception:
-            pass
-
-    @staticmethod
-    def _log_tags(msg):
-        tags = []
-        if any(k in msg for k in ("[训练]", "loss")):
-            tags.append("train")
-        if any(k in msg for k in ("[底模]", "[预处理]", "[WD14]", "[下载]")):
-            tags.append("model")
-        if any(k in msg for k in ("[OK]", "完成", "成功")):
-            tags.append("ok")
-        if any(k in msg for k in ("[WARN]", "警告", "注意")):
-            tags.append("warn")
-        if any(k in msg for k in ("[ERROR]", "失败", "错误", "✘")):
-            tags.append("err")
-        if not tags:
-            tags.append("info")
-        return tags
-
-    def _run(self, fn, title):
-        if self.busy:
-            messagebox.showinfo(APP_NAME, "有任务正在运行，请稍候。")
-            return
-        self._start_worker(fn, title)
-
-    def _start_worker(self, fn, title):
-        self._set_busy(True)
-        self._log("=" * 60)
-        self._log(f"开始：{title}")
-        threading.Thread(target=self._worker, args=(fn, title), daemon=True).start()
-
-    def _worker(self, fn, title):
-        try:
-            fn()
-            self._log(f"✔ 完成：{title}")
-        except Exception as e:
-            self._log(f"✘ 失败：{title} -> {e}")
-            self._log(traceback.format_exc())
-        finally:
-            self.q.put("__DONE__")
-
-    # ---- 命令 ----
-    def cmd_env(self):
-        self._run(lambda: ensure_prereqs(self._log), "环境准备")
-
-    def cmd_install(self):
-        self._run(lambda: install_kohya(self._log), "安装 Kohya-SS")
-
-    def cmd_preprocess(self):
-        d = filedialog.askdirectory(title="选择原始图片文件夹")
-        if not d:
-            return
-        try:
-            params = self._collect_params()
-        except ValueError as e:
-            messagebox.showerror(APP_NAME, str(e))
-            return
-        if self.mode == "character":
-            msg = ("人物模式预处理说明：\n"
-                   "· 自动调用 WD14 打标（原图自带 .txt 会完整保留）；\n"
-                   "· 已开启去重（MD5）；\n"
-                   "· 将把全部 trigger 插入每张标签最开头。")
-            if not params["trigger"]:
-                msg += "\n\n⚠ 尚未填写 Trigger 触发词，建议填写唯一触发词。"
-            if not params["reg_dir"]:
-                msg += "\n⚠ 尚未选择正则数据集（可选）。"
-            messagebox.showinfo(APP_NAME, msg)
-        _mode = params["mode"]
-        reso = RESOLUTIONS.get(params["base_type"], 512)
-        self._run(lambda: preprocess(
-            self._log, input_dir=d, size=reso,
-            mode=_mode,
-            trigger=params["trigger"],
-            reg_dir=params["reg_dir"],
-            repeats=params["repeats"],
-            dedup=(_mode == "character"),
-            wd14=True,
-            concept_type=params.get("concept_type") or "",
-            clean_concept=bool(params.get("clean_concept", True)),
-        ), "数据预处理")
-
-    def cmd_start_ui(self):
-        if self.busy:
-            return
-        if self.ui_proc and self.ui_proc.poll() is None:
-            messagebox.showinfo(APP_NAME, "Web UI 已在运行（http://127.0.0.1:7860）。")
-            return
-        try:
-            self.ui_proc = start_ui(self._log)
-        except Exception as e:
-            messagebox.showerror(APP_NAME, f"启动失败：{e}")
-            return
-        threading.Thread(target=self._ui_reader, daemon=True).start()
-        self._log("Web UI 已在后台运行，可点击 ⑤ 停止。")
-
-    def _ui_reader(self):
-        proc = self.ui_proc
-        if not proc or not proc.stdout:
-            return
-        for line in proc.stdout:
-            self._log(line.rstrip("\n").rstrip("\r"))
-        self._log("[UI] Web UI 已退出。")
-
-    def cmd_stop_ui(self):
-        if self.ui_proc and self.ui_proc.poll() is None:
-            try:
-                self.ui_proc.terminate()
-                self._log("[UI] 已发送停止信号。")
-            except Exception as e:
-                self._log(f"[UI] 停止失败：{e}")
-        else:
-            self._log("[UI] 当前没有运行中的 Web UI。")
-
-    def cmd_train(self):
-        if self.busy:
-            messagebox.showinfo(APP_NAME, "有任务正在运行，请稍候。")
-            return
-        try:
-            params = self._collect_params()
-        except ValueError as e:
-            messagebox.showerror(APP_NAME, str(e))
-            return
-        base = self._ensure_base_model()
-        if not base:
-            return
-        params["base_model"] = base
-        params["base_type"] = self.base_type
-        if not self._warn_no_nvidia():
-            return
-        vram = detect_vram_gb()
-        params["vram"] = vram
-        batch, xformers, _gc = auto_training_setup(vram, params["base_type"])
-        params["batch_size"] = batch
-        params["use_xformers"] = xformers
-        need = ARCH_INFO.get(params["base_type"], {}).get("recommend_vram", 12)
-        if vram is not None and vram < need:
-            if not messagebox.askyesno(
-                    APP_NAME,
-                    f"你的显卡显存约 {vram:.1f}G，带这个底模有点吃力，\n"
-                    "可能会卡顿或者直接内存爆掉（OOM）。\n"
-                    "工具已经自动开了省显存模式，要不要再试一次？"):
-                return
-        if not self._confirm_training(params, base):
-            return
-        resume = self._ask_resume(params)
-        self._run(lambda: train(self._log, base_model=base, mode=params["mode"],
-                                params=params, vram_gb=vram, resume_from=resume), "一键训练")
-
-    def cmd_one_click_train(self):
-        if self.busy:
-            messagebox.showinfo(APP_NAME, "有任务正在运行，请稍候。")
-            return
-        raw = self.raw_dir_var.get().strip()
-        if not raw or not os.path.isdir(raw):
-            raw = filedialog.askdirectory(title="选择原始图片文件夹（自动预处理 + 训练）")
-            if not raw:
-                return
-            self.raw_dir_var.set(raw)
-        base = self._ensure_base_model()
-        if not base:
-            return
-        try:
-            params = self._collect_params()
-        except ValueError as e:
-            messagebox.showerror(APP_NAME, str(e))
-            return
-        params["raw_dir"] = raw
-        params["base_model"] = base
-        self._set_busy(True)
-        self._log("=" * 60)
-        self._log("开始：一键开始训练（自动预处理 + 训练）")
-        threading.Thread(target=self._one_click_worker, args=(params,), daemon=True).start()
-
-    def _one_click_worker(self, params):
-        try:
-            report = os.path.join(tempfile.gettempdir(), "kohya_auto_report.json")
-            try:
-                if os.path.isfile(report):
-                    os.remove(report)
-            except Exception:
-                pass
-            preprocess(
-                self._log, input_dir=params["raw_dir"],
-                size=RESOLUTIONS.get(params["base_type"], 512),
-                mode=preprocess_mode(params["mode"], params.get("at_sub_mode")), trigger=params["trigger"],
-                reg_dir=params["reg_dir"], repeats=params["repeats"],
-                dedup=True, wd14=True, square_crop=bool(params.get("square_crop", False)),
-                crop_ratio=params.get("crop_ratio") or "",
-                min_size=256, blur_threshold=30.0, report=report,
-                keep_tokens=None,
-                concept_type=params.get("concept_type") or "",
-                clean_concept=bool(params.get("clean_concept", True)),
-            )
-            stats = {}
-            if os.path.isfile(report):
-                try:
-                    with open(report, "r", encoding="utf-8") as f:
-                        stats = json.load(f)
-                except Exception:
-                    stats = {}
-            self.q.put(("AUTO_CONFIRM", params, stats))
-        except Exception as e:
-            self._log(f"✘ 失败：自动预处理 -> {e}")
-            self._log(traceback.format_exc())
-            self.q.put("__DONE__")
-
-    def _handle_auto_confirm(self, params, stats):
-        ok_n = stats.get("ok", 0)
-        skipped_n = stats.get("skipped_existing", 0)
-        usable = ok_n + skipped_n
-        min_n = MIN_IMAGES.get(params["mode"], 20)
-        filtered = (stats.get("duplicates", 0) + stats.get("blurry", 0)
-                    + stats.get("too_small", 0) + stats.get("corrupt", 0))
-        if usable < min_n:
-            self._set_busy(False)
-            messagebox.showwarning(
-                APP_NAME,
-                f"可用图片太少啦：处理后只有 {usable} 张（{MODE_LABELS[params['mode']]} 至少需要 {min_n} 张）。\n"
-                f"本次新处理 {ok_n} 张，另有 {skipped_n} 张是之前已处理过的。\n"
-                f"已过滤：重复 {stats.get('duplicates', 0)} 张、模糊 {stats.get('blurry', 0)} 张、"
-                f"过小 {stats.get('too_small', 0)} 张、损坏 {stats.get('corrupt', 0)} 张。\n\n"
-                "请补充更多清晰、有效的图片后再试。")
-            return
-        if filtered:
-            messagebox.showinfo(
-                APP_NAME,
-                f"图片预处理完成：共处理 {stats.get('total', 0)} 张，可用 {usable} 张。\n"
-                f"自动过滤：重复 {stats.get('duplicates', 0)}、模糊 {stats.get('blurry', 0)}、"
-                f"过小 {stats.get('too_small', 0)}、损坏 {stats.get('corrupt', 0)}。")
-        vram = detect_vram_gb()
-        params["vram"] = vram
-        batch, xformers, _gc = auto_training_setup(vram, params["base_type"])
-        params["batch_size"] = batch
-        params["use_xformers"] = xformers
-        if not self._warn_no_nvidia():
-            self._set_busy(False)
-            return
-        need = ARCH_INFO.get(params["base_type"], {}).get("recommend_vram", 12)
-        if vram is not None and vram < need:
-            if not messagebox.askyesno(
-                    APP_NAME,
-                    f"你的显卡显存约 {vram:.1f}G，带这个底模有点吃力，\n"
-                    "可能会卡顿或者直接内存爆掉（OOM）。\n"
-                    "工具已经自动开了省显存模式，要不要再试一次？"):
-                self._set_busy(False)
-                return
-        extra = [f"可用图片：{usable} 张（已过滤 {filtered} 张）",
-                 f"batch_size：{batch}（按显存自动）"]
-        if not self._confirm_training(params, params.get("base_model") or "", extra=extra):
-            self._set_busy(False)
-            return
-        resume = self._ask_resume(params)
-        self._start_worker(lambda: train(
-            self._log, base_model=params["base_model"], mode=params["mode"],
-            params=params, vram_gb=vram, resume_from=resume), "一键开始训练")
-
-    def _warn_no_nvidia(self):
-        """训练前检查：无 NVIDIA 显卡时弹出兼容性提示。返回 True=继续。"""
-        if detect_nvidia_gpu():
-            return True
-        return messagebox.askyesno(
-            APP_NAME,
-            "本工具针对NVIDIA显卡优化。\n"
-            "AMD/Intel显卡Windows无开箱即用支持，需要自行配置ZLUDA/ROCm，存在兼容性风险，是否继续？")
-
-    def _ask_resume(self, params):
-        output_name = OUTPUT_NAMES.get(params["mode"], "anime_style_lora")
-        state = find_latest_state(data_sub("output"), output_name)
-        if state:
-            if messagebox.askyesno(
-                    APP_NAME,
-                    f"发现上次中断留下的训练进度快照：\n{os.path.basename(state)}\n\n"
-                    "要不要从上次断点继续训练？（选否则从头重新训练）"):
-                return state
-        return None
-
-    def cmd_readme(self):
-        p = os.path.join(KIT_DIR, "README_使用说明.md")
-        if os.path.isfile(p):
-            os.startfile(p)  # noqa
-        else:
-            messagebox.showinfo(APP_NAME, "README 未找到。")
-
-    def cmd_open_output(self):
-        d = data_sub("output")
-        os.startfile(d)  # noqa
-
-    def cmd_about(self):
-        messagebox.showinfo(
-            APP_NAME,
-            "Kohya-SS LoRA 一键工具（画风 / 人物角色 双模式）\n\n"
-            "本项目基于 kohya-ss / sd-scripts（Apache-2.0 开源协议）二次封装，\n"
-            "项目本体以 MIT 协议开源。\n\n"
-            "⚠ 免责提示：\n"
-            "· 禁止训练受版权保护的画师作品；\n"
-            "· 禁止训练受版权保护的真人素材（肖像权）；\n"
-            "· 请仅使用你拥有版权或已获授权的图片。\n\n"
-            "kohya-ss: https://github.com/bmaltais/kohya_ss\n"
-            "sd-scripts: https://github.com/kohya-ss/sd-scripts")
-
-
-def main():
-    if not _HAS_TK:
-        print("错误：缺少 tkinter，无法启动图形界面。")
-        return 1
-    root = tk.Tk()
-    App(root)
-    root.mainloop()
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-

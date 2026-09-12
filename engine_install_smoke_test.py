@@ -461,6 +461,12 @@ def test_preprocess_deps(base: Path):
     # 2) 首次 import 失败 -> 内置 wheel 为空走国内镜像 -> 补装成功 -> 复检通过
     state = {"import_ok": False}
     def subrun_probe(cmd, *args, **kwargs):
+        # 2026-09-06 起 _ensure_preprocess_deps 多了一道「解释器级 ctypes 前置校验」
+        # （Anaconda 建的 venv 脱离 conda 激活时 _ctypes 对不上，重装 numpy 永远修不好）。
+        # 这里按真实调用返回 ctypes-ok，否则会在进入补装流程之前就被判 False（旧断言已过期）。
+        code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
+        if "import ctypes" in code:
+            return subprocess.CompletedProcess([], 0, "ctypes-ok\n", "")
         return probe(0 if state["import_ok"] else 1)
     install_cmd = {"seen": []}
     def run_stream_install(cmd, cwd=None, env=None, logf=print, **kwargs):
@@ -474,11 +480,15 @@ def test_preprocess_deps(base: Path):
          patch.object(core, "_bundled_pip_wheels", return_value=[]), \
          patch.object(core, "_wheels_for_python", return_value=[]):
         assert core._ensure_preprocess_deps(vpy, kdir, logs.append) is True
-    assert any("mirrors.aliyun.com" in x for c in install_cmd["seen"] for x in c), install_cmd["seen"]
+    # 2026-09-11：pip 主源由阿里云改为中科大（实测 2.84 vs 0.12 MB/s），断言改为对常量取。
+    assert any(core.PIP_INDEX_PRIMARY in x for c in install_cmd["seen"] for x in c), install_cmd["seen"]
 
     # 2.5) force=True：即使快速校验通过（-c 可 import），也强制补装一轮
     force_install = {"n": 0}
     def subrun_ok_force(cmd, *args, **kwargs):
+        code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
+        if "import ctypes" in code:
+            return subprocess.CompletedProcess([], 0, "ctypes-ok\n", "")   # ctypes 前置校验先过
         return probe(0)  # 校验总是通过
     def run_stream_force(cmd, cwd=None, env=None, logf=print, **kwargs):
         force_install["n"] += 1
@@ -500,6 +510,9 @@ def test_preprocess_deps(base: Path):
 
     # 3) 补装也失败（离线+双镜像，两轮重试都失败） -> 返回 False
     def subrun_bad(cmd, *args, **kwargs):
+        code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
+        if "import ctypes" in code:
+            return subprocess.CompletedProcess([], 0, "ctypes-ok\n", "")   # ctypes 前置校验先过
         return probe(1)
     def run_stream_bad(cmd, cwd=None, env=None, logf=print, **kwargs):
         return 1
@@ -565,7 +578,8 @@ def test_preprocess_auto_retry(base: Path):
             core.preprocess(logs2.append, input_dir=str(in_dir), mode="style")
             raise AssertionError("应抛出预处理失败错误")
         except RuntimeError as e:
-            assert "强制补装后仍不可用" in str(e), e
+            # 文案随 2026-09-06 的「训练环境自愈」改造更新（旧文案「强制补装后仍不可用」已不存在）
+            assert "训练环境自愈后仍不可用" in str(e), e
     assert calls2["n"] == 1, "补装失败时不应重试 preprocess"
     assert deps_n["n"] == 2, deps_n
     print("PREPROCESS_AUTO_RETRY_OK")
@@ -622,7 +636,9 @@ def test_preprocess_crop_ratio(base: Path):
     src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
     g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
     assert "square_crop=True," not in src and "square_crop=True," not in g, "流水线不应再写死居中裁切"
-    assert 'crop_ratio=params.get("crop_ratio")' in src, "Kohya一键工具.py 一键训练应读 crop_ratio"
+    # 2026-09-12：旧 tkinter 界面（Kohya一键工具.py 里的 class App）已删除；
+    # crop_ratio 的读取点现在在新界面 kohya_gui.py，core 侧保留入口参数与归一化函数。
+    assert "normalize_crop_ratio" in src and "crop_ratio=None" in src, "Kohya一键工具.py 缺 crop_ratio 入口"
     assert 'crop_ratio=params.get("crop_ratio")' in g, "kohya_gui.py 预处理应读 crop_ratio"
     assert "crop_ratio_var" in g and "crop_ratio_combo" in g, "GUI 应有裁切比例下拉"
     print("PREPROCESS_CROP_RATIO_OK")
@@ -821,12 +837,13 @@ def test_preprocess_mode_mapping(base: Path):
     g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
     assert 'core.preprocess_mode(params.get("mode"), params.get("at_sub_mode"))' in g
     assert 'params.get("mode") in ("krea2", "qwen_image", "zimage")' not in g, "旧元组漏了 flux2"
+    # 旧界面删除后，调用点在新界面 kohya_gui.py（上面已断言）；core 侧只需保留映射函数本身。
     k = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
-    assert 'mode=preprocess_mode(params["mode"], params.get("at_sub_mode"))' in k
+    assert "def preprocess_mode(" in k, "Kohya一键工具.py 缺 preprocess_mode"
     print("PREPROCESS_MODE_MAPPING_OK")
 
 def test_preinstall_torch_mirror_fallback(base: Path):
-    """_preinstall_torch 本地安装多镜像回退：清华失败 -> 阿里云成功；全部失败才报明确错误。"""
+    """_preinstall_torch 本地安装多镜像回退：第一个失败 -> 第二个成功；全部失败才报明确错误。"""
     kdir = base / "pt" / "kohya_ss"
     cache = base / "pt" / "cache" / "pytorch_wheels"
     cache.mkdir(parents=True, exist_ok=True)
@@ -850,7 +867,7 @@ def test_preinstall_torch_mirror_fallback(base: Path):
     def data_sub(*parts):
         return str(base.joinpath("pt", *parts))  # 与 cache 目录（base/pt/cache/pytorch_wheels）对齐
 
-    # 场景 A：清华失败 -> 阿里云成功
+    # 场景 A：第一个镜像失败 -> 第二个镜像成功
     installs = {"n": 0, "indexes": []}
     def run_stream_a(cmd, cwd=None, env=None, logf=print, **kwargs):
         cmd = [str(x) for x in cmd]
@@ -869,8 +886,11 @@ def test_preinstall_torch_mirror_fallback(base: Path):
                                     cu="cu128", label="第二引擎", force=True)
     assert ok is True
     assert installs["n"] == 2, installs
-    assert installs["indexes"][0] == "https://mirrors.aliyun.com/pypi/simple/", installs
-    assert installs["indexes"][1] == "https://pypi.tuna.tsinghua.edu.cn/simple", installs
+    # 2026-09-11：pip 源改为 PIP_MIRRORS（中科大→华为云→清华→上海交大→阿里云），
+    # 断言直接对常量取，避免以后再调优先级时又要同步改测试。
+    _mirs = [u for _n, u in core.PIP_MIRRORS]
+    assert installs["indexes"][0] == _mirs[0], installs
+    assert installs["indexes"][1] == _mirs[1], installs
     assert any("自动切换下一镜像" in ln for ln in logs), logs
 
     # 场景 B：三个镜像全部失败 -> 抛明确错误（不再笼统报「国内双镜像下载失败」）
@@ -893,9 +913,9 @@ def test_preinstall_torch_mirror_fallback(base: Path):
             raise AssertionError("应抛出本地安装失败错误")
         except RuntimeError as e:
             assert "本地安装 PyTorch 轮子失败" in str(e), e
-    assert installs2["n"] == 3, installs2  # 清华/阿里/上海交大各试一次
-    assert installs2["indexes"][2] == "https://mirror.sjtu.edu.cn/pypi/web/simple", installs2
-    assert installs2["indexes"][0] == "https://mirrors.aliyun.com/pypi/simple/", installs2
+    assert installs2["n"] == len(_mirs), installs2  # 所有国内镜像各试一次
+    assert installs2["indexes"][0] == _mirs[0], installs2
+    assert installs2["indexes"][-1] == _mirs[-1], installs2
 
     print("PREINSTALL_TORCH_MIRROR_FALLBACK_OK")
 
@@ -1609,8 +1629,11 @@ def test_video_caption_args(base: Path):
     defined = set(re.findall(r'add_argument\("--([a-z_]+)"', vc))
     used = set(re.findall(r"args\.([a-z_]+)", vc))
     assert not (used - defined), f"video_caption.py 未定义参数: {used - defined}"
+    # 必须显式指定 utf-8：中文系统默认按 gbk 解码子进程输出，而 video_caption.py 的中文
+    # --help 文本会让读取线程抛 UnicodeDecodeError → r.stdout 变成 None。
+    # （生产代码里 run_stream 本来就是强制 utf-8 + errors=replace，测试这里要对齐。）
     r = subprocess.run([sys.executable, str(ROOT / "video_caption.py"), "--help"],
-                       capture_output=True, text=True, timeout=60)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     assert r.returncode == 0, (r.returncode, r.stderr)
     assert "--model" in r.stdout and "Qwen/Qwen2.5-VL-3B-Instruct" in r.stdout, r.stdout
     print("VIDEO_CAPTION_ARGS_OK")
@@ -2009,7 +2032,9 @@ def test_sample_preview(base: Path):
     assert core._sample_preview_enabled({"sample_preview": True}, 8) is True  # 勾选框说了算，低显存只警告不硬关
     assert core._sample_preview_enabled({"sample_preview": False}, 24) is False
     src = Path(core.__file__).read_text(encoding="utf-8-sig")
-    assert src.count("--sample_every_n_steps=100") >= 3, "train/krea2/flux2 应都接线采样"
+    # 2026-09-07（332c19e）起采样步数改为跟随「中间保存快照」，不再写死每 100 步；
+    # 故按语义断言「三处都接线了采样」而不是抓字面量 "--sample_every_n_steps=100"。
+    assert src.count("--sample_every_n_steps=") >= 3, "train/krea2/flux2 应都接线采样"
     assert "--sample_prompts=" in src
     assert '"--text_encoder", files["te"]' in src  # Krea2 采样必须带 text_encoder（musubi assert）
     g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
@@ -2062,9 +2087,15 @@ def test_krea2_first_engine_guard(base: Path):
     assert "_looks_like_krea2(_k2base)" in seg, "train() 缺 Krea2 拦截"
     assert "Krea2 训练必须用「第二引擎(musubi)」的 Krea2 模式" in seg, "缺引导文案"
     # 4) GUI 选底模：识别到 Krea2 有明确提示（不再是笼统的「类型待确认」）
-    g = src[src.find("def _on_base_change"):src.find("def _set_base_type")]
-    assert "_looks_like_krea2(path)" in g, "GUI 缺 Krea2 提示分支"
-    assert "Krea2 训练请用第二引擎" in g, "GUI 缺 Krea2 提示文案"
+    # 2026-09-12：_on_base_change 现在在新界面 kohya_gui.py（旧 tkinter 界面已删），
+    # 断言跟着改到当前 UI 文件，否则会一直指着已删除的死代码。
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8-sig")
+    i2 = g.find("def _on_base_change")
+    assert i2 >= 0, "kohya_gui.py 缺 _on_base_change"
+    j2 = g.find("\n    def ", i2 + 1)
+    seg2 = g[i2:] if j2 < 0 else g[i2:j2]
+    assert "core._looks_like_krea2(payload)" in seg2, "GUI 缺 Krea2 提示分支"
+    assert "Krea2 训练请用第二引擎" in seg2, "GUI 缺 Krea2 提示文案"
     print("KREA2_FIRST_ENGINE_GUARD_OK")
 
 def test_third_engine_triton_and_laptop_warning(base: Path):
@@ -2601,18 +2632,40 @@ def test_official_source_option(base: Path):
 
 
 def test_modelscope_ptw_preferred(base: Path):
-    """PyTorch 大轮子下载源：魔搭优先，上海交大/阿里云最后兜底（用户反馈阿里云太慢）。"""
+    """PyTorch 大轮子下载源：上海交大优先、阿里云末位兜底，且下载前按实测吞吐重排。"""
     src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
     assert "MODELSCOPE_PTW_MIRROR" in src, "缺魔搭轮子缓存常量"
     assert "download.pytorch.org/whl" in src, "缺官方源（PyTorch 官方，需代理）"
     assert 'modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/engine_sources/pytorch_wheels/' in src
-    # 国内链顺序：魔搭 → 上海交大 → 阿里云
-    i1 = src.find("MODELSCOPE_PTW_MIRROR,")
-    i2 = src.find("mirror.sjtu.edu.cn/pytorch-wheels")
-    i3 = src.find("mirrors.aliyun.com/pytorch-wheels")
-    assert 0 <= i1 < i2 < i3, "下载源顺序应为 魔搭→上海交大→阿里云"
+    # 2026-09-11：源顺序改为「上海交大优先、阿里云末位」，并在下载前按实测吞吐重排
+    # （同一文件实测：上海交大 2.37 / 魔搭 2.25 / 官方直连 0.21 / 阿里云 0.12 MB/s）。
+    i_sjtu = src.find("mirror.sjtu.edu.cn/pytorch-wheels")
+    i_mota = src.find("MODELSCOPE_PTW_MIRROR,")
+    i_ali = src.find("mirrors.aliyun.com/pytorch-wheels")
+    assert 0 <= i_sjtu < i_mota < i_ali, "下载源顺序应为 上海交大→魔搭→阿里云(末位兜底)"
+    assert "_order_bases_by_speed" in src, "缺「下载前实测测速选源」"
+    assert "PIP_INDEX_PRIMARY" in src, "缺国内 PyPI 主源常量（中科大）"
     print("MODELSCOPE_PTW_PREFERRED_OK")
 def main():
+    # 每条用例独立 try/except：任何一条失败（常见于「实现改了、断言没跟着改」）都不再中断整个套件。
+    # 否则后面几十条用例会被一条过期断言全部吞掉 —— v0.15.11~v0.16.5 就踩过：
+    # test_official_source_option 的过期断言让套件从 2026-09-08 起一直卡在第 2597 行，
+    # 其后所有用例（含 preprocess_deps / sample_preview / krea2_at_support）从未被执行。
+    _failures = []
+
+    def _wrap(_fn):
+        def _inner(*a, **k):
+            try:
+                return _fn(*a, **k)
+            except Exception as _e:
+                _failures.append((_fn.__name__, repr(_e)))
+                print("[FAIL] %s: %r" % (_fn.__name__, _e), flush=True)
+        _inner.__name__ = _fn.__name__
+        return _inner
+
+    for _n in [k for k in list(globals()) if k.startswith("test_") and callable(globals()[k])]:
+        globals()[_n] = _wrap(globals()[_n])
+
     with tempfile.TemporaryDirectory(prefix="kohya_engine_flow_") as td:
         base = Path(td)
         test_main_engine(base)
@@ -2702,6 +2755,12 @@ def main():
         test_cpu_device_probe_warning(base)
         test_krea2_at_support(base)
         test_musubi_dataset_precheck(base)
+    if _failures:
+        print("=" * 64)
+        print("ENGINE_CONTROL_FLOW_FAILURES: %d 条失败" % len(_failures))
+        for _n, _e in _failures:
+            print("  · %s: %s" % (_n, _e))
+        raise SystemExit(1)
     print("ALL_ENGINE_CONTROL_FLOW_TESTS_OK")
 
 def test_cpu_device_probe_warning(base: Path):
@@ -2923,9 +2982,12 @@ def test_krea2_at_support(base: Path):
         proc = d["config"]["process"][0]
         assert proc["model"]["arch"] == "krea2"
         assert proc["model"]["qtype"] == "qint8"
-        assert proc["datasets"][0]["resolution"] == [768, 768]      # 16G 压到 768
+        # 2026-09-08（a631a71）Krea2AT 16G 对齐回 0.13 快档配方：分辨率由 768 改为 512
+        assert proc["datasets"][0]["resolution"] == [512, 512]      # 16G 压到 512
         assert proc["train"].get("disable_sampling") is True
-        assert "sample" not in proc
+        # sample 段现在是无条件写出（引擎缺该段时 cache_sample_prompts 会崩），
+        # 关采样靠 disable_sampling 实现（smoke_test 里同样按「必须存在」断言）。
+        assert "sample" in proc
         assert proc["model"]["low_vram"] is True
         assert "Qwen3-VL-4B-Instruct" in proc["model"]["model_kwargs"]["text_encoder_path"] or "te" in proc["model"]["model_kwargs"]["text_encoder_path"]
         cfg2 = base / "krea2_at_24.yaml"
