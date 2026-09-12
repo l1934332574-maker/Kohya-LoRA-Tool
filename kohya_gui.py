@@ -127,6 +127,28 @@ PARAM_LABELS = {
 PARAM_ORDER = ("rank", "alpha", "unet_lr", "te_lr", "repeats", "max_epochs",
                "resolution", "video_steps")
 
+# 安装包目前未做代码签名（签名证书年费数千元），Windows / 第三方杀软常报
+# "无法识别的应用" 或 "检测到威胁"。这段提示放在「发现新版本」确认框里，
+# 让用户装之前就知道怎么放行，而不是被拦后一头雾水。
+UPDATE_AV_HINT = (
+    "⚠ 安装时若 Windows 提示「已保护你的电脑」或杀软报风险：\n"
+    "  这是未签名程序的常见误报，不是病毒。\n"
+    "  · 蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」\n"
+    "  · 安全中心报「检测到威胁」→ 保护历史记录里点「允许在设备上」\n"
+    "  · 360 / 火绒 → 把安装目录加进信任区\n"
+    "  万一被拦截，本软件不会退出，会保留当前版本并告诉你怎么办。"
+)
+
+
+def _sha256_file(path):
+    """分块计算大文件 SHA256（488MB 安装包，不能一次读进内存）。"""
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
 # 「实际生效值」对比项：(引擎上报键, 显示名, 界面 params 里的键)
 #   引擎会自动覆写一部分设定（epoch 防过拟合裁剪、快跑/低显存钳分辨率、RDNA2→fp16、
 #   Krea2(AT) 低显存强制 rank/alpha…），这些差异必须显式告诉用户，否则他会以为
@@ -595,7 +617,8 @@ class App:
             elif kind == "UPDATE_PROGRESS":
                 self._handle_update_progress(item[1], item[2] if len(item) > 2 else None)
             elif kind == "UPDATE_DONE":
-                self._handle_update_done(item[1], item[2], item[3] if len(item) > 3 else None)
+                self._handle_update_done(item[1], item[2], item[3] if len(item) > 3 else None,
+                                         item[4] if len(item) > 4 else "skip")
 
     def _start_worker(self, fn, title):
         # 防重入：同一时间只允许一个后台任务（安装/预处理/训练），
@@ -3575,8 +3598,9 @@ class App:
                 core.APP_NAME,
                 f"发现新版本 {ver}（当前 v{core.APP_VERSION}）\n\n"
                 f"{(info.get('notes') or '').strip()[:180]}\n\n"
-                "是否下载并安装？\n（约 445MB，支持断点续传，装完自动重启）"):
-            self._start_update(info["setup_url"], ver, info.get("setup_url_cn"))
+                "是否下载并安装？\n（约 445MB，支持断点续传，装完自动重启）\n\n" + UPDATE_AV_HINT):
+            self._start_update(info["setup_url"], ver, info.get("setup_url_cn"),
+                               info.get("setup_sha256") or "")
 
     def _auto_check_update(self):
         """启动后台静默检查：有新版本才提示。"""
@@ -3606,10 +3630,11 @@ class App:
                 core.APP_NAME,
                 f"发现新版本 {ver}（当前 v{core.APP_VERSION}）\n\n"
                 f"{(info.get('notes') or '').strip()[:180]}\n\n"
-                "是否下载并安装？\n（约 445MB，支持断点续传，装完自动重启）"):
-            self._start_update(info["setup_url"], ver, info.get("setup_url_cn"))
+                "是否下载并安装？\n（约 445MB，支持断点续传，装完自动重启）\n\n" + UPDATE_AV_HINT):
+            self._start_update(info["setup_url"], ver, info.get("setup_url_cn"),
+                               info.get("setup_sha256") or "")
 
-    def _start_update(self, url, ver, url_cn=""):
+    def _start_update(self, url, ver, url_cn="", sha256=""):
         if getattr(self, "_updating", False):
             return
         try:
@@ -3623,6 +3648,7 @@ class App:
         self._updating = True
         self._set_busy(True)
         self._upd_ver = ver
+        self._upd_sha = (sha256 or "").strip().lower()   # 官方公布的 SHA256（可能为空）
         self._log(f"[更新] 开始下载 {ver}（约 445MB，断点续传，完成自动重启）…")
         self._log(f"[更新] 下载源：{'国内魔搭镜像' if (url_cn or '').strip() else 'GitHub 兜底'}")
         def work():
@@ -3647,8 +3673,22 @@ class App:
                 ok = core._download_with_resume(use, dest, self._log, progress_cb=_prog)
             except Exception as e:
                 self._log(f"[更新] 下载异常：{e}")
+            # 完整性校验放在后台线程做：488MB 的哈希在主线程会卡住界面好几秒。
+            # hv: skip=官方未提供校验值 / ok=通过 / bad=不一致 / err=算不出来
+            hv = "skip"
+            if ok and getattr(self, "_upd_sha", ""):
+                self._log("[更新] 校验安装包完整性（SHA256）…")
+                try:
+                    got = _sha256_file(dest)
+                    hv = "ok" if got == self._upd_sha else "bad"
+                    self._log("[更新] 校验%s：%s" % ("通过" if hv == "ok" else "不通过", got))
+                    if hv == "bad":
+                        self._log("[更新] 官方值：%s" % self._upd_sha)
+                except Exception as e:
+                    hv = "err"
+                    self._log(f"[更新] 校验失败（略过）：{e}")
             try:
-                self.q.put(("UPDATE_DONE", ok, dest, ver))
+                self.q.put(("UPDATE_DONE", ok, dest, ver, hv))
             except Exception:
                 pass
         threading.Thread(target=work, daemon=True).start()
@@ -3666,7 +3706,7 @@ class App:
         except Exception:
             pass
 
-    def _handle_update_done(self, ok, dest, ver):
+    def _handle_update_done(self, ok, dest, ver, hv="skip"):
         self._updating = False
         try:
             self._set_busy(False)
@@ -3676,15 +3716,75 @@ class App:
             self._log("[更新] 下载失败或已取消，可重试（断点续传）")
             messagebox.showerror(core.APP_NAME, "更新包下载失败，请稍后重试（支持断点续传）。")
             return
-        self._log(f"[更新] 下载完成，正在静默安装 {ver} …（装完自动重启）")
+        if hv == "bad":
+            # 校验不通过 = 文件损坏或被篡改，绝不拿它覆盖用户现有的可用版本
+            self._log("[更新] ✗ 校验不通过，已删除该文件，未执行安装")
+            try:
+                os.remove(dest)
+            except Exception:
+                pass
+            messagebox.showerror(
+                core.APP_NAME,
+                "安装包校验不通过（SHA256 与官方公布的不一致），已删除、未安装。\n\n"
+                "通常是下载中断或网络被劫持导致文件损坏。\n"
+                "请重试；若反复出现，请到 GitHub Releases 或魔搭手动下载安装包。")
+            return
+        self._log(f"[更新] 下载完成，正在安装 {ver} …（装完自动重启）")
         try:
-            subprocess.Popen([dest, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+            proc = subprocess.Popen([dest, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
         except Exception as e:
             self._log(f"[更新] 启动安装失败：{e}")
-            messagebox.showerror(core.APP_NAME, f"启动安装失败：{e}")
+            self._update_blocked_help(dest, "启动安装器失败：%s" % e)
             return
-        # 关闭本程序，让安装器覆盖文件
-        self.root.after(1500, self.root.destroy)
+        # 不再「1.5 秒后无条件自杀」：先确认安装器真的跑起来了。
+        # 安装包未做代码签名，被 Windows / 杀软拦截是常态；而 /VERYSILENT 下安装器
+        # 不弹任何提示，旧逻辑会让用户看到「软件自己关了、然后什么都没发生」。
+        self.root.after(2500, lambda: self._check_installer_alive(proc, dest, ver))
+
+    def _check_installer_alive(self, proc, dest, ver):
+        """确认安装器真的在运行；没跑起来就保留当前版本并给放行指引。"""
+        try:
+            rc = proc.poll()
+        except Exception:
+            rc = None
+        if rc is None:
+            # 仍在运行 = 正常安装中，此时才能安全退出，让安装器覆盖文件
+            self._log("[更新] 安装器已启动，退出当前程序以完成覆盖安装…")
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+            return
+        self._log(f"[更新] 安装器启动后立即退出（退出码 {rc}），本次未安装")
+        self._update_blocked_help(dest, "安装器启动后立即退出（退出码 %s）" % rc)
+
+    def _update_blocked_help(self, dest, reason):
+        """更新被拦截/失败：保留当前版本，告诉用户手动怎么装 + 怎么放行。"""
+        self._updating = False
+        try:
+            self._set_busy(False)
+        except Exception:
+            pass
+        self._log("[更新] 当前版本 v%s 保持原样，未做任何改动" % core.APP_VERSION)
+        self._log("[更新] 安装包位置：%s" % dest)
+        try:
+            go = messagebox.askyesno(
+                core.APP_NAME,
+                "更新未能继续（%s）。\n\n"
+                "你的当前版本完好无损，可以继续使用。\n\n"
+                "最常见的原因是 Windows 或杀毒软件拦截了未签名的安装包 —— 这是误报，不是病毒。\n"
+                "请手动双击安装包，看到提示时这样放行：\n"
+                "  · 蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」\n"
+                "  · 安全中心报「检测到威胁」→ 保护历史记录里点「允许在设备上」\n"
+                "  · 360 / 火绒 → 把安装包或安装目录加进信任区\n\n"
+                "现在打开安装包所在文件夹吗？\n%s" % (reason, dest))
+            if go:
+                try:
+                    os.startfile(os.path.dirname(dest))
+                except Exception:
+                    pass
+        except Exception:
+            pass
     # ==================== 🧰 小工具：训练前通用操作 ====================
     # 布局约定（2026-09-11 重做）：
     #   · 每个功能 = 一张卡片（卡片之间留白即视觉分隔），不再给每个功能配大日志框；

@@ -9994,7 +9994,8 @@ def check_update(timeout=15):
       4) GitHub Releases API（最准，但未登录限流 60 次/小时/IP）
 
     返回 dict 或 None（全部失败返回 None）：
-      {'version','setup_url','setup_url_cn','notes','newer'}
+      {'version','setup_url','setup_url_cn','setup_sha256','notes','newer'}
+      setup_sha256：官方安装包的 SHA256（可能为空=未提供），下载后用于完整性校验。
     """
     import json
     cur = parse_version(APP_VERSION)
@@ -10009,8 +10010,12 @@ def check_update(timeout=15):
         bv = parse_version(best["version"]) or (0, 0, 0)
         if lv > bv:
             return item
-        if lv == bv and item.get("setup_url_cn") and not best.get("setup_url_cn"):
-            return item
+        if lv == bv:
+            # 同版本：优先取信息更完整的一条（国内直链 / 带 sha256）
+            if item.get("setup_url_cn") and not best.get("setup_url_cn"):
+                return item
+            if item.get("setup_sha256") and not best.get("setup_sha256"):
+                return item
         return best
 
     best = None
@@ -10031,6 +10036,7 @@ def check_update(timeout=15):
                 "version": tag,
                 "setup_url": (data.get("setup_url") or "").strip(),
                 "setup_url_cn": (data.get("setup_url_cn") or "").strip(),
+                "setup_sha256": (data.get("setup_sha256") or "").strip().lower(),
                 "notes": (data.get("notes") or "").strip()[:400],
                 "newer": bool(cur and parse_version(tag) > cur),
             }
@@ -10054,6 +10060,7 @@ def check_update(timeout=15):
                 "version": tag,
                 "setup_url": setup_url,
                 "setup_url_cn": "",
+                "setup_sha256": "",   # GitHub Releases API 不直接给出资产 sha256
                 "notes": (rel.get("body") or "").strip()[:400],
                 "newer": bool(cur and parse_version(tag) > cur),
             }
