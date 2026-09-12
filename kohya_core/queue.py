@@ -80,7 +80,9 @@ def run_queue_item(name, logf=print):
                  dataset_mode="character" if mode != "style" else None,
                  strong_bind=p.get("strong_bind", True),
                  concept_type=p.get("concept_type") or "",
-                 clean_concept=bool(p.get("clean_concept", True)))
+                 clean_concept=bool(p.get("clean_concept", True)),
+                 concept_mode=K.is_concept_mode(mode, p.get("at_sub_mode")),
+                 style_target=K.style_target_code(p.get("style_preset")))
     logf("[队列] 预处理完成，开始训练…")
     if mode in ("qwen_image", "zimage"):
         K.train_at_image(logf, mode=mode, params=p, vram_gb=vram, resume_from=None, progress=None)
@@ -100,7 +102,8 @@ def run_queue_item(name, logf=print):
         K.train(logf, base_model=p["base_model"], mode=mode, params=p,
                 vram_gb=vram, resume_from=None, progress=None)
     try:
-        K.export_project_named_lora(mode, name, logf=logf)
+        K.export_project_named_lora(mode, name, logf=logf,
+                                    prefer_prefix=K.output_name_for(mode, p.get("style_preset")))
     except Exception:
         pass
     return True, "完成"

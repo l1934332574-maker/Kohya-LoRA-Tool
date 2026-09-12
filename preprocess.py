@@ -55,6 +55,23 @@ DEFAULT_CAPTION = (
     "simple soft cel shading, tv anime screenshot, limited color palette"
 )
 
+# 写实版兜底 caption（--style-target realistic）：
+#   旧版把动漫文案写死，于是"想训写实画风"的用户只要走到任何一条兜底路径
+#   （WD14 打标失败 / 勾了跳过 WD14 / 最终兜底），整批标签都会被写成 anime cel-shading，
+#   等于亲手把模型教成动漫 —— 这是"选了写实却出动漫味"最直接的一条原因。
+DEFAULT_CAPTION_REALISTIC = (
+    "photorealistic, realistic photograph, natural lighting, detailed skin texture, "
+    "sharp focus, high detail, professional photography"
+)
+
+STYLE_TARGET_LABELS = {"anime": "动漫", "realistic": "写实"}
+
+
+def default_style_caption(style_target):
+    """画风模式的兜底 caption：按出图风格（anime / realistic）选文案。"""
+    return DEFAULT_CAPTION_REALISTIC if style_target == "realistic" else DEFAULT_CAPTION
+
+
 # 人物模式兜底 caption（仅在无法运行 WD14 打标、且原图没有自带 .txt 时使用）
 DEFAULT_CHARACTER_CAPTION = "1girl, solo"
 
@@ -710,7 +727,18 @@ def _imgs_no_txt(output_dir):
 
 
 def _is_placeholder_caption(text, trigger, fallback):
-    """判断 caption 是否上次打标失败留下的兜底（仅 fallback 那几个词 + 可选 trigger 前缀）。"""
+    """判断 caption 是否上次打标失败留下的兜底。
+
+    fallback 可以是一个文案，也可以是多个（动漫 / 写实两版兜底都要认得，
+    否则用户切换出图风格后，上一版留下的兜底标签不会被自愈清掉）。
+    """
+    if not isinstance(fallback, str):
+        return any(_is_one_placeholder(text, trigger, _fb) for _fb in (fallback or []))
+    return _is_one_placeholder(text, trigger, fallback)
+
+
+def _is_one_placeholder(text, trigger, fallback):
+    """单个兜底文案的判定（仅 fallback 那几个词 + 可选 trigger 前缀）。"""
     fb = re.sub(r"\s+", " ", (fallback or "").strip().lower())
     if not fb:
         return False
@@ -1441,6 +1469,9 @@ def main():
                         help="dataset_config.toml 输出路径（默认 <kit>/configs/dataset_config.toml）")
     parser.add_argument("--mode", choices=["style", "character"], default="style",
                         help="训练模式：style=画风（默认，过滤人物标签）/ character=人物（保留全部标签）")
+    parser.add_argument("--style-target", choices=["anime", "realistic"], default="anime",
+                        dest="style_target",
+                        help="出图风格（画风模式兜底 caption 用）：anime=动漫（默认）/ realistic=写实")
     parser.add_argument("--trigger", default="", help="人物模式 trigger 触发词（插入每张 txt 第一行）")
     parser.add_argument("--reg-dir", default=None, help="人物模式正则数据集文件夹（写进 dataset_config 的 is_reg）")
     parser.add_argument("--repeats", type=int, default=1, help="训练图片重复次数 num_repeats（默认 1）")
@@ -1450,6 +1481,10 @@ def main():
                         help="人物模式关闭自动强绑定（默认开：自动把 trigger + 100% 一致特征词固定到标签开头）")
     parser.add_argument("--concept-type", default="",
                         help="概念类型：form/outfit/object/bodypart（概念模式用于清洗概念标签）")
+    parser.add_argument("--concept-mode", dest="concept_mode", action="store_true", default=None,
+                        help="明确声明这是概念模式（只有概念模式才清洗概念标签）")
+    parser.add_argument("--no-concept-mode", dest="concept_mode", action="store_false",
+                        help="明确声明不是概念模式（人物/画风模式绝不删除任何标签）")
     parser.add_argument("--no-clean-concept", action="store_true",
                         help="概念模式关闭「自动清洗概念标签」（默认开：删掉描述概念本身的标签，让 trigger 独占）")
     parser.add_argument("--dedup", action="store_true", help="按 MD5 跳过重复图片")
@@ -1517,6 +1552,10 @@ def main():
     mode = args.mode
     trigger = (args.trigger or "").strip()
     style_caption = normalize_caption(args.caption)
+    # 画风模式兜底文案：按出图风格选（动漫 / 写实），见 DEFAULT_CAPTION_REALISTIC 注释
+    style_fb = default_style_caption(getattr(args, "style_target", "anime"))
+    if mode == "style" and getattr(args, "style_target", "anime") == "realistic":
+        print("[INFO] 出图风格 = 写实：缺标签时使用写实兜底描述（不再是 anime cel-shading…）")
 
     # 收集输入文件：优先直接扫描根目录；根目录没有图时自动递归子文件夹
     # （用户常把图按角色/风格分在子目录里，选中"上层图集文件夹"也能直接处理）
@@ -1693,7 +1732,15 @@ def main():
                 with open(os.path.join(output_dir, stem + ".txt"), "w", encoding="utf-8") as f:
                     f.write(cap)
         # ---- 概念模式：清洗「描述概念本身」的标签（让 trigger 独占概念）----
-        if getattr(args, "concept_type", "") and not getattr(args, "no_clean_concept", False):
+        # 必须先确认「确实是概念模式」才清洗（2026-09-12 修）：
+        # 界面「概念类型」默认 form 且在人物模式也照传，若只按 concept_type 判断，
+        # 人物 LoRA 里 horns / animal ears / wings 这类人物特征会被静默删掉。
+        # 未显式传 --concept-mode / --no-concept-mode 时沿用旧行为（按 concept_type 推断），
+        # 保证手动命令行调用不受影响。
+        _concept_on = getattr(args, "concept_mode", None)
+        if _concept_on is None:
+            _concept_on = bool(getattr(args, "concept_type", ""))
+        if _concept_on and getattr(args, "concept_type", "") and not getattr(args, "no_clean_concept", False):
             _ct = args.concept_type
             _extra = set()
             if _ct in ("object", "bodypart"):
@@ -1735,6 +1782,8 @@ def main():
                 print("[概念清洗] 若清单里有你不想删的（如想要的配饰），可在界面关闭「自动清洗概念标签」。")
             else:
                 print(f"[概念清洗] {_cn}模式：没有需要删除的概念标签（标签里本来就没描述它）。")
+        elif getattr(args, "concept_type", "") and not _concept_on:
+            print("[概念清洗] 已跳过：当前不是概念模式（人物/画风模式不删除任何标签）")
 
         # 插入 trigger 到每张 txt 第一行
         if trigger:
@@ -1766,17 +1815,19 @@ def main():
         imgs_no_txt = _imgs_no_txt(output_dir)
         if not args.no_wd14:
             if not imgs_no_txt:
-                if _purge_placeholder_captions(output_dir, DEFAULT_CAPTION, trigger):
+                # 两版兜底都认（用户切过出图风格时，上一版留下的兜底标签也要能被自愈清掉）
+                if _purge_placeholder_captions(
+                        output_dir, (DEFAULT_CAPTION, DEFAULT_CAPTION_REALISTIC), trigger):
                     imgs_no_txt = _imgs_no_txt(output_dir)
             if imgs_no_txt:
                 wd14_ok = _run_wd14_auto(output_dir)
                 if not wd14_ok:
-                    _fill_missing_captions(output_dir, DEFAULT_CAPTION)
+                    _fill_missing_captions(output_dir, style_fb)
                     print("[WARN] WD14/内置打标都失败，缺标签图片使用兜底 caption（训练效果会差；请查看上方日志排查后重试）")
             else:
                 print("[INFO] 图片标签已齐全，跳过 WD14 打标。")
         else:
-            _fill_missing_captions(output_dir, DEFAULT_CAPTION)
+            _fill_missing_captions(output_dir, style_fb)
             print("[INFO] 已跳过 WD14 自动打标（按设置），缺标签图片使用兜底 caption")
         # 还原原图自带 txt（过滤人物标签）
         for stem, cap in user_captions.items():
@@ -1816,7 +1867,7 @@ def main():
 
     # ---- 最终兜底：确保每张图都有非空标签（任何环节失败都不漏标签） ----
     if not args.no_caption and (ok + skipped):
-        fb = DEFAULT_CAPTION if mode == "style" else DEFAULT_CHARACTER_CAPTION
+        fb = style_fb if mode == "style" else DEFAULT_CHARACTER_CAPTION
         n_fill = 0
         for f in sorted(os.listdir(output_dir)):
             if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
@@ -1855,8 +1906,10 @@ def main():
                         _c = ""
                     if _c:
                         _caps.add(_c)
-            if len(_caps) == 1 and list(_caps)[0] == DEFAULT_CAPTION:
-                print("[WARN] 画风模式自动打标未生效：所有标签都是统一的兜底描述（anime cel-shading…），请检查上方 WD14/内置打标日志；否则学不到逐张画风特征，效果会差。")
+            if len(_caps) == 1 and list(_caps)[0] == style_fb:
+                print("[WARN] 画风模式自动打标未生效：所有标签都是统一的兜底描述（%s…），"
+                      "请检查上方 WD14/内置打标日志；否则学不到逐张画风特征，效果会差。"
+                      % style_fb[:40])
             elif len(_caps) <= 2:
                 print("[WARN] 画风模式标签高度一致（%d 种），疑似自动打标未逐张生效；建议确认 WD14 正常后再训。" % len(_caps))
         except Exception:

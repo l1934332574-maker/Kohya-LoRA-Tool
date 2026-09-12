@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.16.6"
+APP_VERSION = "0.16.7"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2837,6 +2837,8 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     output_name = "krea2_lora"
     opt_k, _opt_d = resolve_optimizer(mvpy, logf, requested=params.get("optimizer", "auto"), allow_lion=False)
     logf(f"[Krea2] 优化器: {opt_k}")
+    # 提前记录生效值（界面差异行要能在训练开始时就看到），训练结束那次调用会补上其余项
+    _record_effective(engine="musubi-tuner", resolution=resolution, optimizer=opt_k)
     cmd = [
         *accel, "--num_cpu_threads_per_process", "1", "--mixed_precision", _mp,
         os.path.join(mt_dir, "krea2_train_network.py"),
@@ -2929,33 +2931,21 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         raise RuntimeError(f"Krea2 训练结束，退出码 {rc}，请查看上方日志")
     model_path = os.path.join(out_dir, output_name + ".safetensors")
     logf(f"[Krea2] 完成！模型: {model_path}")
+    _record_effective(engine="musubi-tuner", resolution=resolution, optimizer=opt_k,
+                      batch_size=1, save_every="每 %s 轮" % _save_ep,
+                      total_steps=per_epoch * epochs, epochs=epochs,
+                      images=count_images(train_dir), gradient_checkpointing=gc_on)
     try:
-        _write_krea2_template(mode, params, output_name, out_dir=out_dir)
+        _write_krea2_template(mode, params, output_name, out_dir=out_dir, train_dir=train_dir)
         write_params_report(mode, params, output_name, out_dir=out_dir)
     except Exception as e:
         logf(f"[Krea2] 生成模板/报告失败（忽略）: {e}")
     return model_path
 
 
-def _write_krea2_template(mode, params, output_name, out_dir=None):
-    """Krea2 LoRA 使用模板。"""
-    out_dir = out_dir or data_sub("output")
-    path = os.path.join(out_dir, output_name + "_使用模板.txt")
-    trig = ", ".join(split_triggers(params.get("trigger"))) if params.get("trigger") else "<你的触发词>"
-    text = (
-        "【Krea 2 图像 LoRA 使用模板】\n"
-        f"模型文件：{output_name}.safetensors\n"
-        f"Trigger 触发词：{trig}\n"
-        "适用底模：Krea 2（RAW 训练 / Turbo 推理）\n"
-        "训练分辨率：1024px\n\n"
-        "使用建议：\n"
-        f"1. 正向提示词以触发词开头：{trig}, <描述>\n"
-        "2. 推荐 LoRA 权重 0.6 ~ 0.9\n"
-        "3. 该 LoRA 只能用于 Krea 2 系列底模（不支持 SD/SDXL）。\n"
-    )
-    with open(path, "w", encoding="utf-8-sig") as f:
-        f.write(text)
-    return path
+def _write_krea2_template(mode, params, output_name, out_dir=None, train_dir=None):
+    """Krea2 LoRA 使用模板（统一走 write_usage_template，数值取本次实际生效值）。"""
+    return write_usage_template(mode, params, output_name, out_dir=out_dir, train_dir=train_dir)
 
 
 
@@ -3074,6 +3064,8 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     output_name = "flux2_lora"
     opt_k, _opt_d = resolve_optimizer(mvpy, logf, requested=params.get("optimizer", "auto"), allow_lion=False)
     logf(f"[FLUX.2] 优化器: {opt_k}")
+    # 提前记录生效值（界面差异行要能在训练开始时就看到），训练结束那次调用会补上其余项
+    _record_effective(engine="musubi-tuner", resolution=resolution, optimizer=opt_k)
     cmd = [
         *accel, "--num_cpu_threads_per_process", "1", "--mixed_precision", _mp,
         os.path.join(mt_dir, "flux_2_train_network.py"),
@@ -3163,33 +3155,21 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         raise RuntimeError(f"FLUX.2 训练结束，退出码 {rc}，请查看上方日志")
     model_path = os.path.join(out_dir, output_name + ".safetensors")
     logf(f"[FLUX.2] 完成！模型: {model_path}")
+    _record_effective(engine="musubi-tuner", resolution=resolution, optimizer=opt_k,
+                      batch_size=1, save_every="每 %s 轮" % _save_ep,
+                      total_steps=per_epoch * epochs, epochs=epochs,
+                      images=count_images(train_dir), gradient_checkpointing=gc_on)
     try:
-        _write_flux2_template(mode, params, output_name, out_dir=out_dir)
+        _write_flux2_template(mode, params, output_name, out_dir=out_dir, train_dir=train_dir)
         write_params_report(mode, params, output_name, out_dir=out_dir)
     except Exception as e:
         logf(f"[FLUX.2] 生成模板/报告失败（忽略）: {e}")
     return model_path
 
 
-def _write_flux2_template(mode, params, output_name, out_dir=None):
-    """FLUX.2 LoRA 使用模板。"""
-    out_dir = out_dir or data_sub("output")
-    path = os.path.join(out_dir, output_name + "_使用模板.txt")
-    trig = ", ".join(split_triggers(params.get("trigger"))) if params.get("trigger") else "<你的触发词>"
-    text = (
-        "【FLUX.2 图像 LoRA 使用模板】\n"
-        f"模型文件：{output_name}.safetensors\n"
-        f"Trigger 触发词：{trig}\n"
-        "适用底模：FLUX.2 klein 系列（训练用 base 4B，出图可配 klein 4B/Turbo）\n"
-        "训练分辨率：1024px\n\n"
-        "使用建议：\n"
-        f"1. 正向提示词以触发词开头：{trig}, <描述>\n"
-        "2. 推荐 LoRA 权重 0.6 ~ 0.9\n"
-        "3. 该 LoRA 只能用于 FLUX.2 系列底模（不支持 SD/SDXL/FLUX.1）。\n"
-    )
-    with open(path, "w", encoding="utf-8-sig") as f:
-        f.write(text)
-    return path
+def _write_flux2_template(mode, params, output_name, out_dir=None, train_dir=None):
+    """FLUX.2 LoRA 使用模板（统一走 write_usage_template，数值取本次实际生效值）。"""
+    return write_usage_template(mode, params, output_name, out_dir=out_dir, train_dir=train_dir)
 
 
 # ---------- 第三训练引擎（AI Toolkit：MiniMax H3 视频 LoRA） ----------
@@ -4919,6 +4899,9 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
     else:
         _opt_k = "AdamW"
     _opt_yaml = _optimizer_yaml_name(_opt_k)
+    # 记录实际生效值（参数报告 / 使用模板读取）
+    _record_effective(engine="AI Toolkit (ai-toolkit)", optimizer=_opt_k, total_steps=steps,
+                      note="视频：抽帧 %d 帧" % frames)
     model_dir = h3_models_dir().replace("\\", "/")
     # 显存适配：照搬 ai-toolkit 官方 / RunComfy 社区配置（H3 为 33B 视频模型）
     #  - low_vram: true —— 官方默认开启；DiT(约19.5G)+Qwen3-VL-32B TE(约14.6G) 无法同时常驻
@@ -5182,34 +5165,19 @@ def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from
         raise RuntimeError(f"MiniMax H3 训练结束，退出码 {rc}，请查看上方日志")
     model_path = _find_latest_safetensors(out_dir) or os.path.join(out_dir, "h3_video_lora.safetensors")
     logf(f"[视频] 完成！模型: {model_path}")
+    _record_effective(images=len(videos), total_steps=steps, batch_size=1)
     try:
-        _write_h3_template(mode, params, os.path.splitext(os.path.basename(model_path))[0], out_dir=os.path.dirname(model_path))
+        _write_h3_template(mode, params, os.path.splitext(os.path.basename(model_path))[0],
+                           out_dir=os.path.dirname(model_path), train_dir=video_dir)
         write_params_report(mode, params, os.path.splitext(os.path.basename(model_path))[0], out_dir=os.path.dirname(model_path))
     except Exception as e:
         logf(f"[视频] 生成模板/报告失败（忽略）: {e}")
     return model_path
 
 
-def _write_h3_template(mode, params, output_name, out_dir=None):
-    """MiniMax H3 视频 LoRA 使用模板。"""
-    out_dir = out_dir or data_sub("output")
-    path = os.path.join(out_dir, output_name + "_使用模板.txt")
-    trig = ", ".join(split_triggers(params.get("trigger"))) if params.get("trigger") else "<你的触发词>"
-    text = (
-        "【MiniMax H3 视频 LoRA 使用模板】\n"
-        f"模型文件：{output_name}.safetensors\n"
-        f"Trigger 触发词：{trig}\n"
-        "适用底模：MiniMax H3（33.1B 全模态视频模型，含音频）\n"
-        "训练方式：T2V（文生视频，约 24fps）\n\n"
-        "使用建议：\n"
-        f"1. 提示词以触发词开头：{trig}, <角色/风格描述>, <动作/运镜>，例如 {trig}, a girl walking in the rain, cinematic\n"
-        "2. 该 LoRA 只能用于 MiniMax H3 系列模型（不支持 SD/SDXL/Wan/Hunyuan）。\n"
-        "3. 生成视频建议 480~720p、3~10 秒，显存不足请降低分辨率或缩短时长。\n"
-        "4. 许可：MiniMax H3 为社区许可证（开放权重），商用请自行确认条款。\n"
-    )
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
-    return path
+def _write_h3_template(mode, params, output_name, out_dir=None, train_dir=None):
+    """MiniMax H3 视频 LoRA 使用模板（统一走 write_usage_template）。"""
+    return write_usage_template(mode, params, output_name, out_dir=out_dir, train_dir=train_dir)
 
 
 
@@ -5362,6 +5330,10 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
     else:
         _opt_k = "AdamW"
     _opt_yaml = _optimizer_yaml_name(_opt_k)
+    # 记录实际生效值（参数报告 / 使用模板读取）：分辨率可能被快跑档钳制，这里才是真值
+    _record_effective(engine="AI Toolkit (ai-toolkit)", resolution=reso, optimizer=_opt_k,
+                      note=("⚡快跑档生效：%dpx + 文本编码器量化 + 层交换 0.6" % reso)
+                           if _fast8_tier else None)
     _style_cap = (params.get("style_caption") or "").strip()
     _subj = _guess_sample_subject(train_dir) if str(params.get("at_sub_mode") or "character") == "character" else ""
     # 采样预览：画风模式把「画风描述词」带进提示词，预览才贴近实际风格
@@ -5759,6 +5731,10 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     else:
         _opt_k = "AdamW8bit"
     _opt_yaml = _optimizer_yaml_name(_opt_k)
+    # 记录实际生效值（参数报告 / 使用模板读取）：低显存档会把分辨率压到 512
+    _record_effective(engine="AI Toolkit (ai-toolkit)", resolution=reso, optimizer=_opt_k,
+                      note=("低显存档：%dpx + %s + 分层交换 %s" % (reso, qtype, _off_pct))
+                           if _off_pct else None)
     _style_cap = (params.get("style_caption") or "").strip()
     _subj = _guess_sample_subject(train_dir) if str(params.get("at_sub_mode") or "character") == "character" else ""
     # 采样预览：画风模式把「画风描述词」带进提示词，预览才贴近实际风格
@@ -5845,25 +5821,9 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     return cfg_path
 
 
-def _write_krea2_at_template(params, output_name, out_dir=None):
-    """Krea2（AI Toolkit）LoRA 使用模板。"""
-    out_dir = out_dir or data_sub("output")
-    path = os.path.join(out_dir, output_name + "_使用模板.txt")
-    trig = ", ".join(split_triggers(params.get("trigger"))) if params.get("trigger") else "<你的触发词>"
-    text = (
-        "【Krea2 图像LoRA（AI Toolkit 引擎）使用模板】\n"
-        f"模型文件：{output_name}.safetensors\n"
-        f"Trigger 触发词：{trig}\n"
-        "适用模型：Krea 2 RAW / Turbo（训练用 bf16 RAW，出图可挂 Turbo）\n\n"
-        "使用建议：\n"
-        f"1. 提示词以触发词开头：{trig}, <描述>\n"
-        "2. 推荐 LoRA 权重 0.6 ~ 0.9\n"
-        "3. 该 LoRA 只能用于 Krea 2 模型（不支持 SD/SDXL/FLUX）。\n"
-        "4. 若 ComfyUI 无法直接识别本 LoRA 键名，可先用 ai-toolkit 的转换脚本转成 ComfyUI 格式。\n"
-    )
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
-    return path
+def _write_krea2_at_template(params, output_name, out_dir=None, train_dir=None):
+    """Krea2（AI Toolkit）LoRA 使用模板（统一走 write_usage_template）。"""
+    return write_usage_template("krea2_at", params, output_name, out_dir=out_dir, train_dir=train_dir)
 
 
 def _check_at_train_driver(logf=print):
@@ -6012,8 +5972,10 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
         raise RuntimeError(f"Krea2（AI Toolkit）训练结束，退出码 {rc}，请查看上方日志")
     model_path = _find_latest_safetensors(out_dir) or os.path.join(out_dir, "krea2_at_lora.safetensors")
     logf(f"[Krea2] 完成！模型: {model_path}")
+    _record_effective(total_steps=steps, images=_n_img, batch_size=1)
     try:
-        _write_krea2_at_template(params, os.path.splitext(os.path.basename(model_path))[0], out_dir=os.path.dirname(model_path))
+        _write_krea2_at_template(params, os.path.splitext(os.path.basename(model_path))[0],
+                                 out_dir=os.path.dirname(model_path), train_dir=train_dir)
         write_params_report(mode, params, os.path.splitext(os.path.basename(model_path))[0], out_dir=os.path.dirname(model_path))
     except Exception as e:
         logf(f"[Krea2] 生成模板/报告失败（忽略）: {e}")
@@ -6098,33 +6060,19 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
         raise RuntimeError(f"训练结束，退出码 {rc}，请查看上方日志")
     model_path = _find_latest_safetensors(out_dir) or os.path.join(out_dir, "lora.safetensors")
     logf(f"[{info['label']}] 完成！模型: {model_path}")
+    _record_effective(total_steps=steps, images=count_images(train_dir), batch_size=1)
     try:
-        _write_at_image_template(mode, params, os.path.splitext(os.path.basename(model_path))[0], out_dir=os.path.dirname(model_path))
+        _write_at_image_template(mode, params, os.path.splitext(os.path.basename(model_path))[0],
+                                 out_dir=os.path.dirname(model_path), train_dir=train_dir)
         write_params_report(mode, params, os.path.splitext(os.path.basename(model_path))[0], out_dir=os.path.dirname(model_path))
     except Exception as e:
         logf(f"生成模板/报告失败（忽略）: {e}")
     return model_path
 
 
-def _write_at_image_template(mode, params, output_name, out_dir=None):
-    """Qwen-Image / Z-Image LoRA 使用模板。"""
-    out_dir = out_dir or data_sub("output")
-    path = os.path.join(out_dir, output_name + "_使用模板.txt")
-    info = AT_IMAGE_MODELS.get(mode, {})
-    trig = ", ".join(split_triggers(params.get("trigger"))) if params.get("trigger") else "<你的触发词>"
-    text = (
-        "【" + (info.get("label", "AI 图像") if info else "AI 图像") + " LoRA 使用模板】\n"
-        f"模型文件：{output_name}.safetensors\n"
-        f"Trigger 触发词：{trig}\n"
-        f"适用模型：{info.get('model_id', '')}（" + (info.get("size", "") if info else "") + "）\n\n"
-        "使用建议：\n"
-        f"1. 提示词以触发词开头：{trig}, <描述>\n"
-        "2. 推荐 LoRA 权重 0.6 ~ 0.9\n"
-        "3. 该 LoRA 只能用于对应模型系列（不支持 SD/SDXL）。\n"
-    )
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
-    return path
+def _write_at_image_template(mode, params, output_name, out_dir=None, train_dir=None):
+    """Qwen-Image / Z-Image LoRA 使用模板（统一走 write_usage_template）。"""
+    return write_usage_template(mode, params, output_name, out_dir=out_dir, train_dir=train_dir)
 
 
 
@@ -6408,6 +6356,75 @@ def preprocess_mode(mode, at_sub_mode=None):
     if sub == "style":
         return "style"
     return "character"   # 人物 / 概念 / 未知子模式：一律保留全部标签
+
+
+def style_target_code(style_preset):
+    """界面「出图风格」-> 打标兜底 caption 目标（写实 -> realistic；自定义/其它 -> anime）。
+
+    兜底 caption 只在"没有逐张标签"时才会写进 txt，所以它一旦跑偏就是整批跑偏：
+    以前写死动漫文案，写实用户会被自己的训练集教成动漫。
+    """
+    return "realistic" if str(style_preset or "").strip() == "写实" else "anime"
+
+
+def output_name_for(mode, style_preset=None):
+    """LoRA 成品文件名（引擎 --output_name / 断点快照目录 / 导出前缀必须一致）。
+
+    画风模式按出图风格区分：旧版对任何风格都固定叫 anime_style_lora，写实用户训完
+    拿到一个 anime_* 的文件名，既对不上他做的事，也容易和动漫 LoRA 混淆。
+    注意：改文件名会同时改变「断点续训」认的快照目录名（<name>-step…-state），
+    所以 train() / _ask_resume() / 导出前缀这三处必须都走本函数，保持同一个口径。
+    """
+    if mode == "style" and style_target_code(style_preset) == "realistic":
+        return "realistic_style_lora"
+    return OUTPUT_NAMES.get(mode) or (mode + "_lora")
+
+
+def param_float(text):
+    """可选数值参数 -> float；空 / 非法 / 负数 -> None（表示"不传这个参数"）。
+
+    用于 noise_offset / min_snr_gamma 这类可选增强项：留空即关闭，不留脏值给训练命令。
+    """
+    try:
+        s = str(text if text is not None else "").strip()
+        if not s:
+            return None
+        v = float(s)
+        return v if v >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def sd_quality_args(params):
+    """SD1.5 / SDXL 质量增强参数 -> (命令行参数列表, 日志文本)。
+
+    noise_offset 改善暗部与对比度；min_snr_gamma 抑制高噪声步过拟合。
+    两者只对 SD 系（epsilon / v-pred）有意义 —— FLUX / Anima 是 flow matching，
+    传了会扭曲训练目标，所以调用点只在 family == "sd" 分支里。
+    留空 / 非法值 = 该项关闭（旧项目迁移时选「否」就是靠这里变空来保持原口径）。
+    """
+    no = param_float((params or {}).get("noise_offset"))
+    ms = param_float((params or {}).get("min_snr_gamma"))
+    args = []
+    if no is not None:
+        args.append("--noise_offset=%s" % no)
+    if ms is not None:
+        args.append("--min_snr_gamma=%s" % ms)
+    txt = "  ".join(x for x in ("noise_offset=%s" % no if no is not None else "",
+                                "min_snr_gamma=%s" % ms if ms is not None else "") if x)
+    return args, txt
+
+
+def is_concept_mode(mode, at_sub_mode=None):
+    """当前是否为「概念」模式：只有概念模式才做概念标签清洗（人物/画风绝不删标签）。
+
+    · 主界面「🦄 概念LoRA模式」-> mode == "concept"（概念类型由「概念类型」下拉单独选）；
+    · AI 图像（Krea2 / FLUX.2 / Qwen-Image / Z-Image）子模式选「概念」-> at_sub_mode == "concept"。
+    """
+    if mode == "concept":
+        return True
+    return mode in ("krea2", "krea2_at", "krea2_fz", "flux2", "flux2_fz",
+                    "qwen_image", "zimage") and (at_sub_mode or "") == "concept"
 
 
 # ==================== 小工具：训练前通用操作（主页 🧰 小工具模块） ====================
@@ -6853,7 +6870,8 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
                reg_dir=None, repeats=5, dedup=False, wd14=True,
                square_crop=False, crop_ratio=None, min_size=0, blur_threshold=0.0, report=None,
                keep_tokens=None, project=None, style_caption="", dataset_mode=None,
-               strong_bind=True, concept_type="", clean_concept=True):
+               strong_bind=True, concept_type="", clean_concept=True, concept_mode=False,
+               style_target="anime"):
     """strong_bind：人物模式自动强绑定（trigger + 100% 一致特征 → 固定前缀，keep_tokens 覆盖整组）。"""
     # 旧调用方不传 strong_bind -> 人物模式默认开启（增量功能，不破坏旧流程）
     if strong_bind is None:
@@ -6862,6 +6880,9 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
 
     Qwen-Image/Z-Image/Krea2 数据统一放 train_character 目录（与训练读取一致），
     即使画风子模式 mode=style 也传 dataset_mode="character"，避免预处理/训练目录不一致。
+
+    concept_mode：是否为「概念」模式（用 is_concept_mode() 判定）。只有概念模式才清洗概念标签；
+    人物/画风模式即使带了 concept_type 也绝不删标签（否则 horns / animal ears 等人物特征会被误删）。
     """
     vpy = _pick_preprocess_python()
     if not vpy:
@@ -6906,14 +6927,22 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
             cmd.append("--dedup")
         if not wd14:
             cmd.append("--no-wd14")
-        if concept_type:
-            cmd += ["--concept-type", str(concept_type)]
+        # 概念标签清洗只在概念模式执行（2026-09-12 修）：界面「概念类型」默认 form 且无条件传入，
+        # 此前只按 concept_type 判断，人物模式也会跑 form 词表清洗，
+        # 导致人物 LoRA 里的 horns / animal ears / wings 被静默删掉。
+        if concept_mode:
+            _ct = str(concept_type or "form")   # 与界面默认一致（形态/种族）
+            cmd += ["--concept-type", _ct, "--concept-mode"]
             if not clean_concept:
                 cmd.append("--no-clean-concept")
-            _cn = {"form": "形态/种族", "outfit": "服装", "object": "物品", "bodypart": "身体部位"}.get(str(concept_type), concept_type)
+            _cn = {"form": "形态/种族", "outfit": "服装", "object": "物品", "bodypart": "身体部位"}.get(_ct, _ct)
             logf(f"[预处理] 概念模式（{_cn}）：自动清洗概念标签 = {'开（推荐）' if clean_concept else '关'}"
                  + ("" if clean_concept else "（关闭后 trigger 可能被标签架空，单独用 trigger 出不来）"))
     else:
+        _st = "realistic" if str(style_target or "").strip() == "realistic" else "anime"
+        cmd += ["--style-target", _st]
+        if _st == "realistic":
+            logf("[预处理] 出图风格 = 写实：缺标签时用写实兜底描述（不再是 anime cel-shading…）")
         if trigger:
             cmd += ["--trigger", trigger]
         if (style_caption or "").strip():
@@ -8433,150 +8462,285 @@ def cap_epochs_by_steps(per_epoch_steps, batch, epochs, max_steps=MAX_AUTO_STEPS
     return new_epochs, per_epoch_steps * new_epochs
 
 
+# ---------- 训练产物：使用模板 / 参数报告 ----------
+# 「实际生效值」记录（2026-09-12 修）：
+#   这些产物过去用「底模类型默认值」甚至写死值（恒定 1024px、固定动漫示例），
+#   与本次训练实际不符，会误导用户。现在由各训练流程在算出真实参数后调用
+#   _record_effective(...) 记录，产物生成时读取，取不到才回落用户设置。
+#   训练是串行的（含队列，一次只跑一个任务），故用模块级单槽记录即可。
+_EFFECTIVE = {}
+
+# 概念类型中文名（报告 / 模板用）
+_CONCEPT_CN = {"form": "形态/种族", "outfit": "服装", "object": "物品", "bodypart": "身体部位"}
+
+# 各模式：显示名 + 推荐 LoRA 权重
+_USAGE_META = {
+    "style": ("画风", "0.5 ~ 0.7"),
+    "character": ("人物角色", "0.6 ~ 0.9"),
+    "concept": ("概念", "0.6 ~ 0.9"),
+    "krea2": ("Krea 2 图像", "0.6 ~ 0.9"),
+    "krea2_at": ("Krea 2 图像 · AI Toolkit 引擎", "0.6 ~ 0.9"),
+    "krea2_fz": ("Krea 2 图像 · Fizgig 引擎", "0.6 ~ 0.9"),
+    "flux2": ("FLUX.2 图像", "0.6 ~ 0.9"),
+    "flux2_fz": ("FLUX.2 Klein 9B · Fizgig 引擎", "0.6 ~ 0.9"),
+    "qwen_image": ("Qwen-Image", "0.6 ~ 0.9"),
+    "zimage": ("Z-Image", "0.6 ~ 0.9"),
+    "video": ("MiniMax H3 视频", "0.6 ~ 0.9"),
+}
+
+# 出图必须搭配的底模系列（kohya 三种模式用 base_type 描述，其余走这里）
+_USAGE_BASE = {
+    "krea2": "Krea 2（RAW 训练 / Turbo 推理）",
+    "krea2_at": "Krea 2 RAW / Turbo（训练用 bf16 RAW，出图可挂 Turbo）",
+    "krea2_fz": "Krea 2（RAW 训练 / Turbo 推理）",
+    "flux2": "FLUX.2 klein 系列（训练用 base 4B，出图可配 klein 4B / Turbo）",
+    "flux2_fz": "FLUX.2 Klein 系列（训练用 klein-base-9b）",
+    "qwen_image": "Qwen-Image / Qwen-Image-2512",
+    "zimage": "Z-Image（Tongyi-MAI/Z-Image）",
+    "video": "MiniMax H3（33.1B 全模态视频模型，含音频）",
+}
+
+# 默认负面提示词（仅出图建议，不参与训练）
+_DEFAULT_NEG = ("lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, "
+                "fewer digits, cropped, worst quality, low quality, jpeg artifacts, signature, "
+                "watermark, username, blurry, bad quality")
+
+
+def _record_effective(**kw):
+    """记录本次训练「实际生效」的参数（值为 None 的键跳过，不覆盖已有值）。"""
+    for _k, _v in kw.items():
+        if _v is not None:
+            _EFFECTIVE[_k] = _v
+
+
+def _eff(key, default=None):
+    """读取本次训练实际生效值；未记录返回 default。"""
+    _v = _EFFECTIVE.get(key)
+    return default if _v is None else _v
+
+
+def reset_effective():
+    """新任务开始前清空「实际生效值」——否则上一次训练的值会被当成这一次的显示出来。"""
+    _EFFECTIVE.clear()
+
+
+def get_effective():
+    """返回本次训练实际生效值的副本（界面「设定值 → 实际生效值」对比用）。"""
+    return dict(_EFFECTIVE)
+
+
+def _mode_display(mode, params=None):
+    """训练模式显示名；AI 图像模式带上子模式（人物 / 画风 / 概念）。"""
+    lab = MODE_LABELS.get(mode, mode)
+    sub = (params or {}).get("at_sub_mode")
+    if sub and sub in ("character", "style", "concept"):
+        return "%s · %s" % (lab, AT_SUB_LABELS.get(sub, sub))
+    return lab
+
+
+def _effective_resolution(params, default=None):
+    """本次训练实际分辨率；取不到才回落用户设置 / 模式默认。"""
+    _used = _eff("resolution")
+    if _used:
+        return int(_used)
+    _set = params.get("resolution")
+    if _set:
+        return int(_set)
+    if default is not None:
+        return int(default)
+    return int(RESOLUTIONS.get(params.get("base_type", "sd15"), 512))
+
+
+def _fmt_onoff(v):
+    return "（未记录）" if v is None else ("开" if v else "关")
+
+
+def _rv(v):
+    """渲染用户参数值：None / 空 -> （未记录），避免报告里出现裸 None。"""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return "（未记录）"
+    return v
+
+
+def _base_label(base):
+    """底模显示名：去掉「（1024px）」这类原生分辨率后缀。
+
+    它紧跟在「训练分辨率」下面，带着数字会让人误以为训练分辨率是那个值。
+    """
+    _full = str(BASE_TYPE_LABELS.get(base, base))
+    _i = _full.find("（")
+    if _i > 0 and "px" in _full[_i:]:
+        return _full[:_i].strip() or _full
+    return _full
+
+
 def write_params_report(mode, params, output_name, extra=None, out_dir=None):
-    """训练结束后生成完整参数报告 txt。"""
+    """训练结束后生成完整参数报告 txt。
+
+    数值优先取本次「实际生效值」（_EFFECTIVE），取不到才回落用户设置 ——
+    旧版恒报 RESOLUTIONS[base_type]，与实际训练分辨率无关，会误导用户。
+    """
     out_dir = out_dir or data_sub("output")
     path = os.path.join(out_dir, output_name + "_参数报告.txt")
     base = params.get("base_type", "sd15")
+
+    _used = _eff("resolution")
+    _set = params.get("resolution")
+    if _used:
+        reso_txt = "%spx" % int(_used)
+        if _set and int(_set) != int(_used):
+            reso_txt += "（你设置 %spx，已按显存/快跑档自动调整）" % int(_set)
+    else:
+        reso_txt = "%spx" % _effective_resolution(params)
+
     lines = [
         "【LoRA 训练参数报告】",
-        f"生成时间      : {time.strftime('%Y-%m-%d %H:%M:%S')}",
-        f"训练模式      : {MODE_LABELS.get(mode, mode)}",
-        f"底模类型      : {BASE_TYPE_LABELS.get(base, base)}",
-        f"底模文件      : {params.get('base_model') or '（未记录）'}",
-        f"训练分辨率    : {RESOLUTIONS.get(base, 512)}px",
-        f"rank / alpha  : {params.get('rank')} / {params.get('alpha')}",
-        f"学习率        : {params.get('unet_lr')}",
-        f"文本编码器学习率: {params.get('te_lr')}",
-        f"repeats       : {params.get('repeats')}",
-        f"最大 epoch    : {params.get('max_epochs')}",
-        f"训练目标      : {'UNet + 文本编码器' if params.get('train_text_encoder', True) else '仅 UNet'}",
-        f"batch_size    : {params.get('batch_size', 1)}",
-        f"梯度检查点    : {params.get('gc')}",
-        f"附加全局正向提示词: {params.get('global_pos') or '（无）'}",
-        f"附加全局负向提示词: {params.get('global_neg') or '（无）'}",
+        "生成时间        : %s" % time.strftime("%Y-%m-%d %H:%M:%S"),
+        "训练模式        : %s" % _mode_display(mode, params),
+        "训练引擎        : %s" % _eff("engine", "（未记录）"),
     ]
+    if mode in ("style", "character", "concept"):
+        lines.append("底模类型        : %s" % BASE_TYPE_LABELS.get(base, base))
+    _bm = _eff("base_model") or params.get("base_model")
+    if _bm:
+        lines.append("底模文件        : %s" % _bm)
+    lines += [
+        "训练分辨率      : %s" % reso_txt,
+        "rank / alpha    : %s / %s" % (_rv(params.get("rank")), _rv(params.get("alpha"))),
+        "学习率          : %s" % _rv(params.get("unet_lr")),
+        "文本编码器学习率: %s" % _rv(params.get("te_lr")),
+        "优化器          : %s" % (_eff("optimizer") or _rv(params.get("optimizer"))),
+        "repeats         : %s" % _rv(params.get("repeats")),
+        "最大 epoch      : %s" % _rv(params.get("max_epochs")),
+        "实际总步数      : %s" % _eff("total_steps", "（未记录）"),
+        "batch_size      : %s" % _eff("batch_size", 1),
+        "保存间隔        : %s" % _eff("save_every", "（未记录）"),
+        "梯度检查点      : %s" % _fmt_onoff(_eff("gradient_checkpointing")),
+    ]
+    if _eff("images"):
+        lines.append("数据集图片数    : %s 张" % _eff("images"))
+    if _eff("note"):
+        lines.append("显存适配        : %s" % _eff("note"))
+    # trigger 对「人物」和「概念」都要显示：概念 LoRA 完全依赖 trigger，旧版漏了
+    if mode in ("character", "concept"):
+        lines.append("Trigger 触发词  : %s" % (params.get("trigger") or "（未填写）"))
+    if mode == "concept":
+        _ct = str(params.get("concept_type") or "form")
+        lines.append("概念类型        : %s" % _CONCEPT_CN.get(_ct, _ct))
     if mode == "character":
-        lines += [
-            f"Trigger 触发词: {params.get('trigger') or '（未填写）'}",
-            f"正则数据集    : {params.get('reg_dir') or '（未使用）'}",
-        ]
+        lines.append("正则数据集      : %s" % (params.get("reg_dir") or "（未使用）"))
     if extra:
         lines.append("")
         lines.append("运行备注：")
         lines.extend("  " + str(x) for x in extra)
+    # 全局提示词只在出图时用：kohya/各引擎训练本身不消费，放在报告末尾并明确标注，
+    # 避免用户以为它影响了训练（旧版混在训练参数里，有误导性）
+    _gp = (params.get("global_pos") or "").strip()
+    _gn = (params.get("global_neg") or "").strip()
+    if _gp or _gn:
+        lines += [
+            "",
+            "以下仅用于出图时的提示词（不参与训练）：",
+            "  附加全局正向提示词: %s" % (_gp or "（无）"),
+            "  附加全局负向提示词: %s" % (_gn or "（无）"),
+        ]
     with open(path, "w", encoding="utf-8-sig") as f:
         f.write("\n".join(lines) + "\n")
+    # 生命周期：一次训练 = 各流程 _record_effective(...) 写入 → 产物生成时读取 → 这里清空。
+    # 报告是所有路径里最后生成的产物，故在此清空即可保证下次训练不残留
+    # （否则可能把上次的「快跑档备注」显示到本次报告里）。
+    _EFFECTIVE.clear()
     return path
 
 
-def write_usage_template(mode, params, output_name, out_dir=None):
-    """训练完成后生成 txt 使用模板（画风=画风提示词；人物=带 trigger/全局提示词示例）。
+def _usage_sample_caption(mode, params, train_dir=None):
+    """读训练集里真实写入的第一条 caption（模板示例用，每个用户各不相同）。
 
-    模板里的「你的训练标签示例」会读取当前项目训练集里真实写入的 caption，
-    每个用户的模板对应各自实际的标签，而不是固定示例。
+    train_dir 优先（调用方传入实际数据目录）；没有才按模式推定 ——
+    AI 图像等模式的数据统一放 train_character，直接按 mode 推会找不到。
+    """
+    try:
+        d = train_dir or dataset_train_dir(mode, params.get("project"))
+        if d and os.path.isdir(d):
+            for fn in sorted(os.listdir(d)):
+                if fn.lower().endswith(".txt"):
+                    c = io.open(os.path.join(d, fn), encoding="utf-8-sig").read().strip()
+                    if c:
+                        return c
+    except Exception:
+        pass
+    return ""
+
+
+def write_usage_template(mode, params, output_name, out_dir=None, train_dir=None):
+    """训练完成后生成 txt 使用模板（全部模式通用）。
+
+    · 数值取本次「实际生效值」，不再用底模默认值 / 写死值；
+    · 示例标签读训练集里真实写入的 caption，读不到就不显示该段；
+    · 不写死具体画风 / 人物示例，写实、动漫、人物、概念、AI 图像、视频都适用。
     """
     out_dir = out_dir or data_sub("output")
     path = os.path.join(out_dir, output_name + "_使用模板.txt")
-    base = params.get("base_type", "sd15")
-    reso = RESOLUTIONS.get(base, 512)
-    gpos = (params.get("global_pos") or "").strip()
-    neg = (params.get("global_neg") or "").strip() or (
-        "lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, "
-        "fewer digits, cropped, worst quality, low quality, jpeg artifacts, signature, "
-        "watermark, username, blurry, bad quality")
-
-    def _sample_caption():
-        """读取当前项目训练集里第一张真实 caption（用于模板示例）。"""
-        try:
-            d = dataset_train_dir(mode, params.get("project"))
-            if os.path.isdir(d):
-                for fn in sorted(os.listdir(d)):
-                    if fn.lower().endswith(".txt"):
-                        c = io.open(os.path.join(d, fn), encoding="utf-8").read().strip()
-                        if c:
-                            return c
-        except Exception:
-            pass
-        return None
-
-    cap = _sample_caption()
-
+    _label, _weight = _USAGE_META.get(mode, (MODE_LABELS.get(mode, mode), "0.6 ~ 0.9"))
     if mode == "concept":
-        triggers = split_triggers(params.get("trigger"))
-        trig_line = ", ".join(triggers) if triggers else "<你的触发词>"
-        pos_example = ((gpos + ", ") if gpos else "") + ((trig_line + ", ") if triggers else "") + "1girl, <形态/种族描述…>"
-        text = (
-            "【概念（形态/种族）LoRA 使用模板】\n"
-            f"模型文件：{output_name}.safetensors\n"
-            f"Trigger 触发词：{trig_line}\n"
-            f"训练分辨率：{reso}px\n\n"
-            "使用建议：\n"
-            f"1. 正向提示词以触发词开头，角色就会变成训练的形态：{pos_example}\n"
-            + (f"   你的训练标签示例：{cap}\n" if cap else "")
-            + "2. 推荐 LoRA 权重 0.6 ~ 0.9（按底模微调）。\n"
-            "3. 想让形态更明显就提高权重；想自然融入就用 0.6 左右。\n"
-            f"4. 负面提示词建议：{neg}\n"
-            "5. ⚠ 训练集混了多种画风时，trigger 只绑形态不绑画风；若输出画风也变了，说明训练集画风太单一。\n"
-        )
-    elif mode == "character":
-        triggers = split_triggers(params.get("trigger"))
-        trig_line = ", ".join(triggers) if triggers else "<你的触发词>"
-        reg = "已启用" if params.get("reg_dir") else "未启用"
-        pos_example = ((gpos + ", ") if gpos else "") + ((trig_line + ", ") if triggers else "") + "1girl, solo, <其他标签…>"
-        text = (
-            "【人物角色 LoRA 使用模板】\n"
-            f"模型文件：{output_name}.safetensors\n"
-            f"Trigger 触发词：{trig_line}\n"
-            f"正则数据集：{reg}\n"
-            f"训练分辨率：{reso}px\n\n"
-            "使用建议：\n"
-            f"1. 正向提示词以触发词开头：{pos_example}\n"
-            + (f"   你的训练标签示例：{cap}\n" if cap else "")
-            + "2. 推荐 LoRA 权重 0.6 ~ 0.9（按底模微调）。\n"
-            f"3. 负面提示词建议：{neg}\n"
-            "4. 想强调角色时提高权重，想自然融入时用 0.6 左右。\n"
-        )
+        # 标题形如「【概念（形态/种族）LoRA 使用模板】」：概念类型动态取，
+        # 不再写死「形态/种族」（服装/物品/身体部位也走这里）
+        _ct = str(params.get("concept_type") or "form")
+        _title = "【概念（%s）LoRA 使用模板】" % _CONCEPT_CN.get(_ct, _ct)
     else:
-        _trig2 = ", ".join(split_triggers(params.get("trigger")))
-        if _trig2:
-            example = cap if cap else (
-                _trig2 + ", anime cel-shading, clean thin black outlines, flat color, "
-                "simple soft cel shading, tv anime screenshot, limited color palette")
-            text = (
-                "【画风 LoRA 使用模板】\n"
-                f"模型文件：{output_name}.safetensors\n"
-                f"Trigger 触发词：{_trig2}\n"
-                f"训练分辨率：{reso}px\n\n"
-                "使用建议：\n"
-                "1. 推荐 LoRA 权重 0.5 ~ 0.7。\n"
-                "2. 正向提示词以触发词开头，并**带上训练时的画风标签**一起输入：\n"
-                f"   你的训练标签示例：{example}\n"
-                f"   出图时直接复制这段标签 + 你想画的内容，例如：{example}, 1girl, <动作/场景>\n"
-                "3. ⚠ 单独输入一个触发词召唤效果较弱（画风信息分散在标签里），建议「触发词 + 画风标签」一起用。\n"
-                f"4. 负面提示词建议：{neg}\n"
-                "5. 想弱化风格时把权重降到 0.4。\n"
-            )
+        _title = "【%s LoRA 使用模板】" % _label
+    base = params.get("base_type", "sd15")
+    trig = ", ".join(split_triggers(params.get("trigger")))
+    cap = _usage_sample_caption(mode, params, train_dir)
+    gpos = (params.get("global_pos") or "").strip()
+    neg = (params.get("global_neg") or "").strip() or _DEFAULT_NEG
+
+    lines = [
+        _title,
+        "模型文件：%s.safetensors" % output_name,
+        "Trigger 触发词：%s" % (trig or "（无）"),
+    ]
+    if mode != "video":
+        lines.append("训练分辨率：%spx" % _effective_resolution(params))
+    lines.append("适用底模：%s" % (_USAGE_BASE.get(mode) or _base_label(base)))
+    lines += ["", "使用建议："]
+
+    tips = []
+    if mode == "style":
+        if trig:
+            tips.append("正向提示词以触发词开头，并**带上训练时的画风标签**一起输入 —— "
+                        "画风信息分散在标签里，只写触发词召唤效果较弱。")
         else:
-            example = cap if cap else (
-                "anime cel-shading, clean thin black outlines, flat color, "
-                "simple soft cel shading, tv anime screenshot, limited color palette")
-            text = (
-                "【画风 LoRA 使用模板】\n"
-                f"模型文件：{output_name}.safetensors\n"
-                "本 LoRA 无 trigger 触发词，提示词直接写画风标签即可。\n"
-                f"训练分辨率：{reso}px\n\n"
-                "使用建议：\n"
-                "1. 推荐 LoRA 权重 0.5 ~ 0.7。\n"
-                "2. 正向提示词直接写训练时的画风标签：\n"
-                f"   你的训练标签示例：{example}\n"
-                f"   出图示例：{example}, 1girl, cherry blossoms\n"
-                "3. 不要输入角色名/trigger 词（这个 LoRA 没有也不应该有）。\n"
-                f"4. 负面提示词建议：{neg}\n"
-                "5. 想弱化风格时把权重降到 0.4。\n"
-            )
+            tips.append("本 LoRA 没有触发词，正向提示词直接写训练时的画风标签即可。")
+        tips.append("不要输入角色名或无关的触发词。")
+    elif mode in ("character", "concept"):
+        if trig:
+            tips.append("正向提示词以触发词开头，人物 / 概念就会被唤起。")
+        else:
+            tips.append("正向提示词直接描述你想要的内容即可（本 LoRA 未设置触发词）。")
+    elif mode == "video":
+        tips.append("提示词以触发词开头，再补动作 / 运镜描述。")
+        tips.append("建议生成 480~720p、3~10 秒；显存不足时降低分辨率或缩短时长。")
+    else:
+        tips.append("正向提示词以触发词开头即可（该模型系列不通用 SD/SDXL 的提示词习惯）。")
+    if gpos:
+        tips.append("把你设置的全局正向提示词也一起带上：%s" % gpos)
+    tips.append("推荐 LoRA 权重 %s：想弱化就调低，想强化就调高。" % _weight)
+    tips.append("负面提示词建议：%s" % neg)
+    if mode == "concept":
+        tips.append("⚠ 训练集混了多种画风时，触发词只绑概念、不绑画风；"
+                    "若出图连画风也变了，说明训练集画风太单一。")
+    elif mode == "style":
+        tips.append("⚠ 若出图人物长得像训练集里的人，说明训练集人物特征太单一，"
+                    "建议补充不同人物 / 姿态的图片重训。")
+    for _i, _t in enumerate(tips, 1):
+        lines.append("%d. %s" % (_i, _t))
+    if cap:
+        lines += ["", "你的训练标签示例（取自本次训练集）：", "  %s" % cap]
+        if mode == "style" and trig:
+            lines.append("  出图时把它和你想画的内容一起写，例如：%s, 1girl, <动作/场景>" % cap)
     with open(path, "w", encoding="utf-8-sig") as f:
-        f.write(text)
+        f.write("\n".join(lines) + "\n")
     return path
 
 
@@ -9453,7 +9617,10 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
                                                     amd_mode=amd_mode)
     if amd_mode:
         use_xformers = False          # AMD 无 xformers，强制 sdpa
-    output_name = OUTPUT_NAMES.get(mode, "anime_style_lora")
+    output_name = output_name_for(mode, params.get("style_preset"))
+    # 回填给调用方（_train_worker 结尾的「按项目名导出成品」要用它做前缀匹配；
+    # 第四引擎本来就把 params["output_name"] 当覆盖项读，口径一致）
+    params["output_name"] = output_name
     # 项目分组输出：output/<项目名>/（没开项目则直接 output/）
     _proj = (params.get("project") or "").strip()
     if _proj:
@@ -9478,6 +9645,18 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     if epochs_eff != epochs:
         logf(f"[训练] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {epochs_eff}（总步数约 {total_steps}）")
         epochs = epochs_eff
+    # 记录实际生效值（界面「设定值 → 实际生效值」与产物报告都读这里）：
+    # 上面的 epoch 自动约束、RDNA2→fp16、SD 质量增强等覆写必须反映出来，
+    # 否则用户看到的还是自己填的数，却不知道实际跑的已经是另一个。
+    _record_effective(engine="kohya (sd-scripts)", rank=params.get("rank"), alpha=params.get("alpha"),
+                      unet_lr=params.get("unet_lr"), te_lr=params.get("te_lr"),
+                      repeats=params.get("repeats"), epochs=epochs,
+                      resolution=params.get("resolution"), optimizer=optimizer_type,
+                      total_steps=total_steps, mixed_precision=mixed)
+    if family == "sd":
+        # 只有 SD 系真的会把这两项送进命令；留空时 param_float 返回 None，_record_effective 会跳过
+        _record_effective(noise_offset=param_float(params.get("noise_offset")),
+                          min_snr_gamma=param_float(params.get("min_snr_gamma")))
     if progress is not None:
         try:
             progress.set_total(total_steps)
@@ -9586,6 +9765,11 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     if base_type == "sdxl" and not train_te:
         cmd.append("--cache_text_encoder_outputs")
     if family == "sd":
+        # SD1.5 / SDXL 质量增强（预设表 _PRESET_SD_EXTRA，仅这两个架构带）
+        _sq_args, _sq_txt = sd_quality_args(params)
+        if _sq_args:
+            cmd += _sq_args
+            logf("[训练] SD 质量增强：" + _sq_txt)
         if use_xformers:
             cmd.append("--xformers")
         else:
@@ -9718,15 +9902,17 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
             logf(f"[导出] 已把 {moved} 个中间快照/续训状态整理到: {snap_dir}")
     except Exception as e:
         logf(f"[导出] 整理中间快照失败（忽略）: {e}")
+    _record_effective(engine="kohya (sd-scripts)", resolution=resolution,
+                      optimizer=optimizer_type, batch_size=batch_size,
+                      save_every="每 %s 步" % save_every, total_steps=total_steps,
+                      epochs=epochs, images=count_images(train_dir), base_model=base_model)
     try:
-        tpl = write_usage_template(mode, params, output_name, out_dir=out_dir)
+        tpl = write_usage_template(mode, params, output_name, out_dir=out_dir, train_dir=train_dir)
         logf(f"[导出] 已生成使用模板: {tpl}")
     except Exception as e:
         logf(f"[导出] 生成使用模板失败: {e}")
     try:
-        rep = write_params_report(mode, params, output_name,
-                                  extra=[f"总步数约 {total_steps}", f"保存间隔 {save_every} 步"],
-                                  out_dir=out_dir)
+        rep = write_params_report(mode, params, output_name, out_dir=out_dir)
         logf(f"[导出] 已生成参数报告: {rep}")
     except Exception as e:
         logf(f"[导出] 生成参数报告失败: {e}")

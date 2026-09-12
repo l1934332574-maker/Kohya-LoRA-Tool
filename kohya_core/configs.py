@@ -8,7 +8,7 @@
 MODE_LABELS = {
     "style": "🎨 画风LoRA模式",
     "character": "👤 人物角色LoRA模式",
-    "concept": "🦄 概念LoRA模式（形态/种族）",
+    "concept": "🦄 概念LoRA模式",
     "krea2": "🖼 Krea 2 图像LoRA",
     "krea2_at": "🖼 Krea2 图像LoRA（AI-Toolkit 引擎）",
     "krea2_fz": "🖼 Krea2 图像LoRA（Fizgig 引擎）",
@@ -27,8 +27,10 @@ AT_SUB_LABELS = {
     "concept": "概念（形态/种族）",
 }
 
-# 概念模式的「概念类型」：只影响【数据集提示 + 采样预览提示词】，不影响训练逻辑。
-# 训练逻辑对所有类型都一样：把训练集里唯一一致的东西绑定到 trigger。
+# 概念模式的「概念类型」：决定【概念标签清洗依据】+【数据集提示 + 采样预览提示词】。
+# · 形态/种族、服装：按词表删掉「描述概念本身」的标签；
+# · 物品、身体部位：词表穷举不了，改删训练集里 100% 一致的标签。
+# 清洗只在概念模式执行（人物/画风模式绝不删标签）；训练超参（yaml/toml）对所有类型一致。
 CONCEPT_TYPE_LABELS = {
     "form": "🧜 形态/种族（美人鱼·半人马）",
     "outfit": "👗 服装（同款衣服）",
@@ -136,118 +138,86 @@ BASE_TYPE_LABELS = {k: v["label"] for k, v in ARCH_INFO.items()}
 BASE_TYPE_HINTS = {k: v["hint"] for k, v in ARCH_INFO.items()}
 
 # 内置预设参数（按 模式 × 底模类型；切换自动填充；手动改过的不再被覆盖，只有「恢复预设」重写）
-PRESETS = {
+#
+# 结构 = 基线 + 架构覆盖（2026-09-12 收敛）：
+#   旧版把 11 模式 × 4 架构 = 44 行平铺，其中 8 个模式（krea2 / krea2_fz / krea2_at / flux2 /
+#   flux2_fz / video / qwen_image / zimage）的 4 行是逐字相同的，等于把同一份数据抄了 4 遍，
+#   改一个数要动 4 处。现在只写一份基线 `_PRESET_BASE`，架构之间真正有差异时才用
+#   `_PRESET_ARCH_DIFF` 覆盖。
+#   运行期 `PRESETS` 的形状与旧版完全一致（mode -> arch -> 参数行），所以 preset_for 与界面的
+#   「base_type not in PRESETS[mode]」判断、冒烟测试的完整性检查都不需要改。
+_PRESET_ARCHS = ("sd15", "sdxl", "flux", "anima")
+
+_PRESET_BASE = {
+    "style": {"rank": "12", "alpha": "6", "unet_lr": "3e-4", "te_lr": "1.5e-4", "repeats": "5", "max_epochs": "8", "resolution": "512"},
+    "character": {"rank": "24", "alpha": "12", "unet_lr": "1.5e-4", "te_lr": "8e-5", "repeats": "3", "max_epochs": "6", "resolution": "512"},
+    "concept": {"rank": "32", "alpha": "16", "unet_lr": "1e-4", "te_lr": "5e-5", "repeats": "3", "max_epochs": "8", "resolution": "512"},
+    "krea2": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "1024"},
+    "krea2_fz": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "512"},
+    "krea2_at": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "8", "resolution": "1024"},
+    "flux2": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "1024"},
+    "flux2_fz": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "768"},
+    "video": {"rank": "32", "alpha": "32", "unet_lr": "2e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "20", "resolution": "1280", "video_steps": "2000"},
+    "qwen_image": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
+    "zimage": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
+}
+
+# SD1.5 / SDXL 专用的「训练质量」增强（2026-09-12 新增，v3）：
+#   noise_offset 改善暗部与对比度（训练集明暗差大时尤其明显），
+#   min_snr_gamma 抑制高噪声步的过拟合。
+#   两者只对 SD 系（epsilon / v-pred）有意义；FLUX / Anima 是 flow matching，
+#   min_snr_gamma 会扭曲训练目标、noise_offset 也无意义，而且 sd-scripts 的
+#   flux_train_network / anima_train_network 本身就不吃这两个参数 —— 所以只挂 sd15 / sdxl。
+#   （第二~四引擎 musubi / AI-Toolkit / Fizgig 也不走 kohya 这条路，同样不挂。）
+_PRESET_SD_EXTRA = {"noise_offset": "0.05", "min_snr_gamma": "5"}
+_PRESET_SD_ARCHS = ("sd15", "sdxl")
+_PRESET_SD_MODES = ("style", "character", "concept")
+
+# 只在「该架构与基线不同」时才写；未列出的架构 = 直接用基线
+_PRESET_ARCH_DIFF = {
     "style": {
-        "sd15": {"rank": "12", "alpha": "6", "unet_lr": "3e-4", "te_lr": "1.5e-4",
-                 "repeats": "5", "max_epochs": "8", "resolution": "512"},
-        "sdxl": {"rank": "16", "alpha": "8", "unet_lr": "1.5e-4", "te_lr": "7.5e-5",
-                 "repeats": "5", "max_epochs": "8", "resolution": "1024"},
-        "flux": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "5", "max_epochs": "8", "resolution": "1024"},
-        "anima": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
-                  "repeats": "5", "max_epochs": "8", "resolution": "1024"},
+        "sdxl": {"rank": "16", "alpha": "8", "unet_lr": "1.5e-4", "te_lr": "7.5e-5", "resolution": "1024"},
+        "flux": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4", "resolution": "1024"},
+        "anima": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4", "resolution": "1024"},
     },
     "character": {
-        "sd15": {"rank": "24", "alpha": "12", "unet_lr": "1.5e-4", "te_lr": "8e-5",
-                 "repeats": "3", "max_epochs": "6", "resolution": "512"},
-        "sdxl": {"rank": "32", "alpha": "16", "unet_lr": "7e-5", "te_lr": "4e-5",
-                 "repeats": "3", "max_epochs": "6", "resolution": "1024"},
-        "flux": {"rank": "16", "alpha": "16", "unet_lr": "8e-5", "te_lr": "8e-5",
-                 "repeats": "3", "max_epochs": "6", "resolution": "1024"},
-        "anima": {"rank": "16", "alpha": "16", "unet_lr": "8e-5", "te_lr": "8e-5",
-                  "repeats": "3", "max_epochs": "6", "resolution": "1024"},
+        "sdxl": {"rank": "32", "alpha": "16", "unet_lr": "7e-5", "te_lr": "4e-5", "resolution": "1024"},
+        "flux": {"rank": "16", "alpha": "16", "unet_lr": "8e-5", "te_lr": "8e-5", "resolution": "1024"},
+        "anima": {"rank": "16", "alpha": "16", "unet_lr": "8e-5", "te_lr": "8e-5", "resolution": "1024"},
     },
     "concept": {
-        "sd15": {"rank": "32", "alpha": "16", "unet_lr": "1e-4", "te_lr": "5e-5",
-                 "repeats": "3", "max_epochs": "8", "resolution": "512"},
-        "sdxl": {"rank": "32", "alpha": "16", "unet_lr": "1e-4", "te_lr": "5e-5",
-                 "repeats": "3", "max_epochs": "8", "resolution": "1024"},
-        "flux": {"rank": "32", "alpha": "16", "unet_lr": "1e-4", "te_lr": "5e-5",
-                 "repeats": "3", "max_epochs": "8", "resolution": "1024"},
-        "anima": {"rank": "32", "alpha": "16", "unet_lr": "1e-4", "te_lr": "5e-5",
-                  "repeats": "3", "max_epochs": "8", "resolution": "1024"},
-    },
-    "krea2": {
-        "sd15": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "16", "resolution": "1024"},
-        "sdxl": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "16", "resolution": "1024"},
-        "flux": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "16", "resolution": "1024"},
-        "anima": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                  "repeats": "2", "max_epochs": "16", "resolution": "1024"},
-    },
-    "krea2_fz": {
-        "sd15": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "16", "resolution": "512"},
-        "sdxl": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "16", "resolution": "512"},
-        "flux": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "16", "resolution": "512"},
-        "anima": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                  "repeats": "2", "max_epochs": "16", "resolution": "512"},
-    },
-    "krea2_at": {
-        "sd15": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "8", "resolution": "1024"},
-        "sdxl": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "8", "resolution": "1024"},
-        "flux": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "8", "resolution": "1024"},
-        "anima": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                  "repeats": "2", "max_epochs": "8", "resolution": "1024"},
-    },
-    "flux2": {
-        "sd15": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "16", "resolution": "1024"},
-        "sdxl": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "16", "resolution": "1024"},
-        "flux": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "16", "resolution": "1024"},
-        "anima": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                  "repeats": "2", "max_epochs": "16", "resolution": "1024"},
-    },
-    "flux2_fz": {
-        "sd15": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "16", "resolution": "768"},
-        "sdxl": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "16", "resolution": "768"},
-        "flux": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "2", "max_epochs": "16", "resolution": "768"},
-        "anima": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                  "repeats": "2", "max_epochs": "16", "resolution": "768"},
-    },
-    "video": {
-        "sd15": {"rank": "32", "alpha": "32", "unet_lr": "2e-4", "te_lr": "1e-4",
-                 "repeats": "1", "max_epochs": "20", "resolution": "1280", "video_steps": "2000"},
-        "sdxl": {"rank": "32", "alpha": "32", "unet_lr": "2e-4", "te_lr": "1e-4",
-                 "repeats": "1", "max_epochs": "20", "resolution": "1280", "video_steps": "2000"},
-        "flux": {"rank": "32", "alpha": "32", "unet_lr": "2e-4", "te_lr": "1e-4",
-                 "repeats": "1", "max_epochs": "20", "resolution": "1280", "video_steps": "2000"},
-        "anima": {"rank": "32", "alpha": "32", "unet_lr": "2e-4", "te_lr": "1e-4",
-                  "repeats": "1", "max_epochs": "20", "resolution": "1280", "video_steps": "2000"},
-    },
-    "qwen_image": {
-        "sd15": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
-        "sdxl": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
-        "flux": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
-        "anima": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
-                  "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
-    },
-    "zimage": {
-        "sd15": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
-        "sdxl": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
-        "flux": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
-                 "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
-        "anima": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4",
-                  "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
+        "sdxl": {"resolution": "1024"},
+        "flux": {"resolution": "1024"},
+        "anima": {"resolution": "1024"},
     },
 }
+
+
+def _build_presets():
+    """基线 + 架构覆盖 -> 运行期 PRESETS（形状与旧版一致：mode -> arch -> 参数行）。"""
+    out = {}
+    for mode, base in _PRESET_BASE.items():
+        out[mode] = {}
+        for arch in _PRESET_ARCHS:
+            row = dict(base)
+            row.update(_PRESET_ARCH_DIFF.get(mode, {}).get(arch, {}))
+            if mode in _PRESET_SD_MODES and arch in _PRESET_SD_ARCHS:
+                row.update(_PRESET_SD_EXTRA)
+            out[mode][arch] = row
+    return out
+
+
+PRESETS = _build_presets()
+
+# 预设表版本：语义性改动（改数值 / 改口径）时 +1。
+# 项目 json 里会存这个值；打开旧项目时若不一致，就列出差异问一次是否按新版重算，
+# 避免"用户正在跑 / 要复现结果的项目被悄悄换掉参数"。
+#   v1 -> v2（2026-09-12）：预设表改「基线 + 架构覆盖」；风格预设由"绝对覆盖 6 个框"改为
+#                          "学习率乘数（动漫 ×0.85 / 写实 ×1.15）"。
+#   v2 -> v3（2026-09-12）：SD1.5 / SDXL 新增 noise_offset 与 min_snr_gamma 两项质量增强。
+#                          这两项旧项目里根本不存在，所以打开旧项目时会单独提示一次，
+#                          选「否」就明确关掉它们，保证老项目训练口径一字不变。
+PRESET_VERSION = 3
 
 RESOLUTIONS = {k: v["resolution"] for k, v in ARCH_INFO.items()}
 MIN_IMAGES = {"style": 20, "character": 15, "concept": 15, "krea2": 15, "krea2_at": 15, "krea2_fz": 15, "flux2": 15, "flux2_fz": 15, "video": 3, "qwen_image": 15, "zimage": 15}   # 一键训练最少可用图片/视频数
@@ -340,8 +310,8 @@ GUIDE_STEPS = {
          "tip": "安装 Git 和 Python（只需一次，全部项目通用）。"},
         {"id": "kohya", "label": "② 安装训练内核", "btn": "去安装", "check": "kohya", "act": "cmd_install",
          "tip": "安装 Kohya 训练内核（画风/人物模式需要，只需一次）。"},
-        {"id": "base", "label": "③ 选择底模", "btn": "去选底模", "check": "base", "act": "cmd_pick_base",
-         "tip": "选择基础底模（.safetensors），SD1.5/SDXL/FLUX/Anima 都可。"},
+        {"id": "base", "label": "③ 选择模型类型", "btn": "去设置", "check": "base", "act": "cmd_pick_model_type",
+         "tip": "选择底模文件并确认模型类型（SD1.5 / SDXL / FLUX / Anima）；自动识别不准时可手动指定。"},
         {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
          "tip": "选择原始图片文件夹（jpg/png/webp 等）。"},
     ],
@@ -350,8 +320,8 @@ GUIDE_STEPS = {
          "tip": "安装 Git 和 Python（只需一次，全部项目通用）。"},
         {"id": "kohya", "label": "② 安装训练内核", "btn": "去安装", "check": "kohya", "act": "cmd_install",
          "tip": "安装 Kohya 训练内核（画风/人物模式需要，只需一次）。"},
-        {"id": "base", "label": "③ 选择底模", "btn": "去选底模", "check": "base", "act": "cmd_pick_base",
-         "tip": "选择基础底模（.safetensors），建议和出图用的底模同系列。"},
+        {"id": "base", "label": "③ 选择模型类型", "btn": "去设置", "check": "base", "act": "cmd_pick_model_type",
+         "tip": "选择底模文件并确认模型类型（SD1.5 / SDXL / FLUX / Anima）；建议和出图用的底模同系列。"},
         {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
          "tip": "选择同一人物的图片文件夹（15~30 张）。"},
     ],
@@ -360,8 +330,8 @@ GUIDE_STEPS = {
          "tip": "安装 Git 和 Python（只需一次，全部项目通用）。"},
         {"id": "kohya", "label": "② 安装训练内核", "btn": "去安装", "check": "kohya", "act": "cmd_install",
          "tip": "安装 Kohya 训练内核（概念模式需要，只需一次）。"},
-        {"id": "base", "label": "③ 选择底模", "btn": "去选底模", "check": "base", "act": "cmd_pick_base",
-         "tip": "选择基础底模（.safetensors），SD1.5/SDXL/FLUX/Anima 都可。"},
+        {"id": "base", "label": "③ 选择模型类型", "btn": "去设置", "check": "base", "act": "cmd_pick_model_type",
+         "tip": "选择底模文件并确认模型类型（SD1.5 / SDXL / FLUX / Anima）；自动识别不准时可手动指定。"},
         {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
          "tip": "15~30 张同一形态/种族（如美人鱼），刻意混不同画风，避免 trigger 把画风也吸进去。"},
     ],
@@ -455,39 +425,35 @@ PY_MIN = (3, 10, 9)
 PY_MAX = (3, 13, 0)
 
 
+# 新建项目模板：只负责「模式 + 底模类型」，参数一律交给 PRESETS（三源合一，2026-09-12）。
+#   旧版每个模板还带一份 `params`，而那 4 份 params 与 PRESETS 对应档「逐字相同」——
+#   属于第二份事实来源，改预设表它不会跟着变，于是出现「动漫画风」模板 rank 16 与
+#   风格预设「动漫」rank 32 互相打架。现在统一由 _apply_presets() 按模式+底模填。
+#   （FLUX.2 人物 的 base_type 是占位值：flux2 模式的底模控件本就隐藏，取哪档结果相同。）
 PROJECT_TEMPLATES = {
-    "动漫画风": {
+    "画风 LoRA（SDXL）": {
         "mode": "style",
         "base_type": "sdxl",
-        "note": "适合动漫/插画风格 LoRA：默认 SDXL 分辨率 1024，rank 16，低学习率防过拟合。",
-        "params": {"rank": "16", "alpha": "8", "unet_lr": "1.5e-4", "te_lr": "7.5e-5",
-                   "repeats": "5", "max_epochs": "8"},
+        "note": "训练「画风」用：分辨率 1024、rank 16、低学习率防过拟合（参数取「画风 × SDXL」预设）。",
     },
-    "写实人物": {
+    "人物 LoRA（SDXL）": {
         "mode": "character",
         "base_type": "sdxl",
-        "note": "适合真人/角色 LoRA：默认 SDXL 分辨率 1024，rank 32，配 trigger 触发词效果更好。",
-        "params": {"rank": "32", "alpha": "16", "unet_lr": "7e-5", "te_lr": "4e-5",
-                   "repeats": "3", "max_epochs": "6"},
+        "note": "训练「人物/角色」用：分辨率 1024、rank 32，配 trigger 触发词效果更好（参数取「人物 × SDXL」预设）。",
     },
-    "SD1.5 动漫": {
+    "画风 LoRA（SD1.5）": {
         "mode": "style",
         "base_type": "sd15",
-        "note": "轻量底模（512 分辨率），显存要求低，适合老显卡快速出效果。",
-        "params": {"rank": "12", "alpha": "6", "unet_lr": "3e-4", "te_lr": "1.5e-4",
-                   "repeats": "5", "max_epochs": "8"},
+        "note": "轻量底模（512 分辨率），显存要求低，适合老显卡快速出效果（参数取「画风 × SD1.5」预设）。",
     },
     "FLUX.2 人物": {
         "mode": "flux2",
         "base_type": "sdxl",
         "note": "FLUX.2 klein 4B 人物/风格 LoRA：需第二引擎 + models/flux2/ 模型（约 16GB，国内镜像）。8G 显存可跑（自动开省显存），推荐 12G+。",
-        "params": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4",
-                   "repeats": "2", "max_epochs": "16"},
     },
     "自定义": {
         "mode": "character",
         "base_type": "sdxl",
-        "note": "全部参数自己调，程序按当前模式+底模填默认值。",
-        "params": {},
+        "note": "只按「人物 + SDXL」起手，模式/底模/参数都自己调。",
     },
 }

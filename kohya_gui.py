@@ -86,11 +86,61 @@ def _apply_theme_globals(key):
 
 _apply_theme_globals("dark")
 
-# 风格预设（高级参数快捷填入）：动漫 / 写实
-STYLE_PRESETS = {
-    "动漫": {"rank": "32", "alpha": "16", "unet_lr": "7e-5", "te_lr": "4e-5", "repeats": "6", "max_epochs": "6"},
-    "写实": {"rank": "24", "alpha": "12", "unet_lr": "1e-4", "te_lr": "6e-5", "repeats": "4", "max_epochs": "6"},
+# 风格预设（出图目标）：2026-09-12 从"绝对覆盖 6 个框"改为"学习率乘数"。
+#   旧版把 rank/alpha/学习率/文本编码器学习率/repeats/epochs 六个框整体替换，其中
+#   rank/alpha 由训练模式决定（画风 12/16、人物 24/32、概念 32/32），跟"动漫/写实"无关，
+#   所以旧「动漫」的 rank 32 实际是把概念模式的 rank 按到了别的模式上；而且绝对值不随架构变，
+#   切 SD1.5→SDXL 后学习率还停在上一个架构的量级。
+#   现在只保留"动漫偏低、写实偏高"这一个社区有共识的维度（学习率），且写成相对基线的**乘数**，
+#   于是 SD1.5/SDXL/FLUX 各自按自己的基线缩放，切架构自动跟随、也不需要加锁。
+STYLE_CHOICES = ("自定义", "动漫", "写实")
+# 「动漫 ×0.85 / 写实 ×1.15」为经验值（社区无按此轴发布的权威超参表），非官方推荐值。
+STYLE_FACTORS = {
+    "动漫": {"unet_lr": 0.85, "te_lr": 0.85},
+    "写实": {"unet_lr": 1.15, "te_lr": 1.15},
 }
+
+
+def _fmt_lr(x):
+    """把倍率结果格式化成 2.55e-4 这种紧凑写法（与预设表里手写的风格保持一致）。"""
+    mant, _, exp = ("%.2e" % float(x)).partition("e")
+    return "%se%d" % (mant.rstrip("0").rstrip(".") or "0", int(exp))
+
+
+def _scale_param(value, factor):
+    """按风格系数缩放参数值；无系数 / 系数为 1 / 值不是数字时原样返回。"""
+    if not factor or float(factor) == 1.0:
+        return value
+    try:
+        return _fmt_lr(float(value) * float(factor))
+    except (TypeError, ValueError):
+        return value
+
+# 「已手动设定」提示条：参数显示名与展示顺序（只列会被预设管理的键）
+PARAM_LABELS = {
+    "rank": "rank", "alpha": "alpha", "unet_lr": "学习率", "te_lr": "文本编码器学习率",
+    "repeats": "repeats", "max_epochs": "最大epoch", "resolution": "分辨率",
+    "video_steps": "训练步数",
+    # 只在旧项目迁移提示里点名用；故意不进 PARAM_ORDER（不占「已手动设定」提示条）
+    "noise_offset": "噪声偏移(noise_offset)", "min_snr_gamma": "min_snr_gamma",
+}
+PARAM_ORDER = ("rank", "alpha", "unet_lr", "te_lr", "repeats", "max_epochs",
+               "resolution", "video_steps")
+
+# 「实际生效值」对比项：(引擎上报键, 显示名, 界面 params 里的键)
+#   引擎会自动覆写一部分设定（epoch 防过拟合裁剪、快跑/低显存钳分辨率、RDNA2→fp16、
+#   Krea2(AT) 低显存强制 rank/alpha…），这些差异必须显式告诉用户，否则他会以为
+#   模型是按自己填的数训出来的。
+EFFECTIVE_CMP = (
+    ("resolution", "分辨率", "resolution"),
+    ("epochs", "最大epoch", "max_epochs"),
+    ("rank", "rank", "rank"),
+    ("alpha", "alpha", "alpha"),
+    ("unet_lr", "学习率", "unet_lr"),
+    ("te_lr", "文本编码器学习率", "te_lr"),
+    ("repeats", "repeats", "repeats"),
+    ("optimizer", "优化器", "optimizer"),
+)
 
 # AMD ROCm 官方 Windows 发布版本（升级 ROCm 时只改这里）
 # wheel 地址模板：https://repo.radeon.com/rocm/windows/rocm-rel-<ver>/...
@@ -138,12 +188,16 @@ def _crop_ratio_label(ratio):
 
 # 方案A：侧边栏引擎导航（引擎 → 模式；模式选择替代顶部训练模式下拉）
 ENGINE_GROUPS = [
-    ("第一引擎 · kohya", ("style", "character", "concept")),
+    # 第一引擎：画风/人物/概念改到右侧卡片的「训练类型」下拉里选，左侧只留一个引擎入口
+    # （与 Qwen-Image / Z-Image 的做法统一，2026-09-12）
+    ("第一引擎 · kohya", ("_kohya",)),
     ("第二引擎 · musubi", ("krea2", "flux2")),
     ("第三引擎 · ai-toolkit", ("video", "krea2_at", "qwen_image", "zimage")),
     ("第四引擎 · fizgig", ("krea2_fz", "flux2_fz")),
 ]
+KOHYA_SUB_MODES = ("style", "character", "concept")   # 第一引擎的三个子模式（右侧下拉切换）
 SHORT_MODE_LABELS = {
+    "_kohya": "LoRA",
     "style": "画风", "character": "人物", "concept": "概念", "krea2": "Krea2", "flux2": "FLUX.2",
     "krea2_fz": "Krea2F", "flux2_fz": "Klein9B", "video": "视频H3", "krea2_at": "Krea2AT", "qwen_image": "Qwen", "zimage": "Z-Image",
 }
@@ -229,18 +283,29 @@ def create_soft_shadow_card(parent, corner_radius=8, pad=10, offset=(1, 2),
     canvas = tk.Canvas(parent, bg=bg, highlightthickness=0, bd=0, height=10)
     inner = ctk.CTkFrame(canvas, corner_radius=corner_radius, fg_color=fg_color)
     wid = canvas.create_window(pad, pad, window=inner, anchor="nw")
-    _st = {"key": None, "after": None}
+    _st = {"key": None, "after": None, "item": None}
     def _render(key, cw, ch):
         _st["after"] = None
         if _st["key"] == key:
             return
         img = _make_shadow(cw, ch, corner_radius, shadow, alpha, offset[0], offset[1], blur, pad)
-        canvas.delete("shd")
-        canvas.create_image(0, 0, image=img, anchor="nw", tags="shd")
-        canvas.tag_lower("shd")
-        canvas.itemconfigure(wid, width=cw)
-        canvas.configure(height=ch + 2 * pad)
+        # 2026-09-12：旧写法是 canvas.delete + create_image，中间有一帧"阴影整块消失"，
+        # 切换/重排时看到的就是这个白闪。改成只换图（首次才 create）。
+        if _st["item"] is None:
+            _st["item"] = canvas.create_image(0, 0, image=img, anchor="nw", tags="shd")
+            canvas.tag_lower("shd")
+        else:
+            canvas.itemconfigure(_st["item"], image=img)
         canvas._shadow_img = img
+        canvas.itemconfigure(wid, width=cw)
+        # 只在高度真的变了才 configure：否则会触发本 canvas 的 <Configure> → _layout → _render，
+        # 在宽度/换行来回变化时退化成持续重绘。
+        h_new = int(ch + 2 * pad)
+        try:
+            if int(float(canvas.cget("height"))) != h_new:
+                canvas.configure(height=h_new)
+        except Exception:
+            pass
         _st["key"] = key
     def _layout(_e=None):
         cw = inner.winfo_reqwidth()
@@ -349,6 +414,8 @@ class App:
         self.busy = False
         self._manual_override = set()
         self._applying_preset = False
+        self._override_rendered = []        # 「已手动设定」提示条当前渲染的键（避免每次输入都重建控件）
+        self._preset_asked = set()          # 已问过「是否按新版预设重算」的项目名（避免反复弹窗）
         self._base_models = []
         self._base_items = []
         self._dl = None
@@ -378,6 +445,7 @@ class App:
             pass
 
         self.param_vars = {}
+        self.style_var = tk.StringVar(value="自定义")   # 风格预设选择（进项目 json，需在卡片构建前存在）
         self.raw_dir_var = tk.StringVar()
         self.trigger_var = tk.StringVar()
         # 人物强绑定（默认开）：自动把 trigger + 100% 一致特征词固定到标签开头，一个词绑定一个人物
@@ -403,6 +471,8 @@ class App:
         self.guide_status = {"env": "未做", "kohya": "未做", "base": "未选", "raw": "未选"}
         self._guide_vars = {}          # 动态引导：步骤 id -> StringVar
         self._guide_row_widgets = []   # 动态引导：已渲染的行控件
+        self._guide_rows = {}          # 动态引导：步骤 id -> {row,label,dot,var,btn,tip}（就地更新用）
+        self._guide_rendered_ids = []  # 当前已渲染的步骤 id 序列（相同则只更新文案、不重建）
         self._guide_hl_after = None    # 引导高亮闪烁定时器
         self._guide_hl_step = None     # 当前高亮的步骤 id
         self._badge_widgets = []
@@ -496,6 +566,7 @@ class App:
         self._poll_n = getattr(self, "_poll_n", 0) + 1
         if self._poll_n % 8 == 0:
             self._refresh_monitor()
+            self._poll_effective()   # 引擎上报的「实际生效值」变了就刷新差异行
         self.root.after(120, self._poll)
 
     def _handle(self, item):
@@ -534,6 +605,8 @@ class App:
             return
         self._set_busy(True)
         self._log("开始：" + title)
+        # 清掉上一次任务上报的「实际生效值」，避免把旧值显示成这一次的
+        self._reset_effective_for_new_run()
         threading.Thread(target=fn, daemon=True).start()
 
     def _set_busy(self, v):
@@ -856,17 +929,19 @@ class App:
                     _btn = ctk.CTkButton(_rf, text=SHORT_MODE_LABELS.get(_mk, _mk), height=26,
                                          fg_color=CARD2, hover_color="#3a4150", corner_radius=6,
                                          font=ui_font(FONT_HINT), text_color=TXT,
-                                         command=lambda m=_mk: self._nav_select_mode(m))
+                                         command=lambda m=_mk: self._nav_cmd(m))
                     _btn.grid(row=_mi // 2, column=_mi % 2, sticky="ew", padx=(2, 4), pady=2)
                     self._nav_mode_btns[_mk] = _btn
             else:
                 for _mk in _modes:
-                    _btn = ctk.CTkButton(_rf, text=SHORT_MODE_LABELS.get(_mk, _mk), width=(108 if len(_modes) == 2 else 64), height=26,
+                    _btn = ctk.CTkButton(_rf, text=SHORT_MODE_LABELS.get(_mk, _mk), width=(108 if len(_modes) <= 2 else 64), height=26,
                                          fg_color=CARD2, hover_color="#3a4150", corner_radius=6,
                                          font=ui_font(FONT_HINT), text_color=TXT,
-                                         command=lambda m=_mk: self._nav_select_mode(m))
+                                         command=lambda m=_mk: self._nav_cmd(m))
                     _btn.pack(side="left", padx=(2, 4), pady=2)
                     self._nav_mode_btns[_mk] = _btn
+                    if _mk == "_kohya":
+                        self._tip(_btn, "第一引擎（kohya）：画风 / 人物 / 概念在右侧卡片的「训练类型」里切换。")
         self._guide_dots = {}
         self._guide_btns = {}
         self._guide_vars = {}
@@ -1094,6 +1169,10 @@ class App:
             self.btn_pick_train_env.pack(side="left")
         self.preset_summary = ctk.CTkLabel(top, text="", font=ui_font(FONT_HINT), text_color=SUB, anchor="w")
         self.preset_summary.pack(fill="x", pady=(8, 0))
+        # 「实际生效值」差异行：训练开始后由引擎上报，只列被自动改掉的项（默认隐藏）
+        self.effective_label = ctk.CTkLabel(top, text="", font=ui_font(FONT_HINT), text_color="#d9a441",
+                                            anchor="w", wraplength=1100, justify="left")
+        self._effective_cache = None
 
         # 可滚动主区
         self.scroll = ctk.CTkScrollableFrame(self.work_frame, fg_color=BG, corner_radius=0)
@@ -1319,6 +1398,11 @@ class App:
 
     def _highlight_guide(self, step_id):
         """第一个未完成步骤的按钮做呼吸闪烁，引导小白点它。"""
+        # 已经在闪同一个按钮：直接返回。旧版每次都 cancel + 重启，会把呼吸"卡帧"，
+        # 而 _refresh_guide 被频繁调用时就表现为高亮按钮反复被重新点亮（观感闪烁）。
+        if step_id and step_id == getattr(self, "_guide_hl_step", None) \
+                and getattr(self, "_guide_hl_after", None) is not None:
+            return
         self._stop_guide_highlight()
         if not step_id or step_id not in self._guide_btns:
             return
@@ -1339,8 +1423,59 @@ class App:
 
         _pulse()
 
+    def _show_guide_placeholder(self, text):
+        """引导占位态：文案没变就不重复 pack（避免无意义的整栏重排）。"""
+        try:
+            if self.guide_placeholder.winfo_manager() == "pack" \
+                    and self.guide_placeholder.cget("text") == text:
+                return
+        except Exception:
+            pass
+        try:
+            self.guide_placeholder.configure(text=text)
+            self.guide_placeholder.pack(anchor="w", pady=(6, 2))
+        except Exception:
+            pass
+
+    def _guide_rows_alive(self):
+        rows = getattr(self, "_guide_rows", None)
+        if not rows:
+            return False
+        try:
+            return all(g["row"].winfo_exists() for g in rows.values())
+        except Exception:
+            return False
+
+    def _guide_update_in_place(self, steps):
+        """步骤集合没变：只改文案 / 命令 / 提示，不重建控件。失败返回 False（调用方回退重建）。"""
+        try:
+            for step in steps:
+                g = self._guide_rows[step["id"]]
+                g["label"].configure(text=step["label"])
+                g["btn"].configure(text=step["btn"],
+                                   command=getattr(self, step["act"], lambda: None))
+                tp = g.get("tip")
+                if tp is not None:
+                    tp.text = step.get("tip") or ""
+        except Exception:
+            return False
+        self._refresh_guide()
+        return True
+
     def _render_guide(self):
-        """按当前模式重建左侧新手引导（主页=占位；工作区=该模式专属步骤）。"""
+        """按当前模式渲染左侧新手引导（主页=占位；工作区=该模式专属步骤）。
+
+        2026-09-12 性能修复：各模式的步骤 id 是固定的（env / kohya / base / raw），
+        旧版每次切换都把这 4 行 × 5 个控件（约 20 个 CTk 控件，按钮内部还有 canvas/label）
+        destroy 掉再重建 —— 实测一次切换 350~460ms，而且整块重建本身就是"闪一下"的来源。
+        现在 id 没变就只更新文案，不重建控件。
+        """
+        steps = [] if self.current_project is None else (self._current_steps() or [])
+        want_ids = [s["id"] for s in steps]
+        if steps and want_ids == list(getattr(self, "_guide_rendered_ids", [])) \
+                and self._guide_rows_alive() and self._guide_update_in_place(steps):
+            return
+        # ---- 需要真重建 ----
         for w in self._guide_row_widgets:
             try:
                 w.destroy()
@@ -1350,6 +1485,8 @@ class App:
         self._guide_dots = {}
         self._guide_btns = {}
         self._guide_vars = {}
+        self._guide_rows = {}
+        self._guide_rendered_ids = []
         self._stop_guide_highlight()
         try:
             self.guide_title.pack_forget()
@@ -1358,14 +1495,11 @@ class App:
         except Exception:
             pass
         if self.current_project is None:
-            self.guide_placeholder.configure(text="👆 请先打开/新建项目\\n然后选择训练模式\\n\\n引导会按模式自动生成")
-            self.guide_placeholder.pack(anchor="w", pady=(6, 2))
+            self._show_guide_placeholder("👆 请先打开/新建项目\\n然后选择训练模式\\n\\n引导会按模式自动生成")
             return
         self.guide_title.pack(anchor="w", pady=(0, 4))
-        steps = self._current_steps()
         if not steps:
-            self.guide_placeholder.configure(text="👆 请先选择训练模式\\n\\n引导会按模式自动生成")
-            self.guide_placeholder.pack(anchor="w", pady=(6, 2))
+            self._show_guide_placeholder("👆 请先选择训练模式\\n\\n引导会按模式自动生成")
             return
         self.guide_host.pack(fill="x", pady=3)
         for step in steps:
@@ -1373,8 +1507,9 @@ class App:
             row.pack(fill="x", pady=3)
             dot = ctk.CTkFrame(row, width=10, height=10, corner_radius=5, fg_color="#4a3636")
             dot.pack(side="left", padx=(2, 8), pady=9)
-            ctk.CTkLabel(row, text=step["label"], font=ui_font(FONT_BODY), text_color=TXT,
-                         width=88, anchor="w").pack(side="left")
+            lbl = ctk.CTkLabel(row, text=step["label"], font=ui_font(FONT_BODY), text_color=TXT,
+                               width=88, anchor="w")
+            lbl.pack(side="left")
             var = tk.StringVar(value="·")
             ctk.CTkLabel(row, textvariable=var, font=ui_font(FONT_HINT), text_color=HINT,
                          width=18, anchor="w").pack(side="left")
@@ -1387,8 +1522,10 @@ class App:
             self._guide_vars[step["id"]] = var
             self._guide_btns[step["id"]] = btn
             self._guide_row_widgets.append(row)
-            if step.get("tip"):
-                self._tip(btn, step["tip"])
+            self._guide_rows[step["id"]] = {"row": row, "label": lbl, "btn": btn, "dot": dot,
+                                            "var": var,
+                                            "tip": (self._tip(btn, step["tip"]) if step.get("tip") else None)}
+        self._guide_rendered_ids = want_ids
         self._refresh_guide()
 
     def _refresh_guide(self):
@@ -1419,6 +1556,9 @@ class App:
         """给所有输入控件绑定变更回调，自动保存项目。"""
         try:
             def _on_any(*_a):
+                # 程序批量填预设（_apply_presets 会逐键 set 十几次）时不必逐键调度自动保存
+                if getattr(self, "_applying_preset", False):
+                    return
                 self._schedule_autosave()
             for v in (self.trigger_var, self.reg_var, self.raw_dir_var,
                       self.global_pos_var, self.global_neg_var,
@@ -1519,7 +1659,8 @@ class App:
         body = ctk.CTkFrame(dlg, fg_color=BG)
         body.pack(fill="both", expand=True, padx=18, pady=16)
         ctk.CTkLabel(body, text="选择预设模板", font=ui_font(FONT_BODY), text_color=TXT).pack(anchor="w")
-        tpl_var = tk.StringVar(value="动漫画风")
+        # 默认「自定义」：模板现在只决定「模式 + 底模」，不再暗示动漫/写实（出图风格另有开关）
+        tpl_var = tk.StringVar(value="自定义")
         tpl_menu = ctk.CTkOptionMenu(body, values=list(core.PROJECT_TEMPLATES.keys()),
                                      variable=tpl_var, width=220, height=30,
                                      fg_color=CARD2, button_color=CARD2, button_hover_color="#3a4150",
@@ -1567,8 +1708,11 @@ class App:
                     pass
             self._apply_presets()
             self._update_mode_ui()
+            # 模板不再自带 params（2026-09-12 三源合一）：参数统一由上面的 _apply_presets() 按
+            # 「模式+底模」填入。保留这段只为将来可能自带 params 的自定义模板，且用
+            # _set_param_value 写入（不登记成「手动设定」，否则模板默认值会被误当成用户改的）。
             for k, v in (tpl.get("params") or {}).items():
-                self.param_vars.setdefault(k, tk.StringVar()).set(v)
+                self._set_param_value(k, v)
             self._refresh_preset_summary()
             # 导入配置：完全覆盖模板/预设（模式/底模/参数）
             if getattr(self, "_pending_import_config", None):
@@ -1731,6 +1875,8 @@ class App:
             "global_pos": params.get("global_pos") or "",
             "global_neg": params.get("global_neg") or "",
             "style_caption": params.get("style_caption") or "",
+            "style_preset": params.get("style_preset") or "自定义",
+            "preset_version": core.PRESET_VERSION,
             "unet_only": params.get("train_text_encoder") is False,
             "train_env": params.get("train_env") or "",
             "params": {
@@ -1747,6 +1893,8 @@ class App:
                 "clean_concept": bool(params.get("clean_concept", True)),
                 "crop_ratio": params.get("crop_ratio") or "",
                 "sample_prompt": params.get("sample_prompt") or "",
+                "noise_offset": params.get("noise_offset") or "",
+                "min_snr_gamma": params.get("min_snr_gamma") or "",
             },
         }
 
@@ -1810,6 +1958,11 @@ class App:
                     except Exception:
                         pass
             self.unet_only_var.set(bool(data.get("unet_only", False)))
+            try:
+                _sp = data.get("style_preset") or "自定义"
+                self.style_var.set(_sp if _sp in STYLE_CHOICES else "自定义")
+            except Exception:
+                pass
             te = data.get("train_env") or ""
             if te:
                 self.train_env_var.set(te)
@@ -1869,6 +2022,10 @@ class App:
             self._update_mode_ui()
             self._refresh_preset_summary()
             self._refresh_one_click_state()
+            self._refresh_override_bar()
+            if data.get("preset_version") != core.PRESET_VERSION:
+                # 旧项目（无该字段）或预设表已升级 -> 列差异问一次，不强制
+                self._offer_preset_refresh(data.get("preset_version"), data)
         finally:
             self._loading_project = False
 
@@ -1931,6 +2088,22 @@ class App:
         self.trig_card = card2
         self.trig_card_title = ctk.CTkLabel(card2, text="② 设置触发词（人物模式）", font=ui_font(FONT_TITLE), text_color=TITLE_C)
         self.trig_card_title.pack(anchor="w", padx=22, pady=(14, 8))
+        # 出图风格（常显，2026-09-12 从「高级参数」卡片上移到这一层）：
+        # 它本质是"我要出什么图"，和下面的「训练类型」同层，而不是一个"填数值的预设"。
+        # 外层 holder 固定占位，内层 style_row 负责显隐 —— 避免 pack_forget 后重排到卡片末尾。
+        self.style_holder = ctk.CTkFrame(card2, fg_color="transparent")
+        self.style_holder.pack(fill="x", padx=22, pady=(0, 8))
+        self.style_row = ctk.CTkFrame(self.style_holder, fg_color="transparent")
+        ctk.CTkLabel(self.style_row, text="出图风格", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
+        self.style_preset_menu = ctk.CTkOptionMenu(
+            self.style_row, values=list(STYLE_CHOICES), width=120, height=30, variable=self.style_var,
+            fg_color=CARD2, button_color=CARD2, button_hover_color="#3a4150",
+            text_color=TXT, font=ui_font(FONT_BODY), dropdown_font=ui_font(FONT_BODY),
+            dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150", command=self._apply_style_preset)
+        self.style_preset_menu.pack(side="left", padx=(12, 0))
+        ctk.CTkLabel(self.style_row, text="（只微调学习率：动漫 ×0.85 更精细、写实 ×1.15 更自然；rank 等仍按模式自动）",
+                     font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(12, 0))
+        self.style_row.pack(fill="x")
         # Qwen-Image / Z-Image 专属：画风/人物 训练类型切换（默认隐藏，仅这两个模式显示）
         self.at_sub_row = ctk.CTkFrame(card2, fg_color="transparent")
         ctk.CTkLabel(self.at_sub_row, text="训练类型", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
@@ -2057,10 +2230,17 @@ class App:
         self.trigger_hint = ctk.CTkLabel(card2, textvariable=self.trigger_hint_var, font=ui_font(FONT_HINT), text_color=HINT)
         self.trigger_hint.pack(anchor="w", padx=22, pady=(2, 14))
 
-        # 卡片3：高级参数（折叠）
+        # 卡片3：高级参数（出图风格已上移到卡片②，与「训练类型」同层）
         c3, card3 = create_soft_shadow_card(s); c3.pack(fill="x", pady=(0, 10))
         self._main_widgets += [c3, card3]
-        h3 = ctk.CTkFrame(card3, fg_color="transparent"); h3.pack(fill="x", padx=22, pady=(14, 14))
+        # 「已手动设定」提示条：默认隐藏，参数被手动改过时显示（可逐项回退，避免老手改的值被预设无声覆盖）
+        self.override_bar = ctk.CTkFrame(card3, fg_color="transparent")
+        self.override_chips = []
+        self.override_lbl = None
+        self.btn_revert_all = None
+        self._override_rendered = []
+        h3 = ctk.CTkFrame(card3, fg_color="transparent"); h3.pack(fill="x", padx=22, pady=(16, 14))
+        self.adv_hint_row = h3
         ctk.CTkLabel(h3, text="高级参数（老手可展开，参数已按模式/底模自动填好）", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
         self.btn_toggle_adv = ctk.CTkButton(h3, text="展开 ▾", width=64, height=26, fg_color="transparent",
                                             hover_color="#343a46", border_width=1, border_color=BORDER,
@@ -2083,6 +2263,8 @@ class App:
             self._main_btns[t] = b
         ctk.CTkLabel(s, text="💡 训练前可用「标签编辑器」检查/修正每张图的标签：WD14 自动打的标签偶尔不准，手动改好后 LoRA 学得更准。",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w", padx=22, pady=(2, 12))
+        # 卡片重建后控件是全新的，重算「已手动设定」提示条
+        self._refresh_override_bar()
 
     def _build_badges(self):
         for w in self._badge_widgets:
@@ -2204,30 +2386,267 @@ class App:
     def _refresh_preset_summary(self):
         try:
             pre = core.preset_for(self.mode, self.base_type)
+            fac = STYLE_FACTORS.get(self.style_var.get(), {})
+            lr = _scale_param(pre.get("unet_lr"), fac.get("unet_lr"))
+            telr = _scale_param(pre.get("te_lr"), fac.get("te_lr"))
+            _sv = self.style_var.get()
+            stag = f" · 风格 {_sv}" if _sv != "自定义" else ""
             te = "仅UNet" if self.unet_only_var.get() else "UNet+文本编码器"
             if self.mode == "video":
                 self.preset_summary.configure(
                     text=f"当前预设：rank {pre.get('rank')} · alpha {pre.get('alpha')} · "
-                         f"学习率 {pre.get('unet_lr')} · 训练步数 {pre.get('video_steps')} · 视频 24fps")
+                         f"学习率 {lr} · 训练步数 {pre.get('video_steps')} · 视频 24fps{stag}")
             else:
                 self.preset_summary.configure(
                     text=f"当前预设：rank {pre.get('rank')} · alpha {pre.get('alpha')} · "
-                         f"学习率 {pre.get('unet_lr')} · 文本编码器学习率 {pre.get('te_lr')} · "
+                         f"学习率 {lr} · 文本编码器学习率 {telr} · "
                          f"repeats {pre.get('repeats')} · 最大epoch {pre.get('max_epochs')} · "
-                         f"分辨率 {pre.get('resolution')}px · {te}")
+                         f"分辨率 {pre.get('resolution')}px · {te}{stag}")
+        except Exception:
+            pass
+
+    def _refresh_effective_line(self):
+        """把引擎上报的「实际生效值」与界面设定值对比，只列被自动改掉的项；没差异就隐藏。"""
+        try:
+            eff = core.get_effective()
+        except Exception:
+            eff = {}
+        parts = []
+        if eff:
+            try:
+                p = self._collect_params()
+            except Exception:
+                p = {}
+            for ekey, label, pkey in EFFECTIVE_CMP:
+                if ekey not in eff:
+                    continue
+                got, want = eff.get(ekey), p.get(pkey)
+                if got is None or want is None:
+                    continue
+                # 用户选的是「自动 / 留空」时，引擎自己决定是预期行为，不算"与设定不同"
+                if str(want).strip().lower() in ("", "auto", "none", "自动"):
+                    continue
+                if str(got).strip().lower() != str(want).strip().lower():
+                    parts.append(f"{label} {want}→{got}")
+            if eff.get("note"):
+                parts.append(str(eff["note"]))
+        if parts:
+            self.effective_label.configure(text="⚠ 实际生效（与你的设定不同）：" + " · ".join(parts))
+            if self.effective_label.winfo_manager() != "pack":
+                self.effective_label.pack(fill="x", pady=(2, 0))
+        elif self.effective_label.winfo_manager() == "pack":
+            self.effective_label.pack_forget()
+
+    def _poll_effective(self):
+        """轮询引擎上报的「实际生效值」：有变化才刷新差异行（挂在 _poll 上，约 1s 一次）。"""
+        try:
+            eff = core.get_effective()
+        except Exception:
+            return
+        if eff == getattr(self, "_effective_cache", None):
+            return
+        self._effective_cache = eff
+        try:
+            self._refresh_effective_line()
+        except Exception:
+            pass
+
+    def _reset_effective_for_new_run(self):
+        """新训练开始前清空上一次的生效值，避免把上一次的结果显示成这一次的。"""
+        try:
+            core.reset_effective()
+        except Exception:
+            pass
+        self._effective_cache = None
+        try:
+            if self.effective_label.winfo_manager() == "pack":
+                self.effective_label.pack_forget()
         except Exception:
             pass
 
     def _apply_presets(self):
+        """按「模式 × 底模」基线填参数；未被手动设定的键再乘上风格系数（动漫/写实只动学习率）。
+
+        风格系数在这里算而不是在风格下拉里写死：切模式/切架构时重算即可自动跟随，
+        不需要把值锁住，也就不会出现"换架构后学习率还停在上一个架构量级"的问题。
+        """
         self._applying_preset = True
         try:
             pre = core.preset_for(self.mode, self.base_type)
+            fac = STYLE_FACTORS.get(self.style_var.get(), {})
             for k, v in pre.items():
-                if k not in self._manual_override:
-                    self.param_vars.setdefault(k, tk.StringVar()).set(v)
+                if k in self._manual_override:
+                    continue
+                self.param_vars.setdefault(k, tk.StringVar()).set(_scale_param(v, fac.get(k)))
         finally:
             self._applying_preset = False
         self._refresh_preset_summary()
+        self._refresh_override_bar()
+
+    # ---- 手动设定（覆盖）机制：登记手动值 → 不被预设覆盖 → 可见 / 可逐项回退 ----
+    def _preset_keys(self):
+        """当前模式+底模下，预设会填的键集合。"""
+        try:
+            return set(core.preset_for(self.mode, self.base_type).keys())
+        except Exception:
+            return set()
+
+    def _set_param_value(self, key, value):
+        """程序写入参数值：不登记为「手动设定」（用于填预设 / 回退单项）。"""
+        prev = self._applying_preset
+        self._applying_preset = True
+        try:
+            self.param_vars.setdefault(key, tk.StringVar()).set(str(value))
+        finally:
+            self._applying_preset = prev
+
+    def _bind_param_edit(self, key, var):
+        """参数输入框绑定：自动保存 + 登记「用户手动设定过」。
+
+        旧版只挂自动保存，导致"老手手动改了参数，一切模式/架构建就被预设抹掉"
+        （_apply_presets 只跳过 _manual_override 里的键，而手动输入从未登记）。
+        """
+        def _on_write(*_a):
+            if not self._applying_preset and key not in self._manual_override:
+                self._manual_override.add(key)
+                self._refresh_override_bar()
+            self._schedule_autosave()
+        try:
+            var.trace_add("write", _on_write)
+        except Exception:
+            pass
+
+    def _revert_param(self, key):
+        """把单个参数恢复成「当前模式+底模（× 风格系数）」的预设值。"""
+        try:
+            pre = core.preset_for(self.mode, self.base_type)
+        except Exception:
+            pre = {}
+        if key not in pre:
+            return
+        self._manual_override.discard(key)
+        # 交给 _apply_presets 重算，保证和「风格系数」口径一致（否则回退会漏掉风格缩放）
+        self._apply_presets()
+        self._log(f"[预设] 「{PARAM_LABELS.get(key, key)}」已恢复为预设值 {self.param_vars[key].get()}")
+
+    def _preset_param_diff(self):
+        """当前界面里「与新版预设（含风格系数）不同」的预设管理项 -> [(键, 旧值, 新值)]。"""
+        try:
+            pre = core.preset_for(self.mode, self.base_type)
+        except Exception:
+            pre = {}
+        fac = STYLE_FACTORS.get(self.style_var.get(), {})
+        out = []
+        for k in PARAM_ORDER:
+            if k not in pre or k not in self.param_vars:
+                continue
+            new_v = str(_scale_param(pre[k], fac.get(k)))
+            old_v = self.param_vars[k].get().strip()
+            if old_v and old_v != new_v:
+                out.append((k, old_v, new_v))
+        return out
+
+    def _offer_preset_refresh(self, stored_ver, data):
+        """打开旧项目：预设表版本不一致 -> 列出差异问一次是否按新版重算（不强制）。"""
+        name = data.get("name") or self.current_project or ""
+        if name in getattr(self, "_preset_asked", set()):
+            return
+        self._preset_asked.add(name)
+        diff = self._preset_param_diff()
+        try:
+            _pre = core.preset_for(self.mode, self.base_type)
+        except Exception:
+            _pre = {}
+        # v3 新增项：旧项目里根本不存在这两个键，_preset_param_diff 看不到它们，得单独列出来
+        new_sd = [k for k in ("noise_offset", "min_snr_gamma")
+                  if (stored_ver or 1) < 3 and k in _pre]
+        if not diff and not new_sd:
+            return
+        _parts = [f"{PARAM_LABELS.get(k, k)} {o}→{n}" for k, o, n in diff[:8]]
+        if len(diff) > 8:
+            _parts.append("等共 %d 项" % len(diff))
+        _parts += [f"新增 {PARAM_LABELS.get(k, k)} = {_pre[k]}" for k in new_sd]
+        try:
+            yes = messagebox.askyesno(
+                core.APP_NAME,
+                "这个项目保存时用的是旧版预设表（v%s，当前 v%s）。\n\n"
+                "以下参数与新版预设不同：\n  %s\n\n"
+                "选「是」：按新版预设重算（上面这些会被覆盖 / 开启）。\n"
+                "选「否」：保留项目原值 —— 想复现旧结果就选这个，之后随时可点「↺ 恢复预设」重算。"
+                % (stored_ver or 1, core.PRESET_VERSION, "、".join(_parts)))
+        except Exception:
+            yes = False
+        if yes:
+            for k, _o, _n in diff:
+                self._manual_override.discard(k)
+            self._apply_presets()
+            self._log("[预设] 已按新版预设（v%s）重算 %d 项参数%s"
+                      % (core.PRESET_VERSION, len(diff),
+                         ("，并开启 %s" % "、".join(PARAM_LABELS.get(k, k) for k in new_sd)) if new_sd else ""))
+        else:
+            if new_sd:
+                # 明确关掉 v3 新增项（空值会被写进项目 json），保证该项目训练口径与保存时一字不差
+                for k in new_sd:
+                    self._set_param_value(k, "")
+                self._manual_override.update(new_sd)
+                self._log("[预设] 已按你的选择关闭 %s —— 该项目的训练口径与保存时保持一致"
+                          % "、".join(PARAM_LABELS.get(k, k) for k in new_sd))
+            self._log("[预设] 保留项目原值；预设表已升级到 v%s，需要时点「↺ 恢复预设」可按新版重算"
+                      % core.PRESET_VERSION)
+
+    def _refresh_override_bar(self):
+        """刷新「已手动设定」提示条：只列会被预设管理的键（可逐项回退）。"""
+        bar = getattr(self, "override_bar", None)
+        if bar is None:
+            return
+        try:
+            pkeys = self._preset_keys()
+            keys = [k for k in PARAM_ORDER if k in self._manual_override and k in pkeys]
+            if list(getattr(self, "_override_rendered", [])) != keys:
+                for w in list(getattr(self, "override_chips", [])) + [
+                        getattr(self, "override_lbl", None), getattr(self, "btn_revert_all", None)]:
+                    if w is None:
+                        continue
+                    try:
+                        w.destroy()
+                    except Exception:
+                        pass
+                self.override_chips = []
+                self.override_lbl = None
+                self.btn_revert_all = None
+                if keys:
+                    self.override_lbl = ctk.CTkLabel(
+                        bar, text=f"已手动设定 {len(keys)} 项（不随模式/底模自动变；点标签恢复该项）：",
+                        font=ui_font(FONT_HINT), text_color=HINT)
+                    self.override_lbl.pack(side="left")
+                    for k in keys:
+                        lb = ctk.CTkLabel(bar, text=f"{PARAM_LABELS.get(k, k)} ↺", width=0, height=22,
+                                          fg_color=CARD2, corner_radius=5, text_color=ACC,
+                                          font=ui_font(FONT_HINT), cursor="hand2")
+                        lb.pack(side="left", padx=(6, 0))
+                        lb.bind("<Button-1>", lambda _e, _k=k: self._revert_param(_k))
+                        self.override_chips.append(lb)
+                    self.btn_revert_all = ctk.CTkLabel(
+                        bar, text="↺ 全部恢复预设", width=0, height=22, fg_color=CARD2,
+                        corner_radius=5, text_color=HINT, font=ui_font(FONT_HINT), cursor="hand2")
+                    self.btn_revert_all.pack(side="left", padx=(10, 0))
+                    self.btn_revert_all.bind("<Button-1>", lambda _e: self.cmd_reset_presets())
+                self._override_rendered = keys
+            if keys:
+                # 用 winfo_manager 判断（winfo_ismapped 在窗口未显示/滚动区不可见时会误判）
+                if bar.winfo_manager() != "pack":
+                    _before = getattr(self, "adv_hint_row", None)
+                    try:
+                        if _before is not None and _before.winfo_exists():
+                            bar.pack(fill="x", padx=22, pady=(6, 0), before=_before)
+                        else:
+                            bar.pack(fill="x", padx=22, pady=(6, 0))
+                    except Exception:
+                        pass
+            elif bar.winfo_manager() == "pack":
+                bar.pack_forget()
+        except Exception:
+            pass
 
     def _at_sub_label(self):
         """Qwen-Image / Z-Image 子模式：返回 'style' 或 'character'。"""
@@ -2276,7 +2695,16 @@ class App:
         self._schedule_autosave()
 
     def _on_at_sub_change(self):
-        """Qwen-Image / Z-Image 的画风/人物切换：刷新提示与自动保存。"""
+        """「训练类型」下拉：第一引擎切子模式（画风/人物/概念）；其余模式刷新提示与自动保存。"""
+        try:
+            _key = self._at_sub_label()
+        except Exception:
+            _key = ""
+        if getattr(self, "mode", None) in KOHYA_SUB_MODES and _key in KOHYA_SUB_MODES:
+            # 左侧已不再列画风/人物/概念，改由本下拉切换（含切底模档位、重渲染引导）
+            if _key != self.mode:
+                self._nav_select_mode(_key)
+            return
         try:
             self._update_mode_ui()
         except Exception:
@@ -2286,6 +2714,26 @@ class App:
         except Exception:
             pass
         self._schedule_autosave()
+
+    def _nav_cmd(self, mk):
+        """侧边栏导航点击：_kohya 是「第一引擎」总入口，子模式在右侧卡片里选。"""
+        if mk == "_kohya":
+            self._nav_select_kohya()
+        else:
+            self._nav_select_mode(mk)
+
+    def _nav_select_kohya(self):
+        """进入第一引擎：沿用当前子模式（画风/人物/概念），没有则默认「人物」。"""
+        _cur = getattr(self, "mode", None)
+        _mk = _cur if _cur in KOHYA_SUB_MODES else ""
+        if not _mk:
+            try:
+                _mk = self._at_sub_label()
+            except Exception:
+                _mk = ""
+        if _mk not in KOHYA_SUB_MODES:
+            _mk = "character"
+        self._nav_select_mode(_mk)
 
     def _nav_select_mode(self, mk):
         """方案A：侧边栏引擎导航点击模式 → 同步下拉并走统一切换流程。"""
@@ -2299,11 +2747,12 @@ class App:
         self._refresh_nav_highlight()
 
     def _refresh_nav_highlight(self):
-        """高亮当前模式对应的导航按钮。"""
+        """高亮当前模式对应的导航按钮（第一引擎三个子模式都高亮到「LoRA」按钮）。"""
         cur = getattr(self, "mode", None)
         for _mk, _btn in getattr(self, "_nav_mode_btns", {}).items():
             try:
-                if _mk == cur:
+                _on = (_mk == cur) or (_mk == "_kohya" and cur in KOHYA_SUB_MODES)
+                if _on:
                     _btn.configure(fg_color=ACC, text_color="#ffffff", hover_color=ACC_H)
                 else:
                     _btn.configure(fg_color=CARD2, text_color=TXT, hover_color="#3a4150")
@@ -2337,10 +2786,17 @@ class App:
             self.home_title.configure(text=core.MODE_LABELS.get(self.mode, self.mode) + " 训练")
         except Exception:
             pass
-        # Qwen-Image / Z-Image：显示「画风/人物」训练类型切换；其他模式隐藏
+        # 训练类型（画风/人物/概念）：第一引擎 与 Krea2/FLUX.2/Qwen/Z-Image 都显示
         try:
-            _is_at = self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz")
+            _is_at = self.mode in ("style", "character", "concept",
+                                   "qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz")
             if _is_at:
+                # 第一引擎的左侧入口不带子模式，下拉要反映当前子模式
+                if self.mode in KOHYA_SUB_MODES:
+                    try:
+                        self.at_sub_var.set(core.AT_SUB_LABELS.get(self.mode, core.AT_SUB_LABELS["character"]))
+                    except Exception:
+                        pass
                 self.at_sub_row.pack(fill="x", padx=22, pady=(0, 6))
             else:
                 self.at_sub_row.pack_forget()
@@ -2591,6 +3047,14 @@ class App:
                 self.style_caption_row.pack_forget()
         except Exception:
             pass
+        # 出图风格行：图像类模式显示；视频（H3）训的是动作，"出图风格"没有意义
+        try:
+            if self.mode == "video":
+                self.style_row.pack_forget()
+            elif self.style_row.winfo_manager() != "pack":
+                self.style_row.pack(fill="x")
+        except Exception:
+            pass
         # 人物强绑定行：仅「人物」语义的模式显示（人物模式 / AI 图像・Krea2・FLUX.2 的人物子模式）
         try:
             _is_person = (self.mode in ("character", "concept")) or (
@@ -2742,6 +3206,96 @@ class App:
             self._log(f"[底模] 已选择 {os.path.basename(f)}（自动识别为 {core.BASE_TYPE_LABELS[bt]}）")
         else:
             self._log(f"[底模] 已选择 {os.path.basename(f)}（类型待确认）")
+
+    def cmd_pick_model_type(self):
+        """「③ 选择模型类型」：确认模型类型 + 选底模文件。
+
+        自动识别只在能读到模型文件键名时可用（`.ckpt` 需要 torch，可能识别不出），
+        所以这里让用户能手动指定类型 —— 类型选错会在训练加载模型时直接崩。
+        """
+        _keys = [k for k in ("sd15", "sdxl", "flux", "anima") if k in core.BASE_TYPE_KEYS] \
+            or ["sd15", "sdxl", "flux", "anima"]
+        _cur = self.base_type if self.base_type in _keys else "sd15"
+        _lbl2key = {core.BASE_TYPE_LABELS[k]: k for k in _keys}
+        sel = {"k": _cur}
+        dlg = ctk.CTkToplevel(self.root)
+        dlg.title("选择模型类型")
+        dlg.geometry("580x340")
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        ctk.CTkLabel(dlg, text="① 确认模型类型（必须与底模文件真实架构一致，否则训练加载模型时会失败）",
+                     font=ui_font(FONT_BODY), text_color=TXT, justify="left",
+                     wraplength=520).pack(padx=20, pady=(16, 6), anchor="w")
+
+        def _on_pick(v):
+            sel["k"] = _lbl2key.get(v, _cur)
+
+        menu = ctk.CTkOptionMenu(dlg, values=[core.BASE_TYPE_LABELS[k] for k in _keys], width=500, height=30,
+                                 fg_color=CARD2, button_color=CARD2, button_hover_color="#3a4150",
+                                 text_color=TXT, font=ui_font(FONT_BODY), dropdown_font=ui_font(FONT_BODY),
+                                 dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150", command=_on_pick)
+        menu.pack(padx=20, pady=(0, 10))
+        menu.set(core.BASE_TYPE_LABELS[_cur])
+        ctk.CTkLabel(dlg, text="② 选择底模文件（推荐 .safetensors；.ckpt 可能无法自动识别类型，请手动确认上面的类型）",
+                     font=ui_font(FONT_BODY), text_color=TXT, justify="left",
+                     wraplength=520).pack(padx=20, pady=(4, 4), anchor="w")
+        _bm = (self.base_model_var.get() or "").strip()
+        _file_lbl = ctk.CTkLabel(dlg, text=(os.path.basename(_bm) if _bm else "（未选择底模文件）"),
+                                 font=ui_font(FONT_HINT), text_color=HINT, justify="left", wraplength=520)
+        _file_lbl.pack(padx=20, pady=(0, 4), anchor="w")
+
+        def _pick_file():
+            try:
+                os.makedirs(core.base_models_dir(), exist_ok=True)
+            except Exception:
+                pass
+            _f = filedialog.askopenfilename(title="选择底模（.safetensors / .ckpt）",
+                                            initialdir=core.base_models_dir(),
+                                            filetypes=[("模型文件", "*.safetensors *.ckpt"), ("所有文件", "*.*")])
+            if not _f or not os.path.isfile(_f):
+                return
+            self.base_model_var.set(_f)
+            _file_lbl.configure(text=os.path.basename(_f))
+            _bt = core.detect_base_type(_f)
+            if _bt in _keys:
+                sel["k"] = _bt
+                menu.set(core.BASE_TYPE_LABELS[_bt])
+                self._log(f"[底模] 已选择 {os.path.basename(_f)}（自动识别为 {core.BASE_TYPE_LABELS[_bt]}）")
+            else:
+                self._log(f"[底模] 已选择 {os.path.basename(_f)}（自动识别失败，请手动确认模型类型）")
+
+        def _ok():
+            self._set_base_type(sel["k"])
+            try:
+                self.base_combo.set(core.BASE_TYPE_LABELS[sel["k"]])
+            except Exception:
+                pass
+            _no_file = not (self.base_model_var.get() or "").strip()
+            self._log(f"[底模] 模型类型已设为 {core.BASE_TYPE_LABELS[sel['k']]}"
+                      + ("（尚未选择底模文件，训练前请补选）" if _no_file else ""))
+            try:
+                self._render_guide()
+            except Exception:
+                pass
+            try:
+                self._refresh_guide()
+            except Exception:
+                pass
+            self._schedule_autosave()
+            dlg.destroy()
+
+        _bar = ctk.CTkFrame(dlg, fg_color="transparent")
+        _bar.pack(fill="x", padx=20, pady=(12, 0))
+        ctk.CTkButton(_bar, text="选择底模文件…", width=130, height=32, fg_color=CARD2,
+                      hover_color="#343a46", border_width=1, border_color=BORDER, text_color=TXT,
+                      corner_radius=6, font=ui_font(FONT_BODY), command=_pick_file).pack(side="left")
+        ctk.CTkButton(_bar, text="确定", width=96, height=32, fg_color=ACC, hover_color=ACC_H,
+                      text_color="#ffffff", corner_radius=6, font=ui_font(FONT_BODY),
+                      command=_ok).pack(side="right")
+        ctk.CTkButton(_bar, text="取消", width=76, height=32, fg_color="transparent", hover_color="#343a46",
+                      border_width=1, border_color=BORDER, text_color=HINT, corner_radius=6,
+                      font=ui_font(FONT_BODY), command=dlg.destroy).pack(side="right", padx=(0, 8))
 
     def cmd_download_base(self):
         self._download_choice_dialog()
@@ -3660,15 +4214,6 @@ class App:
     def _build_adv_body(self):
         g = ctk.CTkFrame(self.adv_body, fg_color="transparent")
         g.pack(fill="x")
-        prow = ctk.CTkFrame(self.adv_body, fg_color="transparent"); prow.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(prow, text="风格预设（一键填入常用数值）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
-        self.style_preset_menu = ctk.CTkOptionMenu(
-            prow, values=["自定义", "动漫", "写实"], width=120, height=26,
-            fg_color=CARD2, button_color=CARD2, button_hover_color="#3a4150",
-            text_color=SUB, font=ui_font(FONT_HINT), dropdown_font=ui_font(FONT_HINT),
-            dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150", command=self._apply_style_preset)
-        self.style_preset_menu.pack(side="left", padx=(10, 0))
-        ctk.CTkLabel(prow, text="（动漫偏精细、写实偏自然；选完仍可手动微调）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         items = [("rank", "rank"), ("alpha", "alpha"), ("学习率", "unet_lr"),
                  ("文本编码器学习率", "te_lr"), ("repeats", "repeats"), ("最大 epoch", "max_epochs"),
                  ("训练分辨率", "resolution"), ("训练步数", "video_steps")]
@@ -3676,10 +4221,7 @@ class App:
             f = ctk.CTkFrame(g, fg_color="transparent"); f.grid(row=0, column=i, padx=10, pady=8, sticky="w")
             ctk.CTkLabel(f, text=label, font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w")
             v = self.param_vars.setdefault(key, tk.StringVar())
-            try:
-                v.trace_add("write", lambda *a: self._schedule_autosave())
-            except Exception:
-                pass
+            self._bind_param_edit(key, v)
             entry = ctk.CTkEntry(f, width=80, height=28, justify="center", textvariable=v,
                                  fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
             entry.pack(pady=(3, 0))
@@ -3690,10 +4232,7 @@ class App:
         sf.grid(row=1, column=0, columnspan=9, sticky="w", padx=10, pady=(0, 8))
         ctk.CTkLabel(sf, text="模型保存间隔", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
         _sv = self.param_vars.setdefault("save_every", tk.StringVar())
-        try:
-            _sv.trace_add("write", lambda *a: self._schedule_autosave())
-        except Exception:
-            pass
+        self._bind_param_edit("save_every", _sv)
         _se = ctk.CTkEntry(sf, width=80, height=28, justify="center", textvariable=_sv,
                            fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
         _se.pack(side="left", padx=(10, 8))
@@ -3706,10 +4245,7 @@ class App:
         sf2.grid(row=2, column=0, columnspan=9, sticky="w", padx=10, pady=(0, 8))
         ctk.CTkLabel(sf2, text="采样预览间隔(步)", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
         _iv = self.param_vars.setdefault("sample_interval", tk.StringVar())
-        try:
-            _iv.trace_add("write", lambda *a: self._schedule_autosave())
-        except Exception:
-            pass
+        self._bind_param_edit("sample_interval", _iv)
         _ie = ctk.CTkEntry(sf2, width=80, height=28, justify="center", textvariable=_iv,
                            fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
         _ie.pack(side="left", padx=(10, 8))
@@ -3804,19 +4340,43 @@ class App:
         self._attach_adv_tooltips()
 
     def _apply_style_preset(self, val):
-        if val in STYLE_PRESETS:
-            for k, v in STYLE_PRESETS[val].items():
-                self.param_vars.setdefault(k, tk.StringVar()).set(v)
-                self._manual_override.add(k)
-            self._log(f"[预设] 已应用「{val}」风格参数（rank/alpha/学习率/repeats/epochs）")
-            self._refresh_preset_summary()
+        """选「动漫/写实」：作为学习率乘数重算参数（只动学习率，rank/alpha 等仍由训练模式决定）。
+
+        点下拉是显式意图，所以即使学习率被手动设定过也照算 —— 但要在日志里点名（避免无声改写）。
+        被风格接管的键顺便解锁，否则乘数以后就不跟着架构走了。
+        """
+        if val not in STYLE_CHOICES:
+            return
+        fac = STYLE_FACTORS.get(val, {})
+        before = {k: self.param_vars[k].get() for k in fac if k in self.param_vars}
+        was_manual = [k for k in fac if k in self._manual_override]
+        for k in fac:
+            self._manual_override.discard(k)
+        self.style_var.set(val)
+        self._apply_presets()
+        after = {k: self.param_vars[k].get() for k in fac if k in self.param_vars}
+        if fac:
+            self._log("[预设] 风格「%s」已生效（%s，只动学习率）"
+                      % (val, "、".join(f"{PARAM_LABELS.get(k, k)} ×{fac[k]}" for k in fac)))
         else:
-            self._log("[预设] 自定义：参数保持当前值，可手动微调")
+            self._log("[预设] 风格「自定义」：学习率不缩放，用「模式+底模」基线值")
+        changed = [f"{PARAM_LABELS.get(k, k)} {before.get(k)}→{after.get(k)}"
+                   for k in fac if before.get(k) != after.get(k)]
+        if changed:
+            self._log("[预设] 点名：以下项已按风格改写 —— " + "、".join(changed))
+        if was_manual:
+            self._log("[预设] 其中 %s 原本是你手动设定的值（风格只管学习率，已按风格重算）"
+                      % "、".join(PARAM_LABELS.get(k, k) for k in was_manual))
+        self._schedule_autosave()
 
     def cmd_reset_presets(self):
         self._manual_override.clear()
+        try:
+            self.style_var.set("自定义")
+        except Exception:
+            pass
         self._apply_presets()
-        self._log("已恢复当前模式+底模的全部预设参数")
+        self._log("已恢复当前模式+底模的全部预设参数（风格预设已重置为「自定义」）")
 
     # ============ 停止当前任务 ============
     def cmd_stop(self):
@@ -3837,11 +4397,13 @@ class App:
 
     # ============ 悬停提示 ============
     def _tip(self, widget, text):
+        """挂悬停提示；返回 Tooltip 对象（引导行做就地更新时要改 text）。"""
         if widget is not None and text:
             try:
-                Tooltip(widget, text)
+                return Tooltip(widget, text)
             except Exception:
                 pass
+        return None
 
     def _attach_tooltips(self):
         """悬停提示：只绑顶部/侧边栏（主卡片提示在 _ensure_main_cards 后补绑，避免启动时引用未构建的控件）。"""
@@ -3881,6 +4443,9 @@ class App:
             (getattr(self, "trigger_entry", None), "触发词=模型的“召唤词”：人物模式=角色名；画风模式=画风专属词。训练后画图写上它就能唤出角色/画风。支持多个，用英文逗号分隔。"),
             (getattr(self, "reg_entry", None), "正则图：同一角色的参考图文件夹，训练时防止模型学过头（可选）。"),
             (getattr(self, "btn_pick_reg", None), "选择正则数据集文件夹（人物模式可选）。"),
+            (getattr(self, "style_preset_menu", None),
+             "出图风格：只在「模式+底模」基线学习率上做微调（动漫 ×0.85 更精细、写实 ×1.15 更自然）。"
+             "rank / alpha / repeats / epoch 仍按训练模式和底模自动填；选「写实」还会切换打标兜底描述与成品文件名。"),
         ]
         for w, t in tips:
             self._tip(w, t)
@@ -3892,9 +4457,8 @@ class App:
             tip = core.PARAM_TIPS.get(key)
             if tip:
                 self._tip(entry, tip)
-        self._tip(self.style_preset_menu, "一键填入常用数值：动漫偏精细、写实偏自然；选完仍可手动微调。")
         self._tip(self.chk_unet_only, "只训练 UNet（不训练文本编码器）：更省显存、更稳，画风类可以勾选。")
-        self._tip(self.btn_reset_preset, "把当前模式+底模的所有参数恢复成推荐预设（手动改过的会被重置）。")
+        self._tip(self.btn_reset_preset, "把当前模式+底模的所有参数恢复成推荐预设（手动改过的会被重置，风格预设也会重置为「自定义」）。")
         self._tip(self.global_pos_entry, "附加全局正向提示词：训练时自动加到每张图片标签最前面（例如 masterpiece），不写进图片的 txt 文件，可留空。")
         self._tip(self.global_neg_entry, "附加全局负向提示词：会写进使用模板和参数报告；kohya 训练本身不使用负向提示词，可留空。")
 
@@ -3932,7 +4496,11 @@ class App:
             "save_every": (lambda _s: int(_s) if str(_s).isdigit() else None)(_getv("save_every", "")),
             "sample_interval": (lambda _s: int(_s) if str(_s).isdigit() and int(_s) > 0 else 0)(_getv("sample_interval", "")),
             "train_text_encoder": not self.unet_only_var.get(),
+            "style_preset": self.style_var.get(),
             "style_caption": getattr(self, "style_caption_var", tk.StringVar()).get().strip(),
+            # SD1.5/SDXL 质量增强（预设表带入，无界面框；留空=不传该参数）
+            "noise_offset": _getv("noise_offset", ""),
+            "min_snr_gamma": _getv("min_snr_gamma", ""),
             "global_pos": self.global_pos_var.get().strip(),
             "global_neg": self.global_neg_var.get().strip(),
             "amd_mode": bool(self.amd_var.get()),
@@ -4521,7 +5089,9 @@ class App:
                 dataset_mode="character" if params.get("mode") != "style" else None,
                 strong_bind=params.get("strong_bind", True),
                 concept_type=params.get("concept_type") or "",
-                clean_concept=bool(params.get("clean_concept", True)))
+                clean_concept=bool(params.get("clean_concept", True)),
+                concept_mode=core.is_concept_mode(params.get("mode"), params.get("at_sub_mode")),
+                style_target=core.style_target_code(params.get("style_preset")))
             self._log("[OK] 预处理完成")
         except core.StopRequested:
             self._log("[停止] 预处理已手动停止")
@@ -4598,8 +5168,10 @@ class App:
                 core.train(self._log, base_model=params["base_model"], mode=params["mode"],
                            params=params, vram_gb=vram, resume_from=resume, progress=self._train_mon)
             try:
-                core.export_project_named_lora(params.get("mode"), params.get("project") or "",
-                                               logf=self._log, prefer_prefix=params.get("output_name"))
+                core.export_project_named_lora(
+                    params.get("mode"), params.get("project") or "", logf=self._log,
+                    prefer_prefix=(params.get("output_name")
+                                   or core.output_name_for(params.get("mode"), params.get("style_preset"))))
             except Exception as _exp_e:
                 self._log(f"[导出] 按项目名导出成品失败（忽略）：{_exp_e}")
             self._log("[OK] 训练完成，模型在 output 文件夹")
@@ -4681,7 +5253,9 @@ class App:
                 dataset_mode="character" if params.get("mode") != "style" else None,
                 strong_bind=params.get("strong_bind", True),
                 concept_type=params.get("concept_type") or "",
-                clean_concept=bool(params.get("clean_concept", True)))
+                clean_concept=bool(params.get("clean_concept", True)),
+                concept_mode=core.is_concept_mode(params.get("mode"), params.get("at_sub_mode")),
+                style_target=core.style_target_code(params.get("style_preset")))
             stats = {}
             if os.path.isfile(report):
                 try:
@@ -5334,7 +5908,7 @@ class App:
             "训练可能卡顿或显存不足（OOM），工具会自动开启省显存设置。\n是否继续？")
 
     def _ask_resume(self, params):
-        output_name = core.OUTPUT_NAMES.get(params["mode"], "anime_style_lora")
+        output_name = core.output_name_for(params["mode"], params.get("style_preset"))
         # 断点续训要在当前项目的输出目录里找快照：
         # params 里通常没有 project 字段（_collect_params 不生成），直接用 self.current_project。
         _proj = (self.current_project or "").strip() or (params.get("project") or "").strip()
@@ -5519,7 +6093,11 @@ class App:
         dlg.geometry("540x340")
         dlg.resizable(False, False)
         dlg.transient(self.root)
-        ctk.CTkLabel(dlg, text=f"当前底模类型：{label}\n选择要下载的底模（建议选「动漫」系列，并和你出图用的底模同一系列）：",
+        _dl_guide = ("选择要下载的底模（建议和你的训练集、出图用的底模同一系列）：")
+        if getattr(self, "style_var", None) is not None and self.style_var.get() == "写实":
+            _dl_guide = ("当前出图风格选了「写实」—— 下面内置清单以动漫底模为主，"
+                         "写实请优先用「选择底模文件…」导入你自己的真人/写实底模。")
+        ctk.CTkLabel(dlg, text=f"当前底模类型：{label}\n{_dl_guide}",
                      font=ui_font(FONT_BODY), text_color=TXT, justify="left", wraplength=480).pack(padx=20, pady=(16, 8), anchor="w")
         names = [f"{m['name']}（{m['size']}）" for m in models]
         menu = ctk.CTkOptionMenu(dlg, values=names, width=460, height=30,
@@ -5559,7 +6137,7 @@ class App:
             ctk.CTkButton(bf, text=t, width=104, height=30, fg_color=CARD2, hover_color="#343a46",
                           border_width=1, border_color=BORDER, text_color=TXT, corner_radius=6,
                           font=ui_font(FONT_HINT), command=lambda kk=k: _act(kk)).pack(side="left", padx=4)
-        self._tip(menu, "选择训练用的底模：动漫 LoRA 建议选「动漫」系列；最好和你出图用的底模同一系列（例如 Forge 用 AniShadow 就选 AniShadow/Illustrious）。")
+        self._tip(menu, "选择训练用的底模：最好和你的训练集、出图用的底模同一系列（例如 Forge 出图用 AniShadow，训练就选 AniShadow/Illustrious；写实用真人底模，效果才出得来）。")
         dlg.grab_set()
 
     def cmd_dl_in_app(self, bt=None, model=None):
