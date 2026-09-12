@@ -6,13 +6,13 @@
 
 ## ⬇️ 先下载安装包
 
-> ⚠️ **不要点右上角绿色的 `Code → Download ZIP`** —— 那是**源代码**，不含可执行程序，下载后双击没有任何作用。
+
 
 | 想怎么用 | 去哪下 |
 |---|---|
-| **推荐：双击安装** | [GitHub Releases → `Setup.exe`](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) |
-| 国内免代理 | [魔搭安装包](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool) |
-| 免安装版 | Releases 里的 `KohyaLoraTool_*_portable.zip` —— **解压后双击 `Kohya一键工具.exe`** |
+[GitHub Releases → `Setup.exe`](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) |
+[魔搭安装包](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool) |
+
 
 > 版本号以 Releases / 魔搭页面为准（本 README 不再写死版本号，避免又一次过期；软件内「关于」也能看到）。
 
