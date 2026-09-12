@@ -16,8 +16,10 @@ kohya_dir.txt
 configs/dataset_config.toml
 
 # PyInstaller 构建产物（生成物忽略，源码 spec/iss 保留）
-build_exe/work/
-build_exe/dist/
+# 构建产物：用 work*/dist* 通配，避免改名后的残留目录（如 work_bak_20260912）被误提交
+build_exe/work*/
+build_exe/dist*/
+build_exe/*_bak*/
 build_exe/installer/*
 !build_exe/installer/installer.iss
 build/
