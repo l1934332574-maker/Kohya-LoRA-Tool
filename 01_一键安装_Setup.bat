@@ -8,7 +8,7 @@ echo   Kohya-SS LoRA 一键安装（离线包 + 国内镜像）
 echo   第 1 步：检查/安装 Git 与 Python（优先用内置安装包，无需联网）
 echo   第 2 步：解压内置 kohya_ss + sd-scripts 源码（无需 GitHub/代理）
 echo   第 3 步：创建 Python 虚拟环境
-echo   第 4 步：设置 pip 清华 pypi + 阿里 pytorch 镜像
+echo   第 4 步：设置 pip 中科大 pypi + 上海交大 pytorch 镜像
 echo   第 5 步：安装全部依赖（约 10~30 分钟）
 echo   第 6 步：配置 accelerate
 echo ============================================================
@@ -152,16 +152,16 @@ if not errorlevel 1 (
 )
 
 rem ================= 设置镜像 =================
-echo [第 4 步] 设置 pip 清华 pypi + 阿里 pytorch 镜像（无需代理）…
-"%KOHYA_DIR%\venv\Scripts\python.exe" -m pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
-"%KOHYA_DIR%\venv\Scripts\python.exe" -m pip config set global.extra-index-url https://mirrors.aliyun.com/pytorch-wheels/cu128
+echo [第 4 步] 设置 pip 中科大 pypi + 上海交大 pytorch 镜像（无需代理）…
+"%KOHYA_DIR%\venv\Scripts\python.exe" -m pip config set global.index-url https://mirrors.ustc.edu.cn/pypi/simple/
+"%KOHYA_DIR%\venv\Scripts\python.exe" -m pip config set global.extra-index-url https://mirror.sjtu.edu.cn/pytorch-wheels/cu128
 
 rem ================= 安装全部依赖 =================
 echo [第 5 步] 正在安装全部依赖（约 10~30 分钟）…
 pushd "%KOHYA_DIR%"
 call venv\Scripts\activate.bat
 python -m pip install --upgrade pip setuptools wheel -q
-set "PIP_EXTRA_INDEX_URL=https://mirrors.aliyun.com/pytorch-wheels/cu128"
+set "PIP_EXTRA_INDEX_URL=https://mirror.sjtu.edu.cn/pytorch-wheels/cu128"
 python setup\setup_windows.py --headless
 set "SETUP_RC=%errorlevel%"
 call venv\Scripts\deactivate.bat
@@ -186,9 +186,9 @@ echo   安装完成！
 echo   kohya_ss 位置：%KOHYA_DIR%
 echo.
 echo   接下来：
-echo   1. 把图片放到：%KIT_DIR%dataset\raw
-echo   2. 运行 02_数据预处理_Preprocess.bat（或主程序 ③ 数据预处理）
-echo   3. 运行主程序 ⑥ 一键训练（画风/人物双模式）
+echo   1. 双击主程序 Kohya一键工具.exe 打开界面
+echo   2. 按左侧新手引导 ③ 数据预处理
+echo   3. 按引导 ⑥ 一键训练（画风 / 人物 / 概念，多引擎可选）
 echo ============================================================
 echo.
 pause

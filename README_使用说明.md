@@ -18,11 +18,10 @@
 | 文件 | 作用 |
 |---|---|
 | **`kohya_gui.py`** | **新版桌面主程序（CustomTkinter 界面）**：新手引导、模式/架构切换、预处理、一键训练、停止、下载、教学。`python kohya_gui.py` 运行 |
-| `Kohya一键工具.py` | 业务逻辑核心（训练/预处理/下载/环境/识别），被 kohya_gui.py 复用；老版 tkinter 界面保留为兜底入口 |
+| `Kohya一键工具.py` | 业务逻辑核心（训练/预处理/下载/环境/识别），界面在 `kohya_gui.py` |
 | `preprocess.py` | 预处理/去模糊去重/方形裁剪/WD14 打标/trigger 插入 |
 | `model_downloader.py` | 底模应用内下载（断点续传） |
-| `01_一键安装_Setup.bat` | 命令行一键装环境（Git/Python/kohya_ss + 依赖） |
-| `02_数据预处理_Preprocess.bat` / `03_启动UI_StartUI.bat` / `04_一键训练_TrainCLI.bat` | 命令行备选流程 |
+| `01_一键安装_Setup.bat` | 命令行装环境的**兜底入口**（正常情况下用主程序 ② 安装训练内核即可） |
 | `installers/` | 内置离线安装包（Git、Python、kohya_ss + sd-scripts、musubi-tuner 源码），无需代理 |
 | `configs/` | 训练配置模板（运行时自动生成实际配置） |
 | `models/base/` | **把你的底模放这里**（程序自动扫描识别） |
@@ -100,7 +99,7 @@
 
 ## 3. 安装（第一次使用）
 
-> 项目内置离线安装包，全程**不需要代理、不需要访问 GitHub**；Python 依赖走国内镜像（清华 pypi + 阿里 pytorch）。
+> 项目内置离线安装包，全程**不需要代理、不需要访问 GitHub**；Python 依赖走国内镜像（中科大 / 华为云 pypi + 上海交大 pytorch，按实测速度自动择优）。
 
 1. 打开程序 → 左侧新手引导 **① 环境准备（去准备）**、**② 安装训练内核（去安装）**（或双击 `01_一键安装_Setup.bat`）
 2. 看到日志 `cuda available: True` 即安装成功；重复运行自动跳过
@@ -283,10 +282,12 @@ dataset/train_character/
 
 ## 10. 打包与安装
 
-- **便携版**：`build_portable.bat` → `build_exe\dist\Kohya一键工具\`（自动压缩 zip），整个文件夹解压即用
-- **安装包版**：`build_installer.bat`（需 Inno Setup 6）→ `build_exe\installer\Setup.exe`，默认装到 `文档\KohyaLoraTool`，带桌面/开始菜单快捷方式与卸载入口
+打包统一用 **`release.py`**（一个命令做完全部：PyInstaller → Inno Setup → 便携 zip → 魔搭 → 推送）：
+
+- **便携版**：`release.py` 生成 `build_exe\dist\KohyaLoraTool_v<版本>_portable.zip`，解压后双击 `Kohya一键工具.exe` 即用
+- **安装包版**：`release.py` 调用 Inno Setup 生成 `build_exe\installer\Setup.exe`，带桌面/开始菜单快捷方式与卸载入口
 - 打包不包含 torch/大模型/用户数据；`models\base`、`configs` 保留在程序目录
-- 训练/日志等运行数据重定向到 `%APPDATA%\KohyaLoraTool\`
+- 训练/日志等运行数据默认写入**安装目录同级的数据目录**（打包安装版为 `KohyaLoraTool_data`；绿色/老版本为 `%APPDATA%\KohyaLoraTool`）
 
 ## 11. 常见坑提醒
 

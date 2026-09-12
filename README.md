@@ -4,20 +4,25 @@
 
 无需手动配置复杂的 Python、CUDA 和训练命令：按照应用内新手引导选择模式、安装对应训练引擎、导入图片并选择模型，即可完成数据预处理与 LoRA 训练。
 
-**当前版本：v0.15.1** · [GitHub Releases](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) · [国内安装包（魔搭）](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool)
+## ⬇️ 先下载安装包
+
+> ⚠️ **不要点右上角绿色的 `Code → Download ZIP`** —— 那是**源代码**，不含可执行程序，下载后双击没有任何作用。
+
+| 想怎么用 | 去哪下 |
+|---|---|
+| **推荐：双击安装** | [GitHub Releases → `Setup.exe`](https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases) |
+| 国内免代理 | [魔搭安装包](https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool) |
+| 免安装版 | Releases 里的 `KohyaLoraTool_*_portable.zip` —— **解压后双击 `Kohya一键工具.exe`** |
+
+> 版本号以 Releases / 魔搭页面为准（本 README 不再写死版本号，避免又一次过期；软件内「关于」也能看到）。
 
 > ⚠️ **免责提示：禁止训练版权画师作品或未经授权的真人素材；请仅使用你拥有版权或已获授权的图片。**
 
 ---
 
-## 🆕 v0.15.1 更新重点（小修复 / 完善）
+## 🆕 更新记录
 
-- **修复：训练中采样预览被“100% 收尾看门狗”误杀**（第二次采样预览时自动停止）：采样进度不再被当成训练步，看门狗只认真实训练进度。
-- **第四引擎（Fizgig）断点续训接入**：识别 Fizgig 断点目录并把 --resume 传给训练；跑完的不再误提示续训。
-- **Anima 合并包自动识别 + 一键剥离 DiT 缓存**：社区 Semi/含文本编码器的推理包也能直接训练（自动剥离并缓存，二次复用）。
-- **画风模式自动打标自检**：整批标签高度一致（疑似全走统一兜底句，常见于 0.8 等老版本产物）会显眼告警；老版本数据重跑可自愈重新打标。
-
-> 完整更新记录见 [CHANGELOG.md](CHANGELOG.md)。
+完整更新记录见 [CHANGELOG.md](CHANGELOG.md)（顶部为最新版本；README 不再重复维护版本摘要，避免过期后误导）。
 
 ---
 
@@ -93,8 +98,8 @@
 
 | 文件 | 说明 |
 |---|---|
-| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源、WD14 打标模型和离线中英词典；当前最新版为 v0.15.1 |
-| `KohyaLoraTool_*_portable.zip` | 便携版，解压后运行；若该版本未上传 ZIP，请使用 `Setup.exe` |
+| `Setup.exe` | 推荐使用。双击安装，内置主程序、离线安装资源、WD14 打标模型和离线中英词典 |
+| `KohyaLoraTool_*_portable.zip` | 便携版：**解压后双击 `Kohya一键工具.exe`**；若该版本未上传 ZIP，请使用 `Setup.exe` |
 
 ### 国内镜像
 

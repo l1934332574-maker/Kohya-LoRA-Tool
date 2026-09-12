@@ -1,6 +1,7 @@
 ﻿; ============================================================
 ; KohyaLoraTool 安装脚本（Inno Setup 6）
-; 用法：build_exe\installer\installer.iss 由 build_installer.bat 调用
+; 用法：build_exe\installer\installer.iss 由 release.py 调用（Inno Setup 6 的 ISCC.exe）；
+; 注：早期的 build_installer.bat / build_portable.bat 已删除，打包统一走 release.py。
 ; 默认安装到用户文档目录 {userdocs}\KohyaLoraTool，避开 Program Files 权限问题
 ; ============================================================
 #define MyAppName "KohyaLoraTool"
