@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.8"
+APP_VERSION = "0.17.9"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -5123,7 +5123,15 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
                 if _pv_swap:
                     cmd += ["--preview_blocks_to_swap", str(_pv_swap)]
                 cmd += ["--sample_width", str(_s_res), "--sample_height", str(_s_res)]
-                logf(f"[Krea2(Fizgig)] 采样预览：每 {_s_ep} epoch（约每 {_s_ep * _per_ep} 步）用 Turbo + 当前 LoRA 出一张预览图 → {os.path.join(out_dir, 'sample')}")
+                logf(f"[Krea2(Fizgig)] 采样预览：{_fizgig_sample_note(params, _per_ep, epochs, _s_ep)}"
+                     f"用 Turbo + 当前 LoRA 出一张预览图 → {os.path.join(out_dir, 'sample')}")
+                # 每次预览本身要 1~2 分钟，会**计入界面那个累计 s/it** ✗
+                # → 用户看到"预览过就变慢"其实多半是这个（实际训练步速不变 ✓）
+                # 2026-09-21 用户实测日志佐证：epoch2 末 200/4000 [11:22, 3.41s/it] →
+                #   epoch3 首步 201/4000 [13:19]（中间 117s 是预览）→ 之后逐步仍是 3 秒/步 ✓
+                logf("[Krea2(Fizgig)]   注：每次预览本身约 1~2 分钟，它会**计入界面的累计 s/it**，"
+                     "所以每次预览后平均值会变大 —— 这是正常的，训练步速并未变慢 ✓"
+                     "（判断真实速度看引擎自报的「epoch N avr_loss=…」那一行）")
                 if _pv_swap:
                     logf(f"[Krea2(Fizgig)] 预览模型已分块换出 {_pv_swap} 块（--preview_blocks_to_swap）"
                          f"，预览分辨率 {_s_res}{'、int8 快速矩阵乘' if (vram_gb is not None and vram_gb <= 16.5) else ''}："
@@ -5308,7 +5316,10 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
             if vram_gb is not None and vram_gb <= 16.5:
                 _s_res = min(_s_res, 512)
                 logf("[FLUX.2(Fizgig)] ⚠ 16G 档采样预览已压到 512 + fp8 文本编码器（预览失败会自动停用、不影响训练）")
-            logf(f"[FLUX.2(Fizgig)] 采样预览：每 {_s_ep} epoch（约每 {_s_ep * _per_ep} 步）用当前 LoRA 出一张预览图→ {os.path.join(out_dir, 'sample')}")
+            logf(f"[FLUX.2(Fizgig)] 采样预览：{_fizgig_sample_note(params, _per_ep, epochs, _s_ep)}"
+                 f"用当前 LoRA 出一张预览图 → {os.path.join(out_dir, 'sample')}")
+            logf("[FLUX.2(Fizgig)]   注：每次预览本身耗时会计入界面的累计 s/it，"
+                 "所以预览后平均值变大属正常 —— 训练步速并未变慢 ✓")
     logf("[FLUX.2(Fizgig)] 提示：首次运行需加载 fp8 9B 底模（~9GB）并编译内核，前几分钟可能无步数输出，属正常现象。")
     logf(f"[FLUX.2(Fizgig)] 底模(DiT): {files['dit']}")
     logf(f"[FLUX.2(Fizgig)] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 1)}")
@@ -10325,12 +10336,20 @@ def _guess_sample_subject(train_dir):
     return ""
 
 def _fizgig_sample_epochs(params, per_epoch, epochs):
-    """把界面填的「采样预览间隔(步)」换算成 Fizgig 的 --sample_every_n_epochs。
+    """Fizgig 的 `--sample_every_n_epochs`：**这个字段在 Fizgig 下直接就是「轮」** ✓
 
-    Fizgig 只支持按 epoch 采样，而界面给的是步数，所以这里换算：
-      填了 N 步  -> 每 max(1, round(N / 每epoch步数)) 个 epoch
-      没填(0/空) -> 沿用原来的「约每 100 步」启发式
-    （此前两处 Fizgig 路径完全没读 sample_interval，界面却写着「Krea2/FLUX.2 生效」——issue #6）
+    ⚠️ 2026-09-21 用户实测纠正（原文：「那不是标的轮吗？所以填的 10 轮一次啊」）✗
+      上一版把它当**步数**再换算（`round(N ÷ 每轮步数)` ✗）：
+        用户按"轮"理解填 10 → round(10÷100)=0 → 下限 1 → **实际变成每 1 轮** ✗
+        → 期望「每 10 轮」却得到「每 1 轮」，**差 10 倍** ✗
+        → 他反馈的现象就是「还是 100 张预览一次」（1 轮 = 100 步 ✓）✗
+      单位不一致是**设计的问题**，不是用户填错 ✓
+      现在改为：**填几就是几轮** ✓ 与引擎口径一致 ✓
+        · 填 10  → 每 10 轮 ✓（约每 1000 步）
+        · 留空/0 → 沿用原来的「约每 100 步」启发式（= 每 1 轮）✓
+      注：本引擎**按轮**组织采样（epoch-0 的 Sample at Start + 每个 epoch 各一次，
+      见 trainer.py 源码核对结论），所以**做不到「每 N 步」** ✗ ——
+      需要按步请改用 Krea2（musubi 引擎，`--sample_every_n_steps`）✓
     """
     _per = max(1, int(per_epoch or 1))
     _eps = max(1, int(epochs or 1))
@@ -10338,9 +10357,24 @@ def _fizgig_sample_epochs(params, per_epoch, epochs):
         si = int(params.get("sample_interval") or 0)
     except Exception:
         si = 0
-    if si >= 10:
-        return max(1, min(int(round(si / float(_per))), _eps))
+    if si >= 1:
+        return max(1, min(si, _eps))          # ← 直接当轮数用 ✓
     return min(max(1, int(round(100.0 / _per))), _eps)
+
+
+def _fizgig_sample_note(params, per_epoch, epochs, s_ep):
+    """给 Fizgig 的采样频率写一句用户能直接看懂的话（含"你填的为什么没生效"）✓"""
+    _per = max(1, int(per_epoch or 1))
+    _eps = max(1, int(epochs or 1))
+    try:
+        si = int(params.get("sample_interval") or 0)
+    except Exception:
+        si = 0
+    txt = "每 %d 轮（约每 %d 步）" % (s_ep, s_ep * _per)
+    if si >= 1 and si > _eps:
+        txt += ("—— ⚠ 你填的 %d 轮超过了总轮数 %d，已按 %d 轮执行（本次只会出 1 张预览）✗"
+                % (si, _eps, s_ep))
+    return txt
 
 
 # Fizgig v5.0.0 采样失败时引擎自己打印的那一句（逐字，trainer.py 两个采样调用点共用）：

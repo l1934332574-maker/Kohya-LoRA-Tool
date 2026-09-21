@@ -2146,6 +2146,46 @@ def test_anima_qwen3_pick_guards():
     print("ANIMA_QWEN3_PICK_GUARD_OK")
 
 
+def test_fizgig_sample_interval_is_epochs():
+    """Fizgig 的「采样预览间隔」必须**直接就是轮数** —— 填 10 = 每 10 轮一次。
+
+    ★ 2026-09-21 用户实测纠正（原文：「那不是标的轮吗？所以填的 10 轮一次啊」）✗
+      上一版把这个字段当**步数**、内部再换算：`round(N ÷ 每轮步数)` ✗
+      于是他按"轮"理解填 10 → round(10÷100)=0 → 下限 1 → **实际每 1 轮** ✗
+      → 期望「每 10 轮」却得到「每 1 轮」，**差 10 倍** ✗
+      → 他反馈的现象：「还是 100 张预览一次」（1 轮 = 100 步 ✓）
+      单位不一致是**设计的问题** ✓ 现在与引擎口径统一：填几就是几轮 ✓
+      （Fizgig 按轮组织采样 —— epoch-0 的 Sample at Start + 每个 epoch 各一次，
+        做不到「每 N 步」；要按步得用 Krea2（musubi）的 --sample_every_n_steps ✓）
+    """
+    import Kohya一键工具 as core        # noqa: E402
+
+    # 用户这次的实况：每轮 100 步、共 40 轮、他填 10
+    assert core._fizgig_sample_epochs({"sample_interval": 10}, 100, 40) == 10, \
+        "填 10 应等于「每 10 轮」✗（又变回按步换算了？）"
+    assert core._fizgig_sample_epochs({"sample_interval": 1}, 100, 40) == 1
+    assert core._fizgig_sample_epochs({"sample_interval": 3}, 100, 40) == 3
+    # 留空/0 → 沿用「约每 100 步」启发式（每轮 100 步 → 1 轮）
+    assert core._fizgig_sample_epochs({}, 100, 40) == 1, "留空时应是每 1 轮"
+    assert core._fizgig_sample_epochs({"sample_interval": 0}, 100, 40) == 1
+    # 超过总轮数 → 限制在总轮数（避免一次都不出）
+    assert core._fizgig_sample_epochs({"sample_interval": 100}, 100, 40) == 40
+    # 每轮不是 100 步时，留空仍约每 100 步
+    assert core._fizgig_sample_epochs({}, 25, 40) == 4
+
+    # 日志文案要说人话（用户能否看懂"实际会怎样"）
+    _n = core._fizgig_sample_note({"sample_interval": 10}, 100, 40,
+                                 core._fizgig_sample_epochs({"sample_interval": 10}, 100, 40))
+    assert "每 10 轮" in _n and "1000 步" in _n, "采样说明没写清轮数与对应步数：%s" % _n
+
+    # 界面：这个字段的单位必须**随模式变**（Fizgig=轮、其它=步）✗ 不能一律写"(步)"
+    _g = open(os.path.join(ROOT, "kohya_gui.py"), encoding="utf-8-sig").read()
+    assert "采样预览间隔(轮)" in _g, "界面缺少「(轮)」的动态标签 ✗"
+    assert 'self.mode in ("krea2_fz", "flux2_fz")' in _g, \
+        "标签没有按 Fizgig 模式切换 ✗（用户会再次按错单位）"
+    print("FIZGIG_SAMPLE_INTERVAL_IS_EPOCHS_OK")
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -2174,6 +2214,7 @@ def main():
     check("改过的标签能通过「重新处理」生效", test_preprocess_overwrite_picks_up_changed_captions)
     check("选了新打标模型就不能偷偷用旧模型", test_wd14_respects_selected_model)
     check("Anima 指定 Qwen3：选错要拦、能恢复默认、失效要说", test_anima_qwen3_pick_guards)
+    check("Fizgig 采样间隔按「轮」算（填 10 = 每 10 轮）", test_fizgig_sample_interval_is_epochs)
     check("自带 Python / Git：选文件夹 → 识别 → 校验 → 采用", test_env_paths_custom)
     check("自带环境入口可见且能打开", test_env_locations_ui)
     check("Krea2 量化档必须按显存配块交换", test_fizgig_quant_swap_vram_table)

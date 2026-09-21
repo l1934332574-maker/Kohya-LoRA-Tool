@@ -3730,6 +3730,24 @@ class App:
                     _tips[key] = self._tip(widget, _tip)
                 except Exception:
                     pass
+        # ★「采样预览间隔」的单位随模式变：Fizgig 按**轮**、其它按**步** ✓
+        #   2026-09-21 用户实测：原先一律标"(步)"、Fizgig 内部再换算 ✗ →
+        #   他按"轮"理解填 10 → round(10÷100)=0 → 下限 1 → **实际每 1 轮**（差 10 倍）✗
+        #   → 现象就是「还是 100 张预览一次」✓ 单位与引擎一致才对得上直觉 ✓
+        _fz = self.mode in ("krea2_fz", "flux2_fz")
+        try:
+            self.lbl_si_title.configure(
+                text="采样预览间隔(轮)" if _fz else "采样预览间隔(步)")
+        except Exception:
+            pass
+        try:
+            self.lbl_si_hint.configure(
+                text=("（本引擎按「轮」出图 —— 直接填轮数：填 10 = 每 10 轮一次；"
+                      "留空=每 1 轮。它做不到「每 N 步」✗）") if _fz else
+                     "（0/留空=默认：画风/人物/Krea2/FLUX.2 跟随保存快照，视频/Qwen/Z-Image 每 250 步；"
+                     "填 N=每 N 步出预览）")
+        except Exception:
+            pass
 
     def _scan_base_models(self):
         """后台扫描底模目录（safetensors 只读头部秒级；.ckpt 用 torch 读取可能较慢，放后台不阻塞启动）。"""
@@ -5062,17 +5080,25 @@ class App:
         #      —— 用户以为改了设置，其实引擎那边一帧没变 ✗）
         sf2 = ctk.CTkFrame(g, fg_color="transparent")
         sf2.grid(row=2, column=0, columnspan=9, sticky="w", padx=10, pady=(0, 8))
-        ctk.CTkLabel(sf2, text="采样预览间隔(步)", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        # ⚠️ 标签与提示**按模式动态变化**（见 `_apply_param_scope`）：
+        #   Fizgig 引擎（Krea2 / FLUX.2 的 Fizgig 版）按「轮」组织采样 →
+        #   那里**直接填轮数**（填 10 = 每 10 轮一次）✓
+        #   其它引擎按「步」→ 填 N = 每 N 步 ✓
+        # ★ 2026-09-21 用户实测纠正：「那不是标的轮吗？所以填的 10 轮一次啊」✗
+        #   原先把 Fizgig 也标成"(步)"、内部再换算 → 用户按轮填 10 得到"每 1 轮"（差 10 倍）✗
+        self.lbl_si_title = ctk.CTkLabel(sf2, text="采样预览间隔(步)",
+                                         font=ui_font(FONT_HINT), text_color=HINT)
+        self.lbl_si_title.pack(side="left")
         _iv = self.param_vars.setdefault("sample_interval", tk.StringVar())
         self._bind_param_edit("sample_interval", _iv)
         _ie = ctk.CTkEntry(sf2, width=80, height=28, justify="center", textvariable=_iv,
                            fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
         _ie.pack(side="left", padx=(10, 8))
-        ctk.CTkLabel(sf2, text="（0/留空=默认：画风/人物/Krea2/FLUX.2 跟随保存快照，视频/Qwen/Z-Image 每 250 步；"
-                               "填 N=每 N 步出预览。"
-                               "⚠ Krea2/FLUX.2 的 Fizgig 引擎只能按「轮」出图：填 N 会换算成 round(N÷每轮步数) 轮，"
-                               "且 N<10 视为没填）",
-                     font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        self.lbl_si_hint = ctk.CTkLabel(
+            sf2, text="（0/留空=默认：画风/人物/Krea2/FLUX.2 跟随保存快照，视频/Qwen/Z-Image 每 250 步；"
+                      "填 N=每 N 步出预览）",
+            font=ui_font(FONT_HINT), text_color=HINT)
+        self.lbl_si_hint.pack(side="left")
         self._adv_entries["sample_interval"] = _ie
         self._adv_frames["sample_interval"] = sf2
         cb = ctk.CTkFrame(self.adv_body, fg_color="transparent"); cb.pack(anchor="w", pady=(4, 0))
