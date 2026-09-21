@@ -2186,6 +2186,109 @@ def test_fizgig_sample_interval_is_epochs():
     print("FIZGIG_SAMPLE_INTERVAL_IS_EPOCHS_OK")
 
 
+def test_fizgig_int8_vram_guard():
+    """16G 卡跑 Krea2(Fizgig)：必须把分辨率压到 512，并在引擎确认时告警。
+
+    ★ 2026-09-21 用户实测（5060 Ti 16G / Krea2 Fizgig / 768px / int8，日志 v0.17.8）：
+      「每次建新项目练，一样设置时间越来越长，好几次 11 小时；删项目重来几次才变 3 小时；
+        而且步数越跑越慢」
+
+      根因（引擎原文，日志 L175）：
+        `[int8] W8A8 base is fully resident … block swap can't reduce its footprint;
+         forcing blocks_to_swap=0` ✗
+      → int8 底模**必须全驻留显存**，工具按显存配的 blocks_to_swap **被引擎强制改回 0** ✗
+      → 需 ~18G，而 16G 卡装不下 → 溢出到系统内存 / 硬盘页面文件 ✗
+      → 实测 8~19 s/it（2052 步 ≈ 11 小时 ✗）
+      用户三个现象全部由此解释：
+        · 时间越来越长 = 换页程度随内存/磁盘状态变 ✓
+        · 删项目才变快 = 释放磁盘后页面文件有地方写 ✓
+        · 越跑越慢     = 换页随时间恶化 ✓
+      —— 与「新建项目」无关 ✓
+
+    判据：
+      ① 16G 档（≤19 取整）+ >512 → 压到 512 ✓ 且**必须打印说明**（不许静默改 ✗）
+      ② 显存够（≥20）或已是 512 / 显存未知 → **不动** ✓
+      ③ 引擎那条原文出现时必须告警 ✓ 且要澄清「与新建项目无关」✓
+      ④ 普通日志 / 空日志 → 不许误报 ✗
+    """
+    import Kohya一键工具 as core        # noqa: E402
+
+    # ① 用户实况：DXGI 报 15.67G、分辨率 768
+    _logs = []
+    assert core._fizgig_clamp_resolution(15.673828125, 768, _logs.append) == 512, \
+        "16G 卡 + 768px 必须降到 512 ✗（否则 int8 溢出 → 越跑越慢）"
+    _t = "\n".join(_logs)
+    assert "512" in _t, "降了但没打印说明 ✗（静默改用户设置）"
+    assert "越跑越慢" in _t, "没说清后果 ✗"
+
+    # ② 不该动的情况
+    for _vram, _reso, _want, _desc in ((24.0, 768, 768, "24G 卡不动"),
+                                       (19.9, 768, 768, "≈20G 档不动"),
+                                       (16.0, 512, 512, "已是 512 不动"),
+                                       (None, 768, 768, "显存未知不猜"),
+                                       (19.0, 1024, 512, "19G 中间档 + 1024 → 512"),
+                                       (12.0, 768, 512, "12G + 768 → 512")):
+        assert core._fizgig_clamp_resolution(_vram, _reso, lambda s: None) == _want, \
+            "%s ✗（得到 %s）" % (_desc, core._fizgig_clamp_resolution(_vram, _reso, lambda s: None))
+
+    # ③ 用用户日志里的**逐字原文**
+    _real = ("INFO:fizgig.krea2.trainer:[int8] W8A8 base is fully resident (staged quantise -> GPU) "
+             "— block swap can't reduce its footprint; forcing blocks_to_swap=0.")
+    _l2 = []
+    assert core._warn_fizgig_int8_resident(_real, _l2.append), "真实日志原文没被识别 ✗"
+    _t2 = "\n".join(_l2)
+    assert "18G" in _t2, "没说明需要多少显存 ✗"
+    assert "与「新建项目」无关" in _t2, "没澄清用户的核心困惑 ✗"
+
+    # ④ 不许误报
+    assert not core._warn_fizgig_int8_resident("普通日志", lambda s: None), "普通日志误报 ✗"
+    assert not core._warn_fizgig_int8_resident("", lambda s: None), "空日志误报 ✗"
+    print("FIZGIG_INT8_VRAM_GUARD_OK")
+
+
+def test_save_interval_is_epochs_for_krea2():
+    """Krea2/FLUX.2（含 Fizgig）的「模型保存间隔」按**轮** —— 填超总轮数必须警告。
+
+    ★ 2026-09-21 用户反馈（欣欣 / Krea2 Fizgig，界面截图佐证）：
+      「输出的 LoRA 快照好像也没了，以前都有很多个，新版就没了」
+      他界面里填的是 **200** ✗ 而这条路用 `--save_every_n_epochs <save_every>` ✗
+      → 200 轮存一次、训练只有 18~22 轮 → **一个中间快照都不会产生** ✗
+      日志只留一句「本次没有产生可续训的快照」，用户读成"新版不存快照了"✗
+
+    他为什么会填 200 ✗：原界面提示把「留空=默认 200 **步**」和「N **轮**」写在同一句里 ✗
+      （与「采样预览间隔」是同一类单位混淆 ✓）
+
+    判据：
+      ① 值 > 总轮数 → 必须警告「不会保存任何中间快照」+ 给改法 ✓
+      ② 正常值（1/2/留空）→ **不许**误报 ✓
+      ③ 返回值**不能被改**（尊重用户填的值 ✓）
+      ④ 界面标签按模式在「(轮) / (步)」之间切 ✓
+    """
+    import Kohya一键工具 as core        # noqa: E402
+
+    # ① 用户实况：填 200、训练 18 轮
+    _lg = []
+    _v = core._save_every_note({"save_every": 200}, 18, _lg.append, "Krea2(Fizgig)")
+    _t = "\n".join(_lg)
+    assert _v == 200, "不该改变用户填的值（得到 %s）" % _v
+    assert "不会保存任何中间快照" in _t, "没警告「一个快照都不会存」✗（用户的核心困惑）"
+    assert "留空" in _t, "没给改法 ✗"
+
+    # ② 正常值不许误报
+    for _p, _e, _d in (({"save_every": 1}, 18, "填 1"), ({}, 18, "留空"),
+                       ({"save_every": "2"}, 18, "填 2"), ({"save_every": 18}, 18, "正好等于轮数")):
+        _l2 = []
+        core._save_every_note(_p, _e, _l2.append, "Krea2")
+        assert not any("不会保存任何中间快照" in s for s in _l2), "%s 被误报 ✗" % _d
+
+    # ③ 界面标签按模式切
+    _g = open(os.path.join(ROOT, "kohya_gui.py"), encoding="utf-8-sig").read()
+    assert "模型保存间隔(轮)" in _g, "界面缺少「(轮)」的动态标签 ✗"
+    assert 'self.mode in ("krea2", "krea2_fz", "flux2", "flux2_fz")' in _g, \
+        "保存间隔标签没有按模式切换 ✗（用户会再次按错单位）"
+    print("SAVE_INTERVAL_IS_EPOCHS_OK")
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -2215,6 +2318,8 @@ def main():
     check("选了新打标模型就不能偷偷用旧模型", test_wd14_respects_selected_model)
     check("Anima 指定 Qwen3：选错要拦、能恢复默认、失效要说", test_anima_qwen3_pick_guards)
     check("Fizgig 采样间隔按「轮」算（填 10 = 每 10 轮）", test_fizgig_sample_interval_is_epochs)
+    check("16G 档防 int8 溢出：降 512 + 告警", test_fizgig_int8_vram_guard)
+    check("保存间隔按「轮」+ 超总轮数要警告", test_save_interval_is_epochs_for_krea2)
     check("自带 Python / Git：选文件夹 → 识别 → 校验 → 采用", test_env_paths_custom)
     check("自带环境入口可见且能打开", test_env_locations_ui)
     check("Krea2 量化档必须按显存配块交换", test_fizgig_quant_swap_vram_table)

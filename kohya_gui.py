@@ -3748,6 +3748,23 @@ class App:
                      "填 N=每 N 步出预览）")
         except Exception:
             pass
+        # ★「模型保存间隔」同样按模式变（Krea2/FLUX.2 含 Fizgig = 轮，其它 = 步）✓
+        #   2026-09-21 用户填 200 而实际按**轮**算 → 18 轮训练一个快照都不存 ✗
+        #   （根因是原提示把「200 步」和「N 轮」写进同一句 ✗ → 用户按步理解 ✗）
+        _ep_engine = self.mode in ("krea2", "krea2_fz", "flux2", "flux2_fz")
+        try:
+            self.lbl_save_title.configure(
+                text="模型保存间隔(轮)" if _ep_engine else "模型保存间隔(步)")
+        except Exception:
+            pass
+        try:
+            self.lbl_save_hint.configure(
+                text=("（本引擎按「轮」保存 —— 直接填轮数：填 1 = 每轮都存；"
+                      "留空=默认每 1 轮。⚠ 填得比总轮数还大 → 一次快照都不会存 ✗）")
+                if _ep_engine else
+                "（画风/人物/视频/Qwen/Z-Image 按「步」：留空=默认 200 步）")
+        except Exception:
+            pass
 
     def _scan_base_models(self):
         """后台扫描底模目录（safetensors 只读头部秒级；.ckpt 用 torch 读取可能较慢，放后台不阻塞启动）。"""
@@ -5062,15 +5079,27 @@ class App:
         # 模型保存间隔：画风/人物=每 N 步，Krea2/FLUX.2=每 N 轮（留空用默认）
         sf = ctk.CTkFrame(g, fg_color="transparent")
         sf.grid(row=1, column=0, columnspan=10, sticky="w", padx=10, pady=(0, 8))
-        ctk.CTkLabel(sf, text="模型保存间隔", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        # ⚠️ 标签与提示**按模式动态**（见 `_apply_param_scope`）：
+        #   Krea2/FLUX.2（含 Fizgig）= **轮** ✓；画风/人物/视频/Qwen/Z-Image = **步** ✓
+        # ★ 2026-09-21 用户实测（欣欣 / Krea2 Fizgig）：
+        #   「输出的 LoRA 快照好像也没了，以前都有很多个，新版就没了」
+        #   他界面里填的是 **200** ✗ 而 Krea2/FLUX.2 这条路的单位是**轮** ✗
+        #   → 200 轮存一次，而训练只有 18~22 轮 → **一个中间快照都不会产生** ✗
+        #   他为什么会填 200 ✗：原提示把「200 步」和「N 轮」写在同一句里 ✗
+        #   （与「采样预览间隔」是同一类单位混淆 ✓）
+        self.lbl_save_title = ctk.CTkLabel(sf, text="模型保存间隔",
+                                           font=ui_font(FONT_HINT), text_color=HINT)
+        self.lbl_save_title.pack(side="left")
         _sv = self.param_vars.setdefault("save_every", tk.StringVar())
         self._bind_param_edit("save_every", _sv)
         _se = ctk.CTkEntry(sf, width=80, height=28, justify="center", textvariable=_sv,
                            fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
         _se.pack(side="left", padx=(10, 8))
-        ctk.CTkLabel(sf, text="（画风/人物=每 N 步，Krea2/FLUX.2 及它们的 Fizgig 引擎=每 N 轮，"
-                              "视频/Qwen/Z-Image=每 N 步；留空=默认 200 步 / 1 轮）",
-                     font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        self.lbl_save_hint = ctk.CTkLabel(
+            sf, text="（画风/人物=每 N 步，Krea2/FLUX.2 及它们的 Fizgig 引擎=每 N 轮，"
+                     "视频/Qwen/Z-Image=每 N 步；留空=默认 200 步 / 1 轮）",
+            font=ui_font(FONT_HINT), text_color=HINT)
+        self.lbl_save_hint.pack(side="left")
         self._adv_entries["save_every"] = _se
         self._adv_frames["save_every"] = sf
         # 采样预览间隔：0/留空=跟随保存快照；填 N=固定每 N 步。

@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.9"
+APP_VERSION = "0.17.10"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -3235,7 +3235,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         logf(f"[Krea2] 高级参数手动指定 blocks_to_swap={swap}")
     # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
     per_epoch = int(params.get("repeats", 5)) * _flat_n
-    _save_ep = _resolve_save_every_epochs(params)   # 与中间保存快照对齐（采样预览同节奏）
+    _save_ep = _save_every_note(params, epochs, logf, "Krea2")   # 与中间保存快照对齐（采样预览同节奏）
     if per_epoch * epochs > KREA2_MAX_STEPS:
         new_epochs = max(1, int(KREA2_MAX_STEPS / max(1, per_epoch)))
         logf(f"[Krea2] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
@@ -3471,7 +3471,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         logf(f"[FLUX.2] 高级参数手动指定 blocks_to_swap={swap}")
     # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
     per_epoch = int(params.get("repeats", 2)) * _flat_n
-    _save_ep = _resolve_save_every_epochs(params)   # 与中间保存快照对齐（采样预览同节奏）
+    _save_ep = _save_every_note(params, epochs, logf, "FLUX.2")   # 与中间保存快照对齐（采样预览同节奏）
     if per_epoch * epochs > FLUX2_MAX_STEPS:
         new_epochs = max(1, int(FLUX2_MAX_STEPS / max(1, per_epoch)))
         logf(f"[FLUX.2] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
@@ -5016,6 +5016,18 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     cache_dir = os.path.join(data_dir(), "dataset", proj, "fizgig_cache")
     os.makedirs(cache_dir, exist_ok=True)
     resolution = int(params.get("resolution") or KREA2_RESOLUTION or 512)
+    # ★ 2026-09-21：16G 档把分辨率降到 512 —— 防「int8 全驻留 → 溢出 → 越跑越慢」✗
+    #   用户实测（5060 Ti 16G + 768px + int8(auto 默认)，日志 v0.17.8）：
+    #     · 引擎原文：`[int8] W8A8 base is fully resident … block swap can't reduce its
+    #       footprint; forcing blocks_to_swap=0` ✗
+    #       → **工具按显存配的 swap 对 int8 完全无效** ✗（引擎会强制改 0 ✗）
+    #     · 于是要 ~18G 常驻，而 16G 卡（5060 Ti / 5070 Ti / 4080）装不下 ✗
+    #     · 后果：溢出到系统内存 / 硬盘页面文件 → 实测 **8~19 s/it**（2052 步 ≈ 11 小时 ✗），
+    #       且「删项目重来几次才变 3 小时」✗ —— 那只是删项目释放了磁盘、页面文件有地方写了 ✓
+    #   768px 的激活/梯度更大，进一步加剧 ✓ 所以 16G 档必须压到 512 ✓
+    #   同门 Krea2(AI-Toolkit) 早就有这个保护（train_krea2_at 的 `_is_low`）✓ 这里对齐 ✓
+    #   ⚠️ **明确打印**，不静默改用户的分辨率 ✗（这是我们反复踩到的教训 ✓）
+    resolution = _fizgig_clamp_resolution(vram_gb, resolution, logf)
     write_fizgig_dataset_config(train_dir, cache_dir, cfg_path, resolution=resolution,
                                 num_repeats=int(params.get("repeats", 1)))
     logf(f"[Krea2(Fizgig)] 数据集: {train_dir}（{resolution}px, repeats={params.get('repeats', 1)}）")
@@ -5064,7 +5076,7 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
         "--network_dim", str(rank), "--network_alpha", str(alpha),
         "--learning_rate", str(lr),
         "--max_train_epochs", str(epochs),
-        "--save_every_n_epochs", str(_resolve_save_every_epochs(params)),
+        "--save_every_n_epochs", str(_save_every_note(params, epochs, logf, "Krea2(Fizgig)")),
         # ★ 2026-09-17 修：这里原来**漏了 --save_state** ✗ —— 第四引擎 Krea2 的「续训」因此
         #   从存在起就一直是坏的 ✗：Fizgig 只在**带这个参数时**才写断点
         #   （{output_name}-NNNNNN-state/ + training_state.json），否则只存 LoRA 权重。
@@ -5157,6 +5169,8 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     logf(f"[Krea2(Fizgig)] 引擎后端: {backend} | 量化={quant_detail} | blocks_to_swap={swap} | torch.compile={'开' if _k2_compile else '关'}")
     rc = run_stream(cmd, cwd=fz_dir, env=_fz_env, logf=logf, collect=_log_tail)
     _warn_fizgig_sample_failure("\n".join(_log_tail), logf)
+    # int8 底模全驻留（块交换失效）→ 溢出 → 越跑越慢：确凿信号，必须当场说清 ✓
+    _warn_fizgig_int8_resident("\n".join(_log_tail), logf)
     if rc != 0:
         _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError("Krea2(Fizgig) 训练失败，退出码 %d，请查看上方日志。" % rc)
@@ -5281,7 +5295,7 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
         "--network_dim", str(rank), "--network_alpha", str(alpha),
         "--learning_rate", str(lr),
         "--max_train_epochs", str(epochs),
-        "--save_every_n_epochs", str(_resolve_save_every_epochs(params)),
+        "--save_every_n_epochs", str(_save_every_note(params, epochs, logf, "FLUX.2(Fizgig)")),
         "--save_state", "--save_state_on_train_end", "--keep_last_n_states", "2",
         "--seed", "42",
         "--timestep_sampling", "flux2_shift",
@@ -5326,6 +5340,8 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
     logf(f"[FLUX.2(Fizgig)] 引擎后端: {backend} | 量化={quant_detail} | blocks_to_swap={swap}")
     rc = run_stream(cmd, cwd=fz_dir, env=_fz_env, logf=logf, collect=_log_tail)
     _warn_fizgig_sample_failure("\n".join(_log_tail), logf)
+    # 同上：int8 全驻留（块交换失效）→ 溢出 → 越跑越慢 ✓（9B 上同样适用 ✓）
+    _warn_fizgig_int8_resident("\n".join(_log_tail), logf)
     if rc != 0:
         _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError("FLUX.2 Klein 9B(Fizgig) 训练失败，退出码 %d，请查看上方日志。" % rc)
@@ -7078,6 +7094,36 @@ def _warn_alloc_conf(logf):
         logf("[训练] ⚠ 检测到系统环境变量 PYTORCH_CUDA_ALLOC_CONF 含 expandable_segments"
              "（Windows 不支持，且可能引发“显存充足却 OOM”的假性爆显存），本次训练已自动忽略。"
              "建议彻底删除后重启软件：setx PYTORCH_CUDA_ALLOC_CONF \"\"")
+
+
+def _save_every_note(params, epochs, logf, label="训练"):
+    """打印「模型保存间隔」的实际含义，并在**超过总轮数**时明确警告 ✗。
+
+    ★ 2026-09-21 用户反馈（欣欣 / Krea2 Fizgig，界面截图佐证）：
+      「输出的 LoRA 快照好像也没了，以前都有很多个，新版就没了」
+      —— 他界面里「模型保存间隔」填的是 **200** ✗
+      而 Krea2/FLUX.2（含 Fizgig）这条路的保存间隔单位是**轮**：
+        `--save_every_n_epochs <save_every>`（见 train_krea2 等四处调用）✗
+      → 200 轮存一次，而他的训练只有 18~22 轮 ✗ → **一个中间快照都不会产生** ✗
+      → 日志只会留一句「本次没有产生可续训的快照」，用户读成"新版不存快照了"✗
+
+    为什么用户会填 200 ✗：界面提示写的是
+      「画风/人物=每 N 步，Krea2/FLUX.2 及它们的 Fizgig 引擎=每 N 轮，
+        视频/Qwen/Z-Image=每 N 步；留空=默认 200 步 / 1 轮」
+      —— 「200 步」与「N 轮」混在一句里 ✗ 用户按"步"理解就填了 200 ✗
+      （与「采样预览间隔」是同一类单位混淆 ✓）
+    现在：界面标签按模式动态（轮/步）+ 这里给出**可执行的警告** ✓
+    """
+    _v = _resolve_save_every_epochs(params)
+    _eps = max(1, int(epochs or 1))
+    if _v > _eps:
+        logf("[%s] ⚠ 模型保存间隔 = %d **轮**，超过总轮数 %d → 本次**不会保存任何中间快照** ✗"
+             % (label, _v, _eps))
+        logf("[%s]   后果：中断后无法续训，也拿不到中间轮次的 LoRA 权重 ✗" % label)
+        logf("[%s]   改法：把它改小（如 1~2 轮），或**留空**（默认每 1 轮存一次）✓" % label)
+    else:
+        logf("[%s] 模型保存间隔：每 %d 轮存一次（共 %d 轮）" % (label, _v, _eps))
+    return _v
 
 
 def _resolve_save_every_epochs(params):
@@ -10362,6 +10408,41 @@ def _fizgig_sample_epochs(params, per_epoch, epochs):
     return min(max(1, int(round(100.0 / _per))), _eps)
 
 
+def _fizgig_clamp_resolution(vram_gb, resolution, logf=print):
+    """16G 档把 Krea2(Fizgig) 的训练分辨率压到 512 —— 防「int8 全驻留 → 溢出 → 越跑越慢」✗
+
+    ★ 2026-09-21 用户实测（5060 Ti 16G / Krea2 Fizgig / 768px / int8，日志 v0.17.8）：
+      引擎原文：`[int8] W8A8 base is fully resident … block swap can't reduce its footprint;
+      forcing blocks_to_swap=0` ✗
+      → **工具按显存配的 blocks_to_swap 对 int8 完全无效**（引擎强制改 0 ✗）
+      → 需 ~18G 常驻，而 16G 卡（5060 Ti / 5070 Ti / 4080）装不下 ✗
+      → 溢出到系统内存 / 硬盘页面文件 → 实测 **8~19 s/it**（2052 步 ≈ 11 小时 ✗）
+      用户现象与之一一吻合：
+        ·「一样的设置时间越来越长」= 换页程度随内存/磁盘状态变 ✓
+        ·「删项目重来几次才 3 小时」= 删项目释放了磁盘，页面文件有地方写 ✓
+        ·「步数越跑越慢」= 换页随时间恶化 ✓
+      —— 全都与「新建项目」无关 ✓
+
+      768px 的激活/梯度更大，进一步加剧 ✓ 同门 Krea2(AI-Toolkit) 早有此保护
+      （train_krea2_at 的 `_is_low`）✓ 这里对齐 ✓
+      ⚠️ **明确打印**，不静默改用户的分辨率 ✗（这是反复踩到的教训 ✓）
+      ⚠️ 档位用 `round()` 取整（16G 卡 DXGI 常报 15.6~15.9，也可能报 16.0x）✓
+    """
+    _tier = round(vram_gb) if vram_gb is not None else None
+    if _tier is None or _tier > 19 or resolution <= 512:
+        return resolution
+    logf("[Krea2(Fizgig)] ⚠ 16G 档：训练分辨率 %d → **512**（自动下调）" % resolution)
+    logf("[Krea2(Fizgig)]   原因：int8 底模必须**全驻留显存** —— 块交换对它无效"
+         "（引擎会强制 blocks_to_swap=0），共需约 18G ✗")
+    logf("[Krea2(Fizgig)]   16G 卡在 %dpx 下装不下 → 溢出到内存/页面文件 → **越跑越慢** ✗"
+         "（实测 8~19 秒/步、2052 步要 11 小时）" % resolution)
+    logf("[Krea2(Fizgig)]   ⚠ 注意：**512px 只是缓解** ✗ —— 若显存仍不够，会换页到硬盘，"
+         "表现为**时快时慢**（3~11 秒/步）✗")
+    logf("[Krea2(Fizgig)]   若仍然慢：① 「量化方式」改 **NF4 4bit**（冻结底模 ~5.6GB）"
+         " ② 或试试同门的 Krea2（musubi 引擎）✓")
+    return 512
+
+
 def _fizgig_sample_note(params, per_epoch, epochs, s_ep):
     """给 Fizgig 的采样频率写一句用户能直接看懂的话（含"你填的为什么没生效"）✓"""
     _per = max(1, int(per_epoch or 1))
@@ -10380,6 +10461,11 @@ def _fizgig_sample_note(params, per_epoch, epochs, s_ep):
 # Fizgig v5.0.0 采样失败时引擎自己打印的那一句（逐字，trainer.py 两个采样调用点共用）：
 #   [preview] epoch N preview failed (...) — disabling previews for the rest of the run.
 _FIZGIG_SAMPLE_OFF_MARK = "disabling previews for the rest of the run"
+# ★ int8 底模「必须全驻留显存」时引擎打印的那一句（逐字，2026-09-21 用户日志 L175 实证）：
+#   [int8] W8A8 base is fully resident (staged quantise -> GPU) — block swap can't reduce
+#   its footprint; forcing blocks_to_swap=0.
+# → 这是「越跑越慢」最确凿的信号：工具按显存配的块交换**被引擎强制改回 0** ✗
+_FIZGIG_INT8_RESIDENT_MARK = "block swap can't reduce its footprint"
 # 旧引擎（采样循环无 try/except）会把原始异常串留在日志里；保留兼容，别删。
 _FIZGIG_SAMPLE_ERR_MARK = "unsupported operand type(s) for *"
 
@@ -10429,6 +10515,36 @@ def _warn_fizgig_sample_failure(log_text, logf=print):
          "（本版本已自动做分块换出，仍失败多半是训练分辨率偏高或桌面程序占用过多）。")
     logf("[Fizgig]   想继续看到预览：① 训练前关掉占显存的桌面程序（浏览器/动态壁纸/QQ 微信等）；"
          "② 或降低训练分辨率；③ 或改为训练结束后单独出图。")
+    return True
+
+
+def _warn_fizgig_int8_resident(log_text, logf=print):
+    """引擎声明「int8 底模全驻留」时告警 —— 这是「越跑越慢」的确凿信号 ✗。返回是否命中。
+
+    ★ 2026-09-21（用户日志实证，v0.17.8 / 5060 Ti 16G / Krea2 Fizgig / 768px）：
+      引擎原文 `[int8] W8A8 base is fully resident … block swap can't reduce its
+      footprint; forcing blocks_to_swap=0` ✗
+      → 工具按显存配的 `blocks_to_swap`（16G 档 = 20）**被引擎强制改成 0** ✗
+      → int8 需 ~18G 常驻，16G 卡装不下 → 溢出到内存 / 硬盘页面文件 →
+        **8~19 秒/步**（2052 步 ≈ 11 小时）✗
+      用户现象完全吻合：「一样的设置时间越来越长」✗「删项目重来几次才 3 小时」✗
+        「步数越跑越慢」✗ —— 都是换页程度在变，与项目本身无关 ✓
+    训练前已按 16G 档自动降到 512（见 train_krea2_fizgig）✓；这里再给一次**确凿确认**，
+    覆盖「用户手动选 int8 且显存刚好不够」等训练前判断不到的情况 ✓
+    """
+    if not log_text or _FIZGIG_INT8_RESIDENT_MARK not in log_text:
+        return False
+    logf("[Fizgig] ⚠ 引擎提示：int8 底模必须**全驻留显存**（块交换对它无效，已强制 "
+         "blocks_to_swap=0）—— 它需要约 18G ✗")
+    logf("[Fizgig]   显存不足时会溢出到系统内存 / 硬盘页面文件，表现为**越跑越慢** ✗"
+         "（这与「新建项目」无关 ✓）")
+    logf("[Fizgig]   ⚠ 关键：**这条一出现，说明工具传的 blocks_to_swap 已被引擎忽略** ✗ "
+         "（int8 走 W8A8 全驻留路径 → 引擎强制改 0）")
+    logf("[Fizgig]   → 于是显存压力全落在「底模常驻 + 激活」上，装不下就换页："
+         "表现为**时快时慢**（3~11 秒/步，取决于当时内存/磁盘/其它程序）✗")
+    logf("[Fizgig]   可选：① 「量化方式」改 **NF4 4bit**（冻结底模 ~5.6GB，16G 以下的主路径）"
+         " ② 换 24G+ 显卡 ③ 分辨率降到 512 只是**缓解** ✗")
+    logf("[Fizgig]   另外：① 清理数据盘（旧项目输出/快照会累积）② 训练时关掉占内存的程序 ✓")
     return True
 
 
