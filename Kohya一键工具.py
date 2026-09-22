@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.11"
+APP_VERSION = "0.17.12"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -8184,12 +8184,23 @@ def _venv_imports_ok(vpy, mods):
 #
 #   ★ 判据：把模块**真 import 一遍**（含子模块 ✓）；坏了的按人话翻出来 ✓
 _ENV_SELFTEST_PROBES = (
-    # (模块名, 人话名, 是否必需) —— 必需的失败就拦下训练（它必然失败 ✗）；非必需只警告 ✓
+    # (模块名, 人话名, 是否必需) —— **必需**的失败才拦下训练 ✓；其余只警告 ✓
     ("torch", "PyTorch", True),
-    ("torch._C._distributed_c10d", "PyTorch 分布式扩展（torch/_C/）", True),
     ("torchvision", "torchvision", True),
     ("transformers", "transformers", True),
-    # ↓ 这几个是"上层派生"：根因（_C 缺失）已被上面第 2 条兜住 ✓ 这里只作补充警告 ✓
+    # ⚠️⚠️ 2026-09-22 **二次修正（v0.17.11 误伤，必须记住）**：
+    #   这两个**不能算必需** ✗ —— v0.17.11 把它们当必需，结果**误拦了本来能正常训练的 AMD 用户** ✗
+    #   实测证据（用户日志 KohyaLoRA_055_20260922，AMD RX 7800 XT，v0.17.11）：
+    #     · 报的是「`'torch._C'` is not a package」✗ —— 这说明 **`import torch` 是成功的** ✓
+    #       （若 torch 本身 import 失败，根本走不到解析 `torch._C` 这一步 ✓）
+    #     · 用户明确说「0.17.10 训练一切正常」✓ → 这份 torch 对训练**够用** ✓
+    #     · 同一份日志里还有 `offload-arch.exe` 因**路径含空格**而报错 ✓
+    #       → 说明 AMD ROCm 这一套与 NVIDIA 版**本就不是一回事** ✓
+    #   → 结论：**AMD ROCm 版 PyTorch 可能本来就不含** `torch/_C/_distributed_c10d` ✗
+    #     而它只影响 distributed / DTensor 路径 —— 单卡训练未必走到 ✓
+    #     （真走到时报错会自带原始 traceback ✓，比我们"猜"更准 ✓）
+    #   → 降为**仅警告** ✓，措辞也不再断言「装得不完整」（见 env_selftest_advice）✓
+    ("torch._C._distributed_c10d", "PyTorch 分布式扩展（torch/_C/）", False),
     ("torch.distributed.tensor", "PyTorch DTensor（accelerate 会用到）", False),
     ("diffusers", "diffusers", False),
     ("accelerate", "accelerate", False),
@@ -8256,9 +8267,18 @@ def env_selftest(vpy, logf=print, quiet=False):
 
 
 def env_selftest_advice(fails):
-    """把自检失败翻成**用户能照做的**修法（而不是「退出码 1，请查看上方日志」✗）。"""
+    """把自检失败翻成**用户能照做的**修法（而不是「退出码 1，请查看上方日志」✗）。
+
+    ⚠️⚠️ 2026-09-22 必须区分「必需项」和「非必需项」✗ ——
+      v0.17.11 曾把 `torch._C._distributed_c10d` 当成必需 ✗，结果**误拦了本来能正常训练的
+      AMD 用户** ✗（用户日志 KohyaLoRA_055：他 0.17.10 训练一切正常 ✓，升到 0.17.11 后
+      被这个弹窗卡住 ✗）。教训：
+        · **必需项**失败 → 说清「训练没有开始，没白跑时间」✓（这些是真的必然崩 ✓）
+        · 只有**非必需项**失败 → 必须说清「**不影响开始训练**」✓，别把人吓住/卡住 ✗
+    """
     _raw = " ".join((f[3] or "") for f in fails)
-    _bad = "、".join(f[1] for f in fails if f[2]) or "、".join(f[1] for f in fails)
+    _req = [f for f in fails if f[2]]
+    _bad = "、".join(f[1] for f in (_req or fails))
     _tips = []
     if ("1392" in _raw) or ("文件或目录损坏" in _raw):
         _tips.append(
@@ -8268,11 +8288,14 @@ def env_selftest_advice(fails):
             "        ② 重跑【② 安装训练内核】重建环境\n"
             "        ③ 重建后仍报 1392 → 这块盘可能有坏道，把工具换到另一块盘重装")
     if ("torch._C" in _raw) and (("not a package" in _raw) or ("No module named 'torch._C" in _raw)):
+        # ⚠️ 2026-09-22：这里**不再**说「装得不完整」✗ —— v0.17.11 就是这么误伤 AMD 用户的 ✓
         _tips.append(
-            "★ 检测到「PyTorch 装得不完整」：`torch/_C/` 子目录缺失 ✗\n"
-            "  （`import torch` 能过 ✓，但训练走到 accelerate 的分布式检查时就崩 ✗）\n"
-            "  修法：重跑【② 安装训练内核】自动重装；AMD 环境重跑 AMD 环境引导\n"
-            "        （或先删掉 venv_amd / fizgig_venv 目录再重装，更干净）")
+            "ℹ 本机这份 PyTorch 不含「分布式扩展」（`torch/_C/_distributed_c10d`）。\n"
+            "  ⚠️ 这**不等于环境坏了** ✗：AMD ROCm 版 PyTorch 可能本来就不含它 ✓\n"
+            "     （`import torch` 是成功的 ✓ 它只影响 distributed / DTensor 那条路径 ✓）\n"
+            "  · 单卡训练通常用不到 → 可**先照常训练** ✓\n"
+            "  · 若训练**中途**真报这个错（accelerate 的 DTensor 检查会用到）→ 那时再处理：\n"
+            "    重跑【② 安装训练内核】；AMD 用户也可改用同门的 Krea2(musubi) 引擎 ✓")
     if ("1114" in _raw) or ("c10.dll" in _raw) or ("动态链接库" in _raw):
         _tips.append(
             "★ 检测到「DLL 初始化失败」(WinError 1114)：★ 头号原因是 VC++ 运行库版本太低 ✗\n"
@@ -8283,9 +8306,14 @@ def env_selftest_advice(fails):
             "        复查 C:\\Windows\\System32\\msvcp140.dll 的**版本号**才是准的 ✓")
     if not _tips:
         _tips.append("  修法：重跑【② 安装训练内核】重建训练环境（多数情况能修好）")
-    return ("训练环境自检未通过（%s）：\n%s\n"
-            "—— 训练**没有开始**，所以没白跑训练时间 ✓\n"
-            "—— 修好后直接重试即可，项目配置不用重设 ✓" % (_bad, "\n".join(_tips)))
+    if _req:
+        return ("训练环境自检未通过（%s）：\n%s\n"
+                "—— 训练**没有开始**，所以没白跑训练时间 ✓\n"
+                "—— 修好后直接重试即可，项目配置不用重设 ✓" % (_bad, "\n".join(_tips)))
+    # 只有非必需项失败：**绝不能**说"没白跑训练时间"✗（那是把人卡住的意思 ✗）
+    return ("训练环境自检有 %d 项提示（**不影响开始训练** ✓）：\n%s\n"
+            "—— 可以先照常训练 ✓；若训练中途真的报出同样的错，再按上面处理 ✓"
+            % (len(fails), "\n".join(_tips)))
 
 
 def venv_python_version(venv_dir):
@@ -8927,13 +8955,23 @@ def verify_amd_torch(venv_dir):
         "print('CUDA_VERSION=' + str(getattr(torch.version, 'cuda', '') or ''));"
         "print('GPU_AVAILABLE=' + str(torch.cuda.is_available()));"
         "print('GPU_NAME=' + (torch.cuda.get_device_name(0) if torch.cuda.is_available() else ''));"
-        # ★ 2026-09-22（AMD 用户日志 KohyaLoRA_123_20260922）：`torch/_C/` 目录是**缺的** ✗，
-        #   可 `import torch` 只用得到 `torch._C` 那个扩展模块、**根本用不到 `_C/_distributed_c10d`** ✗
-        #   → 原来这里只 import torch，于是判定「torch 可用」✓；训练一路跑到 accelerate.prepare
-        #     才炸 `'torch._C' is not a package` ✗（此前数据检查、VAE/文本编码器缓存全白跑 ✗）
-        #   现在把训练**必经**的两个子模块也 import 一次 ✓ —— 坏环境在这里就暴露 ✓
-        "import torch._C._distributed_c10d, torch.distributed.tensor;"
-        "print('SUBMODULES_OK=1')"
+        # ⚠️⚠️ 2026-09-22 **修正 v0.17.11 的误伤** ✗ ——
+        #   v0.17.11 把下面这段子模块检查和上面**串在一起** ✗，于是任何子模块缺失都会让
+        #   整段 returncode=1 ✗ → 弹出「AMD 依赖已安装，但环境验证失败」把用户**卡在安装界面** ✗
+        #   而实测（用户日志 KohyaLoRA_055_20260922，AMD RX 7800 XT）：
+        #     · 报的是「`'torch._C'` is not a package」✗ → 说明 **`import torch` 是成功的** ✓
+        #     · 同一份日志还有 `offload-arch.exe` 因**路径含空格**报错 ✓
+        #     · 用户明确说「0.17.10 训练一切正常」✓
+        #   → **AMD ROCm 版 PyTorch 可能本来就不含** `torch/_C/_distributed_c10d` ✓
+        #     （它只影响 distributed / DTensor 路径，单卡训练未必走到 ✓）
+        #   → 现在改为**单独 try** ✓、只作提示 ✓、**绝不改变主判定** ✓
+        "\n"
+        "try:\n"
+        "    import torch._C._distributed_c10d, torch.distributed.tensor\n"
+        "    print('SUBMODULES_OK=1')\n"
+        "except Exception as _e:\n"
+        "    print('SUBMODULES_OK=0')\n"
+        "    print('SUBMODULES_ERR=' + (type(_e).__name__ + ': ' + str(_e))[:300])\n"
     )
     try:
         r = subprocess.run(
@@ -8969,7 +9007,12 @@ def verify_amd_torch(venv_dir):
     name = values.get("GPU_NAME", "")
     if avail:
         backend = f"ROCm/HIP {hip}" if hip else (f"CUDA {cuda}" if cuda else "GPU")
-        return True, f"{version} · {backend} · {name or 'GPU'}", True
+        _info = f"{version} · {backend} · {name or 'GPU'}"
+        if values.get("SUBMODULES_OK") == "0":
+            # ⚠️ 只是**提示**，绝不改变判定 ✓（见上面 code 处的说明：AMD ROCm 可能本来就不含 ✓）
+            _info += ("（提示：这份 PyTorch 不含分布式扩展 —— AMD ROCm 版可能本来就没有 ✓，"
+                      "单卡训练通常不受影响 ✓；若训练中途报 torch._C 相关错误再重装）")
+        return True, _info, True
     backend = f"HIP {hip}" if hip else (f"CUDA {cuda}" if cuda else "CPU")
     return False, f"torch {version} 已导入，但 GPU 不可用（后端：{backend}）。请检查 AMD 驱动/ROCm 兼容性。", False
 

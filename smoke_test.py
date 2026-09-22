@@ -2338,17 +2338,33 @@ def test_env_selftest_catches_broken_env():
         os.makedirs(os.path.join(sp, "torch"))
         with open(os.path.join(sp, "torch", "__init__.py"), "w", encoding="utf-8") as f:
             f.write("__version__ = '0.0.0'\n")
+        # ⚠️ 必须把**其余必需项**也塞上 ✓ —— 否则测的就变成"缺 torchvision/transformers"了 ✗
+        #   （那些缺了本来就该拦 ✓ 与本测试要守的「只缺分布式扩展不许拦」是两回事 ✗）
+        for _m in ("torchvision", "transformers"):
+            os.makedirs(os.path.join(sp, _m), exist_ok=True)
+            with open(os.path.join(sp, _m, "__init__.py"), "w", encoding="utf-8") as f:
+                f.write("\n")
         _ok2, _f2, _r2 = core.env_selftest(vpy, _sil, quiet=True)
         _mods = [x[0] for x in _f2]
         _key = "torch._C._distributed_c10d"
         assert _key in _mods, \
-            "没能抓到 torch._C 缺失 ✗ —— 这正是 AMD 用户日志的坏法（只 import torch 是成功的 ✗）"
+            "没能抓到 torch._C 缺失 ✗ —— 这是日志 ③ 的坏法（只 import torch 是成功的 ✗）"
         assert "torch" not in _mods, "torch 本体被误报了 ✗ —— 它确实 import 得到，误报会让自检不可信"
-        assert any(x[0] == _key and x[2] for x in _f2), \
-            "%s 没被标成「必需」，不会拦下训练 ✗" % _key
+
+        # ★★ 2026-09-22 二次修正（**必须守住这条，否则会再次误伤**）★★
+        #   v0.17.11 把 `torch._C._distributed_c10d` 当成「必需」✗ → 弹出
+        #   「AMD 依赖已安装，但环境验证失败」把用户**卡在安装界面** ✗
+        #   而实测（用户日志 KohyaLoRA_055_20260922，AMD RX 7800 XT）：用户 0.17.10 训练一切正常 ✓
+        #   → AMD ROCm 版 PyTorch **可能本来就不含** 它 ✓（只影响 distributed/DTensor 路径 ✓）
+        assert not any(x[0] == _key and x[2] for x in _f2), \
+            "%s 被标成「必需」✗ —— AMD ROCm 版可能本来就没有它，会误拦正常用户" % _key
+        assert _ok2 is True, \
+            "torch 本体可用、只是缺分布式扩展时**不该拦下训练** ✗（v0.17.11 就是这么误伤的）"
         _adv = core.env_selftest_advice(_f2)
-        assert "装得不完整" in _adv and "没白跑训练时间" in _adv, \
-            "自检失败后的提示没说清怎么修 ✗：%s" % _adv[:200]
+        assert "不影响开始训练" in _adv, "非必需项失败时该说「不影响开始训练」✗：%s" % _adv[:220]
+        assert "没白跑训练时间" not in _adv, \
+            "非必需项失败却说「没白跑训练时间」✗ —— 那等于把用户卡住（v0.17.11 的错）"
+        assert "不等于环境坏了" in _adv, "没澄清「这不算环境坏」✗ —— 用户会被误导去重装"
 
         # ③ 三份日志的原始报错，各自都要能识别
         _cases = (
@@ -2356,12 +2372,19 @@ def test_env_selftest_catches_broken_env():
              "文件或目录损坏"),
             ("WinError 1114", "OSError: [WinError 1114] 动态链接库(DLL)初始化例程失败。Error loading \"c10.dll\"",
              "VC++ 运行库"),
+            # ⚠️ 这里要的是「澄清」而不是「判定坏了」✗ —— 见上面二次修正的说明 ✓
             ("torch._C", "ModuleNotFoundError: No module named 'torch._C._distributed_c10d'; "
-                         "'torch._C' is not a package", "装得不完整"),
+                         "'torch._C' is not a package", "不等于环境坏了"),
         )
         for _nm, _err, _want in _cases:
             _a = core.env_selftest_advice([("m", "M", True, _err)])
-            assert _want in _a, "「%s」这类坏法没给出对应修法（缺「%s」）✗" % (_nm, _want)
+            assert _want in _a, "「%s」这类坏法没给出对应说明（缺「%s」）✗" % (_nm, _want)
+
+        # ④ **必需项**失败时，必须说清「训练没开始、没白跑」（这跟上面正好相反 ✓）
+        _a_req = core.env_selftest_advice(
+            [("torch", "PyTorch", True, "OSError: [WinError 1114] 动态链接库(DLL)初始化例程失败")])
+        assert "没白跑训练时间" in _a_req, \
+            "必需项真失败时必须说清「训练没有开始、没白跑」✗"
     finally:
         _sh.rmtree(tmp, ignore_errors=True)
     print("ENV_SELFTEST_CATCHES_BROKEN_ENV_OK")
