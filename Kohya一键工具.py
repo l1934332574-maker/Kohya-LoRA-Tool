@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.10"
+APP_VERSION = "0.17.11"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -4567,6 +4567,23 @@ def _domestic_pip_env():
     except Exception:
         pass
     return env
+def _fz_selftest(vpy, logf=print):
+    """fizgig_venv 的深度自检（True=可用；False 会让调用方拦下训练 ✓）。
+
+    ★ 2026-09-22：第四引擎的 venv 是**最容易装坏**的一个 ✓ —— torch 2~3G + 文本编码器/
+      量化相关的一堆额外依赖，安装一旦中断最容易留下"半截包"✗：
+      · RTX 5060 Ti 用户日志（KohyaLoRA_椿_20260922）：`transformers/models` 目录**损坏**
+        → 训练跑到「缓存文本编码器」才炸 ✗ —— 而在此之前 latents 缓存（21 张）已经白跑 ✓
+      · `_ensure_fizgig_deps` 原来只 `find_spec` ✗（看目录在不在）→ 这种"在但坏"**完全看不见** ✗
+    现在装好依赖后立刻真 import 一遍 ✓（见 env_selftest），坏了**当场**给修法 ✓
+    """
+    _ok, _fails, _raw = env_selftest(vpy, logf)
+    if _ok:
+        return True
+    logf("[第四引擎] " + env_selftest_advice(_fails).replace("\n", "\n[第四引擎] "))
+    return False
+
+
 def _ensure_fizgig_deps(vpy, fz_dir, logf=print):
     """训练前自愈：fizgig_venv 缺关键依赖（如老版本安装漏了 toml）时按需补装。
 
@@ -4596,7 +4613,7 @@ def _ensure_fizgig_deps(vpy, fz_dir, logf=print):
     except Exception:
         _miss = ["toml"]
     if not _miss:
-        return True
+        return _fz_selftest(vpy, logf)
     _pkgs = [_pkg.get(m, m) for m in _miss]
     logf("[第四引擎] ⚠ fizgig_venv 缺依赖：%s，自动补装（国内镜像）…" % ", ".join(_pkgs))
     _env = _domestic_pip_env()
@@ -4605,7 +4622,7 @@ def _ensure_fizgig_deps(vpy, fz_dir, logf=print):
                    "--extra-index-url", PIP_INDEX_SECONDARY] + _pkgs,
                   cwd=fz_dir, env=_env, logf=logf) == 0:
         logf("[第四引擎] Fizgig 依赖补装完成")
-        return True
+        return _fz_selftest(vpy, logf)
     logf("[第四引擎] Fizgig 依赖补装失败（网络/镜像问题），可稍后重试或重装第四引擎")
     return False
 def install_fizgig_engine(logf=print):
@@ -5027,7 +5044,13 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     #   768px 的激活/梯度更大，进一步加剧 ✓ 所以 16G 档必须压到 512 ✓
     #   同门 Krea2(AI-Toolkit) 早就有这个保护（train_krea2_at 的 `_is_low`）✓ 这里对齐 ✓
     #   ⚠️ **明确打印**，不静默改用户的分辨率 ✗（这是我们反复踩到的教训 ✓）
-    resolution = _fizgig_clamp_resolution(vram_gb, resolution, logf)
+    # ★ 2026-09-22：量化档必须**先算出来** ✗ —— 分辨率钳制要知道**真实**量化方式才能判断 ✓
+    #   （原来钳制在 L5047、量化要到 L5077 才算 → 钳制拿不到量化方式 ✗
+    #    于是**连 NF4 用户也被降到 512** ✗ —— 而 NF4 底模只 ~5.6GB，768px 完全放得下 ✓
+    #    详见 _fizgig_clamp_resolution 的注释 ✓）
+    quant_flags, swap, quant_detail = _fizgig_quant_swap(
+        vram_gb, params.get("quant_mode", "auto"), backend=backend)
+    resolution = _fizgig_clamp_resolution(vram_gb, resolution, quant_flags, logf)
     write_fizgig_dataset_config(train_dir, cache_dir, cfg_path, resolution=resolution,
                                 num_repeats=int(params.get("repeats", 1)))
     logf(f"[Krea2(Fizgig)] 数据集: {train_dir}（{resolution}px, repeats={params.get('repeats', 1)}）")
@@ -5057,7 +5080,8 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
             pass
     out_dir = data_sub("output", proj)
     output_name = str(params.get("output_name") or "krea2_fizgig_lora").strip() or "krea2_fizgig_lora"
-    quant_flags, swap, quant_detail = _fizgig_quant_swap(vram_gb, params.get("quant_mode", "auto"), backend=backend)
+    # ⚠️ 量化档已在函数前段提前算好（配合 _fizgig_clamp_resolution 使用 ✓）——
+    #   分辨率钳制需要知道真实量化方式，所以不能等到这里才算 ✓
     _manual_swap = str(params.get("blocks_to_swap") or "").strip()
     if _manual_swap.isdigit():
         swap = int(_manual_swap)
@@ -8142,6 +8166,128 @@ def _venv_imports_ok(vpy, mods):
         return False
 
 
+# ---------- 深度环境自检：**真的 import**，而不是只看目录在不在 ----------
+# ★ 2026-09-22：三份用户日志暴露的**同一个洞** ✗ —— 三台不同机器、三种坏法，工具**一个都没提前发现** ✗
+#   · ① RTX 5070 12G（日志 KohyaLoRA_项目_0921_1511）：
+#        `torch/lib/c10.dll` 初始化失败（WinError 1114）——VC++ 运行库 14.36 < torch 要求的 14.44 ✗
+#   · ② RTX 5060 Ti 16G（日志 KohyaLoRA_椿_20260922）：
+#        `transformers/models` 目录**损坏**（WinError 1392）→ `import transformers` 直接 OSError ✗
+#   · ③ AMD RX 9060 XT 8G（日志 KohyaLoRA_123_20260922）：
+#        `torch/_C/` 目录**缺失** → `'torch._C' is not a package` ✗（训练到 accelerate.prepare 才炸 ✗）
+#
+#   ★ 原来为什么抓不到：环境检查用 `find_spec()` ✗（只看**文件/目录在不在**）——
+#     · ② 的目录"在，但内容损坏" → find_spec 通过 ✗
+#     · ③ 的 `torch/_C` 虽缺，可 `import torch` **根本用不到它** → 只 import torch 也通过 ✗
+#   三例于是全都拖到「训练跑到一半」才炸 ✗ —— 而此前已白跑：数据检查 + latents 缓存 +
+#   文本编码器缓存 + 模型加载（② 里白跑了 2 分多钟 ✗、③ 里连 21 张图的缓存都做完了 ✗），
+#   用户还看不懂报错（「退出码 1，请查看上方日志」/「文本编码器缓存失败」✗）
+#
+#   ★ 判据：把模块**真 import 一遍**（含子模块 ✓）；坏了的按人话翻出来 ✓
+_ENV_SELFTEST_PROBES = (
+    # (模块名, 人话名, 是否必需) —— 必需的失败就拦下训练（它必然失败 ✗）；非必需只警告 ✓
+    ("torch", "PyTorch", True),
+    ("torch._C._distributed_c10d", "PyTorch 分布式扩展（torch/_C/）", True),
+    ("torchvision", "torchvision", True),
+    ("transformers", "transformers", True),
+    # ↓ 这几个是"上层派生"：根因（_C 缺失）已被上面第 2 条兜住 ✓ 这里只作补充警告 ✓
+    ("torch.distributed.tensor", "PyTorch DTensor（accelerate 会用到）", False),
+    ("diffusers", "diffusers", False),
+    ("accelerate", "accelerate", False),
+    ("safetensors", "safetensors", False),
+)
+
+
+def env_selftest(vpy, logf=print, quiet=False):
+    """深度自检：真的 import 关键模块（含子模块），返回 (ok, fails, raw)。
+
+    fails = [(模块名, 人话名, 是否必需, 错误摘要), ...]，全通过时为空 ✓
+    ok    = **必需项**全过（非必需项失败只警告，不拦训练 ✓）
+
+    ⚠️ 用**一个**子进程跑完所有 probe ✓（每启动一次 python 要 1~3 秒，逐个跑太慢 ✗），
+       用 JSON 回收结果 —— 这样某个 probe 崩溃不会带走其它 probe 的结果 ✓
+    """
+    _mods = [m for m, _n, _r in _ENV_SELFTEST_PROBES]
+    code = (
+        "import json, importlib\n"
+        "res = {}\n"
+        "for m in %r:\n"
+        "    try:\n"
+        "        importlib.import_module(m)\n"
+        "        res[m] = ''\n"
+        "    except BaseException as e:\n"
+        "        res[m] = (type(e).__name__ + ': ' + str(e))[:600]\n"
+        "print('SELFTEST_JSON=' + json.dumps(res))\n"
+    ) % (_mods,)
+    _stdout = _stderr = ""
+    try:
+        _r = subprocess.run([vpy, "-c", code], capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", timeout=900,
+                            env=build_env())
+        _stdout, _stderr = (_r.stdout or ""), (_r.stderr or "")
+    except Exception as e:
+        _stderr = "启动自检进程失败：%s" % e
+    _res = {}
+    for _line in _stdout.splitlines():
+        if _line.startswith("SELFTEST_JSON="):
+            try:
+                _res = json.loads(_line[len("SELFTEST_JSON="):])
+            except Exception:
+                _res = {}
+    # 进程整体崩掉（c10.dll 初始化失败会让 python 直接退出 ✗）→ JSON 收不到，
+    # 此时**必须用 stderr 兜底**：否则会把"根本没跑起来"误判成"全过" ✗
+    _crashed = not _res
+    fails = []
+    for _m, _name, _req in _ENV_SELFTEST_PROBES:
+        if _m in _res and not _res.get(_m):
+            continue
+        _err = _res.get(_m) or ""
+        if not _err:
+            _err = (_stderr.strip()[-600:] if _crashed else "未返回结果")
+        fails.append((_m, _name, _req, _err))
+    if not quiet:
+        if not fails:
+            logf("[环境] 深度自检通过：%d 项关键模块均可正常导入 ✓" % len(_ENV_SELFTEST_PROBES))
+        else:
+            logf("[环境] 深度自检发现 %d 项异常：" % len(fails))
+            for _m, _name, _req, _err in fails:
+                _first = (_err or "未知").strip().splitlines()[-1][:220] if _err else "未知"
+                logf("[环境]   %s %s：%s" % ("✗" if _req else "⚠", _name, _first))
+    return (not any(f[2] for f in fails)), fails, (_stderr or "")
+
+
+def env_selftest_advice(fails):
+    """把自检失败翻成**用户能照做的**修法（而不是「退出码 1，请查看上方日志」✗）。"""
+    _raw = " ".join((f[3] or "") for f in fails)
+    _bad = "、".join(f[1] for f in fails if f[2]) or "、".join(f[1] for f in fails)
+    _tips = []
+    if ("1392" in _raw) or ("文件或目录损坏" in _raw):
+        _tips.append(
+            "★ 检测到「文件或目录损坏」(WinError 1392)：环境里的文件没写完整 ✗\n"
+            "  常见原因：pip 下载/安装被中断、杀毒软件隔离、磁盘空间不足。\n"
+            "  修法：① 看看该盘剩余空间够不够（训练环境要 4~6G）\n"
+            "        ② 重跑【② 安装训练内核】重建环境\n"
+            "        ③ 重建后仍报 1392 → 这块盘可能有坏道，把工具换到另一块盘重装")
+    if ("torch._C" in _raw) and (("not a package" in _raw) or ("No module named 'torch._C" in _raw)):
+        _tips.append(
+            "★ 检测到「PyTorch 装得不完整」：`torch/_C/` 子目录缺失 ✗\n"
+            "  （`import torch` 能过 ✓，但训练走到 accelerate 的分布式检查时就崩 ✗）\n"
+            "  修法：重跑【② 安装训练内核】自动重装；AMD 环境重跑 AMD 环境引导\n"
+            "        （或先删掉 venv_amd / fizgig_venv 目录再重装，更干净）")
+    if ("1114" in _raw) or ("c10.dll" in _raw) or ("动态链接库" in _raw):
+        _tips.append(
+            "★ 检测到「DLL 初始化失败」(WinError 1114)：★ 头号原因是 VC++ 运行库版本太低 ✗\n"
+            "  （运行库**在**、但版本低于 PyTorch 编译时用的那个 —— 光看文件在不在判断不出来 ✗）\n"
+            "  修法：装最新的「Microsoft Visual C++ 2015-2022 Redistributable (x64)」\n"
+            "        https://aka.ms/vs/17/release/vc_redist.x64.exe\n"
+            "        ⚠️ 装完**必须重启**；静默安装返回 194 也可能是装成功了 ✗ 别据此判定失败\n"
+            "        复查 C:\\Windows\\System32\\msvcp140.dll 的**版本号**才是准的 ✓")
+    if not _tips:
+        _tips.append("  修法：重跑【② 安装训练内核】重建训练环境（多数情况能修好）")
+    return ("训练环境自检未通过（%s）：\n%s\n"
+            "—— 训练**没有开始**，所以没白跑训练时间 ✓\n"
+            "—— 修好后直接重试即可，项目配置不用重设 ✓" % (_bad, "\n".join(_tips)))
+
+
 def venv_python_version(venv_dir):
     """读取 venv 的 Python 版本，返回 '3.12' 或 None。"""
     try:
@@ -8420,6 +8566,11 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
             raise RuntimeError("自动补装 torchvision 失败：%s\n请重跑【② 安装训练内核】" % e)
         if not _venv_imports_ok(vpy, ("torch", "torchvision")):
             raise RuntimeError("torchvision 补装后仍不可用，请重跑【② 安装训练内核】")
+    # ★ 2026-09-22：补装完**立刻做深度自检** —— 以前只 find_spec，坏环境要到训练中途才炸 ✗
+    #   （见 env_selftest 的注释：三份用户日志 = 三种坏法，全都逃过了 find_spec ✗）
+    _st_ok, _st_fails, _st_raw = env_selftest(vpy, logf)
+    if not _st_ok:
+        raise RuntimeError(env_selftest_advice(_st_fails))
     logf("[环境] 训练环境运行时依赖补装完成")
     return True
 
@@ -8775,7 +8926,14 @@ def verify_amd_torch(venv_dir):
         "print('HIP_VERSION=' + str(getattr(torch.version, 'hip', '') or ''));"
         "print('CUDA_VERSION=' + str(getattr(torch.version, 'cuda', '') or ''));"
         "print('GPU_AVAILABLE=' + str(torch.cuda.is_available()));"
-        "print('GPU_NAME=' + (torch.cuda.get_device_name(0) if torch.cuda.is_available() else ''))"
+        "print('GPU_NAME=' + (torch.cuda.get_device_name(0) if torch.cuda.is_available() else ''));"
+        # ★ 2026-09-22（AMD 用户日志 KohyaLoRA_123_20260922）：`torch/_C/` 目录是**缺的** ✗，
+        #   可 `import torch` 只用得到 `torch._C` 那个扩展模块、**根本用不到 `_C/_distributed_c10d`** ✗
+        #   → 原来这里只 import torch，于是判定「torch 可用」✓；训练一路跑到 accelerate.prepare
+        #     才炸 `'torch._C' is not a package` ✗（此前数据检查、VAE/文本编码器缓存全白跑 ✗）
+        #   现在把训练**必经**的两个子模块也 import 一次 ✓ —— 坏环境在这里就暴露 ✓
+        "import torch._C._distributed_c10d, torch.distributed.tensor;"
+        "print('SUBMODULES_OK=1')"
     )
     try:
         r = subprocess.run(
@@ -8793,7 +8951,10 @@ def verify_amd_torch(venv_dir):
     if r.returncode != 0:
         raw = stderr or stdout or f"验证进程退出码 {r.returncode}"
         detail = raw[-1200:]
-        return False, f"torch 导入/验证失败（退出码 {r.returncode}）：\n{detail}", False
+        # ★ 2026-09-22：把原始报错翻成**能照做的修法** ✓（以前只说「torch 导入/验证失败」✗，
+        #   用户拿着这句完全不知道下一步做什么 ✗）
+        _adv = env_selftest_advice([("torch", "PyTorch（AMD ROCm 版）", True, detail)])
+        return False, f"torch 导入/验证失败（退出码 {r.returncode}）：\n{detail}\n{_adv}", False
     values = {}
     for line in stdout.splitlines():
         if "=" in line:
@@ -10408,8 +10569,8 @@ def _fizgig_sample_epochs(params, per_epoch, epochs):
     return min(max(1, int(round(100.0 / _per))), _eps)
 
 
-def _fizgig_clamp_resolution(vram_gb, resolution, logf=print):
-    """16G 档把 Krea2(Fizgig) 的训练分辨率压到 512 —— 防「int8 全驻留 → 溢出 → 越跑越慢」✗
+def _fizgig_clamp_resolution(vram_gb, resolution, quant_flags=(), logf=print):
+    """Krea2(Fizgig) 用 **int8** 时把训练分辨率压到 512 —— 防「全驻留 → 溢出 → 越跑越慢」✗
 
     ★ 2026-09-21 用户实测（5060 Ti 16G / Krea2 Fizgig / 768px / int8，日志 v0.17.8）：
       引擎原文：`[int8] W8A8 base is fully resident … block swap can't reduce its footprint;
@@ -10427,9 +10588,21 @@ def _fizgig_clamp_resolution(vram_gb, resolution, logf=print):
       （train_krea2_at 的 `_is_low`）✓ 这里对齐 ✓
       ⚠️ **明确打印**，不静默改用户的分辨率 ✗（这是反复踩到的教训 ✓）
       ⚠️ 档位用 `round()` 取整（16G 卡 DXGI 常报 15.6~15.9，也可能报 16.0x）✓
+
+    ★ 2026-09-22 修 bug：**只有 int8 才需要这么干** ✗ ——
+      原来不看量化方式，凡是 ≤19G 就降 ✗ → **连 NF4 用户也被降到 512** ✗
+      可 NF4 底模只 ~5.6GB ✓（`_fizgig_quant_swap` 的注释和本函数原来的提示都写着 ✓）
+      → NF4 + 768px 在 16G 卡上**完全放得下** ✓，砍到 512 纯属白丢画质 ✗
+      → 现在按 `quant_flags` 判：**非 int8 一律原样返回** ✓
+      ⚠️ 为什么看 `quant_flags`、而不是用户填的 `quant_mode` ✗：用户常填「自动」✗，
+         而 auto 在 <10G 会解析成 NF4 ✓、12~19G 会解析成 int8 ✓
+         —— 只有 `quant_flags` 是**最终结果** ✓（且 `--quant_int8` 就是引擎的 int8 开关 ✓）
     """
     _tier = round(vram_gb) if vram_gb is not None else None
     if _tier is None or _tier > 19 or resolution <= 512:
+        return resolution
+    if not any("quant_int8" in str(_f) for _f in (quant_flags or ())):
+        # NF4（~5.6G）等档位底模占用远低于 18G ✓ 不需要降分辨率 ✓
         return resolution
     logf("[Krea2(Fizgig)] ⚠ 16G 档：训练分辨率 %d → **512**（自动下调）" % resolution)
     logf("[Krea2(Fizgig)]   原因：int8 底模必须**全驻留显存** —— 块交换对它无效"

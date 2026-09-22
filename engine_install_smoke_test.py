@@ -2954,11 +2954,27 @@ def test_fizgig_deps_self_heal(base: Path):
         stderr = ""
 
     with patch.object(core.subprocess, "run", return_value=_CP()), \
+         patch.object(core, "_fz_selftest", return_value=True), \
          patch.object(core, "run_stream", side_effect=lambda cmd, *a, **k: (calls.append([str(x) for x in cmd]), 0)[1]):
+        # ⚠️ 本测试只管「缺依赖 → 补装」这条链 ✗ 所以把**深度自检**打桩成通过 ✓
+        #   （2026-09-22）不打桩的话：它用一个假 python 路径、又 patch 了 subprocess.run ✗
+        #   → 自检必然失败 ✗ 断言就测不到本来要测的补装了 ✓
+        #   「环境坏时必须返回 False」由下面一段单独覆盖 ✓
         ok = core._ensure_fizgig_deps(r"X:\fizgig_venv\Scripts\python.exe", str(base), logs.append)
     assert ok is True, "缺 toml 时应补装成功"
     assert any("pip" in c and "install" in c and "toml" in c for c in calls), calls
     assert any("--no-cache-dir" in c for c in calls), "应绕过损坏的 pip 缓存（--no-cache-dir）"
+
+    # ★ 2026-09-22 新增：依赖齐了、但**包里是坏的**（如 `transformers/models` 损坏 1392、
+    #   或 `torch/_C` 缺失）时，必须返回 False 把训练拦下 ✓
+    #   这正是三份用户日志的坏法 ✗ —— 以前 `find_spec` 看目录在不在，**完全看不见** ✗
+    #   于是拖到「训练跑到一半」才炸 ✗（latents/文本编码器缓存全白跑 ✗）
+    _logs2 = []
+    with patch.object(core.subprocess, "run", return_value=_CP()), \
+         patch.object(core, "_fz_selftest", return_value=False), \
+         patch.object(core, "run_stream", side_effect=lambda cmd, *a, **k: (calls.append([str(x) for x in cmd]), 0)[1]):
+        assert core._ensure_fizgig_deps(r"X:\fizgig_venv\Scripts\python.exe", str(base), _logs2.append) is False, \
+            "包在但坏了（自检不过）时必须返回 False 拦下训练 ✗ —— 否则又会跑到一半才炸"
     print("FIZGIG_DEPS_SELF_HEAL_OK")
 def test_fourth_engine_train_pipeline(base: Path):
     """train_krea2_fizgig：数据集 TOML + 缓存 + 训练命令构造（8G→NF4 / 16G→fp8+swap20）。"""

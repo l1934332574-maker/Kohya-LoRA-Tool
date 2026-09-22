@@ -2206,17 +2206,22 @@ def test_fizgig_int8_vram_guard():
       —— 与「新建项目」无关 ✓
 
     判据：
-      ① 16G 档（≤19 取整）+ >512 → 压到 512 ✓ 且**必须打印说明**（不许静默改 ✗）
+      ① **int8** + ≤19G（取整）+ >512 → 压到 512 ✓ 且**必须打印说明**（不许静默改 ✗）
+         ⚠️ 2026-09-22 修：本保护**只对 int8 生效** ✗ —— NF4（底模仅 ~5.6G）/ FP8 档
+            砍分辨率纯属白丢画质 ✗（由 test_fizgig_clamp_resolution_only_for_int8 覆盖 ✓）
       ② 显存够（≥20）或已是 512 / 显存未知 → **不动** ✓
       ③ 引擎那条原文出现时必须告警 ✓ 且要澄清「与新建项目无关」✓
       ④ 普通日志 / 空日志 → 不许误报 ✗
     """
     import Kohya一键工具 as core        # noqa: E402
 
+    # ★ 2026-09-22 改：本函数现在**只对 int8 生效** ✗（NF4 底模仅 ~5.6G，768 放得下 ✓）
+    #   → 这里显式传 int8 档位 ✓；「NF4 不该被降」由 test_fizgig_clamp_resolution_only_for_int8 覆盖 ✓
+    _I8 = ("--quant_int8", "bf16")
     # ① 用户实况：DXGI 报 15.67G、分辨率 768
     _logs = []
-    assert core._fizgig_clamp_resolution(15.673828125, 768, _logs.append) == 512, \
-        "16G 卡 + 768px 必须降到 512 ✗（否则 int8 溢出 → 越跑越慢）"
+    assert core._fizgig_clamp_resolution(15.673828125, 768, _I8, _logs.append) == 512, \
+        "16G 卡 + int8 + 768px 必须降到 512 ✗（否则 int8 溢出 → 越跑越慢）"
     _t = "\n".join(_logs)
     assert "512" in _t, "降了但没打印说明 ✗（静默改用户设置）"
     assert "越跑越慢" in _t, "没说清后果 ✗"
@@ -2228,8 +2233,8 @@ def test_fizgig_int8_vram_guard():
                                        (None, 768, 768, "显存未知不猜"),
                                        (19.0, 1024, 512, "19G 中间档 + 1024 → 512"),
                                        (12.0, 768, 512, "12G + 768 → 512")):
-        assert core._fizgig_clamp_resolution(_vram, _reso, lambda s: None) == _want, \
-            "%s ✗（得到 %s）" % (_desc, core._fizgig_clamp_resolution(_vram, _reso, lambda s: None))
+        assert core._fizgig_clamp_resolution(_vram, _reso, _I8, lambda s: None) == _want, \
+            "%s ✗（得到 %s）" % (_desc, core._fizgig_clamp_resolution(_vram, _reso, _I8, lambda s: None))
 
     # ③ 用用户日志里的**逐字原文**
     _real = ("INFO:fizgig.krea2.trainer:[int8] W8A8 base is fully resident (staged quantise -> GPU) "
@@ -2289,6 +2294,105 @@ def test_save_interval_is_epochs_for_krea2():
     print("SAVE_INTERVAL_IS_EPOCHS_OK")
 
 
+def test_env_selftest_catches_broken_env():
+    """深度环境自检必须**抓得住「包装不全」** —— 而不是拖到训练中途才炸 ✗
+
+    ★ 2026-09-22：三份用户日志、三台完全不同的机器、三种坏法，
+      而工具**一个都没提前发现** ✗：
+        · ① RTX 5070 12G：`torch/lib/c10.dll` 初始化失败（WinError 1114，VC++ 运行库 14.36 < 14.44）
+        · ② RTX 5060 Ti 16G：`transformers/models` 目录损坏（WinError 1392）
+        · ③ AMD RX 9060 XT 8G：`torch/_C/` 缺失 → `'torch._C' is not a package`
+      根因：环境检查只用 `find_spec()`（看文件/目录在不在 ✗），
+      或只 `import torch` —— 而 `import torch` **根本用不到** `_C._distributed_c10d` ✗
+      → 三种坏法全部通过 ✗ → 全都拖到「训练跑到一半」才炸 ✗
+        （①②③ 的数据检查、latents 缓存、文本编码器缓存、模型加载**全白跑** ✗）
+
+    本测试用**真 venv** 复现第 ③ 种（这是最隐蔽的一种：`import torch` 会**成功** ✗）。
+    判据：① 必须**点名** `torch._C._distributed_c10d` ✓
+          ② 该项必须标「必需」✓（否则不会拦下训练，等于没修 ✗）
+          ③ `torch` 本体**不能**被误报 ✓（它确实 import 得到 ✓）
+          ④ 三份日志的三种坏法，建议文案都能识别 ✓
+
+    ⚠️ 为什么必须**真跑一遍**（不旁路）✗：上次教训 —— 只测"看起来对"会绕开除问题那一步 ✓
+      这里同理：只有真起一个 venv、真往里塞"半个包"，才能证明自检抓得住 ✓
+    """
+    import Kohya一键工具 as core     # noqa: E402
+    import shutil as _sh
+    import subprocess as _sp
+    import tempfile as _tf
+
+    _sil = lambda *a, **k: None       # noqa: E731
+    tmp = _tf.mkdtemp(prefix="estest_")
+    try:
+        venv = os.path.join(tmp, "v")
+        _sp.run([sys.executable, "-m", "venv", "--without-pip", venv],
+                check=True, capture_output=True)
+        vpy = os.path.join(venv, "Scripts", "python.exe")
+        sp = os.path.join(venv, "Lib", "site-packages")
+
+        # ① 空 venv：自检必须不通过
+        _ok1, _f1, _r1 = core.env_selftest(vpy, _sil, quiet=True)
+        assert not _ok1 and _f1, "空 venv 竟然通过了自检 —— 等于没查 ✗"
+
+        # ② 塞「有 torch、无 _C」的假包 → 必须点名 _distributed_c10d
+        os.makedirs(os.path.join(sp, "torch"))
+        with open(os.path.join(sp, "torch", "__init__.py"), "w", encoding="utf-8") as f:
+            f.write("__version__ = '0.0.0'\n")
+        _ok2, _f2, _r2 = core.env_selftest(vpy, _sil, quiet=True)
+        _mods = [x[0] for x in _f2]
+        _key = "torch._C._distributed_c10d"
+        assert _key in _mods, \
+            "没能抓到 torch._C 缺失 ✗ —— 这正是 AMD 用户日志的坏法（只 import torch 是成功的 ✗）"
+        assert "torch" not in _mods, "torch 本体被误报了 ✗ —— 它确实 import 得到，误报会让自检不可信"
+        assert any(x[0] == _key and x[2] for x in _f2), \
+            "%s 没被标成「必需」，不会拦下训练 ✗" % _key
+        _adv = core.env_selftest_advice(_f2)
+        assert "装得不完整" in _adv and "没白跑训练时间" in _adv, \
+            "自检失败后的提示没说清怎么修 ✗：%s" % _adv[:200]
+
+        # ③ 三份日志的原始报错，各自都要能识别
+        _cases = (
+            ("WinError 1392", "OSError: [WinError 1392] 文件或目录损坏且无法读取。: 'D:\\x\\transformers\\models'",
+             "文件或目录损坏"),
+            ("WinError 1114", "OSError: [WinError 1114] 动态链接库(DLL)初始化例程失败。Error loading \"c10.dll\"",
+             "VC++ 运行库"),
+            ("torch._C", "ModuleNotFoundError: No module named 'torch._C._distributed_c10d'; "
+                         "'torch._C' is not a package", "装得不完整"),
+        )
+        for _nm, _err, _want in _cases:
+            _a = core.env_selftest_advice([("m", "M", True, _err)])
+            assert _want in _a, "「%s」这类坏法没给出对应修法（缺「%s」）✗" % (_nm, _want)
+    finally:
+        _sh.rmtree(tmp, ignore_errors=True)
+    print("ENV_SELFTEST_CATCHES_BROKEN_ENV_OK")
+
+
+def test_fizgig_clamp_resolution_only_for_int8():
+    """Krea2(Fizgig) 的分辨率钳制**只该对 int8 生效** ✗
+
+    ★ 2026-09-22 修：原先不看量化方式，≤19G 一律把分辨率砍到 512 ✗ ——
+      于是**连 NF4 用户也被砍** ✗。可 NF4 底模只 ~5.6GB ✓
+      （`_fizgig_quant_swap` 的注释与本函数原来的提示都写着 ✓），
+      16G 卡上 NF4 + 768px **完全放得下** ✓ → 砍到 512 纯属**白丢画质** ✗
+      ★ 为什么该降的是 int8：它的底模必须**全驻留**（引擎强制 blocks_to_swap=0 ✗），
+      需 ~18G 常驻 > 16G ✗ → 溢出换页 → 越跑越慢 ✗（实测 8~19 s/it）
+    判据：int8 且 ≤19G → 降 512 ✓；**其余任何档位**（NF4 / fp8 / ≥20G / 本来 ≤512）→ **原样** ✓
+    """
+    import Kohya一键工具 as core     # noqa: E402
+
+    _sil = lambda *a, **k: None       # noqa: E731
+    _i8 = ["--quant_int8", "bf16"]
+    _nf4 = ["--quantize_4bit"]
+    assert core._fizgig_clamp_resolution(15.67, 768, _i8, _sil) == 512, "int8 + 16G 该降到 512"
+    assert core._fizgig_clamp_resolution(15.67, 768, _nf4, _sil) == 768, \
+        "NF4 + 16G 被误降到 512 ✗ —— NF4 底模只 ~5.6G，768 放得下（本次修复点）"
+    assert core._fizgig_clamp_resolution(15.67, 768, [], _sil) == 768, "fp8 档不该被降"
+    assert core._fizgig_clamp_resolution(24.0, 768, _i8, _sil) == 768, "24G 装得下 int8，不该降"
+    assert core._fizgig_clamp_resolution(15.67, 512, _i8, _sil) == 512, "本来就是 512，保持"
+    assert core._fizgig_clamp_resolution(None, 768, _i8, _sil) == 768, "显存未知时不猜"
+    print("FIZGIG_CLAMP_ONLY_INT8_OK")
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -2315,6 +2419,8 @@ def main():
     check("无「用了但看不见」的名字（防同名静默失效）", test_no_undefined_names)
     check("界面提示的适用范围与代码一致", test_param_scope_matches_code)
     check("改过的标签能通过「重新处理」生效", test_preprocess_overwrite_picks_up_changed_captions)
+    check("环境自检能抓到「包装不全」", test_env_selftest_catches_broken_env)
+    check("Fizgig 分辨率钳制只对 int8 生效", test_fizgig_clamp_resolution_only_for_int8)
     check("选了新打标模型就不能偷偷用旧模型", test_wd14_respects_selected_model)
     check("Anima 指定 Qwen3：选错要拦、能恢复默认、失效要说", test_anima_qwen3_pick_guards)
     check("Fizgig 采样间隔按「轮」算（填 10 = 每 10 轮）", test_fizgig_sample_interval_is_epochs)
