@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.12"
+APP_VERSION = "0.17.14"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -5915,8 +5915,89 @@ AT_IMAGE_MODELS = {
 
 
 def at_image_local_dir(mode):
-    """AI Toolkit 图像模型预下载目录（数据目录，整仓 snapshot_download，hf-mirror 国内直连）。"""
+    """AI Toolkit 图像模型预下载目录（数据目录，整仓 snapshot_download，hf-mirror 国内直连）。
+
+    ★ 2026-09-22 扩展：**自定义模型时用独立目录** ✓ ——
+      默认路径仍是 `models/at_image/<mode>` ✓（**已下载的人完全不受影响** ✓ 不重下 40G ✓）；
+      用户自定义了 model_id（训练别的 Qwen-Image，如 Qwen-Image-2.1 ✗）时，
+      改用 `models/at_image/<mode>__<模型名>` ✓ —— 否则会把官方那个 34~40G 覆盖掉 ✗，
+      想切回来又得重下 ✓
+    """
+    c = at_image_custom_get(mode)
+    if c.get("local_dir"):
+        # 用户直接指定了本地目录（手动放好的模型）→ 就用它，跳过下载 ✓
+        return c["local_dir"]
+    if c.get("model_id"):
+        return data_sub("models", "at_image",
+                        mode + "__" + (_sanitize_dirname(c["model_id"]) or "custom"))
     return data_sub("models", "at_image", mode)
+
+
+# ---------- AI Toolkit 模型「自定义」入口（2026-09-22）----------
+# 背景（2026-09-22 用户提出 ✓）：ai-toolkit 官方支持的模型在持续增加
+#   （如 Qwen/Qwen-Image-2.1、Qwen/Qwen-Image-Edit-2511 …✗），
+#   而本工具把每个模式的 model_id / arch / 显存档位**写死**在 AT_IMAGE_MODELS 里 ✗
+#   → 用户想训练"更新的 Qwen-Image"时**没有任何入口** ✗
+#   （用户原话：「那想训练其他的 QwenImage 的模型呢，像最新出的 2.1，我看 AI toolkit 官方已经支持了」）
+#
+# 设计原则（保守 ✓ 默认行为**完全不变** ✗）：
+#   · 没设置过的人：仍走 AT_IMAGE_MODELS 里钉的官方模型 ✓ 感觉不到任何变化 ✓
+#   · 设置过的人：可覆盖 model_id / arch / 显存档位 / 本地目录 ✓
+#   · 自定义 model_id → **下载到独立目录** ✓（不覆盖已下好的官方模型 ✓ 见上面 local_dir）
+#   · 全部经 `at_image_info(mode)` 统一读取 ✓ ——
+#     （原先代码里是 7 处 `AT_IMAGE_MODELS.get(mode)` ✗ 分散各处、迟早漏改 ✓）
+_AT_CUSTOM_KEY = "at_image_custom"      # app_settings.json 里的键：{mode: {...}}
+_AT_CUSTOM_FIELDS = ("model_id", "arch", "label", "size", "hint",
+                     "min_vram", "rec_vram", "resident_vram", "local_dir")
+
+
+def at_image_custom_get(mode):
+    """读该模式的自定义模型设置（没设置过 / 读失败 → 返回 {} ✓）。"""
+    try:
+        d = _load_app_settings() or {}
+        c = (d.get(_AT_CUSTOM_KEY) or {}).get(mode) or {}
+        return {k: c.get(k) for k in _AT_CUSTOM_FIELDS if c.get(k) not in (None, "")}
+    except Exception:
+        return {}
+
+
+def at_image_custom_set(mode, values):
+    """写入 / 清除某模式的自定义模型设置（values 全空 = 清除、恢复默认 ✓）。
+
+    ⚠️ 只改这一项 ✓ 别的设置原样保留 ✓（读-改-写，不整体覆盖 app_settings ✗）
+    """
+    try:
+        d = _load_app_settings() or {}
+        allc = dict(d.get(_AT_CUSTOM_KEY) or {})
+        clean = {k: values.get(k) for k in _AT_CUSTOM_FIELDS
+                 if values.get(k) not in (None, "")}
+        if clean:
+            allc[mode] = clean
+        else:
+            allc.pop(mode, None)
+        if allc:
+            d[_AT_CUSTOM_KEY] = allc
+        else:
+            d.pop(_AT_CUSTOM_KEY, None)
+        _save_app_settings(d)
+        return True
+    except Exception:
+        return False
+
+
+def at_image_info(mode):
+    """取该模式**当前生效**的模型信息：**用户自定义优先** ✓，否则用官方钉的 ✓。
+
+    ⚠️ 所有需要 label / model_id / arch / 显存档位的地方都应走这里 ✓
+      （不要再直接 AT_IMAGE_MODELS.get ✗，否则自定义后各处行为会不一致 ✓）
+    """
+    base = dict(AT_IMAGE_MODELS.get(mode) or {})
+    if not base:
+        return base
+    for k, v in at_image_custom_get(mode).items():
+        if v not in (None, ""):
+            base[k] = v
+    return base
 
 
 def _at_image_download_complete(local):
@@ -5959,7 +6040,7 @@ def at_image_model_ready(mode):
     报 no config.json（D 盘用户 v0.10.12 复现）。本地不完整时重新 snapshot_download
     （会自动复用 HF 缓存文件，不重复下载 16GB）。
     """
-    info = AT_IMAGE_MODELS.get(mode)
+    info = at_image_info(mode)
     if not info:
         return False
     return _at_image_download_complete(at_image_local_dir(mode))
@@ -6183,13 +6264,20 @@ def _at_image_ms_download(mode, logf):
     每个文件 curl 断点续传（可手动停止/中断后续传）；已存在的完整文件跳过。
     返回 True=下载完整（at_image_model_ready 通过）；False=失败（调用方回退在线加载）。
     """
-    info = AT_IMAGE_MODELS.get(mode)
+    info = at_image_info(mode)
     if not info:
         return False
-    repo = AT_IMAGE_MS_REPOS.get(mode)
+    # ★ 2026-09-22：自定义模型时，**魔搭仓库名与 HF 同名** ✓
+    #   （见 AT_IMAGE_MS_REPOS 上方的注释：Z-Image / Qwen-Image-2512 都是同名 ✓）
+    #   例：自定义成 `Qwen/Qwen-Image-2.1` → modelscope.cn/models/Qwen/Qwen-Image-2.1 ✓
+    _custom_repo = at_image_custom_get(mode).get("model_id")
+    repo = _custom_repo or AT_IMAGE_MS_REPOS.get(mode)
     if not repo:
         logf(f"[{info['label']}] 魔搭仓库未配置，无法直连下载")
         return False
+    if _custom_repo:
+        logf(f"[{info['label']}] 自定义模型：按魔搭同名仓库 {repo} 下载"
+             f"（魔搭若没有这个仓库，会回退到训练时在线加载）")
     files = _at_image_ms_file_list(repo)
     if not files:
         logf(f"[{info['label']}] 魔搭文件清单获取失败，稍后重试或手动下载")
@@ -6706,7 +6794,7 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
     _check_at_train_driver(logf)
-    info = AT_IMAGE_MODELS.get(mode)
+    info = at_image_info(mode)
     if not info:
         raise RuntimeError(f"未知模式: {mode}")
     ok, detail, vpy = ai_toolkit_engine_status()
@@ -8035,7 +8123,7 @@ AMD_GFX103X_TORCH_WHEELS = [
     AMD_GFX103X_MS_BASE + "/torchvision-0.24.0%2Brocmsdk20251207-cp312-cp312-win_amd64.whl",
 ]
 
-AMD_TRAIN_DEPS = "transformers==4.54.1 diffusers==0.32.1 accelerate safetensors omegaconf numpy pillow av opencv-python einops sentencepiece toml voluptuous imagesize rich ftfy"
+AMD_TRAIN_DEPS = "transformers==4.54.1 diffusers==0.32.1 accelerate==1.6.0 safetensors omegaconf numpy pillow av opencv-python einops sentencepiece toml voluptuous imagesize rich ftfy"
 
 
 def _venv_python_ok(vpy):
@@ -8450,17 +8538,24 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
     if not need_install:
         # 版本兼容：kohya sd-scripts 需要 transformers 4.x / diffusers 0.32.x；
         # 5.x / 0.39 改了 CLIP 文本编码器结构，加载 SD1.5 底模会报 state_dict key 不匹配
+        # ★ 2026-09-22 补 accelerate：kohya 官方 requirements 钉的是 **1.6.0** ✓
+        #   而它原来**没进校验** ✗ → 装了过新的版本（如 1.15）也照样判定"没问题" ✗ →
+        #   直到训练时才崩：`Default process group has not been initialized` ✗
+        #   （用户日志 RTX 4090 / KohyaLoRA_项目_0922_1632 ✓）
+        #   ⚠️ 版本口径要与上面 `pkgs` 及 FIZGIG_SHARED_DEPS 保持一致 ✓（改一处就三处一起改 ✓）
         vcode = ("from importlib.metadata import version;import sys;"
                  "t=version('transformers').split('.');d=version('diffusers').split('.');"
+                 "a=version('accelerate').split('.');"
                  "s=version('scipy').split('+')[0];n=version('numpy').split('+')[0];"
                  "pair_ok=n=='2.1.3' and s=='1.15.3';"
                  "from scipy.optimize import linear_sum_assignment;"
-                 "sys.exit(0 if t[0]=='4' and d[0]=='0' and d[1]=='32' and pair_ok else 1)")
+                 "sys.exit(0 if t[0]=='4' and d[0]=='0' and d[1]=='32'"
+                 " and a[:2]==['1','6'] and pair_ok else 1)")
         try:
             rv = subprocess.run([vpy, "-c", vcode], capture_output=True, text=True, timeout=60)
             need_install = rv.returncode != 0
             if need_install:
-                logf("[环境] 检测到 transformers/diffusers 或 NumPy/SciPy 版本不兼容，正在校正版本…")
+                logf("[环境] 检测到 transformers/diffusers/accelerate 或 NumPy/SciPy 版本不兼容，正在校正版本…")
         except Exception:
             need_install = True
     if not need_install:
@@ -8524,10 +8619,20 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
     # 只补缺、不追新（2026-09-12）：原命令带 --upgrade，会把**已装且可用**的包一起升到最新 ——
     # 用户 huaf 日志实测：opencv-python 4.10→5.0、safetensors 0.4.5→0.8、huggingface-hub 0.34.3→1.31，
     # 为修 numpy/scipy 却 churn 整个环境，风险远大于收益（opencv 5.0 / hf-hub 1.x 都属大版本跳变）。
-    # 现在：① 钉住两个会大版本跳变、且别处已验过的包；② **去掉 --upgrade**，已满足的直接跳过。
+    # 现在：① 钉住会大版本跳变、且别处已验过的包；② **去掉 --upgrade**，已满足的直接跳过。
     # 注意：显式 == 仍会纠正错误版本（例如 transformers 5.x → 4.54.1、transformers/diffusers 版本校验）。
+    #
+    # ★ 2026-09-22 补漏：`accelerate` 原来**没钉版本** ✗ → pip 会装成**最新** ✗
+    #   用户日志（RTX 4090，KohyaLoRA_项目_0922_1632）实测崩在：
+    #     accelerate/state.py  →  self.num_processes = torch.distributed.get_world_size()
+    #     torch/distributed/distributed_c10d.py  →  raise ValueError(
+    #       "Default process group has not been initialized, please make sure to call init_process_group.")
+    #   = 新版 accelerate 在**单卡**下也去问分布式世界大小 ✗ → 进程组没初始化 → 直接崩 ✗
+    #   ★ kohya 官方 requirements.txt 明确钉的是 **accelerate==1.6.0** ✓
+    #     （本工具的**第四引擎** FIZGIG_SHARED_DEPS 早就钉 1.6.0 ✓ —— 只有第一引擎/AMD 漏了 ✗）
+    #   → 这里补齐，与官方及第四引擎保持一致 ✓
     pkgs = ["transformers==4.54.1", "huggingface-hub==0.34.3", "toml", "voluptuous", "safetensors",
-            "diffusers==0.32.1", "accelerate", "omegaconf", "imagesize", "rich", "ftfy",
+            "diffusers==0.32.1", "accelerate==1.6.0", "omegaconf", "imagesize", "rich", "ftfy",
             "lion-pytorch", "schedulefree", "pytorch-optimizer",
             "prodigy-plus-schedule-free", "prodigyopt", "einops", "opencv-python==4.10.0.84",
             "sentencepiece",
@@ -11316,6 +11421,39 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     # Anima：后台扫描 latent 缓存，第一步 loss=nan 时定位是哪些图（只提示不自动停止）
     if family == "anima":
         _start_anima_latent_nan_watcher(dataset_dir, vpy, logf)
+    # ★ 2026-09-22：**系统内存**预警 —— 训练"无声消失"的另一大原因 ✗
+    #   本机日志（KohyaLoRA_Mhcc_20260922，RTX 4070 Laptop 8G + 15.7G 内存 + blocks_to_swap=16）：
+    #   训练跑到 896/1600、181/1600 步时**无声退出** ✗ —— 日志通篇只有 tqdm，
+    #   **连一句报错都没有** ✗，界面只显示「退出码 1」✗
+    #   ⚠️ 显存不够通常还留下 OOM 报错 ✓；但**系统内存 / 页面文件被撑满时，
+    #     Windows 是直接结束进程** ✗ —— 表现就是"跑着跑着突然没了"✗
+    #   而「块交换」正是把模型块**换到内存里** ✓ → 换出越多越吃系统内存 ✓
+    #   ⚠️ 这里**只警告、不改参数** ✓（不静默动用户设置 —— 这是反复踩到的教训 ✓）
+    #   ⚠️ 换出块数**直接读上面拼好的 cmd** ✓ —— 第一引擎的 `--blocks_to_swap` 是
+    #     **工具按显存自动决定**的（见上面 cmd 拼装处）✗ 它**不读用户的「块交换数」设置** ✗
+    #     （即：第一引擎下那个控件填了是没用的 ✗ —— 这也正是 core.PARAM_SCOPE 的登记 ✓
+    #      最初这里写成「直接取用户设置的那个参数」，被 PARAM_SCOPE 的回归测试当场逮住 ✗✓
+    #      ⚠️ 注：那个测试是**文本匹配**的 ✗ —— 注释里写出生代码片段同样会被算进去 ✓
+    #        所以这里刻意不把那段代码原样写出来 ✓）
+    #     直接读 cmd 还有个好处：**永远不会与真正执行的命令不一致** ✓
+    try:
+        _ram_now = detect_ram_gb()
+    except Exception:
+        _ram_now = None
+    _sw_now = 0
+    for _a in cmd:
+        if str(_a).startswith("--blocks_to_swap="):
+            try:
+                _sw_now = int(str(_a).split("=", 1)[1])
+            except Exception:
+                _sw_now = 0
+            break
+    if _ram_now is not None and _ram_now < 24 and _sw_now >= 8:
+        logf("[训练] ⚠ 系统内存仅 %.0fG，而「块交换」要换出 %d 块（换出的块是放在**内存**里的）——"
+             "内存被撑满时 Windows 会**直接结束训练进程** ✗" % (_ram_now, _sw_now))
+        logf("[训练]   那种情况界面上只看到「退出码 1」，日志里**不会有任何报错**（只有进度条）✗；"
+             "若真遇到「跑着跑着突然没了」：把「块交换数」调小（如 %d）或关掉「训练中采样预览」，"
+             "训练时可用 任务管理器→性能→内存 观察是否用满 ✓" % max(0, _sw_now // 2))
     # 训练中采样出图预览（kohya 引擎原生 --sample_every_n_steps + --sample_prompts；低显存只警告不硬关）
     if _sample_preview_enabled(params, vram_gb):
         _sp = _write_sample_prompts(output_name, params, mode, resolution=resolution,
@@ -12201,11 +12339,24 @@ def _anima_component_ok(kind, path):
                        "model.safetensors），或改用「📄 选文件」直接指定它的 model.safetensors。")
     if not _sf_here:
         return False, "这个文件夹里没有可用的权重文件（.safetensors / .bin）"
-    if _std_here or len(_sf_here) == 1:
-        return True, "就绪（按单文件模式加载，训练会用内置配置）"
-    return False, ("这个文件夹里有 %d 个模型文件，看起来不是 Qwen3 模型本身的目录 ✗\n"
-                   "请选 Qwen3-0.6B 的文件夹本身，或改用「📄 选文件」指定它的 model.safetensors。"
-                   % len(_sf_here))
+    # ★★ 2026-09-22 收紧（实测：这一支原来会**误判「就绪」** ✗）★★
+    #   用户日志（KohyaLoRA_项目_0922_2215_20260922，RTX 3060 Laptop）：
+    #     他指定了 `D:/moxin/wenben` —— 自建目录、里面放了个权重文件、**没有 config.json** ✗
+    #     → 原逻辑（`_std_here or len(_sf_here) == 1`）判「就绪（按单文件模式加载，
+    #       训练会用内置配置）」✗ → 于是**放行** ✗
+    #     → 训练时 `anima_utils.load_qwen3_tokenizer(<目录>)` →
+    #       `AutoTokenizer.from_pretrained(<目录>, local_files_only=True)` ✗
+    #       → `ValueError: Unrecognized model in D:/moxin/wenben. Should have a
+    #          'model_type' key in its config.json` ✗ —— **训练一步都没进去** ✓
+    #   → 结论：sd-scripts 对 `--qwen3=` 用的是**纯 HuggingFace 目录语义**（必须有 config.json）✗
+    #     那个「单文件模式」的假设**已被打破** ✗ → **目录没 config.json 一律不放行** ✓
+    #   （真要只给权重文件：走上面的**文件分支** ✓ —— 传的是文件路径、不是目录 ✓）
+    return False, ("这个文件夹里**没有 config.json** ✗ —— Anima 的文本编码器是按 HuggingFace "
+                   "模型目录加载的，**必须**有 config.json，而且里面的 model_type 要是 qwen3 ✗\n"
+                   "（少了它，训练时会直接报 “Unrecognized model … Should have a `model_type` "
+                   "key in its config.json”，一步都跑不起来）\n"
+                   "请选 **Qwen3-0.6B 模型本身的文件夹**，或改用「📄 选文件」"
+                   "直接指定它的 model.safetensors ✓")
 
 
 def anima_set_component(kind, path, logf=print):

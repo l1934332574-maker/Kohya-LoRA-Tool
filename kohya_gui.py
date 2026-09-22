@@ -1339,6 +1339,21 @@ class App:
                                             text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
                                             command=self.cmd_import_at_env)
         self.btn_at_import2.pack(side="left", padx=(4, 4))
+        # 「自定义模型」（2026-09-22）：训练别的 Qwen-Image（如 Qwen-Image-2.1）✓
+        #   背景：ai-toolkit 官方支持列表一直在加（Qwen-Image-2.1 / Edit 系列…✗），
+        #   而本工具把 model_id / arch 写死 ✗ → 用户想换版本**完全没入口** ✗
+        self.btn_at_custom = ctk.CTkButton(self.at_row, text="🔧 自定义模型", width=112, height=30,
+                                           fg_color=CARD2, hover_color="#343a46", border_width=1,
+                                           border_color=BORDER, text_color=TXT, corner_radius=6,
+                                           font=ui_font(FONT_BODY), command=self.cmd_at_custom_model)
+        self.btn_at_custom.pack(side="left", padx=(4, 4))
+        self._tip(self.btn_at_custom,
+                  "默认用的是工具钉好的官方模型（开箱即用 ✓）。\n"
+                  "想训练**别的 Qwen-Image**（例如官方新出的 Qwen-Image-2.1 ✓）时点这里：\n"
+                  "· 填 HuggingFace / 魔搭的**仓库名**（会自动下载，放独立目录、不覆盖官方模型 ✓）\n"
+                  "· 或直接指一个**本地模型目录**（跳过下载 ✓）\n"
+                  "· 还可改 ai-toolkit 的 arch（照官方文档填 ✓）\n\n"
+                  "⚠️ 换模型后显存档位要跟着改（工具按官方模型估的，可能不准 ✗）")
 
         # AMD 兼容模式（实验性）：仅 AMD 显卡显示
         self.amd_bar = ctk.CTkFrame(top, fg_color="transparent")
@@ -5789,12 +5804,15 @@ class App:
 
     def _refresh_at_status(self):
         try:
-            info = core.AT_IMAGE_MODELS.get(self.mode, {})
+            info = core.at_image_info(self.mode)
             # 秒级 marker 检查：不要在这里跑权威 import（ai_toolkit_engine_status 慢 10s+，
             # 会卡主线程；权威校验只在真正开始训练前做）。2026-09 用户反馈“点哪都卡”。
             ok_e = core._at_marker_ok()
             ok_m = core.at_image_model_ready(self.mode)
             label = info.get("label", "")
+            # ★ 2026-09-22：自定义模型时**明确标出来** ✓（否则用户以为还是官方那个 ✗）
+            if core.at_image_custom_get(self.mode):
+                label += "（自定义）"
             if not ok_e:
                 self.at_model_var.set(f"{label}：第三引擎未装（点⚙安装） · 模型：未下载")
             elif not ok_m:
@@ -5804,9 +5822,114 @@ class App:
         except Exception:
             pass
 
+    def cmd_at_custom_model(self):
+        """「🔧 自定义模型」：把第三引擎的底模换成别的（如 Qwen-Image-2.1）✓
+
+        ★ 2026-09-22（用户提出：「那想训练其他的 QwenImage 的模型呢，像最新出的 2.1，
+          我看 AI toolkit 官方已经支持了」）：
+          ai-toolkit 的支持列表一直在加（Qwen-Image-2.1 / Qwen-Image-Edit 系列 …✗），
+          而本工具把 model_id / arch 写死了 ✗ → 想训别的版本**完全没有入口** ✗
+        ⚠️ 默认仍是工具钉好的官方模型 ✓ —— 没设置过的人**感觉不到任何变化** ✓
+        """
+        mode = self.mode if self.mode in ("qwen_image", "zimage") else "qwen_image"
+        info = core.at_image_info(mode)
+        cur = core.at_image_custom_get(mode)
+        label = info.get("label", mode)
+        w = ctk.CTkToplevel(self.root)
+        w.title("自定义模型 —— %s" % label)
+        w.geometry("720x600")
+        w.resizable(True, True)
+        w.transient(self.root)
+        body = ctk.CTkFrame(w, fg_color=BG)
+        body.pack(fill="both", expand=True, padx=18, pady=16)
+        ctk.CTkLabel(body, text="当前模式：%s" % label, font=ui_font(FONT_TITLE),
+                     text_color=TXT, anchor="w").pack(fill="x")
+        ctk.CTkLabel(body,
+                     text=("默认（不填）= 用工具钉好的官方模型 ✓，开箱即用。\n"
+                           "想训练**别的版本**时，填它的仓库名或本地目录 ✓"),
+                     font=ui_font(FONT_HINT), text_color=HINT, justify="left",
+                     anchor="w").pack(fill="x", pady=(4, 10))
+
+        def _field(title, hint, default=""):
+            ctk.CTkLabel(body, text=title, font=ui_font(FONT_BODY), text_color=TXT,
+                         anchor="w").pack(fill="x", pady=(8, 2))
+            e = ctk.CTkEntry(body, height=32, fg_color=CARD2, border_color=BORDER,
+                             text_color=TXT, font=ui_font(FONT_BODY))
+            e.pack(fill="x")
+            if default:
+                e.insert(0, default)
+            ctk.CTkLabel(body, text=hint, font=ui_font(FONT_HINT), text_color=HINT,
+                         justify="left", anchor="w", wraplength=660).pack(fill="x", pady=(2, 0))
+            return e
+
+        ent_model = _field(
+            "① 模型：仓库名 或 本地目录",
+            "· 仓库名：例 Qwen/Qwen-Image-2.1 ✓ 会从魔搭/HF 下载（放独立目录，**不覆盖**官方模型 ✓）\n"
+            "· 本地目录：例 D:\\models\\Qwen-Image-2.1 ✓ 直接用它、跳过下载\n"
+            "  （该目录要含 model_index.json，且 transformer/ 与 text_encoder/ 下有 config.json）",
+            cur.get("model_id") or cur.get("local_dir") or "")
+        ent_arch = _field(
+            "② 架构 arch（照 ai-toolkit 官方文档填）",
+            "默认：%s\n⚠️ 填错会加载失败；不确定就留空用默认 ✓" % info.get("arch", ""),
+            cur.get("arch") or "")
+        ctk.CTkLabel(body, text="③ 显存档位（GB，可留空用默认）",
+                     font=ui_font(FONT_BODY), text_color=TXT, anchor="w").pack(fill="x", pady=(10, 2))
+        row3 = ctk.CTkFrame(body, fg_color="transparent")
+        row3.pack(fill="x")
+        ents = {}
+        for _k, _t in (("min_vram", "最低"), ("rec_vram", "推荐"), ("resident_vram", "常驻")):
+            ctk.CTkLabel(row3, text=_t, font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(0, 4))
+            _e = ctk.CTkEntry(row3, width=64, height=30, fg_color=CARD2, border_color=BORDER,
+                              text_color=TXT, font=ui_font(FONT_HINT))
+            _e.pack(side="left", padx=(0, 14))
+            if cur.get(_k):
+                _e.insert(0, str(cur[_k]))
+            ents[_k] = _e
+        ctk.CTkLabel(body, text="（工具按官方模型估的；换模型后请按新模型改 ✓ 留空则沿用默认）",
+                     font=ui_font(FONT_HINT), text_color=HINT, anchor="w",
+                     justify="left", wraplength=660).pack(fill="x", pady=(2, 0))
+
+        def _save():
+            v = ent_model.get().strip()
+            d = {"arch": ent_arch.get().strip()}
+            if v:
+                # 看着像已存在的目录 → 当本地目录 ✓；否则当仓库名 ✓（自动判断，少一个字段）
+                if os.path.isdir(v):
+                    d["local_dir"] = v
+                else:
+                    d["model_id"] = v
+            for _k, _e in ents.items():
+                _s = _e.get().strip()
+                if _s.isdigit():
+                    d[_k] = int(_s)
+            core.at_image_custom_set(mode, d)
+            self._log("[模型] 已保存自定义模型：%s%s"
+                      % (d.get("model_id") or d.get("local_dir") or "（清空=官方默认）",
+                         "（本地目录，跳过下载）" if d.get("local_dir") else ""))
+            self._refresh_at_status()
+            w.destroy()
+
+        def _reset():
+            core.at_image_custom_set(mode, {})
+            self._log("[模型] 已恢复官方默认模型：%s"
+                      % (core.AT_IMAGE_MODELS.get(mode, {}).get("model_id", "")))
+            self._refresh_at_status()
+            w.destroy()
+
+        brow = ctk.CTkFrame(body, fg_color="transparent")
+        brow.pack(fill="x", pady=(16, 0))
+        ctk.CTkButton(brow, text="保存", width=96, height=34, fg_color=ACC, hover_color=ACC_H,
+                      text_color="#0b0d12", font=ui_font(FONT_BODY), command=_save).pack(side="left")
+        ctk.CTkButton(brow, text="↩ 恢复默认", width=112, height=34, fg_color=CARD2,
+                      hover_color="#343a46", border_width=1, border_color=BORDER, text_color=TXT,
+                      font=ui_font(FONT_BODY), command=_reset).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(brow, text="取消", width=80, height=34, fg_color="transparent",
+                      hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
+                      font=ui_font(FONT_BODY), command=w.destroy).pack(side="left", padx=(8, 0))
+
     def cmd_at_model_help(self):
         """Qwen-Image / Z-Image 模型与显存说明弹窗。"""
-        info = core.AT_IMAGE_MODELS.get(self.mode, {})
+        info = core.at_image_info(self.mode)
         d = core.data_sub("models")  # 说明弹窗用
         msg = (
             f"📖 {info.get('label', '')} 说明\n\n"
@@ -6854,7 +6977,7 @@ class App:
             need = 24
             label = "MiniMax H3 视频（33.1B）"
         elif params.get("mode") in ("qwen_image", "zimage"):
-            info = core.AT_IMAGE_MODELS.get(params["mode"], {})
+            info = core.at_image_info(params["mode"])
             need = info.get("min_vram", 16)
             label = info.get("label", params["mode"])
         elif params.get("mode") == "krea2_fz":
@@ -6982,7 +7105,9 @@ class App:
                 f"Trigger     : {params['trigger'] or '（未填写）'}"
             )
         elif params.get("mode") in ("qwen_image", "zimage"):
-            _info = core.AT_IMAGE_MODELS.get(params["mode"], {})
+            # ★ 2026-09-22：走 at_image_info ✓ —— 这样训练前的确认弹窗会显示
+            #   **实际要用的那个模型**（含用户自定义的 ✓），而不是官方默认的 ✗
+            _info = core.at_image_info(params["mode"])
             msg = (
                 "即将开始 " + (_info.get("label", "") if _info else "") + " 训练，请确认以下参数：\n\n"
                 f"模式        : {core.MODE_LABELS.get(params['mode'], params['mode'])}\n"
@@ -7730,6 +7855,15 @@ class App:
             "A：人物至少 15 张、画风至少 20 张（过滤后），不够会提示补图。\n\n"
             "Q：训练中断了？\n"
             "A：软件自动检测断点，下次训练会问你是否续训。\n\n"
+            "Q：训练跑着跑着突然结束，日志里只有进度条、没有任何报错？\n"
+            "A：这通常不是程序出错，而是进程被系统结束了 —— 最常见是「系统内存被撑满」\n"
+            "   （块交换会把模型块放到内存里，8G 显存档尤其吃内存）。可以：\n"
+            "   · 把「块交换数」调小一些，或关掉「训练中采样预览」\n"
+            "   · 训练时用 任务管理器 → 性能 → 内存，看是否被用满\n"
+            "   显存不足、杀毒软件拦截也会造成同样现象（把训练环境目录加进白名单）。\n\n"
+            "Q：日志里出现「A matching Triton is not available」或「No module named 'triton'」？\n"
+            "A：那是可选加速组件（供 torch.compile 使用）的提示，不影响训练，可以忽略。\n"
+            "   只有勾选了「torch.compile 加速」才需要它，那时工具会自动安装。\n\n"
             "Q：底模在哪下载？\n"
             "A：点顶部「没有模型？点这里下载」，选「应用内下载」或浏览器下载。\n\n"
             "Q：LoRA 怎么用？\n"

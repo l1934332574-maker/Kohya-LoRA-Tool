@@ -1,4 +1,102 @@
-﻿## v0.17.12（2026-09-22）
+﻿## v0.17.14（2026-09-22）
+
+### 新增★：第三引擎「自定义模型」—— 现在能训练官方更新的 Qwen-Image 了
+
+- **用户提出**（原话）：「那想训练其他的 QwenImage 的模型呢，像最新出的 2.1，
+  我看 AI toolkit 官方已经支持了」
+- **问题**：ai-toolkit 的支持列表**一直在加**（Qwen-Image-2.1、Qwen-Image-Edit 系列…✗），
+  而本工具把 `model_id` / `arch` **写死**在 `AT_IMAGE_MODELS` 里 ✗
+  → 想训别的版本**完全没有入口** ✗
+- **做法**：第三引擎区新增 **「🔧 自定义模型」** 按钮 ✓
+  · **模型**：填 HuggingFace / 魔搭的**仓库名**（如 `Qwen/Qwen-Image-2.1` ✓ 自动下载）
+    或直接填**本地模型目录**（跳过下载 ✓，需含 `model_index.json`）
+  · **架构 arch**：照 ai-toolkit 官方文档填（不确定可留空用默认 ✓）
+  · **显存档位**（最低 / 推荐 / 常驻）：可按新模型改 ✓
+- ⚠️ **默认行为完全不变** ✗ —— 没设置过的人**感觉不到任何变化** ✓
+  打开的仍是官方钉好的 `Qwen/Qwen-Image-2512` ✓
+- ★ **已下载的模型不会被白重下** ✗：只有自定义时才启用**独立目录**
+  （`models/at_image/qwen_image__<模型名>` ✓），不覆盖官方那份 34~40G ✓
+- **状态行会标出「（自定义）」** ✓；训练前的参数确认弹窗也显示**实际要用的模型** ✓
+- **「↩ 恢复默认」一键还原** ✓
+
+### 顺带：7 处「模型信息读取」统一成一个入口
+
+原先 `AT_IMAGE_MODELS.get(mode)` 散落在 **7 处** ✗（4 处后端 + 3 处界面）——
+加自定义后**极易漏改某一处** ✗（本轮就漏了一次，被静态检查「用了但看不见的名字」当场抓住 ✓）
+→ 现在统一走 `at_image_info(mode)` ✓（**用户自定义优先**，否则用官方值 ✓）
+
+### 新增测试
+
+- `AT_IMAGE_CUSTOM_MODEL_OK` —— 判据里**最重要的一条是「默认值不许变」** ✓：
+  没设置过时 info 与本地目录必须与以前**完全一致** ✓
+  （否则已下好的 34~40G 会被判成"未下载"→ 用户白重下 ✗）
+  另含：自定义生效 ✓ / 独立目录 ✓ / 本地目录跳过下载 ✓ / 恢复默认 ✓ /
+  **不破坏 app_settings 的其它键** ✓ / 两个模式互不干扰 ✓
+
+### 验证
+
+- 冒烟 **✔ 全部通过** ✓ 引擎套件 **ALL_ENGINE_CONTROL_FLOW_TESTS_OK** ✓ 静态检查 0 错误 ✓
+- **真机实测**：默认 / 自定义仓库名 / 自定义本地目录 / 恢复默认 / 双模式隔离 —— 全部符合 ✓
+  例：默认 `Qwen/Qwen-Image-2512` ✓；自定义后 `Qwen/Qwen-Image-2.1` + 独立目录
+  `qwen_image__Qwen_Qwen-Image-2.1` ✓，官方目录保持不动 ✓
+- **GUI 真机**：按钮就位 ✓ 弹窗可打开 ✓ 状态行正确标注「（自定义）」✓
+
+---
+
+## v0.17.13（2026-09-22）
+
+> ⚠️ 本版**没有单独发布**（打包时 `Setup.exe` 被占用/杀软锁住 ✗）——
+> 改动已包含在 **v0.17.14** 的安装包里一起发出 ✓
+
+### 修复★：第一引擎的 `accelerate` 没钉版本 —— 装成最新版后训练一启动就崩
+
+- **用户反馈**（RTX 4090，日志 KohyaLoRA_项目_0922_1632）：训练一启动就失败，
+  界面只显示「退出码 1，请查看上方日志」，真正的错在最底下 ✓
+- **真因**（日志末尾）：
+  ```
+  accelerate/state.py:304   →  self.num_processes = torch.distributed.get_world_size()
+  torch/distributed/distributed_c10d.py:1298
+  ValueError: Default process group has not been initialized,
+              please make sure to call init_process_group.
+  ```
+  = **新版 accelerate 在单卡下也去问"分布式世界大小"** ✗ → 而进程组根本没初始化 ✗ → 直接崩 ✓
+- **根因（工具侧）**：`accelerate` 在**第一引擎 / AMD** 的依赖清单里是**裸写的** ✗
+  → pip 会装**最新版** ✗（实测有环境的 accelerate 是 1.15.0 ✗）
+  而 kohya 官方 `requirements.txt` **明确钉的是 `accelerate==1.6.0`** ✓
+  ⚠️ 本工具的**第四引擎** `FIZGIG_SHARED_DEPS` **早就钉了 1.6.0** ✓ —— **只有第一引擎和 AMD 漏了** ✗
+  而且版本校验 `vcode` 只查 `transformers` / `diffusers` ✗
+  → **accelerate 再新也不会被纠正** ✗ → 于是长期潜伏，直到新版行为变了才爆 ✗
+- **修复**：
+  · 第一引擎 `pkgs`：`"accelerate"` → **`"accelerate==1.6.0"`** ✓
+  · `AMD_TRAIN_DEPS`：同样钉版本 ✓
+  · 版本校验 `vcode` **加入 accelerate** ✓ —— 这样**已经装了新版的环境**，
+    重跑【② 安装训练内核】时会**自动纠正**到 1.6.0 ✓
+    （该命令不带 `--upgrade`，但显式 `==` 不匹配照样会重装 ✓）
+
+### 一个必须记下的教训
+
+v0.17.11 那次误伤（AMD 环境被误判为坏）**本来可以避免** ✗ ——
+代码里 **2026-09-15 就有注释**写着：
+
+```
+#   2) torch.distributed.tensor 直接 import 不了（缺 torch._C._distributed_c10d 扩展）
+#      → accelerate 在 accelerator.prepare() 里 from torch.distributed.tensor import DTensor
+#        抛 ModuleNotFoundError: ... 'torch._C' is not a package
+#        （2026-09-15 RX 9070 XT + ROCm 7.2.1 反馈）
+```
+
+**即"AMD ROCm 版 torch 缺这个扩展"是已知、且已打补丁的情况** ✓（`_AMD_DIST_PATCH` ✓）
+→ 教训：**加"拦截式检查"之前，要先搜一遍代码里对这个现象的既有说明** ✗
+（v0.17.12 已把该判断降为"仅警告" ✓ 本段记录在此，防止再犯 ✓）
+
+### 验证
+
+- 冒烟 **✔ 全部通过** ✓ 静态检查 0 错误 ✓
+- 已核对 kohya 官方 `requirements.txt`：`accelerate==1.6.0` ✓（与本工具第四引擎口径一致 ✓）
+
+---
+
+## v0.17.12（2026-09-22）
 
 ### 修复★★：**v0.17.11 误伤了正常用户** —— AMD 环境被误判「验证失败」，卡在安装界面
 

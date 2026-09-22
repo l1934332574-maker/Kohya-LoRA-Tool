@@ -364,7 +364,44 @@ def run_stream(cmd, cwd=None, env=None, logf=print, collect=None):
     # 读取线程是 daemon：等管道真正 EOF 时它会自己读完并退出，无需我们插手。
     if _STOP_EVENT.is_set():
         raise StopRequested("任务已手动停止")
-    return proc.returncode
+    _rc = proc.returncode
+    if _rc not in (0, None) and logf:
+        for _ln in diagnose_child_exit(_rc):
+            logf(_ln)
+    return _rc
+
+
+def diagnose_child_exit(rc):
+    """子进程异常退出时，给**能照着查**的方向（返回要打印的行）。
+
+    ★ 2026-09-22（本机日志 KohyaLoRA_Mhcc_20260922，RTX 4070 Laptop 8G）：
+      训练跑到 **896/1600** 步、以及 **181/1600** 步时**无声消失** ✗ ——
+      日志里全是 tqdm 进度条，**没有任何 traceback** ✗，界面只显示「退出码 1」✗
+      这种「没有报错就没了」几乎不是代码错 ✗，而是**进程被外部干掉** ✓：
+      最典型的是 **系统内存被撑满**（Windows 会直接杀进程 ✓，
+      训练时 `blocks_to_swap` 会把模型块换到内存，8G 显存档尤其吃内存 ✗），
+      其次是显存爆、杀软拦截、显卡驱动重置 ✓
+      → 以前工具**一个字都不补** ✗ → 用户只能来问「为什么我本地跑都报错」✗
+      ⚠️ 只印 3 行 ✓：这条对所有非零退出的子进程都生效（pip/git 也一样 ✓），
+        不能刷屏 ✗；且措辞要能兼容「上面确实有报错」的情况 ✓
+    """
+    _lines = ["[诊断] 子进程退出码 %s（非 0）" % rc]
+    _u = (rc & 0xFFFFFFFF) if isinstance(rc, int) and rc < 0 else rc
+    if isinstance(rc, int) and rc < 0:
+        _lines.append("[诊断] 退出码为负数 = 进程被**信号强制终止**（不是 Python 抛异常，所以没有 traceback）")
+    _known = {
+        0xC0000005: "0xC0000005 = 访问冲突：常见于显卡驱动异常 / 显存或内存不足 / 杀软拦截",
+        0xC0000409: "0xC0000409 = 进程被强制终止：常见于**系统内存不足**（换页文件被撑满）",
+        0xC0000017: "0xC0000017 = 内存 / 页面文件不足",
+        0xC0000135: "0xC0000135 = 缺少 DLL（缺运行库或环境不完整）",
+        0xC0000142: "0xC0000142 = DLL 初始化失败（多为 VC++ 运行库版本过低）",
+    }
+    if _u in _known:
+        _lines.append("[诊断] " + _known[_u])
+    _lines.append("[诊断] 若上方**没有明确报错**（只有进度条）→ 多为进程被外部终止，"
+                  "按顺序查：① 系统内存是否被撑满（任务管理器→性能→内存）"
+                  "② 显存是否爆 ③ 杀软把训练环境目录加白名单 ④ 显卡驱动是否重置")
+    return _lines
 
 def _download(url, dest, logf=print):
     """带进度地下载文件。"""

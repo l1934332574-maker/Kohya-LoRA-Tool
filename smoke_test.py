@@ -2099,15 +2099,34 @@ def test_anima_qwen3_pick_guards():
         assert os.path.normcase(_rp or "") == os.path.normcase(okd), \
             "运行时没用指定的路径（得到 %s）" % _rp
 
-        # ②b 官方支持的单文件模式：只有一个 model.safetensors（无 config）→ 必须通过
-        #     （sd-scripts 会用内置配置加载它，这条路不能误伤 ✗）
+        # ②b ⚠️ 2026-09-22 **改口径**：**目录**里没有 config.json → **必须拒** ✗
+        #     原来这里断言"必须通过"，理由是「sd-scripts 会用内置配置加载它」✗ ——
+        #     但用户日志（KohyaLoRA_项目_0922_2215_20260922，RTX 3060 Laptop）**证伪了它** ✗：
+        #        `--qwen3=D:/moxin/wenben`（自建目录、无 config.json）
+        #          → anima_utils.load_qwen3_tokenizer(路径)
+        #          → AutoTokenizer.from_pretrained(路径, local_files_only=True) ✗
+        #          → ValueError: Unrecognized model in D:/moxin/wenben.
+        #             Should have a `model_type` key in its config.json ✗
+        #        —— 训练**一步都没进去** ✓
+        #     即：`--qwen3=` 对**目录**用的是**纯 HuggingFace 目录语义** ✗
+        #        「单文件模式 = 传目录也行」的假设**不成立** ✗
+        #     → 宁可**选的时候就说清楚** ✓，也不要拖到训练才炸 ✗
+        #       （真要只给权重文件：请选**文件**，见 ②c ✓）
         _only = os.path.join(tmp, "only", "qwen3_weights")
         os.makedirs(_only, exist_ok=True)
         with open(os.path.join(_only, "model.safetensors"), "wb") as f:
             f.write(b"0" * (2 * 1024 * 1024))
         _clear_manual()
-        assert core.anima_set_component("qwen3", _only)[0], \
-            "单文件模式（只有 model.safetensors）被误拒 ✗"
+        _ok_only, _why_only = core.anima_set_component("qwen3", _only)
+        assert not _ok_only, \
+            "无 config.json 的目录竟被判「就绪」✗ —— 训练到这一步必炸（本次修复点）"
+        assert "config.json" in _why_only, \
+            "拒绝时必须讲清是缺 config.json ✗：%s" % _why_only
+
+        # ②c 但**直接选权重文件**（文件路径）这条路必须仍然可用 ✓（别收紧过头 ✗）
+        assert core.anima_set_component(
+            "qwen3", os.path.join(_only, "model.safetensors"))[0], \
+            "「选文件」这条路被误伤 ✗ —— 收紧不能连它一起砍掉"
 
         # ③ 指定后失效 → 必须明确说明（不得静默回落）
         #    ⚠️ 要删**当前指定的那个**（②b 已把指定换成 _only）✗ 删错目录会测不出问题
@@ -2416,6 +2435,85 @@ def test_fizgig_clamp_resolution_only_for_int8():
     print("FIZGIG_CLAMP_ONLY_INT8_OK")
 
 
+def test_at_image_custom_model():
+    """第三引擎「自定义模型」：默认不变、自定义生效、能恢复、不覆盖官方模型、不破坏其它设置。
+
+    ★ 2026-09-22 用户提出（原话）：
+      「那想训练其他的 QwenImage 的模型呢，像最新出的 2.1，我看 AI toolkit 官方已经支持了」
+      → ai-toolkit 的支持列表一直在加（Qwen-Image-2.1 / Qwen-Image-Edit 系列 …✗），
+        而工具把 model_id / arch 写死在 AT_IMAGE_MODELS 里 ✗ → 用户**完全没有入口** ✗
+
+    判据（**第 ① 条最重要** ✗）：
+      ① 没设置过时，info 与本地目录**必须与以前完全一致** ✓
+         （否则已下好的 34~40G 会被判成"未下载"→ 用户白重下 ✗）
+      ② 自定义 model_id → info 被覆盖 ✓ 且用**独立目录** ✓（不覆盖官方那份 ✓）
+      ③ 自定义本地目录 → 直接用它（跳过下载 ✓）
+      ④ 恢复默认 → 一切回到官方 ✓
+      ⑤ 读-改-写：**不许破坏 app_settings 里的其它键** ✗
+      ⑥ 两个模式（qwen_image / zimage）互不干扰 ✓
+    """
+    import Kohya一键工具 as core      # noqa: E402
+    import shutil as _sh
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="atcustom_")
+    _orig = core._settings_path
+    core._settings_path = lambda: os.path.join(tmp, "settings.json")   # 隔离，别动真实配置 ✓
+    try:
+        M = "qwen_image"
+        # ① 默认必须与以前一致
+        i0 = core.at_image_info(M)
+        d0 = core.at_image_local_dir(M)
+        assert i0.get("model_id") == core.AT_IMAGE_MODELS[M]["model_id"], \
+            "没设置过时 model_id 被改动了 ✗（会让已下载的模型判定失效）"
+        assert os.path.basename(d0) == M, \
+            "没设置过时本地目录变了 ✗（%s）—— 已下好的模型会被判成未下载、白重下" % d0
+
+        # ② 自定义仓库名
+        core.at_image_custom_set(M, {"model_id": "Qwen/Qwen-Image-2.1", "arch": "qwen_image",
+                                     "min_vram": 12, "rec_vram": 16, "resident_vram": 20})
+        i1 = core.at_image_info(M)
+        d1 = core.at_image_local_dir(M)
+        assert i1.get("model_id") == "Qwen/Qwen-Image-2.1" and i1.get("arch") == "qwen_image", \
+            "自定义 model_id / arch 没生效 ✗：%s" % {k: i1.get(k) for k in ("model_id", "arch")}
+        assert i1.get("min_vram") == 12, "自定义显存档位没生效 ✗"
+        assert d1 != d0, "自定义后仍用官方目录 ✗ —— 会把官方那份 40G 覆盖掉"
+
+        # ③ 自定义本地目录
+        loc = os.path.join(tmp, "my_model")
+        os.makedirs(loc)
+        core.at_image_custom_set(M, {"local_dir": loc})
+        assert core.at_image_local_dir(M) == loc, "指定本地目录后没用它 ✗（会白下一遍）"
+        assert core.at_image_info(M).get("model_id") == core.AT_IMAGE_MODELS[M]["model_id"], \
+            "只指定了本地目录时，model_id 应回落官方 ✗"
+
+        # ④ 恢复默认
+        core.at_image_custom_set(M, {})
+        assert core.at_image_info(M).get("model_id") == i0.get("model_id"), "恢复默认后 model_id 没回来 ✗"
+        assert core.at_image_local_dir(M) == d0, "恢复默认后本地目录没回来 ✗"
+        assert core.at_image_custom_get(M) == {}, "恢复默认后自定义设置没清空 ✗"
+
+        # ⑤ 不能破坏 app_settings 的其它键
+        core._save_app_settings({"some_other_key": 123})
+        core.at_image_custom_set(M, {"model_id": "Qwen/Qwen-Image-2.1"})
+        _s = core._load_app_settings()
+        assert _s.get("some_other_key") == 123, \
+            "写自定义模型把别的设置弄丢了 ✗（读-改-写 没做对）"
+
+        # ⑥ 两个模式互不干扰
+        core.at_image_custom_set("zimage", {"model_id": "Tongyi-MAI/Z-Image-Turbo"})
+        assert core.at_image_info("qwen_image").get("model_id") == "Qwen/Qwen-Image-2.1", \
+            "改 zimage 影响到了 qwen_image ✗"
+        assert core.at_image_info("zimage").get("model_id") == "Tongyi-MAI/Z-Image-Turbo", \
+            "zimage 的自定义没生效 ✗"
+        # 清掉 zimage 的自定义，避免影响同进程内其它用例
+        core.at_image_custom_set("zimage", {})
+    finally:
+        core._settings_path = _orig
+        _sh.rmtree(tmp, ignore_errors=True)
+    print("AT_IMAGE_CUSTOM_MODEL_OK")
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -2444,6 +2542,7 @@ def main():
     check("改过的标签能通过「重新处理」生效", test_preprocess_overwrite_picks_up_changed_captions)
     check("环境自检能抓到「包装不全」", test_env_selftest_catches_broken_env)
     check("Fizgig 分辨率钳制只对 int8 生效", test_fizgig_clamp_resolution_only_for_int8)
+    check("第三引擎可自定义模型（默认不变+能恢复）", test_at_image_custom_model)
     check("选了新打标模型就不能偷偷用旧模型", test_wd14_respects_selected_model)
     check("Anima 指定 Qwen3：选错要拦、能恢复默认、失效要说", test_anima_qwen3_pick_guards)
     check("Fizgig 采样间隔按「轮」算（填 10 = 每 10 轮）", test_fizgig_sample_interval_is_epochs)
