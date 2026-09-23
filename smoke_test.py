@@ -14,6 +14,7 @@ import io
 import os
 import sys
 import traceback
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
@@ -96,6 +97,11 @@ def test_at_image_models():
         for k in ("label", "arch", "model_id", "min_vram", "rec_vram", "size", "hint"):
             if k not in info:
                 raise AssertionError("AT_IMAGE_MODELS[%s] 缺 %s" % (mode, k))
+    qwen = {c["model_id"]: c for c in core.at_image_model_choices("qwen_image")}
+    if qwen.get("Qwen/Qwen-Image-2512", {}).get("arch") != "qwen_image":
+        raise AssertionError("Qwen-Image-2512 没映射到 qwen_image 架构")
+    if qwen.get("Qwen/Qwen-Image-2.1", {}).get("arch") != "qwen_image_2":
+        raise AssertionError("Qwen-Image-2.1 没映射到 qwen_image_2 架构")
 
 
 def test_download_models():
@@ -143,6 +149,16 @@ def test_yaml():
         d = yaml.safe_load(open(cfg, encoding="utf-8"))
         if d["config"]["process"][0]["model"]["arch"] != core.AT_IMAGE_MODELS[mode]["arch"]:
             raise AssertionError("%s yaml arch 不符" % mode)
+    qwen21 = next(c for c in core.at_image_model_choices("qwen_image")
+                  if c.get("model_id") == "Qwen/Qwen-Image-2.1")
+    cfg = os.path.join(tmp, "qwen21.yaml")
+    core.write_at_image_yaml(params, qwen21, vd, tmp, cfg, vram_gb=24)
+    d = yaml.safe_load(open(cfg, encoding="utf-8"))
+    p0 = d["config"]["process"][0]
+    if p0["model"].get("arch") != "qwen_image_2":
+        raise AssertionError("Qwen-Image-2.1 yaml arch 不符: %s" % p0["model"].get("arch"))
+    if p0["model"].get("name_or_path") != "Qwen/Qwen-Image-2.1":
+        raise AssertionError("Qwen-Image-2.1 yaml model_id 不符: %s" % p0["model"].get("name_or_path"))
     # Z-Image 8G 快跑档（2026-09-06）：分辨率钳到 512 + 关采样 + 量化 TE + weighted（官方 zimage 预设）
     cfg = os.path.join(tmp, "zimage_8g.yaml")
     core.write_at_image_yaml(dict(params, resolution="1024"), core.AT_IMAGE_MODELS["zimage"], vd, tmp, cfg, vram_gb=8)
@@ -2458,7 +2474,9 @@ def test_at_image_custom_model():
 
     tmp = _tf.mkdtemp(prefix="atcustom_")
     _orig = core._settings_path
+    _orig_data_sub = core.data_sub
     core._settings_path = lambda: os.path.join(tmp, "settings.json")   # 隔离，别动真实配置 ✓
+    core.data_sub = lambda *parts: os.path.join(tmp, *parts)  # 下载路径也隔离，避免真实缓存污染测试 ✓
     try:
         M = "qwen_image"
         # ① 默认必须与以前一致
@@ -2470,22 +2488,40 @@ def test_at_image_custom_model():
             "没设置过时本地目录变了 ✗（%s）—— 已下好的模型会被判成未下载、白重下" % d0
 
         # ② 自定义仓库名
-        core.at_image_custom_set(M, {"model_id": "Qwen/Qwen-Image-2.1", "arch": "qwen_image",
+        core.at_image_custom_set(M, {"model_id": "Qwen/Qwen-Image-2.1", "arch": "qwen_image_2",
                                      "min_vram": 12, "rec_vram": 16, "resident_vram": 20})
         i1 = core.at_image_info(M)
         d1 = core.at_image_local_dir(M)
-        assert i1.get("model_id") == "Qwen/Qwen-Image-2.1" and i1.get("arch") == "qwen_image", \
+        assert i1.get("model_id") == "Qwen/Qwen-Image-2.1" and i1.get("arch") == "qwen_image_2", \
             "自定义 model_id / arch 没生效 ✗：%s" % {k: i1.get(k) for k in ("model_id", "arch")}
         assert i1.get("min_vram") == 12, "自定义显存档位没生效 ✗"
         assert d1 != d0, "自定义后仍用官方目录 ✗ —— 会把官方那份 40G 覆盖掉"
+
+        # ②b Qwen-Image-2.1 下载器请求对应的 ModelScope 仓库，而不是默认 2512。
+        _urls = []
+        def _fake_download(url, dest, *_args, **_kwargs):
+            _urls.append(url)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            open(dest, "wb").write(b"metadata")
+            return True
+        with patch.object(core, "_at_image_ms_file_list", return_value=["model_index.json"]), \
+             patch.object(core, "_download_with_resume", side_effect=_fake_download), \
+             patch.object(core, "at_image_model_ready", return_value=True):
+            assert core._at_image_ms_download(M, lambda *_a: None), "Qwen-Image-2.1 下载器没完成"
+        assert _urls and "/models/Qwen/Qwen-Image-2.1/resolve/master/" in _urls[0], \
+            "Qwen-Image-2.1 下载器请求了错误仓库: %s" % _urls
 
         # ③ 自定义本地目录
         loc = os.path.join(tmp, "my_model")
         os.makedirs(loc)
         core.at_image_custom_set(M, {"local_dir": loc})
         assert core.at_image_local_dir(M) == loc, "指定本地目录后没用它 ✗（会白下一遍）"
-        assert core.at_image_info(M).get("model_id") == core.AT_IMAGE_MODELS[M]["model_id"], \
-            "只指定了本地目录时，model_id 应回落官方 ✗"
+        assert core.at_image_info(M).get("model_id") == loc, \
+            "未知架构的旧设置应显示本地路径，不要误显示默认底模"
+
+        core.at_image_custom_set(M, {"local_dir": loc, "arch": "qwen_image_2"})
+        assert core.at_image_info(M).get("model_id") == "Qwen/Qwen-Image-2.1", \
+            "旧版只存本地目录和架构时，应识别为 Qwen-Image-2.1"
 
         # ④ 恢复默认
         core.at_image_custom_set(M, {})
@@ -2510,6 +2546,7 @@ def test_at_image_custom_model():
         core.at_image_custom_set("zimage", {})
     finally:
         core._settings_path = _orig
+        core.data_sub = _orig_data_sub
         _sh.rmtree(tmp, ignore_errors=True)
     print("AT_IMAGE_CUSTOM_MODEL_OK")
 

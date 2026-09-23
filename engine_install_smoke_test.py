@@ -2418,6 +2418,11 @@ def test_at_image_pre_download(base: Path):
     def fake_ready(mode):
         return state["downloaded"]
 
+    def fake_custom_get(mode):
+        if mode == "qwen_image":
+            return {"model_id": "Qwen/Qwen-Image-2.1", "arch": "qwen_image_2"}
+        return {}
+
     def fake_ms_download(mode, logf=print):
         state["ms_call"] = mode
         state["downloaded"] = True
@@ -2438,6 +2443,7 @@ def test_at_image_pre_download(base: Path):
 
     patches = (
         patch.object(core, "data_sub", side_effect=lambda *p: str(base.joinpath(*p))),
+        patch.object(core, "at_image_custom_get", side_effect=fake_custom_get),
         patch.object(core, "at_image_model_ready", side_effect=fake_ready),
         patch.object(core, "_at_image_ms_download", side_effect=fake_ms_download),
         patch.object(core, "ai_toolkit_engine_status", side_effect=fake_status),
@@ -2450,13 +2456,100 @@ def test_at_image_pre_download(base: Path):
         patch.object(core, "_write_at_image_template", return_value=None),
         patch.object(core, "write_params_report", return_value=None),
     )
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10], patches[11]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10], patches[11], patches[12]:
         out = core.train_at_image(lambda _: None, mode="zimage", params={"project": "at_t1"})
-    assert state["ms_call"] == "zimage", "未触发魔搭底模预下载"
-    assert state["yaml_info"]["model_id"].replace("\\", "/").endswith("models/at_image/zimage"), state["yaml_info"]
-    assert state["launched"], "未启动训练"
-    assert str(out).endswith("lora.safetensors"), out
+        assert state["ms_call"] == "zimage", "未触发魔搭底模预下载"
+        assert state["yaml_info"]["model_id"].replace("\\", "/").endswith("models/at_image/zimage"), state["yaml_info"]
+        assert state["launched"], "未启动训练"
+        assert str(out).endswith("lora.safetensors"), out
+
+        # Qwen-Image-2.1: 模拟下载完成后确认训练 YAML 收到正确架构和独立缓存目录。
+        state.update(downloaded=False, ms_call=None, yaml_info=None, launched=False)
+        out = core.train_at_image(lambda _: None, mode="qwen_image", params={"project": "at_qwen21"})
+        expected = core.at_image_local_dir("qwen_image").replace("\\", "/")
+        assert state["ms_call"] == "qwen_image", "Qwen-Image-2.1 没走模型下载阶段"
+        assert state["yaml_info"].get("arch") == "qwen_image_2", state["yaml_info"]
+        assert state["yaml_info"]["model_id"].replace("\\", "/") == expected, state["yaml_info"]
+        assert state["launched"], "Qwen-Image-2.1 没启动 AI Toolkit 训练入口"
+        assert str(out).endswith("lora.safetensors"), out
     print("AT_IMAGE_PRE_DOWNLOAD_OK")
+
+def test_ai_toolkit_engine_update(base: Path):
+    """AI Toolkit 一键源码更新：旧源码触发提示，更新校验注册，失败时恢复旧源码。"""
+    roots = base / "at_engine_update"
+    roots.mkdir(parents=True, exist_ok=True)
+    source_zip = roots / "ai-toolkit-main.zip"
+    source_zip.write_bytes(b"mock zip")
+    calls = []
+
+    def seed_engine(engine_dir: Path, python_path: Path):
+        engine_dir.mkdir(parents=True, exist_ok=True)
+        (engine_dir / "run.py").write_text("# old source\n", encoding="utf-8")
+        python_path.parent.mkdir(parents=True, exist_ok=True)
+        python_path.write_bytes(b"mock python")
+
+    def extract_qwen21(_zip_path, stage_dir):
+        stage = Path(stage_dir)
+        (stage / "run.py").write_text("# updated source\n", encoding="utf-8")
+        model_dir = stage / "extensions_built_in" / "diffusion_models"
+        qwen_dir = model_dir / "qwen_image_2"
+        qwen_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "__init__.py").write_text(
+            "from .qwen_image_2 import QwenImage2Model\n", encoding="utf-8")
+        (qwen_dir / "qwen_image_2.py").write_text(
+            "class QwenImage2Model:\n    arch = 'qwen_image_2'\n", encoding="utf-8")
+
+    lock = SimpleNamespace()
+
+    def downloaded(kind, logf=print, force_refresh=False, required_files=None):
+        calls.append((kind, force_refresh, tuple(required_files or ())))
+        return str(source_zip)
+
+    # Successful update: source changes atomically; venv stays where it was; old source is backed up.
+    good_engine = roots / "success" / "ai-toolkit"
+    good_python = roots / "success" / "venv" / "Scripts" / "python.exe"
+    seed_engine(good_engine, good_python)
+    with patch.object(core, "_at_dirs", return_value=(str(good_python), str(good_engine))), \
+         patch.object(core, "_download_engine_source", side_effect=downloaded), \
+         patch.object(core, "_extract_zip", side_effect=extract_qwen21), \
+         patch.object(core, "_acquire_kohya_install_lock", return_value=lock), \
+         patch.object(core, "_release_kohya_install_lock", return_value=None), \
+         patch.object(core.subprocess, "run", return_value=result(0, "QWEN_IMAGE_2_REGISTERED")), \
+         patch.object(core, "clear_status_cache", return_value=None):
+        assert core.ai_toolkit_engine_update_status()["update_available"] is True
+        result_info = core.update_ai_toolkit_engine(lambda *_a: None)
+        assert result_info.get("updated") is True, result_info
+        assert core._ai_toolkit_qwen21_source_ready(str(good_engine)) is True
+        assert (good_engine / "run.py").read_text(encoding="utf-8") == "# updated source\n"
+        assert good_python.is_file(), "更新引擎不应重建/移动独立 Python 环境"
+        backup = Path(result_info["backup_dir"])
+        assert (backup / "run.py").read_text(encoding="utf-8") == "# old source\n"
+        assert core.ai_toolkit_engine_update_status()["update_available"] is False
+    assert calls and calls[-1][0] == "ai-toolkit" and calls[-1][1] is True, calls
+    assert any("qwen_image_2/qwen_image_2.py" in x.replace("\\", "/") for x in calls[-1][2]), calls
+
+    # Failed runtime registration rolls the old engine source back into the active path.
+    bad_engine = roots / "rollback" / "ai-toolkit"
+    bad_python = roots / "rollback" / "venv" / "Scripts" / "python.exe"
+    seed_engine(bad_engine, bad_python)
+    with patch.object(core, "_at_dirs", return_value=(str(bad_python), str(bad_engine))), \
+         patch.object(core, "_download_engine_source", side_effect=downloaded), \
+         patch.object(core, "_extract_zip", side_effect=extract_qwen21), \
+         patch.object(core, "_acquire_kohya_install_lock", return_value=lock), \
+         patch.object(core, "_release_kohya_install_lock", return_value=None), \
+         patch.object(core.subprocess, "run", return_value=result(1, stderr="mock import failure")), \
+         patch.object(core, "clear_status_cache", return_value=None):
+        try:
+            core.update_ai_toolkit_engine(lambda *_a: None)
+            raise AssertionError("更新后架构导入失败时必须报错")
+        except RuntimeError as e:
+            assert "更新后引擎检查失败" in str(e), e
+        assert (bad_engine / "run.py").read_text(encoding="utf-8") == "# old source\n"
+        assert core._ai_toolkit_qwen21_source_ready(str(bad_engine)) is False
+    gui = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    assert "_animate_at_engine_update_arrow" in gui and "一键更新" in gui
+    assert '"AT_ENGINE_UPDATE_DONE"' in gui
+    print("AI_TOOLKIT_ENGINE_UPDATE_OK")
 
 def test_wd14_triton_noise_collapse(base: Path):
     """WD14 无 Triton 告警/traceback 折叠成一行友好提示，不吞正常输出。"""
@@ -3617,6 +3710,7 @@ def main():
         test_strong_binding(base)
         test_at_image_model_ready_local(base)
         test_at_image_pre_download(base)
+        test_ai_toolkit_engine_update(base)
         test_wd14_triton_noise_collapse(base)
         test_musubi_version_check(base)
         test_quarantine_input_corrupt(base)

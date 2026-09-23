@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.14"
+APP_VERSION = "0.17.15"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -4011,6 +4011,11 @@ def _ai_toolkit_engine_status_impl():
         return False, "环境异常", vpy
 
 
+AI_TOOLKIT_QWEN21_REQUIRED_FILES = (
+    "extensions_built_in/diffusion_models/__init__.py",
+    "extensions_built_in/diffusion_models/qwen_image_2/qwen_image_2.py",
+)
+
 ENGINE_SOURCE_URLS = {
     "ai-toolkit": [
         "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/engine_sources/ai-toolkit-main.zip",
@@ -4054,12 +4059,17 @@ def _valid_zip(path, required_files=()):
         return False
 
 
-def _download_engine_source(kind, logf=print):
+def _download_engine_source(kind, logf=print, force_refresh=False, required_files=None):
     """按国内优先顺序获取第三引擎源码 ZIP，缓存到用户数据目录。"""
     names = {"ai-toolkit": "ai-toolkit-main.zip", "diffusers": "diffusers-c9438378.zip"}
-    required = {"ai-toolkit": ("run.py", "requirements.txt"), "diffusers": ("pyproject.toml",)}
+    required = {
+        "ai-toolkit": ("run.py", "requirements.txt") + AI_TOOLKIT_QWEN21_REQUIRED_FILES,
+        "diffusers": ("pyproject.toml",),
+    }
+    if required_files:
+        required[kind] = tuple(dict.fromkeys(required[kind] + tuple(required_files)))
     dest = os.path.join(_engine_source_cache_dir(), names[kind])
-    if _valid_zip(dest, required[kind]):
+    if not force_refresh and _valid_zip(dest, required[kind]):
         logf(f"[第三引擎] 已复用源码缓存：{names[kind]}")
         return dest
     for old in (dest, dest + ".part"):
@@ -4097,6 +4107,109 @@ def _download_engine_source(kind, logf=print):
                 pass
         logf("[第三引擎] 当前源码来源不可用，自动切换备用来源…")
     raise RuntimeError(f"{names[kind]} 国内来源均下载失败，无需开代理，请稍后重试。")
+
+
+def _ai_toolkit_qwen21_source_ready(at_dir):
+    """静态检查源码是否注册了 Qwen-Image-2.1 的 qwen_image_2 架构。"""
+    try:
+        model_file = os.path.join(at_dir, "extensions_built_in", "diffusion_models",
+                                  "qwen_image_2", "qwen_image_2.py")
+        registry_file = os.path.join(at_dir, "extensions_built_in", "diffusion_models", "__init__.py")
+        if not (os.path.isfile(model_file) and os.path.isfile(registry_file)):
+            return False
+        model_src = open(model_file, encoding="utf-8", errors="replace").read()
+        registry_src = open(registry_file, encoding="utf-8", errors="replace").read()
+        return ("QwenImage2Model" in registry_src and
+                re.search(r"arch\s*=\s*['\"]qwen_image_2['\"]", model_src) is not None)
+    except Exception:
+        return False
+
+
+def ai_toolkit_engine_update_status():
+    """返回 AI Toolkit 是否已安装，以及是否缺少本软件当前需要的 Qwen-Image-2.1 架构。"""
+    try:
+        vpy, at_dir = _at_dirs()
+        installed = os.path.isfile(vpy) and os.path.isfile(os.path.join(at_dir, "run.py"))
+        supported = installed and _ai_toolkit_qwen21_source_ready(at_dir)
+        return {
+            "installed": bool(installed),
+            "qwen_image_2_supported": bool(supported),
+            "update_available": bool(installed and not supported),
+            "engine_dir": at_dir,
+        }
+    except Exception:
+        return {"installed": False, "qwen_image_2_supported": False,
+                "update_available": False, "engine_dir": ""}
+
+
+def update_ai_toolkit_engine(logf=print):
+    """更新 AI Toolkit 源码以注册 Qwen-Image-2.1，并保留 venv、模型和旧源码备份。"""
+    vpy, at_dir = _at_dirs()
+    if not os.path.isfile(vpy) or not os.path.isfile(os.path.join(at_dir, "run.py")):
+        raise RuntimeError("没有找到已安装的 AI Toolkit 引擎，请先安装或导入引擎。")
+    if _ai_toolkit_qwen21_source_ready(at_dir):
+        logf("[第三引擎] 当前源码已支持 Qwen-Image-2.1，无需更新。")
+        return {"updated": False, "already_current": True, "backup_dir": ""}
+
+    lock_f = _acquire_kohya_install_lock(get_kohya_dir(), logf)
+    if lock_f is None:
+        raise RuntimeError("检测到另一个引擎安装/更新任务正在运行，请等待完成后再试。")
+
+    parent = os.path.dirname(os.path.abspath(at_dir))
+    name = os.path.basename(os.path.abspath(at_dir))
+    stamp = time.strftime("%Y%m%d_%H%M%S") + "_%s" % os.getpid()
+    stage_dir = os.path.join(parent, ".%s.update_%s" % (name, stamp))
+    backup_dir = os.path.join(parent, "%s_backup_%s" % (name, stamp))
+    installed_new = False
+    moved_old = False
+    try:
+        logf("[第三引擎] 下载支持 Qwen-Image-2.1 的 AI Toolkit 源码…")
+        zip_path = _download_engine_source(
+            "ai-toolkit", logf, force_refresh=True,
+            required_files=AI_TOOLKIT_QWEN21_REQUIRED_FILES)
+        if os.path.isdir(stage_dir):
+            shutil.rmtree(stage_dir)
+        os.makedirs(stage_dir, exist_ok=True)
+        _extract_zip(zip_path, stage_dir)
+        if not _ai_toolkit_qwen21_source_ready(stage_dir):
+            raise RuntimeError("下载的源码包没有注册 qwen_image_2，已取消更新。")
+
+        logf("[第三引擎] 源码包校验通过，开始替换（保留现有 Python 环境和模型）…")
+        os.rename(at_dir, backup_dir)
+        moved_old = True
+        try:
+            os.rename(stage_dir, at_dir)
+            installed_new = True
+            code = (
+                "from extensions_built_in.diffusion_models import AI_TOOLKIT_MODELS; "
+                "assert any(getattr(m, 'arch', None) == 'qwen_image_2' for m in AI_TOOLKIT_MODELS); "
+                "print('QWEN_IMAGE_2_REGISTERED')"
+            )
+            r = subprocess.run([vpy, "-c", code], capture_output=True, text=True,
+                               timeout=300, cwd=at_dir)
+            if r.returncode != 0 or "QWEN_IMAGE_2_REGISTERED" not in (r.stdout or ""):
+                detail = ((r.stderr or r.stdout or "架构注册检查未通过").strip())[-800:]
+                raise RuntimeError("更新后引擎检查失败：" + detail)
+        except Exception:
+            if installed_new and os.path.isdir(at_dir):
+                failed_dir = os.path.join(parent, ".%s.failed_%s" % (name, stamp))
+                try:
+                    os.rename(at_dir, failed_dir)
+                    shutil.rmtree(failed_dir, ignore_errors=True)
+                except Exception:
+                    pass
+            if moved_old and os.path.isdir(backup_dir) and not os.path.exists(at_dir):
+                os.rename(backup_dir, at_dir)
+            raise
+
+        clear_status_cache()
+        logf("[第三引擎] 更新完成：qwen_image_2 已由 AI Toolkit 注册。")
+        logf("[第三引擎] 旧源码备份：%s" % backup_dir)
+        return {"updated": True, "already_current": False, "backup_dir": backup_dir}
+    finally:
+        if os.path.isdir(stage_dir):
+            shutil.rmtree(stage_dir, ignore_errors=True)
+        _release_kohya_install_lock(lock_f)
 
 
 def _install_engine_source(zip_path, dest, marker, logf=print):
@@ -5890,7 +6003,7 @@ def _write_h3_template(mode, params, output_name, out_dir=None, train_dir=None):
 
 
 # ---------- AI Toolkit 图像 LoRA（Qwen-Image / Z-Image） ----------
-# 走第三引擎 AI Toolkit（与 H3 视频同引擎）：diffusers 格式，首次训练自动下载模型（国内镜像）。
+# 走第三引擎 AI Toolkit（与 H3 视频同引擎）：diffusers 格式，首次训练按需下载模型（ModelScope 国内直链）。
 # 显存说明（写进引导/提示）：Qwen-Image 20B = 16G 起步、24G 舒服；Z-Image 8B = 12G 起步、16G 舒服。
 AT_IMAGE_MODELS = {
     "qwen_image": {
@@ -5900,7 +6013,7 @@ AT_IMAGE_MODELS = {
         "min_vram": 16, "rec_vram": 24,
         "resident_vram": 28,   # 关闭 low_vram（模型全驻留）所需显存（fp8 20G + 激活 + 余量）
         "size": "约 40GB",
-        "hint": "Qwen-Image 是 20B 大模型：16G 显存起步、24G 舒服（推荐）。首次训练自动下载模型（约 40GB，国内镜像）。",
+        "hint": "Qwen-Image 是 20B 大模型：16G 显存起步、24G 舒服（推荐）。首次训练按需下载模型（约 40GB，ModelScope 国内直链）。",
     },
     "zimage": {
         "label": "Z-Image（8B）",
@@ -5909,9 +6022,66 @@ AT_IMAGE_MODELS = {
         "min_vram": 12, "rec_vram": 16,
         "resident_vram": 14,   # 关闭 low_vram（模型全驻留）所需显存（fp8 8G + 激活 + 余量）
         "size": "约 16GB",
-        "hint": "Z-Image 是 8B 轻量模型：12G 显存起步、16G 舒服。首次训练自动下载模型（约 16GB，国内镜像）。训练用基础版，出图可配合 Turbo 加速。",
+        "hint": "Z-Image 是 8B 轻量模型：12G 显存起步、16G 舒服。首次训练按需下载模型（约 16GB，ModelScope 国内直链）。训练用基础版，出图可配合 Turbo 加速。",
     },
 }
+
+# AI Toolkit 图像入口中可直接选择的模型。架构和显存信息随选项一起维护，
+# 这样 GUI 不需要让用户手填仓库名、arch 和显存档位。
+AT_IMAGE_MODEL_CHOICES = {
+    "qwen_image": [
+        {
+            "key": "qwen_2512", "label": "Qwen-Image-2512（默认）",
+            "model_id": "Qwen/Qwen-Image-2512", "arch": "qwen_image",
+            "size": "约 40GB", "min_vram": 16, "rec_vram": 24, "resident_vram": 28,
+            "hint": "Qwen-Image 是 20B 大模型：16G 显存起步、24G 舒服（推荐）。",
+            "default": True,
+        },
+        {
+            "key": "qwen_21", "label": "Qwen-Image-2.1",
+            "model_id": "Qwen/Qwen-Image-2.1", "arch": "qwen_image_2",
+            "size": "约 40GB", "min_vram": 16, "rec_vram": 24, "resident_vram": 28,
+            "hint": "Qwen-Image-2.1：20B 级模型，建议 16G 显存起步、24G 及以上。",
+        },
+    ],
+    "zimage": [
+        {
+            "key": "zimage", "label": "Z-Image（默认）",
+            "model_id": "Tongyi-MAI/Z-Image", "arch": "zimage",
+            "size": "约 16GB", "min_vram": 12, "rec_vram": 16, "resident_vram": 14,
+            "hint": "Z-Image：12G 显存起步、16G 舒服。",
+            "default": True,
+        },
+    ],
+}
+
+
+def at_image_model_choices(mode):
+    """返回 GUI 可选模型配置；旧版已保存的其他仓库继续保留为一个选项。"""
+    choices = [dict(c) for c in AT_IMAGE_MODEL_CHOICES.get(mode, [])]
+    current = at_image_custom_get(mode)
+    current_id = current.get("model_id")
+    if current_id and not any(c.get("model_id") == current_id for c in choices):
+        choices.append({
+            "key": "legacy_custom", "label": "当前模型（旧配置）· " + current_id,
+            "model_id": current_id,
+            "arch": current.get("arch") or (AT_IMAGE_MODELS.get(mode) or {}).get("arch", ""),
+            "size": current.get("size") or (AT_IMAGE_MODELS.get(mode) or {}).get("size", ""),
+            "hint": current.get("hint") or "这是此前保存的模型仓库配置。",
+            "min_vram": current.get("min_vram"), "rec_vram": current.get("rec_vram"),
+            "resident_vram": current.get("resident_vram"),
+        })
+    current_arch = current.get("arch")
+    if current.get("local_dir") and current_arch and not any(c.get("arch") == current_arch for c in choices):
+        choices.append({
+            "key": "legacy_local", "label": "当前本地模型（旧设置）· " + os.path.basename(current["local_dir"]),
+            "model_id": current_id or "", "arch": current_arch,
+            "size": current.get("size") or (AT_IMAGE_MODELS.get(mode) or {}).get("size", ""),
+            "hint": current.get("hint") or "这是此前指定的本地模型架构。",
+            "min_vram": current.get("min_vram"), "rec_vram": current.get("rec_vram"),
+            "resident_vram": current.get("resident_vram"),
+        })
+    return choices
 
 
 def at_image_local_dir(mode):
@@ -5994,9 +6164,26 @@ def at_image_info(mode):
     base = dict(AT_IMAGE_MODELS.get(mode) or {})
     if not base:
         return base
-    for k, v in at_image_custom_get(mode).items():
+    custom = at_image_custom_get(mode)
+    for k, v in custom.items():
         if v not in (None, ""):
             base[k] = v
+    # 旧版本地模型设置只存 local_dir + arch，没有仓库名；用已知架构反推模型，
+    # 让状态行和训练确认弹窗显示正确版本。未知架构至少显示本地目录，避免误显示默认底模。
+    if custom.get("local_dir") and not custom.get("model_id"):
+        choice = next((c for c in AT_IMAGE_MODEL_CHOICES.get(mode, [])
+                       if c.get("arch") == custom.get("arch")), None)
+        if choice:
+            base["model_id"] = choice.get("model_id")
+            for k in ("label", "size", "hint", "min_vram", "rec_vram", "resident_vram"):
+                if not custom.get(k) and choice.get(k) not in (None, ""):
+                    base[k] = choice[k]
+            if not custom.get("label"):
+                base["label"] = choice.get("label", base.get("label", "")) + "（本地）"
+        else:
+            base["model_id"] = custom["local_dir"]
+            if not custom.get("label"):
+                base["label"] = os.path.basename(custom["local_dir"]) + "（本地）"
     return base
 
 
@@ -6043,7 +6230,12 @@ def at_image_model_ready(mode):
     info = at_image_info(mode)
     if not info:
         return False
-    return _at_image_download_complete(at_image_local_dir(mode))
+    return at_image_model_dir_ready(at_image_local_dir(mode))
+
+
+def at_image_model_dir_ready(local_dir):
+    """检查用户直接指定的本地 AI Toolkit diffusers 模型目录是否完整。"""
+    return bool(local_dir and _at_image_download_complete(local_dir))
 
 
 def _ensure_ai_toolkit_triton(vpy, logf=print):
@@ -6276,8 +6468,7 @@ def _at_image_ms_download(mode, logf):
         logf(f"[{info['label']}] 魔搭仓库未配置，无法直连下载")
         return False
     if _custom_repo:
-        logf(f"[{info['label']}] 自定义模型：按魔搭同名仓库 {repo} 下载"
-             f"（魔搭若没有这个仓库，会回退到训练时在线加载）")
+        logf(f"[{info['label']}] 所选模型仓库：{repo}（魔搭若没有这个仓库，会回退到训练时在线加载）")
     files = _at_image_ms_file_list(repo)
     if not files:
         logf(f"[{info['label']}] 魔搭文件清单获取失败，稍后重试或手动下载")
@@ -6830,7 +7021,15 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     # 五十五：底模预下载到本地（hf-mirror 国内直连 + 断点续传 + 可手动停止），
     # 避免训练时 huggingface_hub 在线拉取 16~40GB（Xet 401/超时/卡 0.00B）。
     # 下载完成或已存在时，训练 yaml 的 name_or_path 指向本地目录，离线加载。
+    _custom_model = at_image_custom_get(mode)
+    _is_local_model = bool(_custom_model.get("local_dir"))
     _model_ok = at_image_model_ready(mode)
+    if _is_local_model and not _model_ok:
+        raise RuntimeError(
+            "指定的本地模型目录不完整或不是 AI Toolkit 所需的 diffusers 格式：\n"
+            f"{_custom_model.get('local_dir')}\n\n"
+            "请选包含 model_index.json、transformer/config.json 和 text_encoder/config.json 的模型目录。"
+        )
     if not _model_ok:
         logf(f"[{info['label']}] 底模未下载，开始预下载 {info['model_id']}（约 {info['size']}，魔搭国内直连 + 断点续传，可随时停止）…")
         try:
@@ -6850,7 +7049,12 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=vpy, logf=logf, vram_gb=vram_gb)
     steps = int(params.get("video_steps", 2000))
     logf(f"[{info['label']}] 数据集: {train_dir}（{count_images(train_dir)} 张）")
-    logf(f"[{info['label']}] 模型: {info['model_id']}（首次训练自动下载 {info['size']}，国内镜像）")
+    if _is_local_model:
+        logf(f"[{info['label']}] 模型: 使用指定的本地模型目录 {info['model_id']}")
+    elif _model_ok:
+        logf(f"[{info['label']}] 模型: 使用本机已就绪的模型目录 {info['model_id']}")
+    else:
+        logf(f"[{info['label']}] 模型: {info['model_id']}（本地下载未完成，将尝试在线加载）")
     logf(f"[{info['label']}] LoRA: dim={params.get('rank',16)}, alpha={params.get('alpha',16)}, lr={params.get('unet_lr','1e-4')}, steps={steps}")
     env = build_direct_env()
     env["HF_ENDPOINT"] = "https://hf-mirror.com"
