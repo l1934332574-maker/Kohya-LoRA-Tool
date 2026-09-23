@@ -461,6 +461,187 @@ def test_amd_gpu_arch_mapping():
             assert core._amd_gpu_arch(r"X:\missing_engine", lambda _: None) == expected, name
     print("AMD_ROCM_GPU_ARCH_SELECTION_OK")
 
+def test_amd_arch_probe_not_polluted_by_hsa_override():
+    """★ 2026-09-23（RX 7800 XT 装错包的根因）：探测架构时必须绕开 HSA_OVERRIDE_GFX_VERSION ✗
+
+    完整事故链（用户日志 KohyaLoRA_Frieren1_20260923，RX 7800 XT = gfx1101）：
+      ① 用户照老教程设 HSA_OVERRIDE_GFX_VERSION=11.0.0（把 gfx1101 伪装成 gfx1100）
+      ② 安装时 detect_gpu.py 去问 HIP → 得到**假的** gfx1100 ✗
+      ③ pip 按 gfx1100 装包（site-packages 里确实是 rocm_sdk_device_gfx1100 ✓）
+      ④ 训练第一步 VAE 卷积 → `hipErrorInvalidImage` ✗
+         （而"装的时候验证是通过的" ✗ —— 那次只测了矩阵乘 ✗）
+
+    判据：
+      · 脚本被带偏（报 gfx1100）而显卡名是 7800 XT → 必须返回 **gfx1101** ✓
+      · 跑脚本时**必须**把 HSA_OVERRIDE_GFX_VERSION 从子进程环境里去掉 ✓
+      · 名字表里没有的卡（脚本是唯一线索）→ 仍以脚本为准 ✓
+    """
+    with tempfile.TemporaryDirectory(prefix="archprobe_") as td:
+        eng = Path(td)
+        (eng / "detect_gpu.py").write_text("print('gfx1100')\n", encoding="utf-8")
+        seen = {}
+
+        def _run(cmd, *a, **k):
+            seen["env"] = dict(k.get("env") or {})
+            return result(0, "gfx1100\n")
+
+        with patch.object(core, "detect_gpu_name", return_value="AMD Radeon RX 7800 XT"), \
+             patch.object(core.subprocess, "run", side_effect=_run), \
+             patch.dict(os.environ, {"HSA_OVERRIDE_GFX_VERSION": "11.0.0"}):
+            arch = core._amd_gpu_arch(str(eng), lambda _s: None)
+        assert arch == "gfx1101", \
+            "探测脚本被 override 带偏时必须**以显卡名为准** ✗（得到 %s）" % arch
+        assert "HSA_OVERRIDE_GFX_VERSION" not in (seen.get("env") or {}), \
+            "跑 detect_gpu.py 时必须屏蔽 HSA_OVERRIDE_GFX_VERSION ✗ 否则永远探测到假架构"
+
+        # 名字表里没有的新卡：脚本是唯一线索 ✓
+        with patch.object(core, "detect_gpu_name", return_value="AMD Radeon RX 9999 XT"), \
+             patch.object(core.subprocess, "run", side_effect=_run):
+            assert core._amd_gpu_arch(str(eng), lambda _s: None) == "gfx1100"
+    print("AMD_ARCH_PROBE_NOT_POLLUTED_BY_OVERRIDE_OK")
+
+def test_amd_mirror_only_for_gfx1100():
+    """★ 2026-09-23 修：魔搭那套 wheel 是 gfx1100 构建 ✗ —— 非 gfx1100 的卡不许再用它 ✓
+
+    背景：魔搭预存 wheel 文件名里没有架构后缀，元数据固定拉 `rocm_sdk_device_gfx1100` ✗
+      → RX 7800 XT（gfx1101）装上去后 MIOpen 卷积 kernel 对不上
+      → 训练第一步 VAE 编码 `hipErrorInvalidImage` ✗（白折腾一整晚 ✓）
+
+    判据：gfx1101 → **不下载**魔搭 wheel ✓，pip 走 `torch[device-gfx1101]` ✓
+          gfx1100 → 仍走魔搭（国内快速路径不能丢 ✓）
+    """
+    for _arch, _want_mirror in (("gfx1101", False), ("gfx1100", True)):
+        with tempfile.TemporaryDirectory(prefix="amdflow_") as td:
+            eng = Path(td) / "fizgig"
+            eng.mkdir(parents=True)
+            vpy = str(Path(td) / "fizgig_venv" / "Scripts" / "python.exe")
+            fake_python(Path(vpy))
+            downloads, pips, logs = [], [], []
+
+            def _run_stream(cmd, cwd=None, env=None, logf=print, **kw):
+                pips.append([str(x) for x in cmd])
+                return 0
+
+            def _dl(url, dest, *a, **k):
+                downloads.append(os.path.basename(str(dest)))
+                return True
+
+            with patch.object(core, "_amd_gpu_arch", return_value=_arch), \
+                 patch.object(core, "run_stream", side_effect=_run_stream), \
+                 patch.object(core, "_download_with_resume", side_effect=_dl), \
+                 patch.object(core, "_wheel_valid", return_value=True), \
+                 patch.object(core, "_engine_source_cache_dir", return_value=os.path.join(td, "cache")), \
+                 patch.object(core, "_domestic_pip_env", return_value={}), \
+                 patch.object(core, "build_direct_env", return_value={}), \
+                 patch.object(core, "_amd_device_pkgs", return_value=[]):
+                core._install_windows_amd_rocm_runtime(vpy, str(eng), logs.append, "第四引擎")
+            _flat = " ".join(" ".join(c) for c in pips)
+            _txt = " ".join(logs)
+            if _want_mirror:
+                assert downloads, "gfx1100 应保留魔搭国内快速路径 ✗"
+                assert "魔搭" in _txt, logs
+            else:
+                # ⚠️ bitsandbytes 是**单独**从各自来源取的（两边都要 ✓），
+                #   这里只关心"魔搭那套 ROCm/torch wheel"有没有被误用 ✗
+                _rocm_dl = [d for d in downloads if "bitsandbytes" not in d]
+                assert not _rocm_dl, \
+                    "非 gfx1100 不该下载魔搭那套 gfx1100 wheel ✗（下到了 %s）" % _rocm_dl
+                assert ("torch[device-%s]" % _arch) in _flat, _flat
+                assert "gfx1100 构建" in _txt, logs
+    print("AMD_MIRROR_ONLY_FOR_GFX1100_OK")
+
+def test_amd_device_pkg_and_override_checks():
+    """device 包架构核对 + HSA_OVERRIDE_GFX_VERSION 解析（本轮两处新护栏）✓
+
+    · `_hsa_override_arch`：`11.0.0`/`11.0`→gfx1100、`10.3.0`→gfx1030、`11.0.1`→gfx1101、
+      `gfx1101`→gfx1101、未设置→None ✓（解析错会误报/漏报 ✓）
+    · `_warn_amd_arch_mismatch`：真 venv 里放**假 dist-info** ✓
+      - 只有 gfx1100 包、卡是 gfx1101 → 必须报警 ✓ 且提示含「安装第四引擎」✓
+      - 有 `gfx110x` 通配包 → 视为覆盖 1101 ✓ 不报 ✓（否则 7700/7600 会被误伤 ✗）
+    · `_warn_hsa_override`：架构不符时必须说清**怎么删**（上次用户就是忘了删持久变量 ✓）
+    """
+    def _sil(*a, **k):
+        return None
+
+    assert core._hsa_override_arch() is None, "未设变量时应返回 None"
+    for _v, _want in (("11.0.0", "gfx1100"), ("11.0", "gfx1100"), ("10.3.0", "gfx1030"),
+                      ("11.0.1", "gfx1101"), ("gfx1101", "gfx1101")):
+        with patch.dict(os.environ, {"HSA_OVERRIDE_GFX_VERSION": _v}):
+            assert core._hsa_override_arch() == _want, (_v, core._hsa_override_arch())
+
+    with tempfile.TemporaryDirectory(prefix="devpkg_") as td:
+        vpy = str(Path(td) / "venv" / "Scripts" / "python.exe")
+        fake_python(Path(vpy))
+        sp = Path(td) / "venv" / "Lib" / "site-packages"
+        sp.mkdir(parents=True, exist_ok=True)
+        (sp / "rocm_sdk_device_gfx1100-7.15.dist-info").mkdir()
+        assert core._amd_device_pkgs(vpy) == ["rocm_sdk_device_gfx1100-7.15"], core._amd_device_pkgs(vpy)
+        _logs = []
+        _ok, _pkgs, _hint = core._warn_amd_arch_mismatch(vpy, "gfx1101", _logs.append)
+        assert not _ok and "安装第四引擎" in _hint, _hint
+        assert any("不一致" in _ln for _ln in _logs), _logs
+        (sp / "amd_torch_device_gfx110x-2.12.dist-info").mkdir()
+        assert core._warn_amd_arch_mismatch(vpy, "gfx1101", _sil)[0] is True, \
+            "gfx110x 是通配包（覆盖 1100/1101/1102）✗ 不该误报 ✗"
+
+    with patch.dict(os.environ, {"HSA_OVERRIDE_GFX_VERSION": "11.0.0"}):
+        _l2 = []
+        core._warn_hsa_override("gfx1101", _l2.append)
+        _t2 = "".join(_l2)
+        assert "Remove-Item" in _t2 and "SetEnvironmentVariable" in _t2, _t2
+        _l3 = []
+        core._warn_hsa_override("gfx1100", _l3.append)
+        assert not _l3, "与本机架构一致时不该报警 ✗"
+    print("AMD_DEVICE_PKG_AND_OVERRIDE_CHECKS_OK")
+
+def test_amd_gpu_kernel_check_detects_broken_gpu():
+    """卷积自检必须能**抓住"GPU 卷积不可用"** ✗ —— 这是本次事故的直接信号 ✓
+
+    用**真 python** 跑一遍：本机没有可用 CUDA/ROCm 时 `device='cuda'` 必然失败 ✓
+      · 必须返回 ok=False ✓（抓不住就等于白加 ✗）
+      · detail 要说清"后果 + 怎么修"（VAE / 重装 / 换 musubi ✓）
+      · 且**不能抛异常** ✗（它要在训练前安全调用 ✓）
+    """
+    _logs = []
+    # ① 打桩成"卷积失败"（不依赖本机有没有 GPU ✓）→ 必须判定 False ✓ 且给出修法 ✓
+    _fake = result(0, "INFO|archs=gfx1100,cap=11.0,dev=AMD Radeon RX 7800 XT\n"
+                      "CONV|FAIL|AcceleratorError: CUDA error: device kernel image is invalid\n")
+    with patch.object(core, "_amd_device_pkgs", return_value=["rocm_sdk_device_gfx1100-7.15"]), \
+         patch.object(core.subprocess, "run", return_value=_fake):
+        ok, detail = core._amd_gpu_kernel_check(r"X:\v\Scripts\python.exe", {}, _logs.append, "自检")
+    assert ok is False, "卷积失败时必须判定 False ✗（否则等于没查 ✗）"
+    assert "VAE" in detail and "安装第四引擎" in detail, detail[:300]
+    assert "rocm_sdk_device_gfx1100" in detail, "应把已装的 device 包列出来（诊断用）✗：" + detail[:300]
+    assert any("GPU" in _ln for _ln in _logs), _logs
+
+    # ② 「自检自己没跑成」时**绝不能拦训练** ✗ —— v0.17.11 误伤事件的教训 ✓
+    #    （打桩：python 跑起来了、也有输出，但没有 CONV 结论）
+    _l3 = []
+    with patch.object(core.subprocess, "run",
+                      return_value=result(0, "2.12.0+rocm7.15.0a20260728\nok=True\n")):
+        ok3, _d3 = core._amd_gpu_kernel_check(r"X:\v\Scripts\python.exe", {}, _l3.append, "自检")
+    assert ok3 is True, \
+        "自检没取得结论时必须**放行** ✗（防误伤 —— v0.17.11 就是误拦把正常用户卡住的 ✓）"
+
+    # ③ 真跑一次（本机环境）：**不允许抛异常** ✗ —— 它要在训练前安全调用 ✓
+    _logs2 = []
+    try:
+        core._amd_gpu_kernel_check(sys.executable, None, _logs2.append, "自检")
+    except Exception as _e:
+        raise AssertionError("GPU 卷积自检不允许抛异常 ✗：%r" % _e)
+    print("AMD_GPU_KERNEL_CHECK_CATCHES_BROKEN_GPU_OK")
+
+def test_fizgig_amd_preflight_blocks_early():
+    """训练前的 AMD 体检：卷积不过时必须**拦下**（而不是白跑完缓存才炸 ✗）✓"""
+    with patch.object(core, "_amd_gpu_kernel_check", return_value=(False, "GPU 卷积自检未通过 ✗")), \
+         patch.object(core, "_warn_hsa_override") as _w1, \
+         patch.object(core, "_warn_amd_arch_mismatch") as _w2:
+        ok, detail = core._fizgig_amd_preflight(r"X:\v\Scripts\python.exe", r"X:\fz", {},
+                                                lambda _s: None)
+    assert ok is False and "卷积" in detail, detail
+    assert not _w1.called and not _w2.called, "卷积都不通过时不必再做后续检查 ✓"
+    print("FIZGIG_AMD_PREFLIGHT_BLOCKS_EARLY_OK")
+
 def test_optimizer_resolution(base: Path):
     """resolve_optimizer / _probe_adamw8bit / _probe_lion / _optimizer_yaml_name 单元测试（mock 子进程，不真实运行 CUDA）。"""
     logs = []
@@ -922,7 +1103,7 @@ def test_nvidia_smi_driver_safe(base: Path):
     print("NVIDIA_SMI_DRIVER_SAFE_OK")
 
 def test_alloc_conf_expandable_stripped(base: Path):
-    """Windows 不支持 expandable_segments：训练子进程环境自动剥离，避免“显存充足却 OOM”假性爆显存。"""
+    """Windows 不支持 expandable_segments：训练子进程环境自动剥离，避免"显存充足却 OOM"假性爆显存。"""
     import os as _os
     # build_direct_env 剥离 expandable_segments，保留 max_split_size_mb 等其他有效项
     with patch.dict(_os.environ, {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True,max_split_size_mb:128"}, clear=False):
@@ -4088,6 +4269,12 @@ def main():
         test_third_engine_amd(base)
         test_third_engine_amd_torchvision_guard()
         test_amd_gpu_arch_mapping()
+        # ★ 2026-09-23（AMD Radeon RX 7800 XT 事故）：装错架构的 ROCm 包 → 训练第一步卷积炸 ✗
+        test_amd_arch_probe_not_polluted_by_hsa_override()
+        test_amd_mirror_only_for_gfx1100()
+        test_amd_device_pkg_and_override_checks()
+        test_amd_gpu_kernel_check_detects_broken_gpu()
+        test_fizgig_amd_preflight_blocks_early()
         test_fourth_engine(base)
         test_fourth_engine_train_pipeline(base)
         test_fizgig_deps_self_heal(base)
@@ -4497,7 +4684,7 @@ def test_krea2_at_support(base: Path):
 
 def test_musubi_dataset_precheck(base: Path):
     """musubi 训练前/缓存后校验：子文件夹、不支持扩展名、缺 .txt、缓存为空都要给明确报错，
-    避免“缓存静默为空 → 训练 total batches: 0”的谜之失败。"""
+    避免"缓存静默为空 → 训练 total batches: 0"的谜之失败。"""
     logs = []
 
     def fresh(name):
@@ -4522,7 +4709,7 @@ def test_musubi_dataset_precheck(base: Path):
     except RuntimeError as e:
         assert ".txt" in str(e) and "b.png" in str(e), str(e)
 
-    # 3) 只有子文件夹图片 → 报“子文件夹”
+    # 3) 只有子文件夹图片 → 报"子文件夹"
     only_sub = fresh("only_sub")
     (only_sub / "sub").mkdir(parents=True, exist_ok=True)
     (only_sub / "sub" / "x.png").write_bytes(b"x")
@@ -4533,7 +4720,7 @@ def test_musubi_dataset_precheck(base: Path):
     except RuntimeError as e:
         assert "子文件夹" in str(e), str(e)
 
-    # 4) 只有不支持扩展名 → 报“扩展名”
+    # 4) 只有不支持扩展名 → 报"扩展名"
     only_gif = fresh("only_gif")
     (only_gif / "x.gif").write_bytes(b"x")
     (only_gif / "x.txt").write_text("1girl", encoding="utf-8")

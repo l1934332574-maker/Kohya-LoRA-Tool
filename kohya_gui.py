@@ -415,7 +415,13 @@ def _collect_env_lines():
         if not _gi.get("gpu_ok"):
             out.append("⚠ 未检测到可用独立显卡驱动（重装系统后常见）：请先安装显卡驱动，否则无法训练。")
         elif _gi.get("nvidia_smi_broken"):
-            out.append("⚠ nvidia-smi 不可用（NVIDIA 驱动异常）：建议重装/更新显卡驱动。")
+            # ★ 2026-09-23：AMD / Intel 显卡上本来就**没有** nvidia-smi ✗ ——
+            #   以前这里不分厂商，一律报「NVIDIA 驱动异常」✗，把 A 卡用户吓得去重装驱动 ✗
+            #   （用户日志 KohyaLoRA_Frieren1_20260923：AMD RX 7800 XT 上就出现了这条 ✓）
+            if (_gi.get("vendor") or "").lower() in ("amd", "intel"):
+                out.append("— 未使用 nvidia-smi（当前是 AMD/Intel 显卡，属正常现象 ✓）")
+            else:
+                out.append("⚠ nvidia-smi 不可用（NVIDIA 驱动异常）：建议重装/更新显卡驱动。")
     except Exception:
         pass
     try:
@@ -442,7 +448,16 @@ def _collect_env_lines():
     try:
         _vpy = core.venv_python(core.get_kohya_dir())
         if _vpy and os.path.isfile(_vpy):
-            out.append("训练环境 torch 后端: %s" % (core.detect_torch_backend(_vpy) or "无法检测"))
+            # ★ 2026-09-23：**必须标明是哪个引擎** ✗ ——
+            #   以前只写「训练环境 torch 后端: cpu」✗，但它测的是**第一引擎(kohya)** 的 venv ✓，
+            #   而用户实际训练用的是**第四引擎(fizgig)**（独立 venv）✗
+            #   → 用户看到 cpu 以为自己环境全废了 ✗
+            #   （用户日志 KohyaLoRA_Frieren1_20260923：AMD 用户正被这条误导 ✓）
+            _bk = core.detect_torch_backend(_vpy) or "无法检测"
+            out.append("第一引擎(kohya) torch 后端: %s" % _bk)
+            if _bk == "cpu":
+                out.append("  （这是第一引擎的环境；第四引擎有独立环境，"
+                           "训练用的哪个引擎请看训练日志里那一行 ✓）")
     except Exception:
         pass
     return out

@@ -1,4 +1,75 @@
-﻿## v0.17.19（2026-09-23）
+﻿## v0.17.20（2026-09-23）
+
+### 修复★：AMD 上「包按错的显卡架构安装」→ 训练第一步必炸
+
+- **现象**（用户日志 `KohyaLoRA_Frieren1_20260923`，AMD RX 7800 XT 16G）：
+  装第四引擎时**验证通过** ✓，但训练一开始就炸：
+  `torch.AcceleratorError: CUDA error: device kernel image is invalid` / `hipErrorInvalidImage`
+  —— 炸在**VAE 编码第一步**（此时 latents 缓存等还没开始 ✓，但前面已白等一场 ✓）
+- **根因**：第四引擎的 AMD 包原先**优先走魔搭预存 wheel**，而那一套是 **gfx1100 构建** ✗
+  （文件名无架构后缀，元数据固定拉 `rocm_sdk_device_gfx1100` ✗）
+  → 用户的卡是 **gfx1101** ✗ → 装进去的是 7900 XTX 的 kernel ✗
+  → 而 MIOpen（卷积）的 kernel 是**按架构分包**的 ✗ → 一步都跑不了 ✗
+- **为什么装的时候测不出来** ✗：旧校验只测 `import torch` + **矩阵乘**，
+  矩阵乘走 **hipBLAS**（多架构包里都有 ✓）→ 装错也照样"通过" ✓
+  而 VAE 走 **MIOpen 卷积** ✗ → 只有真跑卷积才看得见 ✗
+- **修复**：
+  · 魔搭那套**只给 gfx1100 用** ✓（保留国内快速路径 ✓）
+  · 其余架构（gfx1101 / gfx1102 / gfx103x / gfx12xx）**直接走 AMD 官方多架构源** ✓
+    （`torch[device-gfx1101]` → 装对应架构的包 ✓；国内可能较慢，支持断点续传 ✓）
+  · 装完**当场核对**「已装 device 包架构」与「显卡真实架构」✓，不一致立刻报 ✓
+
+### 修复★：架构探测会被 `HSA_OVERRIDE_GFX_VERSION` 带偏（装着装着就装错了）
+
+- **事故链**：用户照老教程设了 `HSA_OVERRIDE_GFX_VERSION=11.0.0`（把 gfx1101 伪装成 gfx1100）
+  → 安装时 `detect_gpu.py` 去问 HIP → 拿到**假的 gfx1100** ✗
+  → pip 按 gfx1100 装包 ✗ → 训练第一步崩 ✗
+- **修复**：
+  · 探测时**屏蔽** `HSA_OVERRIDE_GFX_VERSION` ✓（问到的必须是**真实**架构 ✓）
+  · 并与**显卡名映射**交叉核对 ✓ —— 能识别时**以显卡名为准** ✓（名字是硬事实 ✓）
+    名字表里没有的新卡 → 仍以探测脚本为准 ✓（兼容性不变 ✓）
+
+### 新增★：GPU 卷积自检（装完 + 每次训练前）
+
+- 装完引擎、以及每次 AMD 训练前，都**真跑一次** `conv2d`（3 秒 ✓）
+- **只有引擎明确报出卷积失败**才拦下训练 ✓；
+  自检"没取得结果"或"根本跑不起来"→ **只提示、不拦** ✓
+  （这是 v0.17.11 的教训：误拦的代价比漏报更大 —— 那次把本来能正常训练的 AMD 用户卡住了 ✓）
+- 一旦拦下，理由写全：报错原文 + **已装的 device 包** + `archs` / `cap` / 设备名 + 三种修法 ✓
+
+### 新增：`HSA_OVERRIDE_GFX_VERSION` 一致性告警
+
+- 设了它、且与真实显卡架构**不符**时，明确说清后果 ✓
+  并给出**完整删除方法**（含持久变量那句 —— 上次的坑就是"删了当前窗口、忘了删持久变量"✓）
+- 与本机架构一致时**不吵** ✓
+
+### 修复：两处会误导人的日志文案
+
+- `训练环境 torch 后端: cpu` ✗ → 改成 `第一引擎(kohya) torch 后端: ...` ✓
+  （它测的是**第一引擎**的 venv ✓，而用户训练常用**第四引擎**（独立环境）✗
+   —— AMD 用户看到 cpu 以为环境全废 ✓；现在并补一句说明 ✓）
+- AMD/Intel 显卡上不再报 `⚠ nvidia-smi 不可用（NVIDIA 驱动异常）` ✗
+  → 改为 `— 未使用 nvidia-smi（当前是 AMD/Intel 显卡，属正常现象）✓`
+  （以前会把 A 卡用户吓得去重装驱动 ✓）
+
+### 新增测试（引擎安装套件）
+
+- `AMD_ARCH_PROBE_NOT_POLLUTED_BY_OVERRIDE_OK` —— 脚本被带偏时必须**以显卡名为准** ✓，
+  且跑脚本时**必须**从子进程环境里去掉 `HSA_OVERRIDE_GFX_VERSION` ✓
+- `AMD_MIRROR_ONLY_FOR_GFX1100_OK` —— 非 gfx1100 **不得**下载魔搭那套 wheel ✓ 且必须走 `torch[device-gfx1101]` ✓
+- `AMD_DEVICE_PKG_AND_OVERRIDE_CHECKS_OK` —— device 包架构核对（`gfx110x` 通配算匹配 ✓）
+  + `HSA_OVERRIDE_GFX_VERSION` 解析（`11.0.0`→gfx1100、`10.3.0`→gfx1030、`11.0.1`→gfx1101 ✓）
+- `AMD_GPU_KERNEL_CHECK_CATCHES_BROKEN_GPU_OK` —— 卷积失败必拦 ✓；**没结论必须放行** ✓（防误伤 ✓）
+- `FIZGIG_AMD_PREFLIGHT_BLOCKS_EARLY_OK` —— 训练前体检不通过时不许继续 ✓
+
+### 验证
+
+- 冒烟套件 **✔ 全部通过** ✓ 引擎套件 **ALL_ENGINE_CONTROL_FLOW_TESTS_OK** ✓
+- 新增 6 条测试全绿 ✓；同步修正三处既有测试（卷积自检的"放行"语义 ✓）
+
+---
+
+## v0.17.19（2026-09-23）
 
 ### 新增：AI Toolkit Windows AMD ROCm 图像训练实验通道
 

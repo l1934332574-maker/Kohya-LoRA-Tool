@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.19"
+APP_VERSION = "0.17.20"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -5021,17 +5021,23 @@ def _engine_ensure_python312(label, logf=print):
 
 
 def _amd_gpu_arch(engine_dir, logf=print):
-    """检测 AMD GPU 架构（gfxXXXX），优先使用引擎目录中的 detect_gpu.py。"""
-    script = os.path.join(engine_dir, "detect_gpu.py")
-    if os.path.isfile(script):
-        try:
-            r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=120)
-            arch = (r.stdout or "").strip().splitlines()
-            if arch and re.match(r"^gfx", arch[-1]):
-                return arch[-1]
-        except Exception:
-            pass
+    """检测 AMD GPU 架构（gfxXXXX）：优先用显卡名映射，其次 detect_gpu.py，结果交叉核对。
+
+    ★★ 2026-09-23 修正（RX 7800 XT 用户装错包的根因）★★
+      原来**只信 detect_gpu.py** ✗ —— 而该脚本问的是 HIP，会被
+      `HSA_OVERRIDE_GFX_VERSION` 带偏 ✗：用户照老教程设了 `11.0.0` 之后，
+      脚本回报的就是 **gfx1100**（假的 ✗），于是 pip 按 gfx1100 装了包 ✗ →
+      训练第一步 VAE 卷积报 `hipErrorInvalidImage` ✗
+      （用户日志 KohyaLoRA_Frieren1_20260923 实证 ✓）
+
+      现在两条路一起走 ✓：
+        · 跑脚本时**屏蔽 HSA_OVERRIDE_GFX_VERSION** ✓（探测真实架构 ✗）
+        · 与**显卡名映射**交叉核对 ✓ —— 名字是硬事实 ✓，能识别时以名字为准 ✓
+          （名字表里没有的新卡，仍以脚本为准 ✓，保证兼容 ✓）
+      ⚠️ 也正因为这里，装包用的架构不再会被用户的 override 污染 ✓
+    """
     gname = detect_gpu_name() or ""
+    _by_name = None
     for pat, arch in (("Ryzen AI Max", "gfx1151"), ("W7800", "gfx1100"),
                       ("7900", "gfx1100"), ("7800", "gfx1101"), ("7700", "gfx1101"),
                       ("6950", "gfx1030"), ("6900", "gfx1030"), ("6800", "gfx1030"),
@@ -5040,7 +5046,30 @@ def _amd_gpu_arch(engine_dir, logf=print):
                       ("9070", "gfx1201"), ("9060", "gfx1200"),
                       ("7650", "gfx1102"), ("7600", "gfx1102")):
         if pat in gname:
-            return arch
+            _by_name = arch
+            break
+    script = os.path.join(engine_dir, "detect_gpu.py")
+    if os.path.isfile(script):
+        try:
+            _env = build_direct_env()
+            # ↓ 关键：屏蔽 override，别让"伪装架构"骗到安装程序 ✗
+            _env.pop("HSA_OVERRIDE_GFX_VERSION", None)
+            r = subprocess.run([sys.executable, script], capture_output=True, text=True,
+                               timeout=120, env=_env)
+            arch = (r.stdout or "").strip().splitlines()
+            if arch and re.match(r"^gfx", arch[-1]):
+                _probe = arch[-1].strip().lower()
+                if _by_name and _by_name != _probe:
+                    logf("[AMD] ⚠ 架构探测不一致：探测脚本报 %s，而显卡名（%s）对应 %s"
+                         % (_probe, gname, _by_name))
+                    logf("[AMD]   以**显卡名**为准 → 按 %s 装包 ✓（脚本结果被 HSA_OVERRIDE_GFX_VERSION"
+                         " 等变量带偏时就会这样；按错架构装包会让训练第一步卷积报 kernel invalid ✗）" % _by_name)
+                    return _by_name
+                return _probe
+        except Exception:
+            pass
+    if _by_name:
+        return _by_name
     raise RuntimeError("无法识别 AMD GPU 架构（gfxXXXX）：%s。请更新显卡驱动后重试。" % (gname or "未知"))
 
 
@@ -5061,43 +5090,65 @@ def _install_windows_amd_rocm_runtime(vpy, engine_dir, logf=print, label="训练
     os.makedirs(rocm_dir, exist_ok=True)
     env = _domestic_pip_env()
     rocm_ok = False
-    try:
-        local = []
-        for name, minsize in FIZGIG_ROCM_WHEELS.items():
-            path = os.path.join(rocm_dir, name)
-            if not (os.path.isfile(path) and os.path.getsize(path) >= minsize and _wheel_valid(path)):
-                logf(f"[{label}] 下载 ROCm wheel（魔搭国内直连，断点续传）：{name}")
-                if not _download_with_resume(FIZGIG_ROCM_MIRROR + name, path, logf, direct=True) or not _wheel_valid(path):
-                    raise RuntimeError("魔搭下载失败：" + name)
-            local.append(path)
-        sdk = [p for p in local if "bitsandbytes" not in os.path.basename(p)
-               and "rocm_bootstrap" not in os.path.basename(p)]
-        if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + sdk,
-                      cwd=engine_dir, env=env, logf=logf) != 0:
-            raise RuntimeError("本地 ROCm 栈安装失败")
-        bnb_wheels = [p for p in local if "bitsandbytes" in os.path.basename(p)]
-        if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + bnb_wheels,
-                      cwd=engine_dir, env=env, logf=logf) != 0:
-            raise RuntimeError("bitsandbytes 安装失败")
-        sdist = os.path.join(rocm_dir, FIZGIG_ROCM_SDIST[0])
-        if not (os.path.isfile(sdist) and os.path.getsize(sdist) >= FIZGIG_ROCM_SDIST[1] and _wheel_valid(sdist)):
-            logf(f"[{label}] 下载 ROCm 源码包（魔搭国内直连，断点续传）：{FIZGIG_ROCM_SDIST[0]}")
-            if not _download_with_resume(FIZGIG_ROCM_MIRROR + FIZGIG_ROCM_SDIST[0], sdist, logf, direct=True) or not _wheel_valid(sdist):
-                raise RuntimeError("ROCm 元包下载失败")
-        if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120", sdist],
-                      cwd=engine_dir, env=env, logf=logf) != 0:
-            raise RuntimeError("rocm 元包安装失败")
-        rocm_ok = True
-        bootstrap = [p for p in local if "rocm_bootstrap" in os.path.basename(p)]
-        if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + bootstrap,
-                      cwd=engine_dir, env=env, logf=logf) != 0:
-            raise RuntimeError("rocm-bootstrap 安装失败")
-        logf(f"[{label}] AMD ROCm 栈安装成功（魔搭国内直连）。")
-    except StopRequested:
-        raise
-    except Exception as e:
-        logf(f"[{label}] 魔搭 ROCm wheel 安装失败：{e}；回退 AMD nightly 直连…")
-        rocm_ok = False
+    # ★★ 2026-09-23 关键修复：魔搭那套预存 wheel 是 **gfx1100 构建** ✗
+    #   证据（用户日志 KohyaLoRA_Frieren1_20260923，AMD RX 7800 XT 16G）：
+    #     · site-packages 里装的是 `rocm_sdk_device_gfx1100` + `amd_torch_device_gfx1100`
+    #       —— 而他的卡是 **gfx1101** ✗（魔搭 wheel 文件名里没有架构后缀，元数据固定拉 gfx1100 ✗）
+    #     · 装的时候"验证通过"✓ —— 因为那次只测 `_x @ _x`（走 hipBLAS，多架构包里都有 ✓）
+    #     · 训练第一步 VAE 卷积（走 **MIOpen**）就炸：
+    #       `torch.AcceleratorError: CUDA error: device kernel image is invalid`
+    #       / `hipErrorInvalidImage` ✗ —— MIOpen 的 kernel 是按架构分包的 ✗
+    #   期间用户被迫设 HSA_OVERRIDE_GFX_VERSION=11.0.0 去"伪装"成 gfx1100（老办法 ✗），
+    #   仍不奏效 —— 因为问题不是"没伪装"，而是**包本身就装错了架构** ✗
+    #   → 魔搭只留给 **gfx1100**（保留国内快速路径 ✓）；
+    #     其余架构（gfx1101 / gfx1102 / gfx103x / gfx12xx …）直接走 AMD 官方多架构源 ✗
+    #     （`torch[device-{arch}]` ✓ 会拉对应架构的 device 包 ✓）
+    #   ⚠️ 代价：非 gfx1100 用户失去国内镜像加速 ✗ → 但"**装对**"优先于"装快" ✓
+    _mirror_ok = (arch == "gfx1100")
+    if _mirror_ok:
+        try:
+            local = []
+            for name, minsize in FIZGIG_ROCM_WHEELS.items():
+                path = os.path.join(rocm_dir, name)
+                if not (os.path.isfile(path) and os.path.getsize(path) >= minsize and _wheel_valid(path)):
+                    logf(f"[{label}] 下载 ROCm wheel（魔搭国内直连，断点续传）：{name}")
+                    if not _download_with_resume(FIZGIG_ROCM_MIRROR + name, path, logf, direct=True) or not _wheel_valid(path):
+                        raise RuntimeError("魔搭下载失败：" + name)
+                local.append(path)
+            sdk = [p for p in local if "bitsandbytes" not in os.path.basename(p)
+                   and "rocm_bootstrap" not in os.path.basename(p)]
+            if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + sdk,
+                          cwd=engine_dir, env=env, logf=logf) != 0:
+                raise RuntimeError("本地 ROCm 栈安装失败")
+            bnb_wheels = [p for p in local if "bitsandbytes" in os.path.basename(p)]
+            if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + bnb_wheels,
+                          cwd=engine_dir, env=env, logf=logf) != 0:
+                raise RuntimeError("bitsandbytes 安装失败")
+            sdist = os.path.join(rocm_dir, FIZGIG_ROCM_SDIST[0])
+            if not (os.path.isfile(sdist) and os.path.getsize(sdist) >= FIZGIG_ROCM_SDIST[1] and _wheel_valid(sdist)):
+                logf(f"[{label}] 下载 ROCm 源码包（魔搭国内直连，断点续传）：{FIZGIG_ROCM_SDIST[0]}")
+                if not _download_with_resume(FIZGIG_ROCM_MIRROR + FIZGIG_ROCM_SDIST[0], sdist, logf, direct=True) or not _wheel_valid(sdist):
+                    raise RuntimeError("ROCm 元包下载失败")
+            if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120", sdist],
+                          cwd=engine_dir, env=env, logf=logf) != 0:
+                raise RuntimeError("rocm 元包安装失败")
+            rocm_ok = True
+            bootstrap = [p for p in local if "rocm_bootstrap" in os.path.basename(p)]
+            if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + bootstrap,
+                          cwd=engine_dir, env=env, logf=logf) != 0:
+                raise RuntimeError("rocm-bootstrap 安装失败")
+            logf(f"[{label}] AMD ROCm 栈安装成功（魔搭国内直连）。")
+        except StopRequested:
+            raise
+        except Exception as e:
+            logf(f"[{label}] 魔搭 ROCm wheel 安装失败：{e}；回退 AMD nightly 直连…")
+            rocm_ok = False
+    else:
+        logf(f"[{label}] ⚠ 检测到 GPU 架构 {arch}：魔搭预存的 wheel 组是 **gfx1100 构建**，"
+             f"对 {arch} 会装成错的架构（训练时 VAE 卷积报 kernel image invalid），因此不用它 ✓")
+        logf(f"[{label}] 改用 AMD 官方多架构源：torch[device-{arch}] / torchvision[device-{arch}] ✓")
+        logf(f"[{label}] 提示：官方源在国内可能较慢（数 GB，支持断点续传），下载期间请勿关闭软件。")
+        env = build_direct_env()
 
     if not rocm_ok:
         for attempt in range(3):
@@ -5122,7 +5173,241 @@ def _install_windows_amd_rocm_runtime(vpy, engine_dir, logf=print, label="训练
                 raise RuntimeError("bitsandbytes ROCm 轮子安装失败")
     if not rocm_ok:
         raise RuntimeError("AMD ROCm 栈安装失败（魔搭国内直连 + AMD nightly 均失败，详见上方日志）。")
+    # ★ 2026-09-23：装完**当场核对**"装的架构"和"显卡架构"是否一致 ✗
+    #   （RX 7800 XT 那位用户就是这么装错的 ✓ 而当时没人发现 ✗ —— 见上面注释）
+    _warn_amd_arch_mismatch(vpy, arch, logf, label)
     return arch
+
+
+def _amd_device_pkgs(vpy):
+    """列出 venv 里已装的所有「按 GPU 架构分包」的 AMD/ROCm 包名。
+
+    例如：`rocm_sdk_device_gfx1100` / `amd_torch_device_gfx1100` / `rocm_sdk_device_gfx110x`。
+
+    ★ 2026-09-23：为什么要盯这些包 ✗ ——
+      它们决定了 **MIOpen（卷积）/ hipBLAS 等底层 kernel 库** 是给哪个架构编译的 ✗。
+      装错架构时的典型现象（RX 7800 XT 用户实测 ✓）：
+        · `import torch` 正常 ✓、`_x @ _x` 正常 ✓（多架构包里都带 hipBLAS kernel）
+        · 但训练第一步 **VAE 卷积** 就炸 `hipErrorInvalidImage` / device kernel image is invalid ✗
+      所以「装完看一眼这几个包」是最省事的体检 ✓
+    """
+    try:
+        venv = os.path.dirname(os.path.dirname(vpy))
+        sp = os.path.join(venv, "Lib", "site-packages")
+        if not os.path.isdir(sp):
+            return []
+        out = []
+        for _n in os.listdir(sp):
+            if not _n.endswith(".dist-info"):
+                continue
+            _low = _n.lower()
+            if "device" in _low and ("gfx" in _low or "rocm" in _low or "amd" in _low):
+                out.append(_n[: -len(".dist-info")])
+        return sorted(out)
+    except Exception:
+        return []
+
+
+def _warn_amd_arch_mismatch(vpy, arch, logf=print, label="训练引擎"):
+    """核对「已安装 ROCm device 包的架构」与「真实 GPU 架构」是否一致，返回 (ok, pkgs, hint)。
+
+    ★ 2026-09-23（用户日志 KohyaLoRA_Frieren1_20260923，AMD RX 7800 XT 16G）：
+      魔搭那套预存 wheel 是 **gfx1100 构建** ✗，于是他的 gfx1101 机器上装的是
+      `rocm_sdk_device_gfx1100` ✗ → 训练第一步 VAE 卷积直接
+      `torch.AcceleratorError: CUDA error: device kernel image is invalid` ✗
+      而**装的时候验证是通过的** ✓（那次只测了矩阵乘 ✗）—— 一路拖到训练才炸 ✗
+      → 现在装完当场核对 ✓ 不一致就明确说清"后果 + 怎么修" ✓
+    判定：`gfx110x` 这类通配包覆盖 1100/1101/1102 ✓，视为匹配 ✓
+    """
+    pkgs = _amd_device_pkgs(vpy)
+    logf("[%s] ROCm device 包：%s" % (label, "、".join(pkgs) or "（未发现按架构分包的包）"))
+    if not pkgs:
+        return True, pkgs, ""
+    _archs = set()
+    for _p in pkgs:
+        _m = re.search(r"(gfx\d{3,4}[a-z]?)", _p, re.I)
+        if _m:
+            _archs.add(_m.group(1).lower())
+    if not _archs:
+        return True, pkgs, ""
+    _real = str(arch or "").lower()
+    if not _real:
+        # ★ 2026-09-23：架构未知（识别失败等）时**不做判定** ✗ ——
+        #   否则会把空字符串当成"不匹配"而误报 ✗（误报会吓用户去重装 ✓）
+        return True, pkgs, ""
+    _covered = False
+    for _a in _archs:
+        if _a == _real:
+            _covered = True
+        elif _a.endswith("x") and _real.startswith(_a[:-1]):
+            _covered = True
+    if _covered:
+        return True, pkgs, ""
+    _hint = ("★ 发现问题：安装的 ROCm 包架构与你的显卡**不一致** ✗\n"
+             "   · 你的显卡架构：%s\n"
+             "   · 实际装进去的：%s\n"
+             "   后果：训练第一步（VAE 卷积）会报 `hipErrorInvalidImage` /\n"
+             "         device kernel image is invalid ✗ —— 现在就能提前发现 ✓\n"
+             "   修法：① 删除 HSA_OVERRIDE_GFX_VERSION（伪装架构会让安装程序也装错 ✗）\n"
+             "        ② 点「⚙ 安装第四引擎」重装（本版会按真实架构选包 ✓）"
+             % (_real or "未知", "、".join(sorted(_archs))))
+    logf("[%s] " % label + _hint.replace("\n", "\n[%s] " % label))
+    return False, pkgs, _hint
+
+
+def _amd_gpu_kernel_check(vpy, env=None, logf=print, label="训练引擎"):
+    """真跑一次 **GPU 卷积** —— 专抓「包装错架构 / 卷积 kernel 缺失」✓，返回 (ok, detail)。
+
+    ★ 2026-09-23：为什么必须是**卷积**，而不是矩阵乘 ✗ ——
+      · `_x @ _x` 走 **hipBLAS** ✓：多架构 wheel 里都带它 → 装错架构也照样通过 ✗
+      · **VAE 编码走 MIOpen 卷积** ✗：它的 kernel 是**按架构分包**的 ✗ → 装错必炸 ✗
+      这正是 RX 7800 XT 用户「装的时候验证通过、训练第一步就炸」的完整解释 ✓
+      → 所以卷积测试要**放进装完的验证**和**训练前的检查**里 ✓（3 秒，比白跑一小时划算 ✓）
+
+    同时把 `archs` / `cap` 打出来（诊断用 ✓）：装错架构时一眼就能看出
+    「设备报 gfx1100 但卡其实是 gfx1101」这类问题 ✓
+    """
+    code = (
+        "import torch\n"
+        "import torch.nn.functional as F\n"
+        "_info = []\n"
+        "try:\n"
+        "    _info.append('archs=' + ','.join(torch.cuda.get_arch_list()))\n"
+        "except Exception:\n"
+        "    pass\n"
+        "try:\n"
+        "    _info.append('cap=' + '.'.join(str(x) for x in torch.cuda.get_device_capability(0)))\n"
+        "except Exception:\n"
+        "    pass\n"
+        "try:\n"
+        "    _info.append('dev=' + str(torch.cuda.get_device_name(0)))\n"
+        "except Exception:\n"
+        "    pass\n"
+        "print('INFO|' + '|'.join(_info))\n"
+        "try:\n"
+        "    _x = torch.randn(1, 4, 64, 64, device='cuda')\n"
+        "    _w = torch.randn(8, 4, 3, 3, device='cuda')\n"
+        "    F.conv2d(_x, _w)\n"
+        "    torch.cuda.synchronize()\n"
+        "    print('CONV|ok')\n"
+        "except Exception as _e:\n"
+        "    print('CONV|FAIL|' + (type(_e).__name__ + ': ' + str(_e))[:400])\n"
+    )
+    try:
+        r = subprocess.run([vpy, "-c", code], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=300,
+                           env=env or build_direct_env())
+        out = (r.stdout or "")
+    except Exception as e:
+        # ★ 2026-09-23：自检**自己跑不起来**（python 路径异常等）与"GPU 卷积坏"是两回事 ✗
+        #   → 只警告、**不拦训练** ✓（防误伤 ✓；真有问题时训练会自带原始 traceback ✓）
+        _w = "GPU 卷积自检未能执行（%s）—— 不拦训练 ✓" % e
+        logf("[%s] ⚠ %s" % (label, _w))
+        return True, _w
+    _info = ""
+    _conv = ""
+    for _line in out.splitlines():
+        if _line.startswith("INFO|"):
+            _info = _line[len("INFO|"):].strip()
+        elif _line.startswith("CONV|"):
+            _conv = _line[len("CONV|"):].strip()
+    if _info:
+        logf("[%s] GPU 信息：%s" % (label, _info))
+    if _conv == "ok":
+        return True, _info
+    if not _conv.startswith("FAIL|"):
+        # ★ 2026-09-23：**没拿到明确结论 ≠ 环境坏** ✗ —— 只警告、**不拦训练** ✓
+        #   （v0.17.11 的教训：误拦的代价比漏报更大 ✗ —— 曾把本来能正常训练的 AMD 用户卡住 ✓）
+        #   只有拿到引擎亲口报的 `CONV|FAIL|...` ✓ 才拦 ✓
+        _w = ("GPU 卷积自检未取得结果（%s）—— 不拦训练 ✓；"
+              "若训练在第一步报错，再按该提示处理" % (((r.stderr or out or "").strip()[-200:]) or "无输出"))
+        logf("[%s] ⚠ %s" % (label, _w))
+        return True, _w
+    _err = _conv[len("FAIL|"):]
+    _pkgs = "、".join(_amd_device_pkgs(vpy)) or "（未发现按架构分包的包）"
+    _detail = ("GPU 卷积自检未通过 ✗ —— 这才是训练第一步（VAE 编码）会炸的真正原因 ✓\n"
+               "   报错：%s\n"
+               "   已装 ROCm device 包：%s\n"
+               "   GPU 信息：%s\n"
+               "   说明：`import torch` 与矩阵乘能过、但**卷积**过不去时，几乎都是\n"
+               "         「装的 ROCm 包架构与显卡不符」或「驱动与这套 ROCm 版本不匹配」✗\n"
+               "   修法：① 删除 HSA_OVERRIDE_GFX_VERSION / AMD_SERIALIZE_KERNEL 环境变量\n"
+               "        ② 点「⚙ 安装第四引擎」重装（本版按真实架构选包 ✓）\n"
+               "        ③ 若仍不行：更新 AMD 显卡驱动；或先用第二引擎（musubi）训练 ✓"
+               % (_err or "未知", _pkgs, _info or "未知"))
+    return False, _detail
+
+
+def _hsa_override_arch():
+    """把 `HSA_OVERRIDE_GFX_VERSION` 解析成 gfxXXXX（解析不出返回 None）。
+
+    可识别的写法：`11.0.0` / `11.0` / `10.3.0` / `gfx1101` ✓
+    （`11.0.0` → gfx1100、`10.3.0` → gfx1030、`11.0.1` → gfx1101 ✓）
+    """
+    _v = (os.environ.get("HSA_OVERRIDE_GFX_VERSION") or "").strip()
+    if not _v:
+        return None
+    if _v.lower().startswith("gfx"):
+        return _v.lower()
+    _m = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?$", _v)
+    if _m:
+        return ("gfx%s%s%s" % (_m.group(1), _m.group(2), _m.group(3) or "0")).lower()
+    return None
+
+
+def _warn_hsa_override(real_arch, logf=print, label="训练引擎"):
+    """用户设了 `HSA_OVERRIDE_GFX_VERSION` 且与真实显卡架构不符时，把后果说清楚。
+
+    ★ 2026-09-23（RX 7800 XT 用户）：用户照老教程设了 `HSA_OVERRIDE_GFX_VERSION=11.0.0`
+      （把 gfx1101 伪装成 gfx1100）✗ —— 而本机的 ROCm 包是**按真实架构装**的 ✓，
+      于是伪装反而让底层 kernel 库（MIOpen 卷积）找不到匹配的二进制 ✗
+      → 训练第一步就 `hipErrorInvalidImage` ✗
+      更要命的是：**它还会污染后续的架构探测** ✗（导致重装时又装错包 ✗，
+      见 `_amd_gpu_arch` 的注释 ✓）
+    → 所以这里既要说"要不要删" ✓，也要说清"怎么删" ✓（用户上次就是忘了删持久变量 ✗）
+    """
+    _raw = (os.environ.get("HSA_OVERRIDE_GFX_VERSION") or "").strip()
+    _ov = _hsa_override_arch()
+    if not _ov or not real_arch:
+        return
+    _real = str(real_arch).lower()
+    if _ov == _real:
+        return
+    logf("[%s] ⚠ 检测到环境变量 HSA_OVERRIDE_GFX_VERSION=%s（相当于 %s），"
+         "而你的显卡架构是 %s ✗" % (label, _raw, _ov, _real))
+    logf("[%s]   它会把显卡「伪装」成 %s：底层 kernel 库（MIOpen 卷积等）会按 %s 去找 ✗"
+         % (label, _ov, _ov))
+    logf("[%s]   · 本机 ROCm 包若正好是 %s 构建 → 需要它 ✓（可保持不动）" % (label, _ov))
+    logf("[%s]   · 否则请删掉它 ✗ —— 否则训练第一步（VAE 卷积）可能直接报 "
+         "kernel image invalid ✗，而且重装引擎时还可能把包又装错架构 ✗" % label)
+    logf("[%s]   删除：在启动工具的窗口执行 Remove-Item Env:HSA_OVERRIDE_GFX_VERSION ✓；"
+         "若设过持久变量，再执行 "
+         "[Environment]::SetEnvironmentVariable(\"HSA_OVERRIDE_GFX_VERSION\",$null,\"User\") ✓" % label)
+
+
+def _fizgig_amd_preflight(vpy, fz_dir, env, logf=print, label="Krea2(Fizgig)"):
+    """AMD 训练前的"提前体检"：①GPU 卷积自检 ②架构/override 自洽性。返回 (ok, detail)。
+
+    ★ 2026-09-23：为什么必须在**训练前**做 ✗ ——
+      这类问题（包装错架构 / 卷积 kernel 缺失）**不会**在 `import torch` 时暴露 ✗，
+      而是等到 VAE 编码第一步才炸 ✗ —— 而那时用户已经白跑完：
+      数据检查 → VAE 缓存 → latents 缓存 → 文本编码器缓存（可能几十分钟 ✗）
+      （RX 7800 XT 用户日志 KohyaLoRA_Frieren1_20260923 完整复现了这个剧本 ✓）
+      → 3 秒的检查换掉几十分钟白跑 ✓，而且**训练没开始**，项目配置不用重设 ✓
+    """
+    _ok, _detail = _amd_gpu_kernel_check(vpy, env, logf, label)
+    if not _ok:
+        return False, _detail
+    try:
+        _real = _fizgig_amd_arch(fz_dir, logf)
+    except Exception as _e:
+        # ★ 2026-09-23：架构认不出来只影响"诊断详情" ✗ → **绝不能因此拦训练** ✓
+        #   （教训同上：误拦比漏报代价大 ✓）
+        logf("[%s] ⚠ 未能识别 GPU 架构（%s），跳过架构一致性检查 ✓" % (label, _e))
+        _real = None
+    _warn_hsa_override(_real, logf, label)
+    _warn_amd_arch_mismatch(vpy, _real, logf, label)
+    return True, ""
 
 
 def _fizgig_verify(vpy, fz_dir, logf=print, backend="nvidia"):
@@ -5142,6 +5427,14 @@ def _fizgig_verify(vpy, fz_dir, logf=print, backend="nvidia"):
             raise RuntimeError("torch 未启用 GPU（" + ((r.stderr or r.stdout or "未知")[-200:]) + "）")
         if backend == "amd-rocm" and not any(ln.startswith(("rocm=", "hip=")) and ln.split("=", 1)[1] for ln in out):
             raise RuntimeError("AMD ROCm torch 缺少 HIP 版本信息，疑似装成 CUDA/CPU 版")
+        if backend == "amd-rocm":
+            # ★ 2026-09-23：AMD 上**必须真跑一次卷积** ✗ —— 见 _amd_gpu_kernel_check 的注释：
+            #   只测 `import torch`（甚至 + 矩阵乘）会漏掉「包装错架构」✗ ——
+            #   RX 7800 XT 用户就是这样"装的时候验证通过、训练第一步炸"✗（白折腾一整晚 ✓）
+            #   装到这里就当场拦住 ✗，并说清是包错还是驱动问题 ✓
+            _kok, _kdetail = _amd_gpu_kernel_check(vpy, _env, logf, "第四引擎")
+            if not _kok:
+                raise RuntimeError(_kdetail)
         r2 = subprocess.run([vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "krea2_train.py"), "--help"],
                             capture_output=True, text=True, timeout=180, env=_env)
         if r2.returncode != 0:
@@ -5558,6 +5851,12 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     if backend == "amd-rocm":
         _fz_env = _fizgig_rocm_env(fz_dir, vpy)
         logf("[Krea2(Fizgig)] AMD ROCm 运行时环境已设置（rocm7.15 / BNB_ROCM_VERSION=715）")
+        # ★ 2026-09-23：训练前"提前体检"✗ —— VAE 卷积真跑一次 + 架构自洽性核对
+        #   这类问题（包装错架构 / 卷积 kernel 缺失）只在 VAE 编码第一步才暴露 ✗，
+        #   届时 latents / 文本编码器缓存都已白跑 ✗（RX 7800 XT 用户实测剧本 ✓）
+        _pf_ok, _pf_detail = _fizgig_amd_preflight(vpy, fz_dir, _fz_env, logf, "Krea2(Fizgig)")
+        if not _pf_ok:
+            raise RuntimeError(_pf_detail)
     files = krea2_model_files()
     missing = krea2_missing_models()
     if missing:
@@ -5794,6 +6093,10 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
     if backend == "amd-rocm":
         _fz_env = _fizgig_rocm_env(fz_dir, vpy)
         logf("[FLUX.2(Fizgig)] AMD ROCm 运行时环境已设置（rocm7.15 / BNB_ROCM_VERSION=715）")
+        # ★ 2026-09-23：同 Krea2 —— 训练前先真跑一次 VAE 卷积 + 核对架构自洽性 ✗
+        _pf_ok, _pf_detail = _fizgig_amd_preflight(vpy, fz_dir, _fz_env, logf, "FLUX.2(Fizgig)")
+        if not _pf_ok:
+            raise RuntimeError(_pf_detail)
     files = flux2_fz_model_files()
     missing = flux2_fz_missing_models()
     if missing:
