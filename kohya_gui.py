@@ -472,6 +472,7 @@ class App:
         # 完整运行日志（不分行数保留，导出用；界面日志框另有 3000 行显示上限，避免 Tk 内存/GDI 耗尽）
         self._full_log = []
         self.mode = "character"
+        self._interval_values = core.normalize_interval_values({})
         self.base_type = "sd15"
         self.busy = False
         self._task_title = ""           # 当前任务名（关闭确认框显示"正在：xxx"）
@@ -1368,6 +1369,7 @@ class App:
         self.btn_at_custom.pack(side="left", padx=(4, 4))
         self._tip(self.btn_at_custom,
                   "从下拉列表选择模型，或指定已有的 Diffusers 目录；Qwen-Image-2.1 也可选 ComfyUI safetensors 权重文件，并自动复用同一 models 目录下已有的文本编码器和 VAE。\n"
+                  "Qwen-Image-2.1 缺少 processor/分词器或组件配置时，首次训练只下载约 16 MB 并缓存，不会重下大模型。\n"
                   "架构和显存建议由工具按模型自动填写。")
 
         # AMD 兼容模式（实验性）：仅 AMD 显卡显示
@@ -1881,6 +1883,12 @@ class App:
         模式/架构/预设随后由所选模板重新填充。
         """
         self._manual_override.clear()
+        self._interval_values = core.normalize_interval_values({})
+        for _key in ("save_every", "sample_interval"):
+            try:
+                self._set_param_value(_key, "")
+            except Exception:
+                pass
         self.raw_dir_var.set("")
         self.base_model_var.set("")
         self.trigger_var.set("")
@@ -2161,6 +2169,7 @@ class App:
     def _collect_project_data(self, template="自定义"):
         """收集当前界面全部状态，供保存到项目 json。"""
         params = self._collect_params()
+        self._capture_interval_values(self.mode)
         return {
             "name": self.current_project or "",
             "template": template,
@@ -2178,6 +2187,7 @@ class App:
             "style_caption": params.get("style_caption") or "",
             "style_preset": params.get("style_preset") or "自定义",
             "preset_version": core.PRESET_VERSION,
+            "interval_values": core.normalize_interval_values(self._interval_values),
             "unet_only": params.get("train_text_encoder") is False,
             "train_env": params.get("train_env") or "",
             "params": {
@@ -2210,6 +2220,7 @@ class App:
         """把项目 json 恢复回界面。"""
         self._loading_project = True
         self._manual_override.clear()
+        self._interval_values = core.normalize_interval_values(data.get("interval_values"))
         try:
             m = data.get("mode", "character")
             if not isinstance(m, str):
@@ -2277,6 +2288,9 @@ class App:
             p = data.get("params") or {}
             if not isinstance(p, dict):
                 p = {}
+            # 清掉上一个项目遗留的共享输入；旧项目再从它当前模式迁移到对应单位桶。
+            for _key in ("save_every", "sample_interval"):
+                self._set_param_value(_key, "")
             _opt_gui = {v: k for k, v in _OPT_GUI_MAP.items()}.get((p.get("optimizer") or "auto"), "自动")
             try:
                 self.optimizer_var.set(_opt_gui)
@@ -2334,6 +2348,15 @@ class App:
                 if v is not None:
                     self.param_vars.setdefault(k, tk.StringVar()).set(str(v))
                     self._manual_override.add(k)   # 项目参数优先，不被预设覆盖
+            _cached_intervals = core.interval_values_for_mode(self._interval_values, self.mode)
+            for _key in ("save_every", "sample_interval"):
+                if _key in p and p.get(_key) is not None:
+                    # 兼容旧项目的通用值；当前模式的显式值优先，并按其真实单位迁移。
+                    self._interval_values = core.capture_interval_values(
+                        self._interval_values, self.mode,
+                        {_key: self.param_vars[_key].get()})
+                else:
+                    self._set_param_value(_key, _cached_intervals.get(_key, ""))
             self._apply_presets()   # 填充缺失参数（不覆盖项目已有值）
             self._update_mode_ui()
             self._refresh_preset_summary()
@@ -3079,7 +3102,10 @@ class App:
         prev = self._applying_preset
         self._applying_preset = True
         try:
-            self.param_vars.setdefault(key, tk.StringVar()).set(str(value))
+            var = self.param_vars.get(key)
+            if var is None:
+                var = self.param_vars[key] = tk.StringVar()
+            var.set(str(value))
         finally:
             self._applying_preset = prev
 
@@ -3350,7 +3376,14 @@ class App:
                 pass
 
     def _on_mode_change(self):
-        self.mode = self._current_mode()
+        _old_mode = self.mode
+        _new_mode = self._current_mode()
+        if _new_mode != _old_mode:
+            self._capture_interval_values(_old_mode)
+            self.mode = _new_mode
+            self._restore_interval_values(_new_mode)
+        else:
+            self.mode = _new_mode
         # 模式切换：底模类型与新模式不匹配（如 style+flux2）→ 回该模式默认档，避免预设查表 KeyError 卡死界面
         try:
             _pres = core.PRESETS.get(self.mode) or {}
@@ -3369,6 +3402,26 @@ class App:
         except Exception:
             pass
         self._schedule_autosave()
+
+    def _capture_interval_values(self, mode=None):
+        """按当前单位记住两个共享间隔输入框的值。"""
+        _mode = mode or self.mode
+        _values = {}
+        for _key in ("save_every", "sample_interval"):
+            try:
+                _values[_key] = self.param_vars[_key].get()
+            except Exception:
+                continue
+        self._interval_values = core.capture_interval_values(
+            getattr(self, "_interval_values", {}), _mode, _values)
+
+    def _restore_interval_values(self, mode=None):
+        """恢复新模式单位下的值；该单位首次使用时留空走引擎默认值。"""
+        _mode = mode or self.mode
+        _values = core.interval_values_for_mode(
+            getattr(self, "_interval_values", {}), _mode)
+        for _key, _value in _values.items():
+            self._set_param_value(_key, _value)
 
     def _update_mode_ui(self):
         self._refresh_nav_highlight()
@@ -3912,7 +3965,7 @@ class App:
         #   2026-09-21 用户实测：原先一律标"(步)"、Fizgig 内部再换算 ✗ →
         #   他按"轮"理解填 10 → round(10÷100)=0 → 下限 1 → **实际每 1 轮**（差 10 倍）✗
         #   → 现象就是「还是 100 张预览一次」✓ 单位与引擎一致才对得上直觉 ✓
-        _fz = self.mode in ("krea2_fz", "flux2_fz")
+        _fz = core.interval_unit_for(self.mode, "sample_interval") == "epochs"
         try:
             self.lbl_si_title.configure(
                 text="采样预览间隔(轮)" if _fz else "采样预览间隔(步)")
@@ -3929,7 +3982,7 @@ class App:
         # ★「模型保存间隔」同样按模式变（Krea2/FLUX.2 含 Fizgig = 轮，其它 = 步）✓
         #   2026-09-21 用户填 200 而实际按**轮**算 → 18 轮训练一个快照都不存 ✗
         #   （根因是原提示把「200 步」和「N 轮」写进同一句 ✗ → 用户按步理解 ✗）
-        _ep_engine = self.mode in ("krea2", "krea2_fz", "flux2", "flux2_fz")
+        _ep_engine = core.interval_unit_for(self.mode, "save_every") == "epochs"
         try:
             self.lbl_save_title.configure(
                 text="模型保存间隔(轮)" if _ep_engine else "模型保存间隔(步)")
@@ -6009,7 +6062,7 @@ class App:
         local_path = cur.get("local_dir") or ""
         w = ctk.CTkToplevel(self.root)
         w.title("选择训练模型")
-        w.geometry("560x390")
+        w.geometry("560x535")
         w.resizable(False, False)
         w.transient(self.root)
         body = ctk.CTkFrame(w, fg_color=BG)
@@ -6024,6 +6077,8 @@ class App:
         model_var = tk.StringVar(value=selected["label"])
         source_var = tk.StringVar(value="local" if local_path else "download")
         local_path_var = tk.StringVar(value=local_path)
+        text_encoder_path_var = tk.StringVar(value=cur.get("text_encoder_path") or "")
+        vae_path_var = tk.StringVar(value=cur.get("vae_path") or "")
         local_display_var = tk.StringVar()
         info_var = tk.StringVar()
         model_menu = ctk.CTkOptionMenu(
@@ -6050,14 +6105,19 @@ class App:
                 if os.path.isfile(local_path):
                     if c.get("arch") == "qwen_image_2":
                         components = core.at_image_qwen21_local_components(local_path)
-                        source_info = "来源：本地 Qwen-Image-2.1 权重；训练会自动复用找到的 ComfyUI 文本编码器和 VAE"
+                        source_info = "来源：本地 Qwen-Image-2.1 权重；可手动指定组件，手动路径优先"
+                        text_encoder_path = (text_encoder_path_var.get().strip()
+                                             or components.get("text_encoder_path"))
+                        vae_path = vae_path_var.get().strip() or components.get("vae_path")
                         component_lines = []
                         component_lines.append("文本编码器：" + (
-                            components["text_encoder_path"] if components.get("text_encoder_path")
+                            text_encoder_path if text_encoder_path
                             else "未找到，训练时只下载此组件"))
                         component_lines.append("VAE：" + (
-                            components["vae_path"] if components.get("vae_path")
+                            vae_path if vae_path
                             else "未找到，训练时只下载此组件"))
+                        if c.get("arch") == "qwen_image_2":
+                            component_lines.append("配置和 processor/分词器：目录内有则复用，否则首次仅下载约 16 MB")
                         local_display_var.set("权重文件：%s\n%s" % (
                             local_path, "\n".join(component_lines)))
                     else:
@@ -6065,12 +6125,18 @@ class App:
                         local_display_var.set("权重文件：" + local_path)
                 else:
                     source_info = "来源：本地 Diffusers 模型目录（不会下载底模）"
-                    local_display_var.set("本地目录：" + local_path)
+                    if c.get("arch") == "qwen_image_2":
+                        local_display_var.set(
+                            "本地目录：%s\n配置和 processor/分词器：目录内有则复用，否则首次仅下载约 16 MB"
+                            % local_path)
+                    else:
+                        local_display_var.set("本地目录：" + local_path)
             else:
                 source_info = "下载仓库：%s" % c.get("model_id", "")
-                local_display_var.set("也可以选择 Diffusers 目录；Qwen-Image-2.1 还支持直接选择 safetensors 权重文件。")
+                local_display_var.set("也可选择 Diffusers 目录；Qwen-Image-2.1 支持单文件权重和手动指定文本编码器、VAE。缺少 processor/分词器或组件配置时首次仅下载约 16 MB。")
             info_var.set("%s\n架构：%s    %s\n%s" % (
                 source_info, c.get("arch", ""), vram, c.get("hint", "")))
+            _sync_component_controls()
 
         def _on_model_change(_value=None):
             choice = choice_by_label.get(_value or model_var.get(), {})
@@ -6157,6 +6223,74 @@ class App:
         local_checkpoint_btn.configure(
             state="normal" if _selected_choice().get("arch") == "qwen_image_2" else "disabled")
 
+        component_frame = ctk.CTkFrame(body, fg_color=CARD, corner_radius=8)
+        component_frame.pack(fill="x", pady=(6, 0))
+        ctk.CTkLabel(component_frame, text="Qwen-Image-2.1 组件（可选；留空自动查找）",
+                     font=ui_font(FONT_HINT), text_color=SUB, anchor="w").pack(
+                         fill="x", padx=10, pady=(7, 4))
+        component_rows = {}
+        for key, label, variable in (
+                ("text_encoder_path", "文本编码器", text_encoder_path_var),
+                ("vae_path", "VAE", vae_path_var)):
+            row = ctk.CTkFrame(component_frame, fg_color="transparent")
+            row.pack(fill="x", padx=8, pady=(0, 5))
+            ctk.CTkLabel(row, text=label, width=72, font=ui_font(FONT_HINT),
+                         text_color=TXT, anchor="w").pack(side="left")
+            entry = ctk.CTkEntry(row, textvariable=variable, height=30, font=ui_font(FONT_HINT),
+                                 fg_color=CARD2, border_color=BORDER, text_color=TXT)
+            entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+            browse = ctk.CTkButton(
+                row, text="浏览…", width=64, height=30, fg_color=CARD2,
+                hover_color="#343a46", border_width=1, border_color=BORDER,
+                text_color=TXT, font=ui_font(FONT_HINT),
+                command=lambda k=key, v=variable, title=label: _browse_qwen21_component(k, v, title))
+            browse.pack(side="left")
+            clear = ctk.CTkButton(
+                row, text="自动", width=52, height=30, fg_color="transparent",
+                hover_color="#252a36", border_width=1, border_color=BORDER,
+                text_color=SUB, font=ui_font(FONT_HINT), command=lambda v=variable: v.set(""))
+            clear.pack(side="left", padx=(5, 0))
+            component_rows[key] = (entry, browse, clear)
+
+        def _sync_component_controls():
+            enabled = (
+                _selected_choice().get("arch") == "qwen_image_2"
+                and source_var.get() == "local"
+                and core._at_image_qwen21_checkpoint_ready(local_path_var.get().strip())
+            )
+            state = "normal" if enabled else "disabled"
+            for controls in component_rows.values():
+                for widget in controls:
+                    widget.configure(state=state)
+
+        def _browse_qwen21_component(key, variable, label):
+            current = variable.get().strip()
+            start = os.path.dirname(current) if os.path.isfile(current) else ""
+            if not start:
+                model_path = local_path_var.get().strip()
+                start = os.path.dirname(model_path) if os.path.isfile(model_path) else model_path
+            options = {
+                "title": "选择 Qwen-Image-2.1 %s safetensors 文件" % label,
+                "filetypes": [("safetensors 权重", "*.safetensors"), ("所有文件", "*.*")],
+                "parent": w,
+            }
+            if start and os.path.isdir(start):
+                options["initialdir"] = start
+            path = filedialog.askopenfilename(**options)
+            if not path:
+                return
+            if not core.at_image_qwen21_component_file_ready(path):
+                messagebox.showerror(
+                    core.APP_NAME,
+                    "请选择有效的 safetensors 文件（文件需大于 1 MB）。",
+                    parent=w)
+                return
+            variable.set(path)
+            _refresh_model_info()
+
+        text_encoder_path_var.trace_add("write", lambda *_: _refresh_model_info())
+        vae_path_var.trace_add("write", lambda *_: _refresh_model_info())
+
         def _save():
             c = _selected_choice()
             if source_var.get() == "local":
@@ -6175,6 +6309,21 @@ class App:
                     "min_vram": c.get("min_vram"), "rec_vram": c.get("rec_vram"),
                     "resident_vram": c.get("resident_vram"),
                 }
+                if (c.get("arch") == "qwen_image_2"
+                        and core._at_image_qwen21_checkpoint_ready(path)):
+                    for key, label, variable in (
+                            ("text_encoder_path", "文本编码器", text_encoder_path_var),
+                            ("vae_path", "VAE", vae_path_var)):
+                        component_path = variable.get().strip()
+                        if component_path and not core.at_image_qwen21_component_file_ready(component_path):
+                            messagebox.showerror(
+                                core.APP_NAME,
+                                "%s路径不是有效的 safetensors 文件（需大于 1 MB）：\n%s"
+                                % (label, component_path),
+                                parent=w)
+                            return
+                        if component_path:
+                            d[key] = component_path
                 core.at_image_custom_set(mode, d)
                 self._log("[模型] 已指定本地模型：%s（跳过下载）" % path)
             elif c.get("default"):
@@ -6218,7 +6367,7 @@ class App:
                 "📖 Qwen-Image LoRA · 操作步骤\n\n"
                 "1. 如果顶部状态提示「第三引擎未装」，点「⚙ 安装第三引擎」。\n"
                 "2. 点「选择训练模型」：选 Qwen-Image-2512（默认）或 Qwen-Image-2.1，再点「使用所选模型」。架构由工具自动设置；选择会保存在本机，之后其他项目也沿用。两个版本分别缓存，各占约 40GB。\n"
-                "3. 若模型已在本机，可选完整 Diffusers 模型目录（含 model_index.json、transformer/config.json、text_encoder/config.json 和权重文件）。训练 Qwen-Image-2.1 时，也可选 ComfyUI 的 qwen_image_2.1_*.safetensors 权重文件；工具会自动复用同一 ComfyUI models 目录下 clip（或 text_encoders）和 vae 中已有的文本编码器与 VAE，只从 Qwen 仓库加载较小的配置和 processor 文件。缺少的组件才会单独下载。\n"
+                "3. 若模型已在本机，可选完整 Diffusers 模型目录（含 model_index.json、transformer/config.json、text_encoder/config.json 和权重文件）。训练 Qwen-Image-2.1 时，也可选 ComfyUI 的 qwen_image_2.1_*.safetensors 权重文件；工具会自动查找同一 ComfyUI models 目录下 clip（或 text_encoders）和 vae 中的组件。若自动查找不到，可在选择窗口手动浏览或粘贴现有文本编码器、VAE 的 safetensors 路径，手动指定路径优先；文本编码器和 VAE 只下载缺失的组件。processor/分词器及组件配置若不在本地模型目录中，首次仅下载约 16 MB 并缓存。\n"
                 "4. 选择训练类型（人物 / 画风 / 概念）和原始图片文件夹。人物、概念建议填写专属 Trigger；至少准备 15 张清晰、同一人物或同一风格的图片。\n"
                 "5. 点左侧「🚀 一键开始训练」。它会先自动去重、过滤过小或模糊图片、按裁切设置处理并用 WD14 打标签，再弹窗确认参数；确认后才开始训练。WD14 标签可在训练前用「标签编辑器」检查。\n\n"
                 f"当前模型：{info.get('model_id', '')}（约 {info.get('size', '')}）\n"

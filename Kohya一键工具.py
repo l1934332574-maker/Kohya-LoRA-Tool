@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.17"
+APP_VERSION = "0.17.18"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -4126,20 +4126,41 @@ def _ai_toolkit_qwen21_source_ready(at_dir):
 
 
 def _ai_toolkit_qwen21_local_components_patch_ready(at_dir):
-    """只读检查 Qwen-Image-2.1 loader 是否已有本地 TE/VAE 路径支持。"""
+    """Check that Qwen-Image-2.1 supports local weights, processor, and configs."""
     model_file = os.path.join(
         at_dir, "extensions_built_in", "diffusion_models", "qwen_image_2",
         "qwen_image_2.py")
     try:
         source = open(model_file, encoding="utf-8", errors="replace").read()
-        return ("AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH" in source and
-                "AI_TOOLKIT_QWEN21_VAE_PATH" in source)
+        required = (
+            "AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH",
+            "AI_TOOLKIT_QWEN21_VAE_PATH",
+            "AI_TOOLKIT_QWEN21_ASSETS_PATH",
+        )
+        return (
+            all(marker in source for marker in required) and
+            re.search(
+                r'QwenImage21Transformer2DModel\.load\(\s*model_path\s*,\s*'
+                r'config_path\s*=\s*local_assets_path\s+or\s+base_model_path', source) is not None and
+            re.search(
+                r'QwenImage21TextEncoder\.load_processor\(\s*'
+                r'local_assets_path\s+or\s+base_model_path\s*\)', source) is not None and
+            re.search(
+                r'QwenImage21TextEncoder\.load_model\(\s*'
+                r'local_text_encoder_path\s+or\s+base_model_path\s*,\s*'
+                r'dtype\s*=\s*dtype\s*,\s*config_path\s*=\s*'
+                r'local_assets_path\s+or\s+base_model_path', source) is not None and
+            re.search(
+                r'AutoencoderKLQwenImage21\.load\(\s*'
+                r'local_vae_path\s+or\s+base_model_path\s*,\s*'
+                r'config_path\s*=\s*local_assets_path\s+or\s+base_model_path\s*,', source) is not None
+        )
     except Exception:
         return False
 
 
 def _patch_ai_toolkit_qwen21_local_components(at_dir, logf=print):
-    """让 Qwen-Image-2.1 loader 接受 ComfyUI 已有的 TE/VAE 单文件权重路径。"""
+    """Patch Qwen-Image-2.1 to load its processor and component configs locally."""
     model_file = os.path.join(
         at_dir, "extensions_built_in", "diffusion_models", "qwen_image_2",
         "qwen_image_2.py")
@@ -4148,54 +4169,171 @@ def _patch_ai_toolkit_qwen21_local_components(at_dir, logf=print):
     try:
         with open(model_file, "r", encoding="utf-8") as f:
             source = f.read()
-        te_marker = 'AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH'
-        vae_marker = 'AI_TOOLKIT_QWEN21_VAE_PATH'
-        if te_marker in source and vae_marker in source:
+        te_marker = "AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH"
+        vae_marker = "AI_TOOLKIT_QWEN21_VAE_PATH"
+        assets_marker = "AI_TOOLKIT_QWEN21_ASSETS_PATH"
+        assets_expr = "local_assets_path or base_model_path"
+        config_expr = "config_path=local_assets_path or base_model_path"
+        te_config_expr = config_expr
+        transformer_config_expr = config_expr
+        vae_config_expr = config_expr
+        transformer_ready = bool(re.search(
+            r'QwenImage21Transformer2DModel\.load\(\s*model_path\s*,\s*'
+            r'config_path\s*=\s*local_assets_path\s+or\s+base_model_path', source))
+        processor_ready = bool(re.search(
+            r'QwenImage21TextEncoder\.load_processor\(\s*'
+            r'local_assets_path\s+or\s+base_model_path\s*\)', source))
+        text_encoder_ready = bool(re.search(
+            r'QwenImage21TextEncoder\.load_model\(\s*'
+            r'local_text_encoder_path\s+or\s+base_model_path\s*,\s*'
+            r'dtype\s*=\s*dtype\s*,\s*config_path\s*=\s*'
+            r'local_assets_path\s+or\s+base_model_path', source))
+        vae_ready = bool(re.search(
+            r'AutoencoderKLQwenImage21\.load\(\s*'
+            r'local_vae_path\s+or\s+base_model_path\s*,\s*'
+            r'config_path\s*=\s*local_assets_path\s+or\s+base_model_path\s*,', source))
+        if (te_marker in source and vae_marker in source and assets_marker in source and
+                transformer_ready and processor_ready and text_encoder_ready and vae_ready):
             return True
         if "import os" not in source:
-            raise RuntimeError("Qwen-Image-2.1 loader 缺少 os 导入，无法接入本地组件")
+            raise RuntimeError("Qwen-Image-2.1 loader is missing the os import")
 
+        transformer_status = 'self.print_and_status_update("Loading transformer")'
         te_status = 'self.print_and_status_update("Loading text encoder")'
         vae_status = 'self.print_and_status_update("Loading VAE")'
+        transformer_call = re.compile(
+            r'(QwenImage21Transformer2DModel\.load\(\s*model_path\s*,\s*config_path\s*=\s*)base_model_path')
+        transformer_local_call = re.compile(
+            r'QwenImage21Transformer2DModel\.load\(\s*model_path\s*,\s*'
+            r'config_path\s*=\s*local_assets_path\s+or\s+base_model_path')
         te_call = re.compile(
             r'(QwenImage21TextEncoder\.load_model\(\s*)base_model_path'
             r'(?=\s*,\s*dtype\s*=\s*dtype)')
         vae_call = re.compile(
             r'(AutoencoderKLQwenImage21\.load\(\s*)base_model_path'
             r'(?=\s*,)')
-        if source.count(te_status) != 1 or source.count(vae_status) != 1:
-            raise RuntimeError("Qwen-Image-2.1 加载代码结构已变化，无法安全加入本地组件路径")
-        if len(te_call.findall(source)) != 1 or len(vae_call.findall(source)) != 1:
-            raise RuntimeError("Qwen-Image-2.1 TE/VAE 加载调用已变化，无法安全加入本地组件路径")
+        processor_call = re.compile(
+            r'(?m)^([ \t]*)processor\s*=\s*QwenImage21TextEncoder\.load_processor\('
+            r'\s*base_model_path\s*\)')
 
-        te_injection = (
-            te_status + "\n"
-            "        local_text_encoder_path = os.environ.get(\"AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH\")\n"
-            "        if local_text_encoder_path and not os.path.isfile(local_text_encoder_path):\n"
-            "            raise FileNotFoundError(f\"Configured Qwen-Image-2.1 text encoder not found: {local_text_encoder_path}\")\n"
-            "        if local_text_encoder_path:\n"
-            "            self.print_and_status_update(f\"Using local Qwen-Image-2.1 text encoder: {local_text_encoder_path}\")")
-        vae_injection = (
-            vae_status + "\n"
-            "        local_vae_path = os.environ.get(\"AI_TOOLKIT_QWEN21_VAE_PATH\")\n"
-            "        if local_vae_path and not os.path.isfile(local_vae_path):\n"
-            "            raise FileNotFoundError(f\"Configured Qwen-Image-2.1 VAE not found: {local_vae_path}\")\n"
-            "        if local_vae_path:\n"
-            "            self.print_and_status_update(f\"Using local Qwen-Image-2.1 VAE: {local_vae_path}\")")
-        source = source.replace(te_status, te_injection, 1)
-        source = source.replace(vae_status, vae_injection, 1)
-        source, te_count = te_call.subn(r'\1local_text_encoder_path or base_model_path', source, count=1)
-        source, vae_count = vae_call.subn(r'\1local_vae_path or base_model_path', source, count=1)
-        if te_count != 1 or vae_count != 1:
-            raise RuntimeError("加入 Qwen-Image-2.1 本地组件路径失败")
+        if assets_marker not in source:
+            if source.count(transformer_status) != 1:
+                raise RuntimeError("Qwen-Image-2.1 transformer loader changed; refusing an unsafe config patch")
+            assets_injection = (
+                transformer_status + "\n"
+                "        local_assets_path = os.environ.get(\"AI_TOOLKIT_QWEN21_ASSETS_PATH\")\n"
+                "        if local_assets_path:\n"
+                "            required_local_assets = (\"processor/added_tokens.json\", \"processor/chat_template.jinja\", \"processor/merges.txt\", \"processor/preprocessor_config.json\", \"processor/special_tokens_map.json\", \"processor/tokenizer.json\", \"processor/tokenizer_config.json\", \"processor/video_preprocessor_config.json\", \"processor/vocab.json\", \"text_encoder/config.json\", \"vae/config.json\", \"transformer/config.json\")\n"
+                "            missing_local_assets = [name for name in required_local_assets if not os.path.isfile(os.path.join(local_assets_path, name))]\n"
+                "            if missing_local_assets:\n"
+                "                raise FileNotFoundError(f\"Configured Qwen-Image-2.1 assets are incomplete: {local_assets_path} (missing {missing_local_assets})\")\n"
+                "            self.print_and_status_update(f\"Using local Qwen-Image-2.1 configs and processor: {local_assets_path}\")")
+            source = source.replace(transformer_status, assets_injection, 1)
+
+        if not transformer_local_call.search(source):
+            if len(transformer_call.findall(source)) != 1:
+                raise RuntimeError("Qwen-Image-2.1 transformer config loader changed; refusing an unsafe patch")
+            source, count = transformer_call.subn(r'\1' + assets_expr, source, count=1)
+            if count != 1:
+                raise RuntimeError("Failed to patch the local Qwen-Image-2.1 transformer config path")
+
+        te_marker = "AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH"
+        if te_marker not in source:
+            if source.count(te_status) != 1 or len(te_call.findall(source)) != 1:
+                raise RuntimeError("Qwen-Image-2.1 text encoder loader changed; refusing an unsafe patch")
+            te_injection = (
+                te_status + "\n"
+                "        local_text_encoder_path = os.environ.get(\"AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH\")\n"
+                "        if local_text_encoder_path and not os.path.isfile(local_text_encoder_path):\n"
+                "            raise FileNotFoundError(f\"Configured Qwen-Image-2.1 text encoder not found: {local_text_encoder_path}\")\n"
+                "        if local_text_encoder_path:\n"
+                "            self.print_and_status_update(f\"Using local Qwen-Image-2.1 text encoder: {local_text_encoder_path}\")")
+            source = source.replace(te_status, te_injection, 1)
+            source, count = te_call.subn(r'\1local_text_encoder_path or base_model_path', source, count=1)
+            if count != 1:
+                raise RuntimeError("Failed to patch the local Qwen-Image-2.1 text encoder path")
+        elif "local_text_encoder_path or base_model_path" not in source:
+            raise RuntimeError("The existing Qwen-Image-2.1 text encoder patch is incomplete")
+
+        text_encoder_config_call = re.compile(
+            r'QwenImage21TextEncoder\.load_model\(\s*'
+            r'local_text_encoder_path\s+or\s+base_model_path\s*,\s*'
+            r'dtype\s*=\s*dtype\s*,\s*' + re.escape(te_config_expr))
+        if not text_encoder_config_call.search(source):
+            te_config_call = re.compile(
+                r'(QwenImage21TextEncoder\.load_model\(\s*(?:local_text_encoder_path\s+or\s+)?base_model_path\s*,\s*dtype\s*=\s*dtype)')
+            if len(te_config_call.findall(source)) != 1:
+                raise RuntimeError("Qwen-Image-2.1 text encoder config call changed; refusing an unsafe patch")
+            source, count = te_config_call.subn(r'\1, ' + te_config_expr, source, count=1)
+            if count != 1:
+                raise RuntimeError("Failed to patch the local Qwen-Image-2.1 text encoder config path")
+
+        if vae_marker not in source:
+            if source.count(vae_status) != 1 or len(vae_call.findall(source)) != 1:
+                raise RuntimeError("Qwen-Image-2.1 VAE loader changed; refusing an unsafe patch")
+            vae_injection = (
+                vae_status + "\n"
+                "        local_vae_path = os.environ.get(\"AI_TOOLKIT_QWEN21_VAE_PATH\")\n"
+                "        if local_vae_path and not os.path.isfile(local_vae_path):\n"
+                "            raise FileNotFoundError(f\"Configured Qwen-Image-2.1 VAE not found: {local_vae_path}\")\n"
+                "        if local_vae_path:\n"
+                "            self.print_and_status_update(f\"Using local Qwen-Image-2.1 VAE: {local_vae_path}\")")
+            source = source.replace(vae_status, vae_injection, 1)
+            source, count = vae_call.subn(r'\1local_vae_path or base_model_path', source, count=1)
+            if count != 1:
+                raise RuntimeError("Failed to patch the local Qwen-Image-2.1 VAE path")
+        elif "local_vae_path or base_model_path" not in source:
+            raise RuntimeError("The existing Qwen-Image-2.1 VAE patch is incomplete")
+
+        vae_config_call_ready = re.compile(
+            r'AutoencoderKLQwenImage21\.load\(\s*'
+            r'local_vae_path\s+or\s+base_model_path\s*,\s*' +
+            re.escape(vae_config_expr) + r'\s*,')
+        if not vae_config_call_ready.search(source):
+            vae_config_call = re.compile(
+                r'(AutoencoderKLQwenImage21\.load\(\s*(?:local_vae_path\s+or\s+)?base_model_path)\s*,')
+            if len(vae_config_call.findall(source)) != 1:
+                raise RuntimeError("Qwen-Image-2.1 VAE config call changed; refusing an unsafe patch")
+            source, count = vae_config_call.subn(
+                r'\1, ' + vae_config_expr + ',', source, count=1)
+            if count != 1:
+                raise RuntimeError("Failed to patch the local Qwen-Image-2.1 VAE config path")
+
+        if not processor_ready:
+            matches = list(processor_call.finditer(source))
+            if len(matches) != 1:
+                raise RuntimeError("Qwen-Image-2.1 processor loader changed; refusing an unsafe patch")
+            match = matches[0]
+            indent = match.group(1)
+            replacement = (
+                indent + 'processor = QwenImage21TextEncoder.load_processor(' + assets_expr + ')')
+            source = source[:match.start()] + replacement + source[match.end():]
+        processor_ready = bool(re.search(
+            r'QwenImage21TextEncoder\.load_processor\(\s*'
+            r'local_assets_path\s+or\s+base_model_path\s*\)', source))
+        transformer_ready = bool(re.search(
+            r'QwenImage21Transformer2DModel\.load\(\s*model_path\s*,\s*'
+            r'config_path\s*=\s*local_assets_path\s+or\s+base_model_path', source))
+        text_encoder_ready = bool(re.search(
+            r'QwenImage21TextEncoder\.load_model\(\s*'
+            r'local_text_encoder_path\s+or\s+base_model_path\s*,\s*'
+            r'dtype\s*=\s*dtype\s*,\s*config_path\s*=\s*'
+            r'local_assets_path\s+or\s+base_model_path', source))
+        vae_ready = bool(re.search(
+            r'AutoencoderKLQwenImage21\.load\(\s*'
+            r'local_vae_path\s+or\s+base_model_path\s*,\s*'
+            r'config_path\s*=\s*local_assets_path\s+or\s+base_model_path\s*,', source))
+        if not all((assets_marker in source, transformer_ready, processor_ready,
+                    text_encoder_ready, vae_ready)):
+            raise RuntimeError("Qwen-Image-2.1 local config/processor patch is incomplete")
+
         with open(model_file, "w", encoding="utf-8", newline="") as f:
             f.write(source)
-        logf("[第三引擎] 已接入 Qwen-Image-2.1 的 ComfyUI 本地文本编码器和 VAE 路径")
+        logf("[AI Toolkit] Qwen-Image-2.1 local text encoder, VAE, configs, and processor paths are enabled")
         return True
     except Exception as e:
-        logf(f"[第三引擎] Qwen-Image-2.1 本地组件接入失败：{e}")
+        logf(f"[AI Toolkit] Failed to patch Qwen-Image-2.1 local components: {e}")
         return False
-
 
 def ai_toolkit_engine_update_status():
     """返回 AI Toolkit 是否已安装，以及是否缺少本软件当前需要的 Qwen-Image-2.1 架构。"""
@@ -6200,7 +6338,8 @@ def at_image_local_dir(mode):
 #     （原先代码里是 7 处 `AT_IMAGE_MODELS.get(mode)` ✗ 分散各处、迟早漏改 ✓）
 _AT_CUSTOM_KEY = "at_image_custom"      # app_settings.json 里的键：{mode: {...}}
 _AT_CUSTOM_FIELDS = ("model_id", "arch", "label", "size", "hint",
-                     "min_vram", "rec_vram", "resident_vram", "local_dir")
+                     "min_vram", "rec_vram", "resident_vram", "local_dir",
+                     "text_encoder_path", "vae_path")
 
 
 def at_image_custom_get(mode):
@@ -6411,6 +6550,16 @@ def at_image_qwen21_local_components(model_path):
     return {}
 
 
+def at_image_qwen21_component_file_ready(path):
+    """手动指定的 Qwen-Image-2.1 文本编码器/VAE 必须是完整 safetensors 文件。"""
+    if not path or not os.path.isfile(path) or os.path.splitext(path)[1].lower() != ".safetensors":
+        return False
+    try:
+        return os.path.getsize(path) >= 1024 * 1024
+    except OSError:
+        return False
+
+
 def _ensure_ai_toolkit_triton(vpy, logf=print):
     """第三引擎 venv 缺 Triton 时自动补装 triton-windows（torchao 量化矩阵内核依赖）。
 
@@ -6591,6 +6740,25 @@ AT_IMAGE_MS_REPOS = {
 }
 
 
+# Qwen-Image-2.1 keeps tokenizer/processor assets and component configs separate from
+# ComfyUI safetensors. Cache only these small files; never snapshot the full repository.
+AT_IMAGE_QWEN21_PROCESSOR_REPO = "Qwen/Qwen-Image-2.1"
+AT_IMAGE_QWEN21_ASSET_FILES = (
+    "processor/added_tokens.json",
+    "processor/chat_template.jinja",
+    "processor/merges.txt",
+    "processor/preprocessor_config.json",
+    "processor/special_tokens_map.json",
+    "processor/tokenizer.json",
+    "processor/tokenizer_config.json",
+    "processor/video_preprocessor_config.json",
+    "processor/vocab.json",
+    "text_encoder/config.json",
+    "vae/config.json",
+    "transformer/config.json",
+)
+
+
 def _at_image_ms_file_list(repo):
     """从 ModelScope API 拉取仓库文件清单。失败返回 None。"""
     import urllib.request
@@ -6668,6 +6836,150 @@ def _at_image_ms_download(mode, logf):
             logf(f"[{info['label']}] ⚠ 文件下载失败：{path}（可重试，断点续传）")
             return False
     return at_image_model_ready(mode)
+
+
+def _at_image_qwen21_assets_cache_dir():
+    """Return the app-owned root that contains the Qwen-Image-2.1 processor/ folder."""
+    return data_sub("models", "at_image", "qwen_image_2.1_assets")
+
+
+def _at_image_qwen21_assets_metadata():
+    """Fetch only repository metadata for the small Qwen-Image-2.1 processor files."""
+    url = ("https://modelscope.cn/api/v1/models/%s/repo/files?"
+           "Revision=master&Recursive=true") % AT_IMAGE_QWEN21_PROCESSOR_REPO
+    try:
+        with urllib.request.urlopen(
+                urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}),
+                timeout=30) as response:
+            data = json.load(response)
+        files = {}
+        required = set(AT_IMAGE_QWEN21_ASSET_FILES)
+        for item in ((data.get("Data") or {}).get("Files") or []):
+            path = (item.get("Path") or "").strip()
+            if path in required and str(item.get("Type") or "").lower() == "blob":
+                try:
+                    size = int(item.get("Size"))
+                except (TypeError, ValueError):
+                    size = 0
+                sha256 = str(item.get("Sha256") or "").lower()
+                if size > 0 and re.fullmatch(r"[0-9a-f]{64}", sha256):
+                    files[path] = {"size": size, "sha256": sha256}
+        return files
+    except Exception:
+        return None
+
+
+def _at_image_qwen21_file_sha256(path):
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _at_image_qwen21_assets_folder_ready(model_root):
+    """Return whether a model folder contains processor files and component configs."""
+    try:
+        return all(
+            os.path.isfile(os.path.join(model_root, rel_path.replace("/", os.sep))) and
+            os.path.getsize(os.path.join(model_root, rel_path.replace("/", os.sep))) > 0
+            for rel_path in AT_IMAGE_QWEN21_ASSET_FILES
+        )
+    except Exception:
+        return False
+
+
+def _at_image_qwen21_assets_ready(root=None):
+    """Check processor files and component configs against the saved size/hash manifest."""
+    root = root or _at_image_qwen21_assets_cache_dir()
+    manifest_path = os.path.join(root, ".qwen21_assets_manifest.json")
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as stream:
+            manifest = json.load(stream)
+        files = manifest.get("files") or {}
+        if manifest.get("repo") != AT_IMAGE_QWEN21_PROCESSOR_REPO:
+            return False
+        if any(path not in files for path in AT_IMAGE_QWEN21_ASSET_FILES):
+            return False
+        for rel_path in AT_IMAGE_QWEN21_ASSET_FILES:
+            meta = files[rel_path]
+            local_path = os.path.join(root, rel_path.replace("/", os.sep))
+            if not os.path.isfile(local_path):
+                return False
+            if os.path.getsize(local_path) != int(meta["size"]):
+                return False
+            if _at_image_qwen21_file_sha256(local_path) != meta["sha256"]:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _ensure_at_image_qwen21_assets(logf=print):
+    """Download only Qwen-Image-2.1 processor files and small component configs."""
+    root = _at_image_qwen21_assets_cache_dir()
+    if _at_image_qwen21_assets_ready(root):
+        logf("[Qwen-Image-2.1] 复用已缓存的 processor/分词器和模型配置")
+        return root
+
+    metadata = _at_image_qwen21_assets_metadata()
+    if not metadata:
+        raise RuntimeError(
+            "无法连接魔搭获取 Qwen-Image-2.1 的 processor 和模型配置文件清单。\n"
+            "请检查网络后重试；底模、文本编码器和 VAE 均未因此下载。")
+    missing = [path for path in AT_IMAGE_QWEN21_ASSET_FILES if path not in metadata]
+    if missing:
+        raise RuntimeError("魔搭仓库缺少 Qwen-Image-2.1 必需配置文件：" + ", ".join(missing))
+
+    os.makedirs(root, exist_ok=True)
+    total = sum(metadata[path]["size"] for path in AT_IMAGE_QWEN21_ASSET_FILES)
+    logf("[Qwen-Image-2.1] 准备 processor/分词器和模型配置（约 %.1f MB；已有缓存会跳过）…" %
+         (total / (1024 * 1024)))
+    for index, rel_path in enumerate(AT_IMAGE_QWEN21_ASSET_FILES, 1):
+        info = metadata[rel_path]
+        destination = os.path.join(root, rel_path.replace("/", os.sep))
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        if os.path.isfile(destination):
+            size = os.path.getsize(destination)
+            if size == info["size"]:
+                if _at_image_qwen21_file_sha256(destination) == info["sha256"]:
+                    continue
+                try:
+                    os.remove(destination)
+                except OSError:
+                    pass
+            elif size > info["size"]:
+                try:
+                    os.remove(destination)
+                except OSError:
+                    pass
+        url = "https://modelscope.cn/models/%s/resolve/master/%s" % (
+            AT_IMAGE_QWEN21_PROCESSOR_REPO, rel_path)
+        logf("[Qwen-Image-2.1] 下载小型模型文件 %d/%d：%s" %
+             (index, len(AT_IMAGE_QWEN21_ASSET_FILES), os.path.basename(rel_path)))
+        if not _download_with_resume(url, destination, logf, direct=True):
+            raise RuntimeError("Qwen-Image-2.1 配置/processor 文件下载失败：" + rel_path)
+        if (not os.path.isfile(destination) or
+                os.path.getsize(destination) != info["size"] or
+                _at_image_qwen21_file_sha256(destination) != info["sha256"]):
+            try:
+                if os.path.isfile(destination) and os.path.getsize(destination) >= info["size"]:
+                    os.remove(destination)
+            except OSError:
+                pass
+            raise RuntimeError("Qwen-Image-2.1 配置/processor 文件校验失败：" + rel_path + "；可重试续传")
+
+    manifest_path = os.path.join(root, ".qwen21_assets_manifest.json")
+    temp_manifest = manifest_path + ".tmp"
+    with open(temp_manifest, "w", encoding="utf-8") as stream:
+        json.dump({"repo": AT_IMAGE_QWEN21_PROCESSOR_REPO, "files": metadata},
+                  stream, ensure_ascii=False, indent=2)
+    os.replace(temp_manifest, manifest_path)
+    if not _at_image_qwen21_assets_ready(root):
+        raise RuntimeError("Qwen-Image-2.1 配置/processor 文件下载完成后校验失败")
+    logf("[Qwen-Image-2.1] 配置和 processor/分词器文件已就绪：%s" % root)
+    return root
 
 
 # ---------- Krea2 图像 LoRA（第三引擎 AI Toolkit） ----------
@@ -7197,12 +7509,27 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     _custom_model = at_image_custom_get(mode)
     _is_local_model = bool(_custom_model.get("local_dir"))
     _qwen21_components = {}
-    if info.get("arch") == "qwen_image_2" and _is_local_model:
-        _qwen21_components = at_image_qwen21_local_components(_custom_model.get("local_dir"))
-        if _qwen21_components and not _patch_ai_toolkit_qwen21_local_components(at_dir, logf):
+    if info.get("arch") == "qwen_image_2":
+        if _is_local_model:
+            _local_base_path = _custom_model.get("local_dir")
+            if _at_image_qwen21_checkpoint_ready(_local_base_path):
+                _qwen21_components = at_image_qwen21_local_components(_local_base_path)
+                for _component_key in ("text_encoder_path", "vae_path"):
+                    _manual_component = (_custom_model.get(_component_key) or "").strip()
+                    if not _manual_component:
+                        continue
+                    if not at_image_qwen21_component_file_ready(_manual_component):
+                        _component_label = "文本编码器" if _component_key == "text_encoder_path" else "VAE"
+                        raise RuntimeError(
+                            f"手动指定的 Qwen-Image-2.1 {_component_label} 文件不存在或不完整：\n"
+                            f"{_manual_component}\n\n"
+                            "请选择大于 1 MB 的 safetensors 文件；修正路径后再启动训练。"
+                        )
+                    _qwen21_components[_component_key] = os.path.abspath(_manual_component)
+        if not _patch_ai_toolkit_qwen21_local_components(at_dir, logf):
             raise RuntimeError(
-                "已找到本机 Qwen-Image-2.1 文本编码器/VAE，但 AI Toolkit 本地组件加载补丁未能应用。\n"
-                "为避免又开始下载大文件，本次训练已停止；请更新第三引擎后重试。"
+                "AI Toolkit 的 Qwen-Image-2.1 本地组件/processor 补丁未能应用。\n"
+                "请更新第三引擎后重试；为避免错误下载，本次训练已停止。"
             )
     _model_ok = at_image_model_ready(mode)
     if _is_local_model and not _model_ok:
@@ -7211,6 +7538,16 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
             f"{_custom_model.get('local_dir')}\n\n"
             "请选包含 model_index.json、transformer/config.json 和 text_encoder/config.json 的模型目录。"
         )
+    _qwen21_assets_path = None
+    if info.get("arch") == "qwen_image_2":
+        _assets_model_root = (_custom_model.get("local_dir") if _is_local_model else
+                              (at_image_local_dir(mode) if _model_ok else None))
+        if (_assets_model_root and
+                _at_image_qwen21_assets_folder_ready(_assets_model_root)):
+            _qwen21_assets_path = _assets_model_root
+            logf("[Qwen-Image-2.1] 复用模型目录内已有的 processor/分词器和配置")
+        else:
+            _qwen21_assets_path = _ensure_at_image_qwen21_assets(logf)
     if not _model_ok:
         logf(f"[{info['label']}] 底模未下载，开始预下载 {info['model_id']}（约 {info['size']}，魔搭国内直连 + 断点续传，可随时停止）…")
         try:
@@ -7239,6 +7576,10 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     logf(f"[{info['label']}] LoRA: dim={params.get('rank',16)}, alpha={params.get('alpha',16)}, lr={params.get('unet_lr','1e-4')}, steps={steps}")
     env = build_direct_env()
     env["HF_ENDPOINT"] = "https://hf-mirror.com"
+    if _qwen21_assets_path:
+        env["AI_TOOLKIT_QWEN21_ASSETS_PATH"] = _qwen21_assets_path
+        logf("[Qwen-Image-2.1] 使用本机 processor/分词器和配置：%s" %
+             _qwen21_assets_path)
     if _qwen21_components.get("text_encoder_path"):
         env["AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH"] = _qwen21_components["text_encoder_path"]
         logf("[Qwen-Image-2.1] 复用本机文本编码器：%s" % _qwen21_components["text_encoder_path"])
@@ -7601,6 +7942,56 @@ def _warn_alloc_conf(logf):
         logf("[训练] ⚠ 检测到系统环境变量 PYTORCH_CUDA_ALLOC_CONF 含 expandable_segments"
              "（Windows 不支持，且可能引发“显存充足却 OOM”的假性爆显存），本次训练已自动忽略。"
              "建议彻底删除后重启软件：setx PYTORCH_CUDA_ALLOC_CONF \"\"")
+
+
+_INTERVAL_PARAM_KEYS = ("save_every", "sample_interval")
+_INTERVAL_EPOCH_MODES = {
+    "save_every": frozenset(("krea2", "krea2_fz", "flux2", "flux2_fz")),
+    "sample_interval": frozenset(("krea2_fz", "flux2_fz")),
+}
+
+
+def interval_unit_for(mode, param):
+    """返回当前模式下间隔参数的实际单位（steps 或 epochs）。"""
+    if param not in _INTERVAL_PARAM_KEYS:
+        raise ValueError("unsupported interval parameter: %s" % param)
+    return "epochs" if mode in _INTERVAL_EPOCH_MODES[param] else "steps"
+
+
+def normalize_interval_values(value):
+    """清理项目文件里可选的分单位间隔值，忽略未知字段和错误结构。"""
+    result = {"steps": {}, "epochs": {}}
+    if not isinstance(value, dict):
+        return result
+    for unit in result:
+        bucket = value.get(unit)
+        if not isinstance(bucket, dict):
+            continue
+        for key in _INTERVAL_PARAM_KEYS:
+            item = bucket.get(key)
+            if item is not None and isinstance(item, (str, int, float)):
+                result[unit][key] = str(item)
+    return result
+
+
+def capture_interval_values(cache, mode, values):
+    """把当前模式的输入值复制到对应的步数/轮数缓存中。"""
+    result = normalize_interval_values(cache)
+    if not isinstance(values, dict):
+        return result
+    for key in _INTERVAL_PARAM_KEYS:
+        if key in values and values[key] is not None:
+            result[interval_unit_for(mode, key)][key] = str(values[key])
+    return result
+
+
+def interval_values_for_mode(cache, mode):
+    """取出当前模式对应的间隔值；未设过的单位返回空串，使用引擎默认值。"""
+    normalized = normalize_interval_values(cache)
+    return {
+        key: normalized[interval_unit_for(mode, key)].get(key, "")
+        for key in _INTERVAL_PARAM_KEYS
+    }
 
 
 def _save_every_note(params, epochs, logf, label="训练"):

@@ -2422,8 +2422,10 @@ def test_at_image_pre_download(base: Path):
     def fake_custom_get(mode):
         if mode == "qwen_image":
             if state["local_model"]:
-                return {"local_dir": state["local_model"], "model_id": "Qwen/Qwen-Image-2.1",
-                        "arch": "qwen_image_2"}
+                custom = {"local_dir": state["local_model"], "model_id": "Qwen/Qwen-Image-2.1",
+                          "arch": "qwen_image_2"}
+                custom.update(state.get("manual_components") or {})
+                return custom
             return {"model_id": "Qwen/Qwen-Image-2.1", "arch": "qwen_image_2"}
         return {}
 
@@ -2460,8 +2462,10 @@ def test_at_image_pre_download(base: Path):
         patch.object(core, "_find_latest_safetensors", side_effect=fake_find_latest),
         patch.object(core, "_write_at_image_template", return_value=None),
         patch.object(core, "write_params_report", return_value=None),
+        patch.object(core, "_patch_ai_toolkit_qwen21_local_components", return_value=True),
+        patch.object(core, "_ensure_at_image_qwen21_assets", return_value=str(base / "processor_cache")),
     )
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10], patches[11], patches[12]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10], patches[11], patches[12], patches[13], patches[14]:
         out = core.train_at_image(lambda _: None, mode="zimage", params={"project": "at_t1"})
         assert state["ms_call"] == "zimage", "未触发魔搭底模预下载"
         assert state["yaml_info"]["model_id"].replace("\\", "/").endswith("models/at_image/zimage"), state["yaml_info"]
@@ -2474,6 +2478,7 @@ def test_at_image_pre_download(base: Path):
         expected = core.at_image_local_dir("qwen_image").replace("\\", "/")
         assert state["ms_call"] == "qwen_image", "Qwen-Image-2.1 没走模型下载阶段"
         assert state["yaml_info"].get("arch") == "qwen_image_2", state["yaml_info"]
+        assert state["train_env"].get("AI_TOOLKIT_QWEN21_ASSETS_PATH") == str(base / "processor_cache"), state["train_env"]
         assert state["yaml_info"]["model_id"].replace("\\", "/") == expected, state["yaml_info"]
         assert state["launched"], "Qwen-Image-2.1 没启动 AI Toolkit 训练入口"
         assert str(out).endswith("lora.safetensors"), out
@@ -2495,6 +2500,11 @@ def test_at_image_pre_download(base: Path):
             "class QwenImage2Model:\n"
             "    arch = 'qwen_image_2'\n"
             "    def load_model(self):\n"
+            "        self.print_and_status_update(\"Loading transformer\")\n"
+            "        transformer = QwenImage21Transformer2DModel.load(\n"
+            "            model_path, config_path=base_model_path, **self.component_load_kwargs(\"transformer\")\n"
+            "        )\n"
+            "        processor = QwenImage21TextEncoder.load_processor(base_model_path)\n"
             "        self.print_and_status_update(\"Loading text encoder\")\n"
             "        text_encoder = QwenImage21TextEncoder.load_model(\n"
             "            base_model_path, dtype=dtype, subfolder=\"text_encoder\"\n"
@@ -2509,8 +2519,82 @@ def test_at_image_pre_download(base: Path):
         assert state["ms_call"] is None, "本地模型已指定时不应触发底模下载"
         assert state["train_env"].get("AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH") == str(te_file), state["train_env"]
         assert state["train_env"].get("AI_TOOLKIT_QWEN21_VAE_PATH") == str(vae_file), state["train_env"]
+        assert state["train_env"].get("AI_TOOLKIT_QWEN21_ASSETS_PATH") == str(base / "processor_cache"), state["train_env"]
+        assert str(out).endswith("lora.safetensors"), out
+
+        # Manual paths override auto-discovery and are handed through to the AI Toolkit process.
+        manual_te = base / "manual_components" / "text_encoder.safetensors"
+        manual_vae = base / "manual_components" / "vae.safetensors"
+        manual_te.parent.mkdir(parents=True, exist_ok=True)
+        for path in (manual_te, manual_vae):
+            with path.open("wb") as f:
+                f.truncate(2 * 1024 * 1024)
+        state.update(downloaded=False, ms_call=None, yaml_info=None, launched=False,
+                     manual_components={"text_encoder_path": str(manual_te),
+                                       "vae_path": str(manual_vae)})
+        out = core.train_at_image(lambda _: None, mode="qwen_image",
+                                  params={"project": "at_qwen21_manual_components"})
+        assert state["ms_call"] is None, "手动指定组件时，本地底模不应触发下载"
+        assert state["train_env"].get("AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH") == str(manual_te), state["train_env"]
+        assert state["train_env"].get("AI_TOOLKIT_QWEN21_VAE_PATH") == str(manual_vae), state["train_env"]
+        assert state["train_env"].get("AI_TOOLKIT_QWEN21_ASSETS_PATH") == str(base / "processor_cache"), state["train_env"]
         assert str(out).endswith("lora.safetensors"), out
     print("AT_IMAGE_PRE_DOWNLOAD_OK")
+
+def test_qwen21_processor_cache(base: Path):
+    """Fetch only processor/config assets, verify hashes, and reuse an offline cache."""
+    import hashlib
+    import json as _json
+
+    root = base / "qwen21_processor_cache"
+    payloads = {
+        path: _json.dumps({"file": Path(path).name}).encode("utf-8")
+        for path in core.AT_IMAGE_QWEN21_ASSET_FILES
+    }
+    metadata = {
+        path: {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        for path, data in payloads.items()
+    }
+    downloads = []
+
+    def fake_download(url, dest, logf=print, progress_cb=None, direct=False):
+        rel_path = next(path for path in payloads if url.endswith("/" + path))
+        downloads.append(rel_path)
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(payloads[rel_path])
+        return True
+
+    with patch.object(core, "data_sub", side_effect=lambda *parts: str(root)), \
+         patch.object(core, "_at_image_qwen21_assets_metadata", return_value=metadata), \
+         patch.object(core, "_download_with_resume", side_effect=fake_download):
+        cache = core._ensure_at_image_qwen21_assets(lambda *_a: None)
+        assert Path(cache) == root
+        assert core._at_image_qwen21_assets_ready(cache)
+        assert set(downloads) == set(core.AT_IMAGE_QWEN21_ASSET_FILES)
+        assert len([path for path in downloads if path.startswith("processor/")]) == 9
+        assert {"text_encoder/config.json", "vae/config.json", "transformer/config.json"}.issubset(downloads)
+        with patch.object(core, "_at_image_qwen21_assets_metadata", side_effect=AssertionError("valid cache should work offline")), \
+             patch.object(core, "_download_with_resume", side_effect=AssertionError("valid cache should not redownload")):
+            assert core._ensure_at_image_qwen21_assets(lambda *_a: None) == cache
+        tokenizer = Path(cache) / "processor" / "tokenizer.json"
+        damaged = bytearray(tokenizer.read_bytes())
+        damaged[0] ^= 1
+        tokenizer.write_bytes(damaged)
+        assert not core._at_image_qwen21_assets_ready(cache)
+        assert core._ensure_at_image_qwen21_assets(lambda *_a: None) == cache
+        assert downloads.count("processor/tokenizer.json") == 2
+        assert downloads.count("processor/vocab.json") == 1
+        assert core._at_image_qwen21_assets_ready(cache)
+        model_root = base / "full_model_with_assets"
+        for rel_path in core.AT_IMAGE_QWEN21_ASSET_FILES:
+            local_file = model_root / rel_path.replace("/", os.sep)
+            local_file.parent.mkdir(parents=True, exist_ok=True)
+            local_file.write_bytes(b"available")
+        assert core._at_image_qwen21_assets_folder_ready(str(model_root))
+        (model_root / "vae" / "config.json").unlink()
+        assert not core._at_image_qwen21_assets_folder_ready(str(model_root))
+    print("QWEN21_PROCESSOR_CACHE_OK")
+
 
 def test_ai_toolkit_engine_update(base: Path):
     """AI Toolkit 一键源码更新：旧源码触发提示，更新校验注册，失败时恢复旧源码。"""
@@ -2539,6 +2623,11 @@ def test_ai_toolkit_engine_update(base: Path):
             "class QwenImage2Model:\n"
             "    arch = 'qwen_image_2'\n"
             "    def load_model(self):\n"
+            "        self.print_and_status_update(\"Loading transformer\")\n"
+            "        transformer = QwenImage21Transformer2DModel.load(\n"
+            "            model_path, config_path=base_model_path, **self.component_load_kwargs(\"transformer\")\n"
+            "        )\n"
+            "        processor = QwenImage21TextEncoder.load_processor(base_model_path)\n"
             "        self.print_and_status_update(\"Loading text encoder\")\n"
             "        text_encoder = QwenImage21TextEncoder.load_model(\n"
             "            base_model_path, dtype=dtype, subfolder=\"text_encoder\"\n"
@@ -2623,8 +2712,8 @@ def test_qwen21_reuses_comfy_components(base: Path):
     components = core.at_image_qwen21_local_components(str(checkpoint))
     assert components == {"text_encoder_path": str(te_file), "vae_path": str(vae_file)}, components
 
-    # The extension patch accepts direct local safetensors paths and leaves the
-    # Qwen repo as the source of the small configs/processor.
+    # The extension patch accepts direct local safetensors paths and gives all
+    # component configs plus the processor the same local cache root.
     engine = base / "qwen21_engine" / "ai-toolkit"
     qwen = engine / "extensions_built_in" / "diffusion_models" / "qwen_image_2"
     qwen.mkdir(parents=True)
@@ -2632,6 +2721,11 @@ def test_qwen21_reuses_comfy_components(base: Path):
         "import os\n"
         "class QwenImage2Model:\n"
         "    def load_model(self):\n"
+        "        self.print_and_status_update(\"Loading transformer\")\n"
+        "        transformer = QwenImage21Transformer2DModel.load(\n"
+        "            model_path, config_path=base_model_path, **self.component_load_kwargs(\"transformer\")\n"
+        "        )\n"
+        "        processor = QwenImage21TextEncoder.load_processor(base_model_path)\n"
         "        self.print_and_status_update(\"Loading text encoder\")\n"
         "        text_encoder = QwenImage21TextEncoder.load_model(\n"
         "            base_model_path, dtype=dtype, subfolder=\"text_encoder\"\n"
@@ -2649,6 +2743,77 @@ def test_qwen21_reuses_comfy_components(base: Path):
     assert "AI_TOOLKIT_QWEN21_VAE_PATH" in patched, patched
     assert "local_text_encoder_path or base_model_path" in patched, patched
     assert "local_vae_path or base_model_path" in patched, patched
+    assert "AI_TOOLKIT_QWEN21_ASSETS_PATH" in patched, patched
+    assert "local_assets_path or base_model_path" in patched, patched
+    assert "QwenImage21Transformer2DModel.load(\n            model_path, config_path=local_assets_path or base_model_path" in patched, patched
+    assert "QwenImage21TextEncoder.load_processor(local_assets_path or base_model_path)" in patched, patched
+    assert "dtype=dtype, config_path=local_assets_path or base_model_path" in patched, patched
+    assert "config_path=local_assets_path or base_model_path," in patched, patched
+    assert core._ai_toolkit_qwen21_local_components_patch_ready(str(engine))
+    compile(patched, str(model_file), "exec")
+
+    # Execute the generated loader with stub component classes. This verifies
+    # that the environment paths reach the three weight loaders and that every
+    # config/processor lookup uses the local assets root.
+    assets_root = base / "qwen21_runtime_assets"
+    for rel_path in core.AT_IMAGE_QWEN21_ASSET_FILES:
+        asset = assets_root / rel_path.replace("/", os.sep)
+        asset.parent.mkdir(parents=True, exist_ok=True)
+        asset.write_text("{}", encoding="utf-8")
+    manual_te = base / "runtime_text_encoder.safetensors"
+    manual_vae = base / "runtime_vae.safetensors"
+    manual_te.write_bytes(b"te")
+    manual_vae.write_bytes(b"vae")
+    calls = {}
+
+    class FakeTransformer:
+        @staticmethod
+        def load(*args, **kwargs):
+            calls["transformer"] = (args, kwargs)
+            return "transformer"
+
+    class FakeTextEncoder:
+        @staticmethod
+        def load_processor(*args, **kwargs):
+            calls["processor"] = (args, kwargs)
+            return "processor"
+
+        @staticmethod
+        def load_model(*args, **kwargs):
+            calls["text_encoder"] = (args, kwargs)
+            return "text_encoder"
+
+    class FakeVae:
+        @staticmethod
+        def load(*args, **kwargs):
+            calls["vae"] = (args, kwargs)
+            return "vae"
+
+    runtime = {
+        "QwenImage21Transformer2DModel": FakeTransformer,
+        "QwenImage21TextEncoder": FakeTextEncoder,
+        "AutoencoderKLQwenImage21": FakeVae,
+        "model_path": str(checkpoint),
+        "base_model_path": "Qwen/Qwen-Image-2.1",
+        "dtype": "bf16",
+    }
+    exec(compile(patched, str(model_file), "exec"), runtime)
+    instance = runtime["QwenImage2Model"]()
+    instance.print_and_status_update = lambda *_a: None
+    instance.component_load_kwargs = lambda component: {"subfolder": component}
+    with patch.dict(os.environ, {
+        "AI_TOOLKIT_QWEN21_ASSETS_PATH": str(assets_root),
+        "AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH": str(manual_te),
+        "AI_TOOLKIT_QWEN21_VAE_PATH": str(manual_vae),
+    }):
+        instance.load_model()
+    assert calls["transformer"][1].get("config_path") == str(assets_root), calls
+    assert calls["processor"][0] == (str(assets_root),), calls
+    assert calls["text_encoder"][0][0] == str(manual_te), calls
+    assert calls["text_encoder"][1].get("config_path") == str(assets_root), calls
+    assert calls["vae"][0][0] == str(manual_vae), calls
+    assert calls["vae"][1].get("config_path") == str(assets_root), calls
+
     before = patched
     assert core._patch_ai_toolkit_qwen21_local_components(str(engine), lambda *_a: None)
     assert model_file.read_text(encoding="utf-8") == before, "引擎补丁必须幂等"
@@ -3820,6 +3985,7 @@ def main():
         test_strong_binding(base)
         test_at_image_model_ready_local(base)
         test_at_image_pre_download(base)
+        test_qwen21_processor_cache(base)
         test_ai_toolkit_engine_update(base)
         test_qwen21_reuses_comfy_components(base)
         test_wd14_triton_noise_collapse(base)

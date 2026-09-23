@@ -2216,9 +2216,82 @@ def test_fizgig_sample_interval_is_epochs():
     # 界面：这个字段的单位必须**随模式变**（Fizgig=轮、其它=步）✗ 不能一律写"(步)"
     _g = open(os.path.join(ROOT, "kohya_gui.py"), encoding="utf-8-sig").read()
     assert "采样预览间隔(轮)" in _g, "界面缺少「(轮)」的动态标签 ✗"
-    assert 'self.mode in ("krea2_fz", "flux2_fz")' in _g, \
-        "标签没有按 Fizgig 模式切换 ✗（用户会再次按错单位）"
+    assert 'core.interval_unit_for(self.mode, "sample_interval")' in _g, \
+        "界面单位没有使用统一的模式映射 ✗（可能与训练参数不一致）"
     print("FIZGIG_SAMPLE_INTERVAL_IS_EPOCHS_OK")
+
+
+def test_interval_values_are_scoped_by_unit():
+    """Step-based and epoch-based modes must not reinterpret one shared interval value."""
+    import Kohya一键工具 as core        # noqa: E402
+
+    cache = core.capture_interval_values({}, "qwen_image", {
+        "save_every": "200", "sample_interval": "200",
+    })
+    assert core.interval_values_for_mode(cache, "qwen_image") == {
+        "save_every": "200", "sample_interval": "200",
+    }
+    assert core.interval_values_for_mode(cache, "krea2_fz") == {
+        "save_every": "", "sample_interval": "",
+    }, "从按步模式切到 Fizgig 时，200 不应悄悄变成 200 轮"
+
+    cache = core.capture_interval_values(cache, "krea2_fz", {
+        "save_every": "1", "sample_interval": "2",
+    })
+    assert core.interval_values_for_mode(cache, "krea2_fz") == {
+        "save_every": "1", "sample_interval": "2",
+    }
+    assert core.interval_values_for_mode(cache, "qwen_image") == {
+        "save_every": "200", "sample_interval": "200",
+    }, "回到按步模式时应恢复该单位下原先的值"
+    assert core.interval_unit_for("krea2", "save_every") == "epochs"
+    assert core.interval_unit_for("krea2", "sample_interval") == "steps"
+    assert core.interval_unit_for("krea2_fz", "sample_interval") == "epochs"
+    assert core.interval_unit_for("krea2_at", "save_every") == "steps"
+
+    # 直接跑 UI 的捕获/恢复方法，确保切换物理模式时输入框不会沿用另一单位的数值。
+    import kohya_gui as gui        # noqa: E402
+
+    class _Value:
+        def __init__(self, value):
+            self.value = str(value)
+
+        def get(self):
+            return self.value
+
+        def set(self, value):
+            self.value = str(value)
+
+    app = object.__new__(gui.App)
+    app.mode = "qwen_image"
+    app._interval_values = {}
+    app._applying_preset = False
+    app.param_vars = {key: _Value("200") for key in ("save_every", "sample_interval")}
+    app._capture_interval_values()
+    app.mode = "krea2_fz"
+    app._restore_interval_values()
+    assert all(app.param_vars[key].get() == "" for key in ("save_every", "sample_interval")), \
+        "切到 epoch 引擎后应使用默认值，不能把 200 步当成 200 轮"
+    app.param_vars["save_every"].set("1")
+    app.param_vars["sample_interval"].set("2")
+    app._capture_interval_values()
+    app.mode = "qwen_image"
+    app._restore_interval_values()
+    assert all(app.param_vars[key].get() == "200" for key in ("save_every", "sample_interval")), \
+        "切回 step 引擎后应恢复原来的步数设置"
+
+    # 项目 JSON 必须同时保存当前值和另一单位下的缓存值。
+    app.current_project = None
+    app.base_type = "sdxl"
+    app._collect_params = lambda: {"mode": app.mode, "base_type": app.base_type}
+    project_data = gui.App._collect_project_data(app)
+    assert project_data["interval_values"]["steps"] == {
+        "save_every": "200", "sample_interval": "200",
+    }
+    assert project_data["interval_values"]["epochs"] == {
+        "save_every": "1", "sample_interval": "2",
+    }, "自动保存项目时不能丢掉另一单位的间隔设置"
+    print("INTERVAL_VALUES_SCOPED_BY_UNIT_OK")
 
 
 def test_fizgig_int8_vram_guard():
@@ -2324,8 +2397,8 @@ def test_save_interval_is_epochs_for_krea2():
     # ③ 界面标签按模式切
     _g = open(os.path.join(ROOT, "kohya_gui.py"), encoding="utf-8-sig").read()
     assert "模型保存间隔(轮)" in _g, "界面缺少「(轮)」的动态标签 ✗"
-    assert 'self.mode in ("krea2", "krea2_fz", "flux2", "flux2_fz")' in _g, \
-        "保存间隔标签没有按模式切换 ✗（用户会再次按错单位）"
+    assert 'core.interval_unit_for(self.mode, "save_every")' in _g, \
+        "保存间隔单位没有使用统一的模式映射 ✗（可能与训练参数不一致）"
     print("SAVE_INTERVAL_IS_EPOCHS_OK")
 
 
@@ -2523,6 +2596,17 @@ def test_at_image_custom_model():
         assert core.at_image_info(M).get("model_id") == "Qwen/Qwen-Image-2.1", \
             "旧版只存本地目录和架构时，应识别为 Qwen-Image-2.1"
 
+        core.at_image_custom_set(M, {
+            "local_dir": loc, "arch": "qwen_image_2",
+            "text_encoder_path": os.path.join(tmp, "custom_text_encoder.safetensors"),
+            "vae_path": os.path.join(tmp, "custom_vae.safetensors"),
+        })
+        _saved_components = core.at_image_custom_get(M)
+        assert _saved_components.get("text_encoder_path", "").endswith("custom_text_encoder.safetensors"), \
+            "手动文本编码器路径没有保存"
+        assert _saved_components.get("vae_path", "").endswith("custom_vae.safetensors"), \
+            "手动 VAE 路径没有保存"
+
         # ④ 恢复默认
         core.at_image_custom_set(M, {})
         assert core.at_image_info(M).get("model_id") == i0.get("model_id"), "恢复默认后 model_id 没回来 ✗"
@@ -2589,6 +2673,8 @@ def test_at_image_qwen21_single_file():
         gui = open(os.path.join(ROOT, "kohya_gui.py"), encoding="utf-8-sig").read()
         assert "askopenfilename" in gui and "选择 Qwen-Image-2.1 权重文件" in gui, \
             "模型选择窗口没有提供 Qwen-Image-2.1 单文件选择入口"
+        assert "文本编码器" in gui and "手动指定组件" in gui and "at_image_qwen21_component_file_ready" in gui, \
+            "模型选择窗口没有提供手动选择 Qwen-Image-2.1 文本编码器/VAE 的入口"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("AT_IMAGE_QWEN21_SINGLE_FILE_OK")
@@ -2627,6 +2713,7 @@ def main():
     check("选了新打标模型就不能偷偷用旧模型", test_wd14_respects_selected_model)
     check("Anima 指定 Qwen3：选错要拦、能恢复默认、失效要说", test_anima_qwen3_pick_guards)
     check("Fizgig 采样间隔按「轮」算（填 10 = 每 10 轮）", test_fizgig_sample_interval_is_epochs)
+    check("步/轮间隔值分别记忆，切换模式不偷换单位", test_interval_values_are_scoped_by_unit)
     check("16G 档防 int8 溢出：降 512 + 告警", test_fizgig_int8_vram_guard)
     check("保存间隔按「轮」+ 超总轮数要警告", test_save_interval_is_epochs_for_krea2)
     check("自带 Python / Git：选文件夹 → 识别 → 校验 → 采用", test_env_paths_custom)
