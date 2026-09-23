@@ -263,12 +263,12 @@ PARAM_TIPS = {
 # ⚠️ 只列**不是全模式通用**的参数；没列出的 = 所有模式都生效 ✓
 #    填写依据：对 Kohya一键工具.py 做的「参数 × 训练入口」读取审计（2026-09-19）✓
 PARAM_SCOPE = {
-    # 仅第一引擎 kohya（画风/人物/概念）：其余引擎不读这些参数 ✗
+    # 第一引擎 kohya + 第三引擎 AI Toolkit AMD 后端会读取兼容模式开关。
     "te_lr": ("style", "character", "concept"),
     "train_text_encoder": ("style", "character", "concept"),
     "global_pos": ("style", "character", "concept"),
     "global_neg": ("style", "character", "concept"),
-    "amd_mode": ("style", "character", "concept"),
+    "amd_mode": ("style", "character", "concept", "krea2_at", "qwen_image", "zimage"),
     "style_preset": ("style", "character", "concept"),
     "noise_offset": ("style", "character", "concept"),
     "min_snr_gamma": ("style", "character", "concept"),

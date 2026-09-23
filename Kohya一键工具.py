@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.18"
+APP_VERSION = "0.17.19"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -3962,6 +3962,7 @@ def _at_dirs():
 # 重型引擎状态检测（会真 import venv 的 torch/musubi_tuner，慢则 10~24s）TTL 缓存：
 # 界面刷新/切模式只该走秒级 marker；这里缓存兜底避免同一动作内重复触发重型检测。
 _ENGINE_STATUS_CACHE = {}
+_AI_TOOLKIT_AMD_STATUS_CACHE = {}
 
 
 def clear_status_cache():
@@ -3969,6 +3970,7 @@ def clear_status_cache():
     _SYSTEM_STATUS_CACHE["t"] = 0.0
     _SYSTEM_STATUS_CACHE["data"] = None
     _ENGINE_STATUS_CACHE.clear()
+    _AI_TOOLKIT_AMD_STATUS_CACHE.clear()
 
 
 def _at_marker_ok():
@@ -4001,14 +4003,89 @@ def _ai_toolkit_engine_status_impl():
     if not _vok:
         return False, "环境异常（%s）" % _vdetail, vpy
     try:
+        _is_amd = detect_gpu_vendor() == "amd"
+        _env = _ai_toolkit_rocm_env(vpy) if _is_amd else build_direct_env()
+        _check_code = "import torch; from toolkit.config_modules import ModelConfig;"
+        if _is_amd:
+            _check_code += "from toolkit.util.quantize import get_qtype;"
+        _check_code += "print('ok')"
         r = subprocess.run(
-            [vpy, "-c", "import torch; from toolkit.config_modules import ModelConfig; print('ok')"],
-            capture_output=True, text=True, timeout=120, cwd=at_dir)
+            [vpy, "-c", _check_code],
+            capture_output=True, text=True, timeout=120, cwd=at_dir, env=_env)
         if r.returncode == 0:
             return True, "已就绪（第三引擎 AI Toolkit）", vpy
         return False, "环境异常（import 失败）", vpy
     except Exception:
         return False, "环境异常", vpy
+
+
+def _ai_toolkit_torch_backend(vpy, at_dir=None, env=None):
+    """Probe the AI Toolkit venv's actual accelerator backend without installing anything."""
+    if not vpy or not os.path.isfile(vpy):
+        return None, False, "未找到 AI Toolkit Python 环境。"
+    code = (
+        "import torch\n"
+        "print('TORCH=' + str(torch.__version__))\n"
+        "print('HIP=' + str(getattr(torch.version, 'hip', '') or ''))\n"
+        "print('CUDA=' + str(getattr(torch.version, 'cuda', '') or ''))\n"
+        "print('AVAILABLE=' + str(torch.cuda.is_available()))\n"
+        "print('DEVICE=' + (torch.cuda.get_device_name(0) if torch.cuda.is_available() else ''))\n"
+        "try:\n"
+        "    _x = torch.ones((64, 64), device='cuda', dtype=torch.float32)\n"
+        "    _ = _x @ _x\n"
+        "    torch.cuda.synchronize()\n"
+        "    print('KERNEL=ok')\n"
+        "except Exception as _e:\n"
+        "    print('KERNEL_ERROR=' + repr(_e))\n"
+    )
+    try:
+        r = subprocess.run([vpy, "-c", code], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=180,
+                           cwd=at_dir, env=env or build_direct_env())
+    except Exception as e:
+        return None, False, str(e)
+    out = (r.stdout or "").strip()
+    if r.returncode != 0:
+        return None, False, ((r.stderr or out or "PyTorch 后端探测失败").strip()[-1000:])
+    values = {}
+    for line in out.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip()
+    backend = "rocm" if values.get("HIP") else ("cuda" if values.get("CUDA") else "cpu")
+    gpu_available = values.get("AVAILABLE", "").lower() == "true"
+    kernel_ok = values.get("KERNEL", "").lower() == "ok"
+    available = gpu_available and kernel_ok
+    detail = "%s · %s · GPU %s · %s" % (
+        values.get("TORCH") or "PyTorch",
+        ("ROCm/HIP " + values["HIP"]) if values.get("HIP") else
+        (("CUDA " + values["CUDA"]) if values.get("CUDA") else "CPU"),
+        values.get("DEVICE") or "不可用",
+        "GPU 核心计算自检通过" if kernel_ok else
+        ("GPU 核心计算失败：" + values.get("KERNEL_ERROR", "未运行")))
+    return backend, available, detail
+
+
+def ai_toolkit_amd_status(vpy=None):
+    """Check the backend AI Toolkit itself will use for AMD training."""
+    if vpy is None:
+        _ok, _detail, vpy = ai_toolkit_engine_status()
+    if not vpy or not os.path.isfile(vpy):
+        return False, None, "第三引擎环境尚未安装；请先安装 AI Toolkit 第三引擎。"
+    _key = os.path.normcase(os.path.abspath(vpy))
+    _cached = _AI_TOOLKIT_AMD_STATUS_CACHE.get(_key)
+    if _cached and time.time() - _cached[0] < 20:
+        return _cached[1]
+    env = _ai_toolkit_rocm_env(vpy)
+    backend, available, detail = _ai_toolkit_torch_backend(vpy, _at_dirs()[1], env)
+    if backend != "rocm":
+        result = (False, backend, "AI Toolkit 自己的环境不是 ROCm PyTorch（%s）。请重装/更新第三引擎以安装 AMD 环境。" % detail)
+    elif not available:
+        result = (False, backend, "AI Toolkit ROCm 环境未通过 GPU 核心计算自检（%s）。" % detail)
+    else:
+        result = (True, backend, detail)
+    _AI_TOOLKIT_AMD_STATUS_CACHE[_key] = (time.time(), result)
+    return result
 
 
 AI_TOOLKIT_QWEN21_REQUIRED_FILES = (
@@ -4446,8 +4523,8 @@ def _install_engine_source(zip_path, dest, marker, logf=print):
     logf(f"[第三引擎] 源码已按需部署到：{dest}")
 
 
-def _write_engine_requirements(at_dir, dest):
-    """展开 requirements.txt，移除 GitHub 版 diffusers，生成可走国内 PyPI 的临时清单。"""
+def _write_engine_requirements(at_dir, dest, backend="nvidia"):
+    """展开 AI Toolkit requirements 并适配后端，生成可走国内 PyPI 的临时清单。"""
     seen = set()
     output = []
 
@@ -4466,6 +4543,17 @@ def _write_engine_requirements(at_dir, dest):
                 visit(os.path.join(os.path.dirname(path), ref))
                 continue
             if "github.com/huggingface/diffusers" in low or low.startswith("git+https://") and "diffusers" in low:
+                continue
+            # AI Toolkit 的默认 optimizer 在本工具中是 AdamW；Windows ROCm 使用社区
+            # bitsandbytes 轮子，不允许通用 PyPI 版本覆盖它（PyPI 轮子面向 CUDA）。
+            if backend == "amd-rocm" and re.match(r"^bitsandbytes([<>=!~].*)?$", low):
+                continue
+            if backend == "amd-rocm" and re.match(r"^torchcodec([<>=!~].*)?$", low):
+                # 图像训练不使用视频/音频解码；上游 0.9.1 与 ROCm torch 2.12 不兼容。
+                continue
+            if backend == "amd-rocm" and re.match(r"^torchao([<>=!~].*)?$", low):
+                # AI Toolkit 上游旧 pin=0.10.0 对应旧 torch；0.17.0 支持 torch 2.11+。
+                output.append("torchao==0.17.0")
                 continue
             # AI Toolkit 当前 requirements 固定 scipy==1.12.0，但该版本要求
             # numpy<1.29，与 Python 3.12 下默认解析到的 NumPy 2.x 冲突；由
@@ -4501,16 +4589,29 @@ def install_ai_toolkit_engine(logf=print):
     """安装第三训练引擎 AI Toolkit（MiniMax H3 视频 LoRA）。
 
     - 独立 ai_toolkit_venv（不碰 kohya / musubi venv）；
-    - 源码从魔搭/国内加速 ZIP 按需下载；torch cu130 + requirements 走国内镜像；
+    - NVIDIA 使用 CUDA；AMD 使用独立 ROCm 7.15 环境（Windows 实验性）；
+    - 源码从魔搭/国内加速 ZIP 按需下载，requirements 走国内镜像；
     - 已安装则跳过（幂等）。返回 ai_toolkit_venv 的 python 路径。
     """
-    py, pyver = find_python()
+    try:
+        amd_mode = detect_gpu_vendor() == "amd"
+    except Exception:
+        amd_mode = False
+    if amd_mode:
+        py = _engine_ensure_python312("第三引擎", logf)
+        pyver = "3.12"
+        logf("[第三引擎] AMD 显卡：使用独立 Windows ROCm 环境（实验性），不会借用 Kohya 环境。")
+    else:
+        py, pyver = find_python()
     if not py:
         raise RuntimeError("请先点击【环境准备】安装 Python")
     # PyTorch cu130 需要 NVIDIA 驱动 570+：驱动过旧时装完首次初始化 CUDA 可能驱动崩溃（蓝屏）。
     # 提前检测并阻止，引导用户先更新驱动。
     try:
-        _drv = nvidia_driver_version()
+        if amd_mode:
+            _drv = None
+        else:
+            _drv = nvidia_driver_version()
         if _drv is not None and _drv < 570:
             raise RuntimeError(
                 "检测到 NVIDIA 驱动版本过低（当前 %d，PyTorch cu130 需要 570+）。\n\n"
@@ -4530,8 +4631,18 @@ def install_ai_toolkit_engine(logf=print):
                     [_vp, "-c", "import torch; from toolkit.config_modules import ModelConfig; print('ok')"],
                     capture_output=True, text=True, timeout=120, cwd=_ad)
                 if r.returncode == 0:
+                    if amd_mode:
+                        _amd_ok, _amd_bk, _amd_detail = ai_toolkit_amd_status(_vp)
+                        if not _amd_ok:
+                            raise RuntimeError(
+                                "导入的第三引擎不是可用的 Windows AMD ROCm 环境：\n"
+                                f"{_amd_detail}\n\n"
+                                "请清除当前导入目录，再使用软件的「安装第三引擎」创建独立 AMD 环境。"
+                            )
                     logf(f"[第三引擎] 检测到已导入的自定义环境可用，跳过安装：{_ad}")
                     return _vp
+            except RuntimeError:
+                raise
             except Exception:
                 pass
         logf(f"[第三引擎] 已导入自定义目录但环境不完整，将安装到标准位置：{kdir}")
@@ -4573,6 +4684,35 @@ def install_ai_toolkit_engine(logf=print):
             elif not _ensure_venv_pip(vpy, av, logf, label="第三引擎"):
                 logf("[第三引擎] ⚠ ai_toolkit_venv 缺 pip 且自愈失败，自动重建（旧 venv 保留）…")
                 _need_rebuild = True
+            elif amd_mode:
+                # The custom ROCm bitsandbytes wheel is cp312-only. Also never layer
+                # ROCm on top of a CUDA/CPU/partially broken torch install.
+                try:
+                    _py_probe = subprocess.run(
+                        [vpy, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+                    _venv_pyver = (_py_probe.stdout or "").strip() if _py_probe.returncode == 0 else ""
+                except Exception:
+                    _venv_pyver = ""
+                if _venv_pyver != "3.12":
+                    logf("[第三引擎] ⚠ AMD ROCm 需要 Python 3.12，当前 venv 为 %s，将保留旧环境并重建。"
+                         % (_venv_pyver or "未知版本"))
+                    _need_rebuild = True
+                else:
+                    try:
+                        _torch_probe = subprocess.run(
+                            [vpy, "-c", "import importlib.util;print('TORCH=' + str(importlib.util.find_spec('torch') is not None))"],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+                        _has_torch = _torch_probe.returncode == 0 and "TORCH=True" in (_torch_probe.stdout or "")
+                    except Exception:
+                        _has_torch = False
+                    if _has_torch:
+                        _backend, _available, _detail = _ai_toolkit_torch_backend(
+                            vpy, at_dir, _ai_toolkit_rocm_env(vpy))
+                        if _backend != "rocm":
+                            logf("[第三引擎] ⚠ AMD venv 中已有非 ROCm/损坏的 torch（%s），将保留旧环境并重建。"
+                                 % (_detail or _backend or "未知后端"))
+                            _need_rebuild = True
             if _need_rebuild:
                 _bak = os.path.join(kdir, "ai_toolkit_venv_broken_%s" % time.strftime("%Y%m%d_%H%M%S"))
                 if os.path.exists(_bak):
@@ -4596,8 +4736,30 @@ def install_ai_toolkit_engine(logf=print):
         except Exception:
             torch_ok = False
         if torch_ok:
-            logf("[第三引擎] 检测到已安装（torch + ai-toolkit 可用），跳过重复安装。")
-            return vpy
+            _backend, _available, _backend_detail = _ai_toolkit_torch_backend(
+                vpy, at_dir, _ai_toolkit_rocm_env(vpy) if amd_mode else build_direct_env())
+            _backend_ok = (_backend == "rocm") if amd_mode else (_backend in ("cuda", "zluda"))
+            if _backend_ok:
+                if amd_mode and not _available:
+                    raise RuntimeError(
+                        "第三引擎 ROCm 环境已安装，但当前会话没有识别到 AMD GPU（%s）。\n"
+                        "请在本机桌面会话中重新检查；不要重复安装运行时。" % _backend_detail)
+                logf("[第三引擎] 检测到已安装（%s），跳过重复安装。" % _backend_detail)
+                return vpy
+            _stamp = time.strftime("%Y%m%d_%H%M%S")
+            _bak = os.path.join(kdir, "ai_toolkit_venv_backend_backup_%s" % _stamp)
+            try:
+                os.rename(av, _bak)
+            except Exception as _e:
+                raise RuntimeError(
+                    "第三引擎现有环境后端与本机显卡不匹配（%s），且无法安全保留旧环境：%s。\n"
+                    "请先关闭正在运行的训练，再重试安装。" % (_backend_detail, _e))
+            logf("[第三引擎] 现有环境后端为 %s，与本机不匹配；旧环境已保留到 %s，正在创建新环境…"
+                 % (_backend or "unknown", os.path.basename(_bak)))
+            if run_stream([py, "-m", "venv", av], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
+                raise RuntimeError("重建第三引擎 venv 失败")
+            if not _ensure_venv_pip(vpy, av, logf, label="第三引擎"):
+                raise RuntimeError("新建第三引擎 venv 缺少 pip，且 ensurepip 自愈失败")
         # 嵌入式/中断创建的 venv 可能没有 pip，先尝试 ensurepip 自愈。
         if not _ensure_venv_pip(vpy, av, logf, label="第三引擎"):
             raise RuntimeError("第三引擎 venv 缺少 pip，且 ensurepip 自愈失败，请重试安装")
@@ -4605,51 +4767,67 @@ def install_ai_toolkit_engine(logf=print):
         if not _upgrade_pip(vpy, kdir, logf, label="第三引擎"):
             raise RuntimeError("pip 升级失败：清华/阿里镜像均不可达，无需代理，请稍后重试")
         env = _domestic_pip_env()
-        # torch cu130：双国内镜像断点续传预下载大轮子 → 本地安装
-        _torch_ok = False
-        for _try in range(3):
-            try:
-                _preinstall_torch(vpy, kdir, logf, torch_ver="2.13.0", tv_ver="0.28.0",
-                                  ta_ver="2.11.0", cu="cu130", label="第三引擎")
-                logf("[第三引擎] PyTorch 预装成功（阿里云/上海交大双国内镜像 + 本地安装）。")
-                _torch_ok = True
-                break
-            except Exception as e:
-                logf(f"[第三引擎] PyTorch 预下载失败（第{_try + 1}/3 次）：{e}（断点续传，可重试）")
-        if not _torch_ok:
-            raise RuntimeError("torch cu130 国内镜像下载/安装失败（详见上方日志：是下载失败还是依赖安装失败）。无需开代理，请稍后重试；缓存支持断点续传。")
+        if amd_mode:
+            _install_windows_amd_rocm_runtime(vpy, at_dir, logf, label="第三引擎")
+        else:
+            # torch cu130：双国内镜像断点续传预下载大轮子 → 本地安装
+            _torch_ok = False
+            for _try in range(3):
+                try:
+                    _preinstall_torch(vpy, kdir, logf, torch_ver="2.13.0", tv_ver="0.28.0",
+                                      ta_ver="2.11.0", cu="cu130", label="第三引擎")
+                    logf("[第三引擎] PyTorch 预装成功（阿里云/上海交大双国内镜像 + 本地安装）。")
+                    _torch_ok = True
+                    break
+                except Exception as e:
+                    logf(f"[第三引擎] PyTorch 预下载失败（第{_try + 1}/3 次）：{e}（断点续传，可重试）")
+            if not _torch_ok:
+                raise RuntimeError("torch cu130 国内镜像下载/安装失败（详见上方日志：是下载失败还是依赖安装失败）。无需开代理，请稍后重试；缓存支持断点续传。")
         # ai-toolkit 依赖：固定 Diffusers 从国内按需缓存安装，requirements 中不再含 git+https。
         _diff_zip = _download_engine_source("diffusers", logf)
         _diff_dir = os.path.join(_engine_source_cache_dir(), "diffusers-c9438378")
         _install_engine_source(_diff_zip, _diff_dir, "pyproject.toml", logf)
         _install_local_diffusers(vpy, _diff_dir, at_dir, env, logf)
         _req_tmp = os.path.join(_engine_source_cache_dir(), "ai-toolkit-requirements-domestic.txt")
-        _write_engine_requirements(at_dir, _req_tmp)
+        _write_engine_requirements(at_dir, _req_tmp, backend="amd-rocm" if amd_mode else "nvidia")
         _constraints = os.path.join(_engine_source_cache_dir(), "ai-toolkit-constraints.txt")
         with open(_constraints, "w", encoding="utf-8") as _cf:
-            _cf.write("torch==2.13.0\ntorchvision==0.28.0\ntorchaudio==2.11.0\n"
-                      "numpy==2.1.3\nscipy==1.15.3\n")
+            if amd_mode:
+                _cf.write("torch==%s\ntorchvision==%s\nsetuptools<82\n" %
+                          (FIZGIG_ROCM_TORCH_PIN, FIZGIG_ROCM_TORCHVISION_PIN))
+            else:
+                _cf.write("torch==2.13.0\ntorchvision==0.28.0\ntorchaudio==2.11.0\n")
+            _cf.write("numpy==2.1.3\nscipy==1.15.3\n")
         logf("[第三引擎] 安装 ai-toolkit 依赖（中科大/华为云国内 PyPI，不访问 GitHub，锁定兼容版本）…")
         if run_stream([vpy, "-m", "pip", "install", "--upgrade", "--no-input", "--retries", "10", "--timeout", "120",
                        "--index-url", PIP_INDEX_PRIMARY,
                        "--extra-index-url", PIP_INDEX_SECONDARY,
+                       *(["--extra-index-url", FIZGIG_ROCM_INDEX] if amd_mode else []),
                        "-c", _constraints, "-r", _req_tmp], cwd=at_dir, env=env, logf=logf) != 0:
             raise RuntimeError("ai-toolkit 依赖安装失败（国内 PyPI 镜像均不可达或依赖冲突）")
         # 验证
         try:
+            _verify_code = ("import torch; from toolkit.config_modules import ModelConfig;"
+                            "from extensions_built_in.diffusion_models.minimax_h3 import MinimaxH3Model;")
+            if amd_mode:
+                _verify_code += "from toolkit.util.quantize import get_qtype;"
+            _verify_code += "print(torch.__version__)"
             r = subprocess.run(
-                [vpy, "-c", "import torch; from toolkit.config_modules import ModelConfig;"
-                            "from extensions_built_in.diffusion_models.minimax_h3 import MinimaxH3Model;"
-                            "print(torch.__version__)"],
-                capture_output=True, text=True, timeout=300, cwd=at_dir)
+                [vpy, "-c", _verify_code],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+                cwd=at_dir, env=_ai_toolkit_rocm_env(vpy) if amd_mode else build_direct_env())
             out = (r.stdout or "").strip().splitlines()
             logf(f"[第三引擎] 验证：torch {out[0] if out else '?'} | H3 扩展已注册（验证不初始化 CUDA，避免旧驱动崩溃）")
             if r.returncode != 0:
                 raise RuntimeError("第三引擎验证失败：" + (r.stderr or "")[-300:])
+            if amd_mode:
+                _bk, _gpu_ok, _detail = _ai_toolkit_torch_backend(vpy, at_dir, _ai_toolkit_rocm_env(vpy))
+                if _bk != "rocm" or not _gpu_ok:
+                    raise RuntimeError("第三引擎 AMD ROCm 验证失败：" + _detail)
         except Exception as e:
             logf(f"[第三引擎] 验证失败: {e}")
             raise
-        logf("[第三引擎] 安装完成：MiniMax H3 视频 LoRA 可用。")
+        logf("[第三引擎] 安装完成：AI Toolkit 可用（%s）。" % ("AMD ROCm 实验通道" if amd_mode else "NVIDIA CUDA"))
         return vpy
     finally:
         _release_kohya_install_lock(lock_f)
@@ -4731,16 +4909,17 @@ def fizgig_engine_status():
     if not _vok:
         return False, "环境异常（%s）" % _vdetail, vpy, None
     try:
+        _env = _fizgig_rocm_env(fz_dir, vpy) if detect_gpu_vendor() == "amd" else build_direct_env()
         r = subprocess.run(
             [vpy, "-c", "import torch; print(torch.__version__);"
                         "print('rocm=' + str(getattr(torch.version, 'rocm', '') or ''));"
                         "print('hip=' + str(getattr(torch.version, 'hip', '') or ''));"
                         "print('cuda=' + str(torch.version.cuda or ''));"
                         "print('ok=' + str(torch.cuda.is_available()))"],
-            capture_output=True, text=True, timeout=180, cwd=fz_dir)
+            capture_output=True, text=True, timeout=180, cwd=fz_dir, env=_env)
         if r.returncode == 0:
             out = (r.stdout or "").splitlines()
-            backend = "amd-rocm" if any("rocm=" in x and x.split("=", 1)[1] for x in out) else "nvidia"
+            backend = "amd-rocm" if any(x.startswith(("rocm=", "hip=")) and x.split("=", 1)[1] for x in out) else "nvidia"
             if "ok=True" in (r.stdout or ""):
                 return True, ("已就绪（第四引擎 Fizgig · %s）" % ("AMD ROCm" if backend == "amd-rocm" else "NVIDIA")), vpy, backend
             return False, "环境异常（torch 未启用 GPU）", vpy, backend
@@ -4822,23 +5001,28 @@ def _find_python312_exe():
 
 
 def _fizgig_ensure_python312(logf=print):
-    """确保系统有 Python 3.12（ROCm bitsandbytes 轮子仅 cp312）。返回 3.12 解释器路径。"""
+    """确保系统有 Python 3.12（ROCm bitsandbytes 轮子仅 cp312）。返回解释器路径。"""
+    return _engine_ensure_python312("第四引擎", logf)
+
+
+def _engine_ensure_python312(label, logf=print):
+    """确保 Windows ROCm 引擎可使用的 Python 3.12 已安装。"""
     py312 = _find_python312_exe()
     if py312:
         return py312
-    logf("[第四引擎] 未检测到 Python 3.12（ROCm 轮子仅 cp312），开始安装 Python 3.12…")
+    logf(f"[{label}] 未检测到 Python 3.12（Windows ROCm 轮子仅 cp312），开始安装 Python 3.12…")
     ok, msg = install_python_312(logf)
     if not ok:
-        raise RuntimeError("第四引擎需要 Python 3.12，安装失败：" + msg)
+        raise RuntimeError(f"{label} 需要 Python 3.12，安装失败：" + msg)
     py312 = _find_python312_exe()
     if not py312:
         raise RuntimeError("Python 3.12 安装完成但未定位到解释器，请重启软件后重试")
     return py312
 
 
-def _fizgig_amd_arch(fz_dir, logf=print):
-    """检测 AMD GPU 架构（gfxXXXX）。优先用 Fizgig 自带 detect_gpu.py。"""
-    script = os.path.join(fz_dir, "detect_gpu.py")
+def _amd_gpu_arch(engine_dir, logf=print):
+    """检测 AMD GPU 架构（gfxXXXX），优先使用引擎目录中的 detect_gpu.py。"""
+    script = os.path.join(engine_dir, "detect_gpu.py")
     if os.path.isfile(script):
         try:
             r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=120)
@@ -4848,33 +5032,118 @@ def _fizgig_amd_arch(fz_dir, logf=print):
         except Exception:
             pass
     gname = detect_gpu_name() or ""
-    for pat, arch in (("7900", "gfx1100"), ("7800", "gfx1100"), ("7700", "gfx1101"),
-                      ("6900", "gfx1030"), ("6800", "gfx1030"), ("6700", "gfx1031"),
-                      ("6600", "gfx1032"), ("9070", "gfx1201"), ("9060", "gfx1201"),
-                      ("7600 XT", "gfx1151"), ("7600", "gfx1150")):
+    for pat, arch in (("Ryzen AI Max", "gfx1151"), ("W7800", "gfx1100"),
+                      ("7900", "gfx1100"), ("7800", "gfx1101"), ("7700", "gfx1101"),
+                      ("6950", "gfx1030"), ("6900", "gfx1030"), ("6800", "gfx1030"),
+                      ("6750", "gfx1031"), ("6700", "gfx1031"),
+                      ("6650", "gfx1032"), ("6600", "gfx1032"),
+                      ("9070", "gfx1201"), ("9060", "gfx1200"),
+                      ("7650", "gfx1102"), ("7600", "gfx1102")):
         if pat in gname:
             return arch
     raise RuntimeError("无法识别 AMD GPU 架构（gfxXXXX）：%s。请更新显卡驱动后重试。" % (gname or "未知"))
 
 
+def _fizgig_amd_arch(fz_dir, logf=print):
+    """向后兼容的 Fizgig AMD 架构探测入口。"""
+    return _amd_gpu_arch(fz_dir, logf)
+
+
+def _install_windows_amd_rocm_runtime(vpy, engine_dir, logf=print, label="训练引擎"):
+    """在一个隔离引擎 venv 安装 Windows ROCm + PyTorch + bitsandbytes 栈。
+
+    复用 Fizgig 已在 AMD 用户环境中采用的 ROCm 7.15 wheel 组：优先魔搭断点续传，
+    失败后回退 AMD nightly。调用方负责在随后安装引擎依赖时锁定匹配的 torch 版本。
+    """
+    arch = _amd_gpu_arch(engine_dir, logf)
+    logf(f"[{label}] AMD ROCm 路径：检测到 GPU 架构 {arch}，安装 Windows ROCm 7.15 栈…")
+    rocm_dir = os.path.join(_engine_source_cache_dir(), "rocm")
+    os.makedirs(rocm_dir, exist_ok=True)
+    env = _domestic_pip_env()
+    rocm_ok = False
+    try:
+        local = []
+        for name, minsize in FIZGIG_ROCM_WHEELS.items():
+            path = os.path.join(rocm_dir, name)
+            if not (os.path.isfile(path) and os.path.getsize(path) >= minsize and _wheel_valid(path)):
+                logf(f"[{label}] 下载 ROCm wheel（魔搭国内直连，断点续传）：{name}")
+                if not _download_with_resume(FIZGIG_ROCM_MIRROR + name, path, logf, direct=True) or not _wheel_valid(path):
+                    raise RuntimeError("魔搭下载失败：" + name)
+            local.append(path)
+        sdk = [p for p in local if "bitsandbytes" not in os.path.basename(p)
+               and "rocm_bootstrap" not in os.path.basename(p)]
+        if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + sdk,
+                      cwd=engine_dir, env=env, logf=logf) != 0:
+            raise RuntimeError("本地 ROCm 栈安装失败")
+        bnb_wheels = [p for p in local if "bitsandbytes" in os.path.basename(p)]
+        if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + bnb_wheels,
+                      cwd=engine_dir, env=env, logf=logf) != 0:
+            raise RuntimeError("bitsandbytes 安装失败")
+        sdist = os.path.join(rocm_dir, FIZGIG_ROCM_SDIST[0])
+        if not (os.path.isfile(sdist) and os.path.getsize(sdist) >= FIZGIG_ROCM_SDIST[1] and _wheel_valid(sdist)):
+            logf(f"[{label}] 下载 ROCm 源码包（魔搭国内直连，断点续传）：{FIZGIG_ROCM_SDIST[0]}")
+            if not _download_with_resume(FIZGIG_ROCM_MIRROR + FIZGIG_ROCM_SDIST[0], sdist, logf, direct=True) or not _wheel_valid(sdist):
+                raise RuntimeError("ROCm 元包下载失败")
+        if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120", sdist],
+                      cwd=engine_dir, env=env, logf=logf) != 0:
+            raise RuntimeError("rocm 元包安装失败")
+        rocm_ok = True
+        bootstrap = [p for p in local if "rocm_bootstrap" in os.path.basename(p)]
+        if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + bootstrap,
+                      cwd=engine_dir, env=env, logf=logf) != 0:
+            raise RuntimeError("rocm-bootstrap 安装失败")
+        logf(f"[{label}] AMD ROCm 栈安装成功（魔搭国内直连）。")
+    except StopRequested:
+        raise
+    except Exception as e:
+        logf(f"[{label}] 魔搭 ROCm wheel 安装失败：{e}；回退 AMD nightly 直连…")
+        rocm_ok = False
+
+    if not rocm_ok:
+        for attempt in range(3):
+            try:
+                cmd = [vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
+                       "--index-url", FIZGIG_ROCM_INDEX,
+                       "torch[device-%s]==%s" % (arch, FIZGIG_ROCM_TORCH_PIN),
+                       "torchvision[device-%s]==%s" % (arch, FIZGIG_ROCM_TORCHVISION_PIN),
+                       "rocm-sdk-devel==%s" % FIZGIG_ROCM_SDK_PIN]
+                if run_stream(cmd, cwd=engine_dir, env=env, logf=logf) == 0:
+                    rocm_ok = True
+                    break
+            except Exception as e:
+                logf(f"[{label}] AMD nightly 安装异常（第{attempt + 1}/3 次）：{e}")
+        if rocm_ok:
+            bnb = os.path.join(rocm_dir, "bitsandbytes-0.50.2.dev0-cp312-cp312-win_amd64.whl")
+            if not (os.path.isfile(bnb) and _wheel_valid(bnb)):
+                logf(f"[{label}] 下载 bitsandbytes（ROCm Windows 社区轮子，0xDELUXA）…")
+                if not _download_with_resume(FIZGIG_ROCM_BNB_URL, bnb, logf, direct=False) or not _wheel_valid(bnb):
+                    raise RuntimeError("bitsandbytes ROCm 轮子下载失败（GitHub 直连较慢，可稍后重试）")
+            if run_stream([vpy, "-m", "pip", "install", "--no-input", bnb], cwd=engine_dir, env=env, logf=logf) != 0:
+                raise RuntimeError("bitsandbytes ROCm 轮子安装失败")
+    if not rocm_ok:
+        raise RuntimeError("AMD ROCm 栈安装失败（魔搭国内直连 + AMD nightly 均失败，详见上方日志）。")
+    return arch
+
+
 def _fizgig_verify(vpy, fz_dir, logf=print, backend="nvidia"):
     """验证第四引擎可用：torch 能 import + GPU 可用 + krea2_train 可运行 --help。"""
     try:
+        _env = _fizgig_rocm_env(fz_dir, vpy) if backend == "amd-rocm" else build_direct_env()
         r = subprocess.run(
             [vpy, "-c", "import torch; print(torch.__version__);"
                         "print('rocm=' + str(getattr(torch.version, 'rocm', '') or ''));"
                         "print('hip=' + str(getattr(torch.version, 'hip', '') or ''));"
                         "print('cuda=' + str(torch.version.cuda or ''));"
                         "print('ok=' + str(torch.cuda.is_available()))"],
-            capture_output=True, text=True, timeout=300)
+            capture_output=True, text=True, timeout=300, env=_env)
         out = (r.stdout or "").strip().splitlines()
         logf("[第四引擎] 验证：" + " | ".join(out))
         if r.returncode != 0 or not any("ok=True" in ln for ln in out):
             raise RuntimeError("torch 未启用 GPU（" + ((r.stderr or r.stdout or "未知")[-200:]) + "）")
-        if backend == "amd-rocm" and not any("rocm=" in ln and ln.split("=", 1)[1] for ln in out):
-            raise RuntimeError("AMD ROCm torch 缺少 ROCm 版本信息，疑似装成 CUDA/CPU 版")
+        if backend == "amd-rocm" and not any(ln.startswith(("rocm=", "hip=")) and ln.split("=", 1)[1] for ln in out):
+            raise RuntimeError("AMD ROCm torch 缺少 HIP 版本信息，疑似装成 CUDA/CPU 版")
         r2 = subprocess.run([vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "krea2_train.py"), "--help"],
-                            capture_output=True, text=True, timeout=180)
+                            capture_output=True, text=True, timeout=180, env=_env)
         if r2.returncode != 0:
             raise RuntimeError("Fizgig krea2_train 启动失败：" + ((r2.stderr or "")[-300:]))
         return True
@@ -5007,51 +5276,58 @@ def install_fizgig_engine(logf=print):
                     raise RuntimeError("重建 fizgig_venv 失败")
                 if not _ensure_venv_pip(vpy, fv, logf, label="第四引擎"):
                     raise RuntimeError("fizgig_venv 重建后仍无 pip，请检查 Python 安装是否完整")
-        # 已装验证（快速）：torch 可用 + GPU 可用 => 跳过
+        # 已装环境必须与本机显卡后端一致；错装后端时保留旧 venv，再建新环境。
         try:
-            r = subprocess.run(
-                [vpy, "-c", "import torch; print(torch.__version__); print('ok=' + str(torch.cuda.is_available()))"],
-                capture_output=True, text=True, timeout=180)
-            if r.returncode == 0 and "ok=True" in (r.stdout or ""):
-                logf("[第四引擎] 检测到已安装（torch + GPU 可用），跳过重复安装。")
-                return vpy
-            # ★ 2026-09-16 用户疑问：「明明徽章显示『第四引擎 就绪』，为什么还要装一遍？」
-            #   因为**界面徽章与这里的跳过判据不是同一套**：
-            #     · 徽章 `_fizgig_marker_ok()` 只查 venv + 源码 + 标记（秒级、不跑 import）；
-            #     · 这里额外要求 `torch.cuda.is_available()` 为 True（防 CPU 版 torch 白装一整天）。
-            #   于是远程桌面等"看不到独显"的会话里：徽章=就绪 ✓ 这里=**永远不跳过** ✗
-            #   → 每次点「安装第四引擎」都从头走一遍。
-            #   这不该让用户猜 —— 明说为什么没跳过、以及这不是"重复下载"。
-            _why = ("torch 导入失败" if r.returncode != 0
-                    else "CUDA 不可用（cuda.is_available()=False）")
-            logf("[第四引擎] 未跳过安装：%s。" % _why)
-            logf("[第四引擎]   · 这与徽章上的「就绪」不矛盾：徽章只看环境与源码是否就位，"
-                 "这里还要确认显卡真的可用。")
-            logf("[第四引擎]   · 本次会重新走一遍安装与校验，但**不会重复下载**"
-                 "（轮子已在本地缓存，直接本地安装）。")
-            if r.returncode == 0:
-                # ⚠️ 2026-09-16 修正（用户实测报告）：远程桌面下 `nvidia-smi` 常报
-                #    "Failed to initialize NVML: Unknown Error"，但**显卡是好的** ✗ ——
-                #    cuInit 返回 0、CUDA 实测可用 ✓。旧文案会让人误以为"没有显卡" ✗。
-                logf("[第四引擎]   · 若正用远程桌面：这里查不到显卡**不代表没有显卡** ✗ —— "
-                     "RDP 会话下 `nvidia-smi` 常报 NVML 错误，可忽略 ✓。"
-                     "想确认真实情况：在**本机**跑 `nvidia-smi`，或运行 "
-                     "`python -c \"import torch;print(torch.cuda.is_available())\"` 验证 ✓")
+            backend = "amd-rocm" if detect_gpu_vendor() == "amd" else "nvidia"
         except Exception:
-            pass
+            backend = "nvidia"
+        try:
+            _probe_env = _fizgig_rocm_env(fz_dir, vpy) if backend == "amd-rocm" else build_direct_env()
+            r = subprocess.run(
+                [vpy, "-c", "import torch; print(torch.__version__);"
+                            "print('hip=' + str(getattr(torch.version, 'hip', '') or ''));"
+                            "print('cuda=' + str(getattr(torch.version, 'cuda', '') or ''));"
+                            "print('ok=' + str(torch.cuda.is_available()))"],
+                capture_output=True, text=True, timeout=180, env=_probe_env)
+            if r.returncode == 0:
+                _lines = (r.stdout or "").strip().splitlines()
+                _hip = any(x.startswith("hip=") and x.split("=", 1)[1] for x in _lines)
+                _cuda = any(x.startswith("cuda=") and x.split("=", 1)[1] for x in _lines)
+                _found = "amd-rocm" if _hip else ("nvidia" if _cuda else "cpu")
+                _available = "ok=True" in _lines
+                if _found == backend and _available:
+                    logf("[第四引擎] 检测到已安装（%s GPU 可用），跳过重复安装。" % backend)
+                    return vpy
+                if _found == backend:
+                    raise RuntimeError(
+                        "第四引擎 %s 环境已安装，但当前会话没有识别到 GPU。请在本机桌面会话重试检查；"
+                        "重复下载安装不会修复显卡不可见。若正使用远程桌面，nvidia-smi/NVML 报错"
+                        "不代表没有显卡；以本机桌面会话中的 PyTorch GPU 探测结果为准。" % backend)
+                _bak = os.path.join(kdir, "fizgig_venv_backend_backup_%s" % time.strftime("%Y%m%d_%H%M%S"))
+                while os.path.exists(_bak):
+                    _bak += "_1"
+                try:
+                    os.rename(fv, _bak)
+                except Exception as e:
+                    raise RuntimeError("第四引擎现有环境后端为 %s，无法保留旧环境：%s。请关闭训练后重试。" % (_found, e))
+                logf("[第四引擎] 现有环境后端为 %s，与本机所需 %s 不匹配；旧环境已保留到 %s。" %
+                     (_found, backend, os.path.basename(_bak)))
+                if run_stream([py312, "-m", "venv", fv], cwd=kdir, logf=logf) != 0 or not os.path.isfile(vpy):
+                    raise RuntimeError("重建第四引擎 venv 失败")
+                if not _ensure_venv_pip(vpy, fv, logf, label="第四引擎"):
+                    raise RuntimeError("重建第四引擎 venv 后仍缺 pip")
+            else:
+                logf("[第四引擎] 现有环境无法导入 torch，将继续安装和修复依赖。")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logf("[第四引擎] 现有环境检查失败（%s），将继续安装。" % e)
         if not _ensure_venv_pip(vpy, fv, logf, label="第四引擎"):
             raise RuntimeError("fizgig_venv 缺少 pip，且 ensurepip 自愈失败，请重试安装")
         logf("[第四引擎] 升级 pip / setuptools / wheel（清华/阿里双国内源）…")
         if not _upgrade_pip(vpy, kdir, logf, label="第四引擎"):
             raise RuntimeError("pip 升级失败：清华/阿里镜像均不可达，无需代理，请稍后重试")
         env = _domestic_pip_env()
-        backend = "nvidia"
-        try:
-            vendor = detect_gpu_vendor()
-            if vendor == "amd":
-                backend = "amd-rocm"
-        except Exception:
-            vendor = "nvidia"
         if backend == "nvidia":
             logf("[第四引擎] NVIDIA 路径：安装 torch %s+%s（阿里云/上海交大双国内镜像断点续传）…"
                  % (FIZGIG_TORCH_VERSION, FIZGIG_TORCH_CU))
@@ -5068,62 +5344,7 @@ def install_fizgig_engine(logf=print):
             if not _torch_ok:
                 raise RuntimeError("torch cu128 国内镜像下载/安装失败（详见上方日志）。无需开代理，请稍后重试；缓存支持断点续传。")
         else:
-            arch = _fizgig_amd_arch(fz_dir, logf)
-            logf(f"[第四引擎] AMD ROCm 路径：检测到 GPU 架构 {arch}，安装钉死 ROCm 栈…")
-            _rocm_ok = False
-            rocm_dir = os.path.join(_engine_source_cache_dir(), "rocm")
-            os.makedirs(rocm_dir, exist_ok=True)
-            try:
-                local = []
-                for _name, _minsize in FIZGIG_ROCM_WHEELS.items():
-                    _p = os.path.join(rocm_dir, _name)
-                    if not (os.path.isfile(_p) and os.path.getsize(_p) >= _minsize and _wheel_valid(_p)):
-                        logf(f"[第四引擎] 下载 ROCm wheel（魔搭国内直连，断点续传）: {_name}")
-                        if not _download_with_resume(FIZGIG_ROCM_MIRROR + _name, _p, logf, direct=True) or not _wheel_valid(_p):
-                            raise RuntimeError("魔搭下载失败: " + _name)
-                    local.append(_p)
-                _sdk = [p for p in local if "bitsandbytes" not in os.path.basename(p) and "rocm_bootstrap" not in os.path.basename(p)]
-                if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + _sdk,
-                              cwd=fz_dir, env=env, logf=logf) != 0:
-                    raise RuntimeError("本地 ROCm 栈安装失败")
-                _bnb = [p for p in local if "bitsandbytes" in os.path.basename(p)]
-                if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + _bnb,
-                              cwd=fz_dir, env=env, logf=logf) != 0:
-                    raise RuntimeError("bitsandbytes 安装失败")
-                if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120", _sd],
-                              cwd=fz_dir, env=env, logf=logf) != 0:
-                    raise RuntimeError("rocm 元包安装失败")
-                _rb = [p for p in local if "rocm_bootstrap" in os.path.basename(p)]
-                if run_stream([vpy, "-m", "pip", "install", "--no-deps", "--no-input", "--retries", "10", "--timeout", "120"] + _rb,
-                              cwd=fz_dir, env=env, logf=logf) != 0:
-                    raise RuntimeError("rocm-bootstrap 安装失败")
-                _rocm_ok = True
-                logf("[第四引擎] AMD ROCm 栈安装成功（魔搭国内直连）。")
-            except Exception as e:
-                logf(f"[第四引擎] 魔搭缓存安装失败：{e}；自动回退 AMD nightly 直连（较慢，仅作兜底）…")
-            if not _rocm_ok:
-                for _try in range(3):
-                    try:
-                        cmd = [vpy, "-m", "pip", "install", "--no-input", "--retries", "10", "--timeout", "120",
-                               "--index-url", FIZGIG_ROCM_INDEX,
-                               "torch[device-%s]==%s" % (arch, FIZGIG_ROCM_TORCH_PIN),
-                               "torchvision[device-%s]==%s" % (arch, FIZGIG_ROCM_TORCHVISION_PIN),
-                               "rocm-sdk-devel==%s" % FIZGIG_ROCM_SDK_PIN]
-                        if run_stream(cmd, cwd=fz_dir, env=env, logf=logf) == 0:
-                            _rocm_ok = True
-                            break
-                    except Exception as e:
-                        logf(f"[第四引擎] AMD nightly 安装异常（第{_try + 1}/3 次）：{e}")
-                if _rocm_ok:
-                    bnb = os.path.join(_engine_source_cache_dir(), "bitsandbytes-0.50.2.dev0-cp312-cp312-win_amd64.whl")
-                    if not (os.path.isfile(bnb) and _wheel_valid(bnb)):
-                        logf("[第四引擎] 下载 bitsandbytes（ROCm Windows 社区轮子，0xDELUXA）…")
-                        if not _download_with_resume(FIZGIG_ROCM_BNB_URL, bnb, logf, direct=False) or not _wheel_valid(bnb):
-                            raise RuntimeError("bitsandbytes ROCm 轮子下载失败（GitHub 直连较慢，可稍后重试）")
-                    if run_stream([vpy, "-m", "pip", "install", "--no-input", bnb], cwd=fz_dir, env=env, logf=logf) != 0:
-                        raise RuntimeError("bitsandbytes ROCm 轮子安装失败")
-            if not _rocm_ok:
-                raise RuntimeError("AMD ROCm 栈安装失败（魔搭国内直连 + AMD nightly 均失败，详见上方日志）。可稍后重试。")
+            _install_windows_amd_rocm_runtime(vpy, fz_dir, logf, label="第四引擎")
         # 共享依赖（国内 PyPI）
         _req_tmp = os.path.join(_engine_source_cache_dir(), "fizgig-requirements-domestic.txt")
         _deps = FIZGIG_SHARED_DEPS
@@ -5273,12 +5494,8 @@ def _fizgig_klein_quant_swap(vram_gb, requested, dit_prequant=True, backend=None
     return ([], swap, "fp8 预量化底模常驻（~9GB）+ blocks_to_swap=%d" % swap)
 
 
-def _fizgig_rocm_env(fz_dir, vpy):
-    """AMD ROCm 运行时环境（对齐 Fizgig 官方 run_fizgig_rocm.bat / write_rocm_env.py）。
-
-    bitsandbytes 需要 BNB_ROCM_VERSION 匹配 PyTorch wheel 内置的 ROCm SDK（7.15→715），
-    且 hipinfo.exe 要在 PATH 里（_rocm_sdk_core/bin + _rocm_sdk_devel/bin），否则报
-    "could not detect ROCm GPU architecture"。NVIDIA 路径不需要这些变量。"""
+def _windows_rocm_runtime_env(vpy, bnb_rocm_version="715", engine_backend=None):
+    """Build runtime DLL paths and environment for the Windows ROCm venv."""
     env = build_direct_env()
     venv = os.path.dirname(os.path.dirname(vpy))
     sp = os.path.join(venv, "Lib", "site-packages")
@@ -5289,8 +5506,10 @@ def _fizgig_rocm_env(fz_dir, vpy):
     env["FLASH_ATTENTION_TRITON_AMD_ENABLE"] = "TRUE"
     env["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:512,garbage_collection_threshold:0.8"
     env["TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL"] = "1"
-    env["FIZGIG_GPU_BACKEND"] = "rocm"
-    env["BNB_ROCM_VERSION"] = "715"
+    if engine_backend:
+        env[engine_backend] = "rocm"
+    if bnb_rocm_version:
+        env["BNB_ROCM_VERSION"] = str(bnb_rocm_version)
     path = []
     for _p in (os.path.join(rocm_core, "bin"), os.path.join(sp, "_rocm_sdk_devel", "bin"),
                os.path.join(venv, "Scripts")):
@@ -5298,6 +5517,16 @@ def _fizgig_rocm_env(fz_dir, vpy):
             path.append(_p)
     env["PATH"] = ";".join(path + [env.get("PATH", "")])
     return env
+
+
+def _fizgig_rocm_env(fz_dir, vpy):
+    """AMD ROCm runtime env for Fizgig and its Windows bitsandbytes build."""
+    return _windows_rocm_runtime_env(vpy, bnb_rocm_version="715", engine_backend="FIZGIG_GPU_BACKEND")
+
+
+def _ai_toolkit_rocm_env(vpy):
+    """AMD ROCm runtime env for the AI Toolkit venv."""
+    return _windows_rocm_runtime_env(vpy, bnb_rocm_version="715")
 
 
 def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, resume_from=None, progress=None):
@@ -6134,6 +6363,8 @@ def _patch_minimax_h3_processor(kdir, logf=print):
 def train_video(logf=print, mode="video", params=None, vram_gb=None, resume_from=None, progress=None):
     """MiniMax H3 视频 LoRA 训练（第三引擎 AI Toolkit，T2V）。"""
     params = params or {}
+    if detect_gpu_vendor() == "amd":
+        raise RuntimeError("H3 视频的 Windows AMD 训练通道尚未开放；当前先验证 Qwen-Image / Z-Image / Krea2 图像训练。")
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     _check_at_train_driver(logf)
     ok, detail, vpy = ai_toolkit_engine_status()
@@ -6560,7 +6791,7 @@ def at_image_qwen21_component_file_ready(path):
         return False
 
 
-def _ensure_ai_toolkit_triton(vpy, logf=print):
+def _ensure_ai_toolkit_triton(vpy, logf=print, amd_mode=False):
     """第三引擎 venv 缺 Triton 时自动补装 triton-windows（torchao 量化矩阵内核依赖）。
 
     缺 triton 时 torchao 的量化 matmul 会回退慢速内核（日志开头常见
@@ -6568,6 +6799,17 @@ def _ensure_ai_toolkit_triton(vpy, logf=print):
     尽力而为，装不上只警告不中断训练。
     """
     if not vpy or not os.path.isfile(vpy):
+        return False
+    if amd_mode:
+        try:
+            tr = subprocess.run([vpy, "-c", "import triton; print(triton.__version__)"],
+                                capture_output=True, text=True, timeout=60,
+                                env=_ai_toolkit_rocm_env(vpy))
+            if tr.returncode == 0:
+                return True
+        except Exception:
+            pass
+        logf("[第三引擎] ⚠ AMD ROCm 环境没有可导入的 Triton；跳过 triton-windows，继续尝试训练。")
         return False
     try:
         r = subprocess.run([vpy, "-c", "import triton; print(triton.__version__)"],
@@ -6622,11 +6864,15 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
     _fast8_tier = _fast_arch and (
         _ft_switch == "on" or (_ft_switch != "off" and info.get("arch") == "zimage"
                                and vram_gb is not None and vram_gb < 10))
-    _at8g_train_yaml = _at8g_model_yaml = ""
+    # Preserve the existing AI image default (sampling on) for old queued configs
+    # that do not carry this UI field; honor an explicit checkbox value.
+    _sample_on = bool(params.get("sample_preview", True))
+    _at8g_train_yaml = ("        disable_sampling: true\n"
+                        if (not _sample_on or _fast8_tier) else "")
+    _at8g_model_yaml = ""
     if _fast8_tier:
         reso = min(int(reso), 512 if info.get("arch") == "qwen_image"
                     else (384 if (detect_ram_gb() or 0) < 32 else 512))
-        _at8g_train_yaml = "        \"disable_sampling\": true\n"
         # 2026-09-06 实测：8G 纯 qfloat8+low_vram 时 fp8 DiT 全量驻留显存(~7.8G)，无激活余量，训练起不来；
         # 必须开官方 layer_offloading 层交换（引擎会自动把 qfloat8 降为 float8 逐层换入），512 才能跑通。
         _at8g_model_yaml = ("        \"quantize_te\": true\n"
@@ -6637,7 +6883,8 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
     out_dir = os.path.abspath(out_dir).replace("\\", "/")
     if vpy:
         try:
-            _opt_k, _od = resolve_optimizer(vpy, logf, requested=params.get("optimizer", "auto"))
+            _opt_k, _od = resolve_optimizer(vpy, logf, requested=params.get("optimizer", "auto"),
+                                            amd_mode=bool(params.get("amd_mode")))
         except Exception:
             _opt_k = "AdamW"
     else:
@@ -6662,6 +6909,8 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
           f"（显存 {vram_gb if vram_gb is not None else '未知'}G" + ("，驻留需 %.0fG" % _need if vram_gb is not None else "，默认开保险") + "）")
     if _fast8_tier:
         logf(f"[{info.get('label', 'AI 图像')}] ⚡快跑档生效（{'手动开启' if _ft_switch == 'on' else '8G 自动'}）：分辨率 {reso}、已关闭训练采样、文本编码器量化、timestep=weighted、层交换 0.6")
+    elif not _sample_on:
+        logf(f"[{info.get('label', 'AI 图像')}] 已关闭训练采样预览")
     text = (
         "job: extension\n"
         "config:\n"
@@ -7207,11 +7456,12 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
         logf("[Krea2(AT)] 显存 %sGB（取整 %sG）：不启用分层交换，保速度" % (vram_gb, _tier))
     if vpy:
         try:
-            _opt_k, _od = resolve_optimizer(vpy, logf, requested=params.get("optimizer", "auto"))
+            _opt_k, _od = resolve_optimizer(vpy, logf, requested=params.get("optimizer", "auto"),
+                                            amd_mode=bool(params.get("amd_mode")))
         except Exception:
-            _opt_k = "AdamW8bit"
+            _opt_k = "AdamW" if params.get("amd_mode") else "AdamW8bit"
     else:
-        _opt_k = "AdamW8bit"
+        _opt_k = "AdamW" if params.get("amd_mode") else "AdamW8bit"
     _opt_yaml = _optimizer_yaml_name(_opt_k)
     # 记录实际生效值（参数报告 / 使用模板读取）：低显存档会把分辨率压到 512
     _record_effective(engine="AI Toolkit (ai-toolkit)", resolution=reso, optimizer=_opt_k,
@@ -7358,6 +7608,11 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
     ok, detail, vpy = ai_toolkit_engine_status()
     if not ok:
         raise RuntimeError("第三训练引擎未安装，请点顶部「⚙ 安装第三引擎」安装。\n" + detail)
+    if params.get("amd_mode"):
+        _amd_ok, _amd_backend, _amd_detail = ai_toolkit_amd_status(vpy)
+        if not _amd_ok:
+            raise RuntimeError("第三引擎 AMD 环境未就绪：\n" + _amd_detail)
+        logf("[第三引擎] AMD ROCm 后端已确认：%s" % _amd_detail)
     kdir = get_kohya_dir()
     at_dir = _at_dirs()[1]
     _ensure_venv_hf_sitecustomize(os.path.dirname(os.path.dirname(vpy)), logf)
@@ -7365,9 +7620,10 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
         raise RuntimeError("ai-toolkit 源码缺失，请重装第三引擎")
     if not _check_at_krea2_support(at_dir, logf):
         raise RuntimeError("ai-toolkit 源码不含 krea2 扩展且自动更新失败，请重装第三引擎后再试")
-    if not _ensure_torchvision_deps(vpy, logf, label="第三引擎", cwd=at_dir):
+    if not _ensure_torchvision_deps(vpy, logf, label="第三引擎", cwd=at_dir,
+                                    env=_ai_toolkit_rocm_env(vpy) if params.get("amd_mode") else None):
         raise RuntimeError("第三引擎 venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第三引擎。")
-    _ensure_ai_toolkit_triton(vpy, logf)
+    _ensure_ai_toolkit_triton(vpy, logf, amd_mode=bool(params.get("amd_mode")))
     # 模型文件：raw 底模必须手动放（26GB）；TE/VAE 首次训练自动下载
     missing = krea2_at_missing_models()
     if missing:
@@ -7420,7 +7676,9 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
     logf(f"[Krea2] 数据集: {train_dir}（{_n_img} 张 × {params.get('repeats',5)} repeats × {params.get('max_epochs',8)} epochs）")
     logf(f"[Krea2] 底模: {os.path.basename(_raw)}（bf16 原版，ai-toolkit 加载期量化）")
     logf(f"[Krea2] LoRA: dim={params.get('rank',16)}, alpha={params.get('alpha',16)}, lr={params.get('unet_lr','1e-4')}, steps={steps}")
-    env = build_direct_env()
+    env = _ai_toolkit_rocm_env(vpy) if params.get("amd_mode") else build_direct_env()
+    if params.get("amd_mode"):
+        logf("[第三引擎] AMD ROCm 运行时 DLL 路径与训练环境已设置")
     env["HF_ENDPOINT"] = "https://hf-mirror.com"
     if progress is not None:
         try:
@@ -7476,14 +7734,20 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     ok, detail, vpy = ai_toolkit_engine_status()
     if not ok:
         raise RuntimeError("第三训练引擎未安装，请点顶部「⚙ 安装第三引擎」安装。\n" + detail)
+    if params.get("amd_mode"):
+        _amd_ok, _amd_backend, _amd_detail = ai_toolkit_amd_status(vpy)
+        if not _amd_ok:
+            raise RuntimeError("第三引擎 AMD 环境未就绪：\n" + _amd_detail)
+        logf("[第三引擎] AMD ROCm 后端已确认：%s" % _amd_detail)
     kdir = get_kohya_dir()
     at_dir = _at_dirs()[1]
     _ensure_venv_hf_sitecustomize(os.path.dirname(os.path.dirname(vpy)), logf)
     if not os.path.isfile(os.path.join(at_dir, "run.py")):
         raise RuntimeError("ai-toolkit 源码缺失，请重装第三引擎")
-    if not _ensure_torchvision_deps(vpy, logf, label="第三引擎", cwd=at_dir):
+    if not _ensure_torchvision_deps(vpy, logf, label="第三引擎", cwd=at_dir,
+                                    env=_ai_toolkit_rocm_env(vpy) if params.get("amd_mode") else None):
         raise RuntimeError("第三引擎 venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第三引擎。")
-    _ensure_ai_toolkit_triton(vpy, logf)   # v0.11.3：缺 Triton 自动补装（torchao 量化内核加速）
+    _ensure_ai_toolkit_triton(vpy, logf, amd_mode=bool(params.get("amd_mode")))   # v0.11.3：缺 Triton 自动补装（torchao 量化内核加速）
     train_dir = dataset_train_dir(mode, params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】或【一键开始训练】")
@@ -7574,7 +7838,9 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     else:
         logf(f"[{info['label']}] 模型: {info['model_id']}（本地下载未完成，将尝试在线加载）")
     logf(f"[{info['label']}] LoRA: dim={params.get('rank',16)}, alpha={params.get('alpha',16)}, lr={params.get('unet_lr','1e-4')}, steps={steps}")
-    env = build_direct_env()
+    env = _ai_toolkit_rocm_env(vpy) if params.get("amd_mode") else build_direct_env()
+    if params.get("amd_mode"):
+        logf("[第三引擎] AMD ROCm 运行时 DLL 路径与训练环境已设置")
     env["HF_ENDPOINT"] = "https://hf-mirror.com"
     if _qwen21_assets_path:
         env["AI_TOOLKIT_QWEN21_ASSETS_PATH"] = _qwen21_assets_path
@@ -7871,7 +8137,7 @@ def _log_mentions_tokenizer_failure(tail):
     return any(k in blob for k in ("tokenizer", "vocab_file", "merges.txt", "spiece.model"))
 
 
-def _ensure_torchvision_deps(vpy, logf=print, label="Kohya", cwd=None):
+def _ensure_torchvision_deps(vpy, logf=print, label="Kohya", cwd=None, env=None):
     """确保训练 venv 可 import torchvision（torch 在但 torchvision 缺时自动补装匹配版本）。
 
     版本映射：torch 2.7.x → torchvision 0.22.x（patch 同号）；阿里云 pytorch-wheels 源优先，官方源兜底。
@@ -7880,22 +8146,29 @@ def _ensure_torchvision_deps(vpy, logf=print, label="Kohya", cwd=None):
     def _check_import():
         try:
             return subprocess.run([vpy, "-c", "import torchvision"],
-                                  capture_output=True, text=True, timeout=120).returncode == 0
+                                  capture_output=True, text=True, timeout=120, env=env).returncode == 0
         except Exception:
             return False
     if _check_import():
         return True
     # torch 可用才补装（torch 缺失由安装流程处理，单独装 torchvision 无意义）
     tver = ""
+    hip = ""
     try:
-        r = subprocess.run([vpy, "-c", "import torch; print(torch.__version__)"],
-                           capture_output=True, text=True, timeout=120)
-        tver = (r.stdout or "").strip()
+        r = subprocess.run(
+            [vpy, "-c", "import torch;print(torch.__version__);print(getattr(torch.version, 'hip', '') or '')"],
+            capture_output=True, text=True, timeout=120, env=env)
+        _torch_lines = (r.stdout or "").strip().splitlines()
+        tver = _torch_lines[0].strip() if _torch_lines else ""
+        hip = _torch_lines[1].strip() if len(_torch_lines) > 1 else ""
     except Exception:
         tver = ""
     if not tver:
         logf(f"[{label}] 未检测到 torch 版本，跳过 torchvision 补装（由安装流程处理）")
         return True
+    if hip:
+        logf(f"[{label}] ROCm PyTorch 缺少可导入的 torchvision；不会尝试安装 CUDA/cu128 轮子，以免破坏 AMD 环境。请重装第三引擎 ROCm 运行时。")
+        return False
     ver = ""
     m = re.match(r"(\d+)\.(\d+)\.(\d+)", tver)
     if m and int(m.group(1)) == 2:

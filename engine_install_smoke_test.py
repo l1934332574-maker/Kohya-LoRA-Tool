@@ -339,6 +339,128 @@ def test_third_engine(base: Path):
     assert any("已损坏" in line for line in logs)
     print("THIRD_ENGINE_FULL_FLOW_AND_BROKEN_VENV_RECOVERY_OK")
 
+def test_third_engine_amd(base: Path):
+    """AI Toolkit AMD install: separate Python 3.12 ROCm path, filtered BNB and GPU verification."""
+    import contextlib
+    kdir = base / "third_amd" / "kohya_ss"
+    av = kdir / "ai_toolkit_venv"
+    src_zip = base / "sources" / "ai-toolkit-amd.zip"
+    diff_zip = base / "sources" / "diffusers-amd.zip"
+    make_source_zip(src_zip, "ai-toolkit-main", {
+        "run.py": "print('ok')\n",
+        "requirements.txt": "numpy\nscipy==1.12.0\nbitsandbytes>=0.48\ntorchao==0.10.0\ntorchcodec==0.9.1\ntransformers\n",
+        "toolkit/config_modules.py": "class ModelConfig: pass\n",
+        "extensions_built_in/diffusion_models/minimax_h3.py": "class MinimaxH3Model: pass\n",
+    })
+    make_source_zip(diff_zip, "diffusers-test", {"pyproject.toml": "[project]\nname='diffusers'\nversion='0.0.0'\n"})
+    state = {"venv": False, "runtime": False, "diffusers": False, "deps": False,
+             "preinstall_torch": False, "constraints": "", "requirements": "", "cmd": []}
+    logs = []
+
+    def run_stream(cmd, cwd=None, env=None, logf=print, **kwargs):
+        cmd = [str(x) for x in cmd]
+        state["cmd"].append(cmd)
+        if len(cmd) >= 4 and cmd[1:3] == ["-m", "venv"]:
+            fake_python(Path(cmd[3]) / "Scripts" / "python.exe")
+            state["venv"] = True
+            return 0
+        if "--no-deps" in cmd:
+            state["diffusers"] = True
+            return 0
+        if "-r" in cmd:
+            req = Path(cmd[cmd.index("-r") + 1]).read_text(encoding="utf-8")
+            constraints = Path(cmd[cmd.index("-c") + 1]).read_text(encoding="utf-8")
+            state["requirements"] = req
+            state["constraints"] = constraints
+            assert "bitsandbytes" not in req.lower(), req
+            assert "torchcodec" not in req.lower(), req
+            assert "torchao==0.17.0" in req and "torchao==0.10.0" not in req, req
+            assert "torch==" + core.FIZGIG_ROCM_TORCH_PIN in constraints, constraints
+            assert "torchvision==" + core.FIZGIG_ROCM_TORCHVISION_PIN in constraints, constraints
+            assert "setuptools<82" in constraints, constraints
+            assert core.FIZGIG_ROCM_INDEX in cmd, cmd
+            state["deps"] = True
+            return 0
+        return 0
+
+    def subrun(cmd, *args, **kwargs):
+        code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
+        if "HIP=" in code:
+            if not state["deps"]:
+                return result(1, "", "torch unavailable")
+            return result(0, "TORCH=2.12.0+rocm7.15.0a20260728\nHIP=7.15.0\nCUDA=\nAVAILABLE=True\nDEVICE=AMD Radeon Test\nKERNEL=ok\n")
+        if "MinimaxH3Model" in code:
+            return result(0 if state["deps"] else 1, "2.12.0+rocm7.15.0a20260728\n")
+        if "toolkit.config_modules" in code:
+            return result(0 if state["deps"] else 1, "ok\n")
+        return result(0)
+
+    def fake_rocm_install(vpy, at_dir, logf=print, label="训练引擎"):
+        assert label == "第三引擎"
+        assert Path(vpy) == av / "Scripts" / "python.exe"
+        state["runtime"] = True
+        return "gfx1100"
+
+    def forbidden_cuda(*args, **kwargs):
+        state["preinstall_torch"] = True
+        raise AssertionError("AMD flow must not preinstall CUDA torch")
+
+    patches = common_patches(kdir) + (
+        patch.object(core, "detect_gpu_vendor", return_value="amd"),
+        patch.object(core, "_engine_ensure_python312", return_value=r"C:\Python312\python.exe"),
+        patch.object(core, "at_custom_dir", return_value=""),
+        patch.object(core, "_download_engine_source", side_effect=lambda name, logf=print: str(src_zip if name == "ai-toolkit" else diff_zip)),
+        patch.object(core, "run_stream", side_effect=run_stream),
+        patch.object(core.subprocess, "run", side_effect=subrun),
+        patch.object(core, "_upgrade_pip", return_value=True),
+        patch.object(core, "_ensure_venv_pip", return_value=True),
+        patch.object(core, "_install_windows_amd_rocm_runtime", side_effect=fake_rocm_install),
+        patch.object(core, "_preinstall_torch", side_effect=forbidden_cuda),
+        patch.object(core, "_ai_toolkit_rocm_env", return_value={"PATH": "C:\\rocm\\bin"}),
+    )
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        out = core.install_ai_toolkit_engine(logs.append)
+    assert Path(out) == av / "Scripts" / "python.exe"
+    assert state["venv"] and state["runtime"] and state["diffusers"] and state["deps"]
+    assert not state["preinstall_torch"]
+    assert any("AI Toolkit 可用（AMD ROCm 实验通道）" in line for line in logs), logs
+    print("THIRD_ENGINE_AMD_ROCM_INSTALL_AND_GPU_VERIFICATION_OK")
+
+def test_third_engine_amd_torchvision_guard():
+    """A missing ROCm torchvision must never trigger installation of a CUDA/cu128 wheel."""
+    calls = []
+    responses = [result(1, "", "torchvision missing"), result(0, "2.12.0+rocm7.15\n7.15.0\n")]
+    with patch.object(core.subprocess, "run", side_effect=lambda *a, **k: responses.pop(0)), \
+         patch.object(core, "run_stream", side_effect=lambda *a, **k: calls.append(a) or 0):
+        ok = core._ensure_torchvision_deps(r"X:\ai_toolkit_venv\Scripts\python.exe", lambda _: None,
+                                           label="第三引擎")
+    assert ok is False
+    assert not calls, calls
+    print("THIRD_ENGINE_AMD_TORCHVISION_NEVER_INSTALLS_CUDA_OK")
+
+def test_amd_gpu_arch_mapping():
+    """AMD ROCm wheel selection must use the GPU's documented gfx target."""
+    cases = {
+        "AMD Radeon RX 7900 XTX": "gfx1100",
+        "AMD Radeon RX 7800 XT": "gfx1101",
+        "AMD Radeon RX 7700 XT": "gfx1101",
+        "AMD Radeon RX 6950 XT": "gfx1030",
+        "AMD Radeon RX 6750 XT": "gfx1031",
+        "AMD Radeon RX 6650 XT": "gfx1032",
+        "AMD Radeon RX 7650 GRE": "gfx1102",
+        "AMD Radeon RX 7600 XT": "gfx1102",
+        "AMD Radeon RX 9070 XT": "gfx1201",
+        "AMD Radeon RX 9060 XT": "gfx1200",
+        "AMD Radeon PRO W7800": "gfx1100",
+        "AMD Ryzen AI Max+ 395": "gfx1151",
+    }
+    for name, expected in cases.items():
+        with patch.object(core, "detect_gpu_name", return_value=name):
+            assert core._amd_gpu_arch(r"X:\missing_engine", lambda _: None) == expected, name
+    print("AMD_ROCM_GPU_ARCH_SELECTION_OK")
+
 def test_optimizer_resolution(base: Path):
     """resolve_optimizer / _probe_adamw8bit / _probe_lion / _optimizer_yaml_name 单元测试（mock 子进程，不真实运行 CUDA）。"""
     logs = []
@@ -955,24 +1077,63 @@ def test_fizgig_krea2_saves_state(base: Path):
     print("FIZGIG_KREA2_SAVE_STATE_OK")
 
 def test_fizgig_skip_reason_logged(base: Path):
-    """第四引擎「徽章显示就绪、点安装却整段重装」时必须说明原因（而不是静默继续）。
+    """已装环境匹配但当前会话看不到 GPU 时，明确停下，不要重装数 GB 依赖。"""
+    import contextlib
 
-    2026-09-16 用户疑问：「为什么还要装一遍？」——因为**界面徽章与跳过判据不是同一套**：
-      · 徽章 `_fizgig_marker_ok()` 只查 venv + 源码 + 标记（秒级、不跑 import）；
-      · 安装流程的跳过条件还要求 `torch.cuda.is_available()` 为 True
-        （防 CPU 版 torch 白装一整天）。
-    远程桌面等"看不到独显"的会话里 → 徽章=就绪 ✓ 但**永远不跳过** ✗ 每次都从头装。
-    旧代码在这里**一句话都不说** ✗ → 用户只能猜「是不是坏了、是不是又要下 2.7GB」。
-    """
-    k = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
-    i = k.index("已装验证（快速）：torch 可用 + GPU 可用 => 跳过")
-    body = k[i:i + 2400]
-    assert "return vpy" in body, "跳过分支被改坏了"
-    assert "未跳过安装" in body, "没跳过时未说明原因（用户只能猜 —— 正是本次反馈）"
-    assert "cuda.is_available()=False" in body, "未区分「torch 导入失败」与「CUDA 不可用」"
-    assert "不会重复下载" in body, "未说明不会重复下载（用户会以为又要等 2.7GB）"
-    assert "远程桌面" in body, "未提示远程桌面看不到独显这一常见原因"
+    kdir = base / "fizgig_skip_guard" / "kohya_ss"
+    fv = kdir / "fizgig_venv"
+    vpy = fv / "Scripts" / "python.exe"
+    fake_python(vpy)
+    logs, stream_calls = [], []
+    probe = result(0, "2.10.0+cu128\nhip=\ncuda=12.8\nok=False\n")
+    patches = (
+        patch.object(core, "get_kohya_dir", return_value=str(kdir)),
+        patch.object(core, "_fizgig_ensure_python312", return_value=r"C:\Python312\python.exe"),
+        patch.object(core, "_deploy_fizgig_source", return_value=str(kdir / "fizgig")),
+        patch.object(core, "_venv_python_ok", return_value=(True, "Python 3.12")),
+        patch.object(core, "_ensure_venv_pip", return_value=True),
+        patch.object(core, "_acquire_kohya_install_lock", return_value=SimpleNamespace()),
+        patch.object(core, "_release_kohya_install_lock", return_value=None),
+        patch.object(core, "detect_gpu_vendor", return_value="nvidia"),
+        patch.object(core.subprocess, "run", return_value=probe),
+        patch.object(core, "run_stream", side_effect=lambda *a, **k: stream_calls.append((a, k)) or 0),
+    )
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        try:
+            core.install_fizgig_engine(logs.append)
+        except RuntimeError as exc:
+            detail = str(exc)
+        else:
+            raise AssertionError("GPU 不可用时应停止，而非继续安装")
+    assert "没有识别到 GPU" in detail and "重复下载安装不会修复" in detail
+    assert "远程桌面" in detail and "不代表没有显卡" in detail
+    assert not stream_calls, "匹配的已安装环境在 GPU 不可见时不应启动 pip/重装"
+
+    # 已安装后端和 GPU 都可用：快速跳过，无安装命令。
+    stream_calls.clear()
+    probe_ok = result(0, "2.10.0+cu128\nhip=\ncuda=12.8\nok=True\n")
+    with contextlib.ExitStack() as stack:
+        for p in patches[:-2]:
+            stack.enter_context(p)
+        stack.enter_context(patch.object(core.subprocess, "run", return_value=probe_ok))
+        stack.enter_context(patch.object(core, "run_stream", side_effect=lambda *a, **k: stream_calls.append((a, k)) or 0))
+        out = core.install_fizgig_engine(logs.append)
+    assert Path(out) == vpy and not stream_calls
+    assert any("跳过重复安装" in line for line in logs)
     print("FIZGIG_SKIP_REASON_LOGGED_OK")
+
+def test_h3_amd_blocked_by_hardware():
+    """H3 AMD 通道尚未开放：即使旧配置没有 amd_mode，也必须按实际 GPU 阻止。"""
+    with patch.object(core, "detect_gpu_vendor", return_value="amd"):
+        try:
+            core.train_video(params={"amd_mode": False})
+        except RuntimeError as exc:
+            assert "H3 视频的 Windows AMD 训练通道尚未开放" in str(exc)
+        else:
+            raise AssertionError("AMD 设备不应进入尚未开放的 H3 训练路径")
+    print("H3_AMD_HARDWARE_GUARD_OK")
 
 def test_preinstall_torch_mirror_fallback(base: Path):
     """_preinstall_torch 本地安装多镜像回退：第一个失败 -> 第二个成功；全部失败才报明确错误。"""
@@ -2409,6 +2570,7 @@ def test_at_image_model_ready_local(base: Path):
 
 def test_at_image_pre_download(base: Path):
     """Z-Image/Qwen-Image 底模预下载：未下载→自动魔搭直链下载（_at_image_ms_download）→yaml 指向本地目录。"""
+    import contextlib
     state = {"downloaded": False, "ms_call": None, "yaml_info": None, "launched": False,
              "local_model": "", "train_env": None}
     vpy = str(base / "third" / "kohya_ss" / "ai_toolkit_venv" / "Scripts" / "python.exe")
@@ -2464,8 +2626,13 @@ def test_at_image_pre_download(base: Path):
         patch.object(core, "write_params_report", return_value=None),
         patch.object(core, "_patch_ai_toolkit_qwen21_local_components", return_value=True),
         patch.object(core, "_ensure_at_image_qwen21_assets", return_value=str(base / "processor_cache")),
+        patch.object(core, "ai_toolkit_amd_status", return_value=(True, "rocm", "ROCm/HIP 7.15 · GPU AMD Radeon Test")),
+        patch.object(core, "_ai_toolkit_rocm_env", return_value={"PATH": "C:\\rocm\\bin", "ROCM_PATH": "C:\\rocm"}),
+        patch.object(core, "_ensure_ai_toolkit_triton", return_value=True),
     )
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10], patches[11], patches[12], patches[13], patches[14]:
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
         out = core.train_at_image(lambda _: None, mode="zimage", params={"project": "at_t1"})
         assert state["ms_call"] == "zimage", "未触发魔搭底模预下载"
         assert state["yaml_info"]["model_id"].replace("\\", "/").endswith("models/at_image/zimage"), state["yaml_info"]
@@ -2538,6 +2705,17 @@ def test_at_image_pre_download(base: Path):
         assert state["train_env"].get("AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH") == str(manual_te), state["train_env"]
         assert state["train_env"].get("AI_TOOLKIT_QWEN21_VAE_PATH") == str(manual_vae), state["train_env"]
         assert state["train_env"].get("AI_TOOLKIT_QWEN21_ASSETS_PATH") == str(base / "processor_cache"), state["train_env"]
+        assert str(out).endswith("lora.safetensors"), out
+
+        # AMD image training must both pass the ROCm runtime DLL environment and require a live ROCm GPU probe.
+        state.update(downloaded=False, ms_call=None, yaml_info=None, launched=False,
+                     local_model="", manual_components={})
+        out = core.train_at_image(lambda _: None, mode="zimage",
+                                  params={"project": "at_zimage_amd", "amd_mode": True})
+        assert state["launched"] and state["ms_call"] == "zimage", state
+        assert state["train_env"].get("ROCM_PATH") == "C:\\rocm", state["train_env"]
+        assert state["train_env"].get("PATH") == "C:\\rocm\\bin", state["train_env"]
+        assert state["train_env"].get("HF_ENDPOINT") == "https://hf-mirror.com", state["train_env"]
         assert str(out).endswith("lora.safetensors"), out
     print("AT_IMAGE_PRE_DOWNLOAD_OK")
 
@@ -2989,7 +3167,7 @@ def test_third_engine_triton_and_laptop_warning(base: Path):
     """v0.11.3：第三引擎缺 Triton 自动补装 + 笔记本低显存重型模型强警告。"""
     src = Path(core.__file__).read_text(encoding="utf-8-sig")
     assert "def _ensure_ai_toolkit_triton" in src, "缺第三引擎 triton 补装"
-    assert "_ensure_ai_toolkit_triton(vpy, logf)" in src, "train_at_image 缺 triton 接线"
+    assert "_ensure_ai_toolkit_triton(vpy, logf, amd_mode=" in src, "train_at_image 缺 triton 接线"
     assert "def _warn_laptop_heavy_load" in src, "缺笔记本强警告"
     for fn in ("train_krea2", "train_flux2", "train_at_image"):
         i = src.find("def %s(" % fn)
@@ -3169,7 +3347,7 @@ def test_fourth_engine(base: Path):
                 assert "rocm-sdk-devel==7.15.0a20260728" in cmd
                 state["rocm"] = True
                 return 0
-            if len(cmd) >= 6 and cmd[3] == "install" and cmd[4] == "--no-input" and cmd[-1].endswith(".whl") and "bitsandbytes" in cmd[-1]:
+            if "bitsandbytes" in " ".join(cmd) and any(x.endswith(".whl") for x in cmd):
                 state["bnb"] = True
                 return 0
             if "-r" in cmd:
@@ -3265,7 +3443,7 @@ def test_fourth_engine(base: Path):
             assert "torch[device-gfx1100]==2.12.0+rocm7.15.0a20260728" in cmd
             state["rocm"] = True
             return 0
-        if len(cmd) >= 6 and cmd[3] == "install" and cmd[4] == "--no-input" and cmd[-1].endswith(".whl"):
+        if "bitsandbytes" in " ".join(cmd) and any(x.endswith(".whl") for x in cmd):
             state["bnb"] = True
             return 0
         if "-r" in cmd:
@@ -3907,6 +4085,9 @@ def main():
         test_second_engine(base)
         test_second_engine_without_git(base)
         test_third_engine(base)
+        test_third_engine_amd(base)
+        test_third_engine_amd_torchvision_guard()
+        test_amd_gpu_arch_mapping()
         test_fourth_engine(base)
         test_fourth_engine_train_pipeline(base)
         test_fizgig_deps_self_heal(base)
@@ -3921,6 +4102,7 @@ def main():
         test_fizgig_krea2_saves_state(base)
         test_torch_import_hints_split_1114_vs_126(base)
         test_fizgig_skip_reason_logged(base)
+        test_h3_amd_blocked_by_hardware()
         test_preinstall_torch_mirror_fallback(base)
         test_preinstall_torch_force_reinstall_on_import_failure(base)
         test_tokenizer_cache(base)

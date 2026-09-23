@@ -1,4 +1,27 @@
-﻿## v0.17.18（2026-09-23）
+﻿## v0.17.19（2026-09-23）
+
+### 新增：AI Toolkit Windows AMD ROCm 图像训练实验通道
+
+- 第三引擎在 AMD 显卡上创建独立 Python 3.12 / ROCm 环境，并检查 PyTorch HIP 后端、GPU 识别和核心计算。
+- 开放 Qwen-Image、Z-Image 和 Krea2（AI Toolkit）图像模式；第四引擎 Fizgig 的 Krea2 / Klein 9B 继续使用其独立 AMD 环境。
+- MiniMax H3 视频的 AMD 训练通道暂未开放；控制流测试通过，完整训练仍需 AMD 用户实机验证。
+
+### 修复：AI Toolkit 图像训练预览开关
+
+- Qwen-Image 与 Z-Image 现在遵循「训练中采样预览」设置；关闭后不再在训练期间生成采样预览。
+
+### 优化：训练目标提示
+
+- Qwen-Image 与 Z-Image 的训练摘要明确显示仅训练 UNet，避免界面暗示会训练文本编码器。
+
+### 验证
+
+- 完整冒烟测试和引擎安装控制流测试通过，包括 AMD ROCm 环境检测、依赖隔离和 H3 AMD 硬件限制。
+- 本机没有 AMD 显卡，未执行 AMD 实机训练；AMD 图像训练通道标记为实验性。
+
+---
+
+## v0.17.18（2026-09-23）
 
 ### 优化：Qwen-Image-2.1 复用本机组件
 

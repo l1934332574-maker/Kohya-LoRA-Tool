@@ -1,7 +1,7 @@
 {
-  "version": "v0.17.18",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.17.18/Setup.exe",
+  "version": "v0.17.19",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.17.19/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "setup_sha256": "beff1d7b3d6e3e13b6ad6c7048a9b1e51a74f76c51d7f7dc328f8a8191a21f93",
-  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.17.18 更新（2026-09-23）\n\n· Qwen-Image-2.1 可手动指定本机已有的文本编码器和 VAE safetensors；留空时自动查找。\n· processor/分词器和模型配置缺失时，仅下载约 16 MB 小文件，不会重下已有的大权重。\n· 保存和采样间隔按当前引擎显示步数或轮数；切换模式时分别记住对应单位的设置。"
+  "setup_sha256": "fec6ce14dda66b8a07ad704423756ca5acfe00c41511be156fec1cf691b70dc7",
+  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.17.19 更新（2026-09-23）\n\n· AI Toolkit 的 Qwen-Image、Z-Image 和 Krea2 图像训练可关闭训练采样预览，减少训练期间的预览耗时。\n· 新增 AI Toolkit Windows AMD ROCm 图像训练实验通道；完整训练仍需 AMD 用户实机验证。\n· MiniMax H3 视频的 AMD 训练通道暂未开放。"
 }

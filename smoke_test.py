@@ -159,6 +159,20 @@ def test_yaml():
         raise AssertionError("Qwen-Image-2.1 yaml arch 不符: %s" % p0["model"].get("arch"))
     if p0["model"].get("name_or_path") != "Qwen/Qwen-Image-2.1":
         raise AssertionError("Qwen-Image-2.1 yaml model_id 不符: %s" % p0["model"].get("name_or_path"))
+    # AI Toolkit 图像模式必须尊重「训练中采样预览」开关；关掉时仍保留 sample
+    # 配置节点以兼容引擎初始化，但必须设置 train.disable_sampling。
+    cfg = os.path.join(tmp, "qwen21_preview_off.yaml")
+    core.write_at_image_yaml(dict(params, sample_preview=False), qwen21, vd, tmp, cfg, vram_gb=24)
+    d = yaml.safe_load(open(cfg, encoding="utf-8"))
+    p0 = d["config"]["process"][0]
+    if p0["train"].get("disable_sampling") is not True or "sample" not in p0:
+        raise AssertionError("Qwen-Image-2.1 关闭预览后必须禁用采样并保留 sample 配置节点")
+    cfg = os.path.join(tmp, "qwen21_preview_on.yaml")
+    core.write_at_image_yaml(dict(params, sample_preview=True), qwen21, vd, tmp, cfg, vram_gb=24)
+    d = yaml.safe_load(open(cfg, encoding="utf-8"))
+    p0 = d["config"]["process"][0]
+    if p0["train"].get("disable_sampling") is True:
+        raise AssertionError("Qwen-Image-2.1 勾选预览时不应禁用采样")
     # Z-Image 8G 快跑档（2026-09-06）：分辨率钳到 512 + 关采样 + 量化 TE + weighted（官方 zimage 预设）
     cfg = os.path.join(tmp, "zimage_8g.yaml")
     core.write_at_image_yaml(dict(params, resolution="1024"), core.AT_IMAGE_MODELS["zimage"], vd, tmp, cfg, vram_gb=8)
@@ -1634,6 +1648,9 @@ def test_steps_summary_and_intervals():
             _txt = _app.preset_summary.cget("text")
             assert "1234" in _txt, "%s：摘要行没跟着输入框走 → %s" % (label, _txt)
             assert "2000" not in _txt, "%s：摘要行还显示预设值 2000 ✗ → %s" % (label, _txt)
+            if m in ("qwen_image", "zimage"):
+                assert "仅UNet（AI Toolkit 固定）" in _txt, "%s：摘要错误暗示会训练文本编码器 → %s" % (label, _txt)
+                assert "UNet+文本编码器" not in _txt, "%s：出现实际配置不会执行的训练目标 → %s" % (label, _txt)
     finally:
         try:
             _app.root.destroy()

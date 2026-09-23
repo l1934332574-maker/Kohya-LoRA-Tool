@@ -642,6 +642,8 @@ class App:
                 self._log(item[1])
             elif kind == "STATUS":
                 self._refresh_status()
+            elif kind == "AMD_STATUS_RESULT":
+                self._apply_amd_status_probe(item[1], item[2], item[3])
             elif kind == "BASE_DETECTED":
                 self._refresh_status()
             elif kind == "BASE_SCAN_DONE":
@@ -1341,7 +1343,7 @@ class App:
                                           border_color=ACC, text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY),
                                           command=self._show_h3_guide)
         self.btn_h3_guide.pack(side="left", padx=(6, 4))
-        ctk.CTkLabel(self.h3_row, text="24G 显存推荐 · NVIDIA 专属（实验性）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(8, 0))
+        ctk.CTkLabel(self.h3_row, text="24G 显存推荐 · 当前仅开放 NVIDIA 训练", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(8, 0))
         # AI Toolkit 图像模型状态行（Qwen-Image / Z-Image 模式显示）
         self.at_row = ctk.CTkFrame(top, fg_color="transparent")
         self.at_model_var = tk.StringVar(value="")
@@ -1376,31 +1378,36 @@ class App:
         self.amd_bar = ctk.CTkFrame(top, fg_color="transparent")
         if self._gpu_info.get("vendor") == "amd":
             self.amd_bar.pack(fill="x", pady=(8, 0))
-            amd_row1 = ctk.CTkFrame(self.amd_bar, fg_color="transparent"); amd_row1.pack(fill="x")
-            self.amd_sw = ctk.CTkSwitch(amd_row1, text="AMD 兼容模式（实验性）", variable=self.amd_var,
+            self.amd_row1 = ctk.CTkFrame(self.amd_bar, fg_color="transparent"); self.amd_row1.pack(fill="x")
+            self.amd_sw = ctk.CTkSwitch(self.amd_row1, text="AMD 兼容模式（实验性）", variable=self.amd_var,
                                         command=self._on_amd_toggle, font=ui_font(FONT_HINT), text_color=SUB,
                                         progress_color=ACC, fg_color="#3a4150")
             self.amd_sw.pack(side="left")
-            self.btn_amd_env = ctk.CTkButton(amd_row1, text="环境检查 / 安装引导", width=140, height=26,
+            self.btn_amd_env = ctk.CTkButton(self.amd_row1, text="环境检查 / 安装引导", width=140, height=26,
                                              fg_color=CARD2, hover_color="#343a46", border_width=1,
                                              border_color=BORDER, text_color=TXT, corner_radius=6,
                                              font=ui_font(FONT_HINT), command=self.cmd_amd_env)
             self.btn_amd_env.pack(side="left", padx=(10, 0))
-            ctk.CTkLabel(amd_row1, textvariable=self.amd_env_var, font=ui_font(FONT_HINT),
-                         text_color=HINT, anchor="w").pack(side="left", padx=(10, 0))
-            amd_row2 = ctk.CTkFrame(self.amd_bar, fg_color="transparent"); amd_row2.pack(fill="x", pady=(6, 0))
-            ctk.CTkLabel(amd_row2, text="训练环境(venv，留空=默认 kohya 环境)", font=ui_font(FONT_HINT),
+            self.amd_status_label = ctk.CTkLabel(self.amd_row1, textvariable=self.amd_env_var, font=ui_font(FONT_HINT),
+                                                 text_color=HINT, anchor="w")
+            self.amd_status_label.pack(side="left", padx=(10, 0))
+            self.amd_row2 = ctk.CTkFrame(self.amd_bar, fg_color="transparent"); self.amd_row2.pack(fill="x", pady=(6, 0))
+            ctk.CTkLabel(self.amd_row2, text="训练环境(venv，留空=默认 kohya 环境)", font=ui_font(FONT_HINT),
                          text_color=HINT).pack(side="left")
-            self.train_env_entry = ctk.CTkEntry(amd_row2, width=280, height=26, textvariable=self.train_env_var,
+            self.train_env_entry = ctk.CTkEntry(self.amd_row2, width=280, height=26, textvariable=self.train_env_var,
                                                 fg_color=CARD2, border_color=BORDER, text_color=TXT,
                                                 placeholder_text="例如 C:\\kohya_amd_env",
                                                 font=ui_font(FONT_HINT))
             self.train_env_entry.pack(side="left", padx=(8, 6))
-            self.btn_pick_train_env = ctk.CTkButton(amd_row2, text="选择训练环境…", width=108, height=26,
+            self.btn_pick_train_env = ctk.CTkButton(self.amd_row2, text="选择训练环境…", width=108, height=26,
                                                     fg_color=CARD2, hover_color="#343a46", border_width=1,
                                                     border_color=BORDER, text_color=TXT, corner_radius=6,
                                                     font=ui_font(FONT_HINT), command=self.cmd_pick_train_env)
             self.btn_pick_train_env.pack(side="left")
+            self.amd_panel_note_var = tk.StringVar(value="")
+            self.amd_panel_note = ctk.CTkLabel(self.amd_bar, textvariable=self.amd_panel_note_var,
+                                               font=ui_font(FONT_HINT), text_color=HINT,
+                                               anchor="w", justify="left", wraplength=900)
         self.preset_summary = ctk.CTkLabel(top, text="", font=ui_font(FONT_HINT), text_color=SUB, anchor="w")
         self.preset_summary.pack(fill="x", pady=(8, 0))
         # 「实际生效值」差异行：训练开始后由引擎上报，只列被自动改掉的项（默认隐藏）
@@ -2726,12 +2733,80 @@ class App:
         except Exception:
             pass
         try:
-            if self._gpu_info.get("vendor") == "amd":
-                ok, bk, detail = core.amd_env_status(self._amd_vpy())
-                self.amd_env_var.set(("✓ 环境就绪（%s）" % bk) if ok else "环境未就绪 · 点「环境检查」查看")
+            vendor = self._gpu_info.get("vendor") or core.detect_gpu_vendor()
+            if vendor != "amd":
+                return
+            if self.mode in ("krea2", "flux2", "video"):
+                self.amd_panel_note_var.set("当前模式尚未开放 Windows AMD 训练通道。请先使用图像模型的 AMD 实验模式。")
+                return
+            self.amd_env_var.set("正在检查当前引擎的 AMD 训练环境…")
+            self._queue_amd_status_probe()
         except Exception:
             pass
 
+    def _queue_amd_status_probe(self):
+        """后台检查 ROCm/GPU，避免状态刷新时在 Tk 主线程导入 torch 或等待子进程。"""
+        mode = self.mode
+        if mode in ("krea2", "flux2", "video"):
+            return
+        pending = getattr(self, "_amd_status_pending", set())
+        if mode in pending:
+            return
+        pending.add(mode)
+        self._amd_status_pending = pending
+        token = getattr(self, "_amd_status_token", 0) + 1
+        self._amd_status_token = token
+        try:
+            vpy = self._amd_vpy() if mode in ("style", "character", "concept") else None
+        except Exception:
+            vpy = None
+
+        def _work():
+            try:
+                if mode in ("qwen_image", "zimage", "krea2_at"):
+                    ok, detail, engine_vpy = core.ai_toolkit_engine_status()
+                    result = core.ai_toolkit_amd_status(engine_vpy) if ok else (False, None, detail)
+                elif mode in ("krea2_fz", "flux2_fz"):
+                    ok, detail, _engine_vpy, backend = core.fizgig_engine_status()
+                    if ok and backend == "amd-rocm":
+                        result = (True, "rocm", detail)
+                    elif ok:
+                        result = (False, backend or "nvidia", detail + "；当前安装的是 NVIDIA 环境")
+                    else:
+                        result = (False, backend or "fizgig", detail)
+                else:
+                    result = core.amd_env_status(vpy)
+            except Exception as e:
+                result = (False, None, str(e))
+            try:
+                self.q.put(("AMD_STATUS_RESULT", token, mode, result))
+            except Exception:
+                pass
+
+        try:
+            threading.Thread(target=_work, daemon=True).start()
+        except Exception:
+            pending.discard(mode)
+
+    def _apply_amd_status_probe(self, token, mode, result):
+        pending = getattr(self, "_amd_status_pending", set())
+        pending.discard(mode)
+        if token != getattr(self, "_amd_status_token", None) or mode != self.mode:
+            self._queue_amd_status_probe()
+            return
+        ok, backend, detail = result
+        if mode in ("krea2_fz", "flux2_fz"):
+            if ok:
+                self.amd_panel_note_var.set("第四引擎 Fizgig 自带 AMD ROCm 环境管理。当前状态：已识别 AMD ROCm GPU。")
+            else:
+                self.amd_panel_note_var.set("第四引擎 AMD ROCm 环境未就绪：%s；请点本模式的「安装第四引擎」。" % detail)
+        elif ok:
+            if self._uses_ai_toolkit_amd_path():
+                self.amd_env_var.set("✓ AI Toolkit ROCm GPU 核心计算自检通过 · 完整训练链路仍待实机验证")
+            else:
+                self.amd_env_var.set("✓ AMD 训练环境已识别（%s）· 训练链路仍待实机验证" % backend)
+        else:
+            self.amd_env_var.set("环境未就绪 · 点「环境检查」查看")
     # ============ 环境 / 安装 ============
     def cmd_install_musubi(self):
         """安装第二训练引擎（Krea2 图像 LoRA + 视频 LoRA）。"""
@@ -2984,7 +3059,9 @@ class App:
             telr = _scale_param(pre.get("te_lr"), fac.get("te_lr"))
             _sv = self.style_var.get()
             stag = f" · 风格 {_sv}" if _sv != "自定义" else ""
-            te = "仅UNet" if self.unet_only_var.get() else "UNet+文本编码器"
+            # AI Toolkit Qwen/Z-Image YAML 固定 train_text_encoder=false；共享复选框不适用于该引擎。
+            te = ("仅UNet（AI Toolkit 固定）" if self.mode in ("qwen_image", "zimage")
+                  else ("仅UNet" if self.unet_only_var.get() else "UNet+文本编码器"))
             # 训练步数：显示**界面里实际会用的值**（不是预设值 ✗ 见 _video_steps_effective 说明）
             _st = self._video_steps_effective()
             _note = "（按上限夹取）" if _st != self._param_now("video_steps", 2000) else ""
@@ -3402,6 +3479,8 @@ class App:
         except Exception:
             pass
         self._schedule_autosave()
+        if (self._gpu_info.get("vendor") or "") == "amd":
+            self._queue_amd_status_probe()
 
     def _capture_interval_values(self, mode=None):
         """按当前单位记住两个共享间隔输入框的值。"""
@@ -3425,6 +3504,10 @@ class App:
 
     def _update_mode_ui(self):
         self._refresh_nav_highlight()
+        try:
+            self._update_amd_panel_mode()
+        except Exception:
+            pass
         try:
             self.home_title.configure(text=core.MODE_LABELS.get(self.mode, self.mode) + " 训练")
         except Exception:
@@ -5537,21 +5620,20 @@ class App:
             (getattr(self, "btn_krea2_guide", None), "打开 Krea2 训练详细逐步引导（装环境→下模型→选图→预处理→训练→出图，含常见问题）。"),
             (getattr(self, "btn_h3_models", None), "打开 MiniMax H3 模型文件夹（models/minimax_h3），把下载的 DiT/文本编码器/VAE 文件放进去。"),
             (getattr(self, "btn_h3_dl", None), "应用内下载 H3 模型（约 40GB，带进度/断点续传，下完自动识别）。"),
-            (getattr(self, "btn_at_install", None), "安装第三训练引擎（AI Toolkit）：MiniMax H3 视频 LoRA 专用，独立环境，不影响其他模式。"),
+            (getattr(self, "btn_at_install", None), "安装第三训练引擎（AI Toolkit）：用于 Qwen-Image、Z-Image、H3 视频和 Krea2。Windows AMD ROCm 实验通道目前只开放图像模式；H3 视频 AMD 暂未开放。其他引擎不会共用这个环境。"),
             (getattr(self, "btn_h3_captions", None), "为没有字幕的视频生成占位 txt（内容=触发词），避免训练缺字幕报错；建议之后手动改成具体描述。"),
             (getattr(self, "btn_h3_caption_ai", None), "用 Qwen2.5-VL 自动给视频生成英文描述（首次下载模型约 6~7GB，已有 txt 的会跳过）。"),
             (getattr(self, "btn_h3_guide", None), "打开 MiniMax H3 视频 LoRA 训练详细引导（装引擎→下模型→准备视频→训练→出视频）。"),
-            (getattr(self, "btn_at_install", None), "安装第三引擎 AI Toolkit（Qwen-Image / Z-Image 模式需要）。"),
             (getattr(self, "btn_at_model_help", None), "查看模型选择步骤、本地模型目录格式、训练流程和显存建议。"),
         ]
         for w, t in tips:
             self._tip(w, t)
         if hasattr(self, "amd_sw"):
-            self._tip(self.amd_sw, "AMD 兼容模式（实验性）：开启后训练自动改用 sdpa + bf16 + AdamW，并做环境检查。第一次用请先点「环境检查 / 安装引导」。")
+            self._tip(self.amd_sw, "AMD 兼容模式（实验性）：按当前引擎检查对应环境并使用 AMD 训练配置。第三引擎需安装独立 ROCm 环境；第一引擎可指定训练 venv。")
         if hasattr(self, "btn_amd_env"):
-            self._tip(self.btn_amd_env, "检查 AMD 训练环境是否就绪，并打开详细安装引导（驱动 / Python / ROCm / PyTorch 一步步教你装）。")
+            self._tip(self.btn_amd_env, "检查当前引擎实际使用的 AMD 训练环境，并显示对应安装路径。")
         if hasattr(self, "train_env_entry"):
-            self._tip(self.train_env_entry, "AMD 官方 ROCm 版 PyTorch 需要 Python 3.12，所以要新建一个训练环境，把它的文件夹路径填在这里（留空=用默认 kohya 环境）。")
+            self._tip(self.train_env_entry, "仅第一引擎 AMD 兼容模式使用：选择含 Scripts\\python.exe 的 venv；留空时使用 Kohya 环境。第三、第四引擎会管理自己的隔离环境。")
 
     def _attach_main_tooltips(self):
         """主卡片构建完成后补绑悬停提示。"""
@@ -5944,15 +6026,29 @@ class App:
         self.q.put(("STATUS",))
 
     def cmd_install_at(self):
-        """安装第三训练引擎（AI Toolkit · MiniMax H3 视频 LoRA）。"""
+        """安装第三训练引擎（AI Toolkit · Qwen / Z-Image / H3 / Krea2）。"""
         if self.busy:
             messagebox.showinfo(core.APP_NAME, "有任务正在运行，请先等待当前任务完成。")
             return
+        try:
+            _install_vendor = self._gpu_info.get("vendor") or core.detect_gpu_vendor()
+        except Exception:
+            _install_vendor = self._gpu_info.get("vendor")
+        if _install_vendor == "amd":
+            _install_note = (
+                "检测到 AMD 显卡，将安装 Windows ROCm 7.15 + PyTorch 的实验通道。\n"
+                "· 使用独立 Python 3.12 / ai_toolkit_venv，不影响其他引擎\n"
+                "· 依赖下载通常有数 GB，界面会显示当前文件和进度；已下载内容会优先复用缓存\n"
+                "· 安装后会检测 AI Toolkit 环境是否实际识别到 AMD GPU\n"
+                "· 本机尚未有 AMD 实机覆盖，建议安装后把完整日志反馈给我们\n\n")
+        else:
+            _install_note = (
+                "· 使用独立环境，完全不影响现有画风/人物/Krea2 训练\n"
+                "· 需下载 PyTorch cu130（约 3GB，需较新 NVIDIA 驱动）\n\n")
         if not messagebox.askyesno(core.APP_NAME,
-                "安装第三训练引擎（AI Toolkit · MiniMax H3 视频 LoRA）？\n\n"
-                "· 独立环境，完全不影响现有画风/人物/Krea2 训练\n"
-                "· 需下载 PyTorch cu130（约 3GB，需较新 NVIDIA 驱动）\n"
-                "· H3 模型 40GB+ 按需另行下载（国内镜像）\n\n是否开始安装？"):
+                "安装第三训练引擎（AI Toolkit · Qwen / Z-Image / H3 / Krea2）？\n\n"
+                + _install_note
+                + "· 训练模型按需另行下载（国内镜像）\n\n是否开始安装？"):
             return
         self._start_worker(self._install_at_worker, "安装第三引擎")
 
@@ -6507,7 +6603,7 @@ class App:
             "Q: 显存不够？\n"
             "A: 12~16G 请下载 nvfp4 主模型（约 11.7GB，见第 2 步），软件自动开低显存模式（low_vram + 分层交换）能跑但会慢；24G+ 用 int8 主模型。\n\n"
             "Q: AMD 显卡能训吗？\n"
-            "A: 不能。AI Toolkit 训练走 CUDA/NVFP4，是 NVIDIA 专属；AMD 用户请继续用画风/人物/Krea2 模式。\n\n"
+            "A: 当前版本先验证 AMD 图像训练；H3 视频的 AMD 通道暂未开放。\n\n"
             "Q: 下载慢/老断？\n"
             "A: 模型走国内镜像（hf-mirror），支持断点续传，断了接着下。\n\n"
             "Q: 训练完视频召唤不出来？\n"
@@ -6595,7 +6691,7 @@ class App:
             return
         if not self._anima_components_preflight(params):
             return
-        if not self._warn_no_nvidia():
+        if not self._warn_no_nvidia(params):
             return
         if not self._warn_low_vram(params):
             return
@@ -6801,27 +6897,89 @@ class App:
             self.cmd_open_base_dir()
 
     def _amd_vpy(self):
-        """AMD 模式当前使用的训练环境 python（优先用户指定，否则默认 kohya venv）。"""
+        """返回当前引擎实际使用的 Python，避免把第三引擎误判为 Kohya 环境。"""
+        if self._uses_ai_toolkit_amd_path():
+            try:
+                _ok, _detail, vpy = core.ai_toolkit_engine_status()
+                return vpy
+            except Exception:
+                return None
+        if self._uses_fizgig_amd_path():
+            try:
+                _ok, _detail, vpy, _backend = core.fizgig_engine_status()
+                return vpy
+            except Exception:
+                return None
         env_dir = self.train_env_var.get().strip()
         if env_dir and os.path.isfile(os.path.join(env_dir, "Scripts", "python.exe")):
             return os.path.join(env_dir, "Scripts", "python.exe")
         kdir = core.get_kohya_dir()
         return core.venv_python(kdir) if kdir else None
 
+    def _uses_ai_toolkit_amd_path(self):
+        return getattr(self, "mode", None) in ("qwen_image", "zimage", "krea2_at")
+
+    def _uses_fizgig_amd_path(self):
+        return getattr(self, "mode", None) in ("krea2_fz", "flux2_fz")
+
+    def _update_amd_panel_mode(self):
+        """只显示当前引擎真正使用的 AMD 控件，避免无效环境路径和开关误导用户。"""
+        if not hasattr(self, "amd_bar") or not hasattr(self, "amd_row1"):
+            return
+        for _widget in (self.amd_row1, self.amd_row2, self.amd_panel_note):
+            try:
+                _widget.pack_forget()
+            except Exception:
+                pass
+        if self.mode in ("style", "character", "concept"):
+            self.amd_env_var.set("第一引擎 AMD 环境 · 点「环境检查」查看状态")
+            self.amd_row1.pack(fill="x")
+            self.amd_row2.pack(fill="x", pady=(6, 0))
+            return
+        if self._uses_ai_toolkit_amd_path():
+            self.amd_env_var.set("AI Toolkit 独立 ROCm 环境 · 状态待检查")
+            self.amd_row1.pack(fill="x")
+            self.amd_panel_note_var.set(
+                "第三引擎使用独立 ai_toolkit_venv；此处路径选择不适用，安装和检查都由「安装第三引擎」管理。")
+            self.amd_panel_note.pack(fill="x", pady=(5, 0))
+            return
+        if self._uses_fizgig_amd_path():
+            self.amd_panel_note_var.set(
+                "第四引擎 Fizgig 自带 AMD ROCm 环境管理，不需要全局兼容开关；请使用本模式内的「安装第四引擎」。")
+            self.amd_panel_note.pack(fill="x", pady=(2, 0))
+            return
+        self.amd_panel_note_var.set(
+            "当前模式尚未开放 Windows AMD 训练通道。请先使用图像模型的 AMD 实验模式。")
+        self.amd_panel_note.pack(fill="x", pady=(2, 0))
+
+    def _amd_status(self):
+        vpy = self._amd_vpy()
+        if self._uses_ai_toolkit_amd_path():
+            return core.ai_toolkit_amd_status(vpy)
+        if self._uses_fizgig_amd_path():
+            ok, detail, _vpy, backend = core.fizgig_engine_status()
+            if ok and backend == "amd-rocm":
+                return True, "rocm", detail
+            if ok:
+                return False, backend or "nvidia", detail + "；当前安装的是 NVIDIA 环境"
+            return False, backend or "fizgig", detail
+        return core.amd_env_status(vpy)
+
     def _on_amd_toggle(self):
         if self.amd_var.get():
-            self._log("[AMD] 已开启 AMD 兼容模式（实验性）：训练将自动使用 sdpa + bf16 + AdamW")
+            self._log("[AMD] 已开启当前引擎的 AMD 兼容配置（实验性）")
             try:
-                ok, bk, detail = core.amd_env_status(self._amd_vpy())
+                ok, bk, detail = self._amd_status()
                 if not ok:
                     self._log(f"[AMD] 训练环境未就绪：{detail}")
-                    if messagebox.askyesno(
-                            core.APP_NAME,
-                            "AMD 兼容模式已开启，但训练环境还没配置好。\n\n"
-                            f"当前状态：{detail}\n\n"
-                            "要不要现在打开「安装引导」？\n"
-                            "引导会一步步告诉你装什么驱动、下载什么、点哪里。\n"
-                            "（装好之前先不要训练，否则会失败）"):
+                    _lead = ("AMD 兼容模式已开启，但 AI Toolkit 独立 ROCm 环境还没配置好。\n\n"
+                             if self._uses_ai_toolkit_amd_path() else
+                             "AMD 兼容模式已开启，但训练环境还没配置好。\n\n")
+                    _prompt = (_lead + f"当前状态：{detail}\n\n"
+                               "要不要现在打开「环境检查 / 安装引导」？\n"
+                               "引导会一步步告诉你装什么驱动、下载什么、点哪里。\n"
+                               "（装好之前先不要训练，否则会失败）")
+                    if messagebox.askyesno(core.APP_NAME, _prompt):
                         self._open_amd_guide()
             except Exception:
                 pass
@@ -6858,6 +7016,39 @@ class App:
 
     def _open_amd_guide(self):
         """AMD 训练环境安装引导窗口（面向小白：自动检测 + 动态命令 + 半自动创建环境）。"""
+        if self._uses_fizgig_amd_path():
+            try:
+                ok, bk, detail = self._amd_status()
+            except Exception as e:
+                ok, bk, detail = False, None, str(e)
+            state = ("AMD ROCm 已就绪（%s）" % bk) if ok else ("未就绪：" + (detail or "未知"))
+            messagebox.showinfo(
+                core.APP_NAME,
+                "第四引擎 Fizgig 的 AMD 环境说明\n\n"
+                "· Fizgig 自己管理隔离的 AMD ROCm 环境，不使用上方全局 AMD 开关或手动 venv 路径。\n"
+                "· 请在 Krea2(Fizgig) 或 Klein9B(Fizgig) 模式中点「安装第四引擎」。\n"
+                "· 安装完成后再启动训练；如果 ROCm/GPU 未识别，请导出运行日志反馈。\n\n"
+                "当前状态：" + state
+            )
+            return
+        if self._uses_ai_toolkit_amd_path():
+            try:
+                ok, bk, detail = self._amd_status()
+            except Exception as e:
+                ok, bk, detail = False, None, str(e)
+            state = ("环境就绪（%s）" % bk) if ok else ("环境未就绪：" + (detail or "未知"))
+            messagebox.showinfo(
+                core.APP_NAME,
+                "第三引擎 AMD ROCm 通道（实验性）\n\n"
+                "1. 确认已开启「AMD 兼容模式」。\n"
+                "2. 点击左侧「安装第三引擎」；工具会创建独立 Python 3.12 / ai_toolkit_venv，"
+                "并安装 ROCm、PyTorch 和第三引擎依赖。\n"
+                "3. 安装完成后重新检查，看到实际 ROCm/HIP 和 GPU 名称，再开始训练。\n"
+                "4. 当前开放 Qwen-Image、Z-Image 和 Krea2（AI Toolkit）图像模式；H3 视频待后续验证。\n\n"
+                "当前状态：" + state + "\n\n"
+                "这是供 AMD 用户实测的实验通道；遇到问题请导出运行日志反馈。"
+            )
+            return
         try:
             if getattr(self, "_amd_guide_win", None) and self._amd_guide_win.winfo_exists():
                 self._amd_guide_win.lift()
@@ -7375,10 +7566,8 @@ class App:
             "· 选「否」将继续用 CPU 训练（不推荐）",
             log="检测到 CPU 版 PyTorch（CUDA 不可用），询问是否自动重装 cu128")
 
-    def _warn_no_nvidia(self):
+    def _warn_no_nvidia(self, params=None):
         """显卡兼容检查：N 卡直接放行；AMD 卡走兼容模式；其他保持原警告。返回 True=继续。"""
-        if getattr(self, "mode", None) in ("krea2_fz", "flux2_fz"):
-            return True   # Fizgig 双平台（NVIDIA/AMD ROCm），不强制 AMD 兼容模式
         try:
             if core.detect_nvidia_gpu():
                 return True
@@ -7389,26 +7578,53 @@ class App:
         except Exception:
             vendor = "unknown"
         if vendor == "amd":
+            if self.mode in ("krea2", "flux2", "video"):
+                _mode_name = "H3 视频" if self.mode == "video" else "第二引擎"
+                self._modal(
+                    "warning", core.APP_NAME,
+                    "当前选择的%s模式尚未开放 Windows AMD 训练通道。\n\n"
+                    "请先使用 Qwen-Image / Z-Image / Krea2 等图像模式的 AMD 实验通道。" % _mode_name,
+                    log="AMD 用户选择了暂不支持 AMD 的模式，阻止训练")
+                return False
+            if self._uses_fizgig_amd_path():
+                ok, bk, detail = self._amd_status()
+                if ok:
+                    self._log("[AMD] Fizgig ROCm GPU 环境就绪，可尝试训练（实验性）")
+                    return True
+                self._modal(
+                    "warning", core.APP_NAME,
+                    "第四引擎 Fizgig 的 AMD ROCm 环境未就绪。\n\n"
+                    f"检测结果：{detail}\n\n"
+                    "请在此模式内点击「安装第四引擎」，安装 AMD ROCm 环境。",
+                    log="Fizgig AMD ROCm 环境检查未通过")
+                return False
             if not self.amd_var.get():
+                _setup = ("第三引擎需安装独立的 Windows ROCm 环境；点「安装第三引擎」即可配置。"
+                          if self._uses_ai_toolkit_amd_path() else
+                          "第一引擎需使用 ROCm 版 PyTorch 或 ZLUDA 训练环境。")
                 ans = self._modal(
                     "yesno", core.APP_NAME,
                     "检测到 AMD 显卡（Radeon）。\n\n"
-                    "本工具默认面向 NVIDIA 优化；AMD 卡需要先开启「AMD 兼容模式（实验性）」\n"
-                    "并配置 ROCm 版 PyTorch 或 ZLUDA 训练环境，否则无法正常训练。\n\n"
-                    "是否现在开启 AMD 兼容模式？",
+                    "训练前需要开启「AMD 兼容模式（实验性）」。\n"
+                    + _setup + "\n\n是否现在开启 AMD 兼容模式？",
                     log="检测到 AMD 显卡，询问是否开启 AMD 兼容模式")
                 if ans:
                     self.amd_var.set(True)
+                    if params is not None:
+                        params["amd_mode"] = True
                     self._log("[AMD] 已开启 AMD 兼容模式（实验性，不承诺稳定）")
-                return False
-            ok, bk, detail = core.amd_env_status(self._amd_vpy())
+                else:
+                    return False
+            ok, bk, detail = self._amd_status()
             if not ok:
                 self._log(f"[AMD] 环境未就绪：{detail}")
-                self._modal(
-                    "warning", core.APP_NAME,
-                    "AMD 兼容模式：训练环境未就绪。\n\n"
-                    f"检测结果：{detail}\n\n"
-                    "请点击顶部「环境检查 / 安装引导」查看两条配置路线（ROCm / ZLUDA）和下载链接。")
+                _lead = ("第三引擎 AMD ROCm 环境未就绪。\n\n" if self._uses_ai_toolkit_amd_path()
+                         else "AMD 兼容模式：训练环境未就绪。\n\n")
+                _next = ("请点击「安装第三引擎」创建独立 AI Toolkit ROCm 环境。"
+                         if self._uses_ai_toolkit_amd_path() else
+                         "请点击顶部「环境检查 / 安装引导」查看 ROCm / ZLUDA 配置路线。")
+                self._modal("warning", core.APP_NAME,
+                            _lead + f"检测结果：{detail}\n\n" + _next)
                 return False
             self._log(f"[AMD] 兼容模式环境就绪（{bk}），可尝试训练（实验性）")
             return True
@@ -7604,7 +7820,7 @@ class App:
             self._set_busy(False)
             return
         self._log(f"[OK] 可用图片 {ok_n} 张")
-        if not self._warn_no_nvidia():
+        if not self._warn_no_nvidia(params):
             self._set_busy(False)
             return
         # 自愈：CPU 版 torch（NVIDIA 卡）→ 弹窗确认是否自动重装 cu128，决定传给训练线程
@@ -8324,9 +8540,10 @@ class App:
             "   表示这组图片在训练时重复 3 次。标签编辑器里点「整理为 repeats_名称」\n"
             "   可一键把平铺图片整理成这种结构（不同概念可以放不同子目录、用不同 repeats）。\n\n"
             "Q：我是 AMD 显卡，能用吗？\n"
-            "A：能，但属于实验性支持：界面顶部会出现「AMD 兼容模式（实验性）」开关，\n"
-            "   开启后训练会自动改成 sdpa + bf16 + AdamW 并做环境检查；第一次用请先点「环境检查 / 安装引导」\n"
-            "   按两条路线（ROCm 原生 / ZLUDA）配置训练环境，配置好再训练。"
+            "A：目前只开放部分图像模式的实验性路径：第一引擎需配置 ROCm/ZLUDA；第三引擎 Qwen-Image、\n"
+            "   Z-Image、Krea2 和第四引擎 Fizgig 的 Krea2 / Klein 9B 各用独立 ROCm 环境。Mock 控制流已验证，\n"
+            "   完整训练链路仍待 AMD 用户实机反馈。MiniMax H3 视频的 AMD 通道暂未开放。训练前按所选模式\n"
+            "   完成环境检查；不要把一个引擎的环境路径用于另一个引擎。"
         )
         txt.insert("1.0", help_text)
         txt.configure(state="disabled")
