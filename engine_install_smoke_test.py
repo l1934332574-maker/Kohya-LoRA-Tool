@@ -2409,17 +2409,21 @@ def test_at_image_model_ready_local(base: Path):
 
 def test_at_image_pre_download(base: Path):
     """Z-Image/Qwen-Image 底模预下载：未下载→自动魔搭直链下载（_at_image_ms_download）→yaml 指向本地目录。"""
-    state = {"downloaded": False, "ms_call": None, "yaml_info": None, "launched": False}
+    state = {"downloaded": False, "ms_call": None, "yaml_info": None, "launched": False,
+             "local_model": "", "train_env": None}
     vpy = str(base / "third" / "kohya_ss" / "ai_toolkit_venv" / "Scripts" / "python.exe")
     at_dir = str(base / "third" / "kohya_ss" / "ai-toolkit")
     os.makedirs(at_dir, exist_ok=True)
     open(os.path.join(at_dir, "run.py"), "w", encoding="utf-8").write("print('ok')\n")
 
     def fake_ready(mode):
-        return state["downloaded"]
+        return state["downloaded"] or bool(state["local_model"])
 
     def fake_custom_get(mode):
         if mode == "qwen_image":
+            if state["local_model"]:
+                return {"local_dir": state["local_model"], "model_id": "Qwen/Qwen-Image-2.1",
+                        "arch": "qwen_image_2"}
             return {"model_id": "Qwen/Qwen-Image-2.1", "arch": "qwen_image_2"}
         return {}
 
@@ -2436,6 +2440,7 @@ def test_at_image_pre_download(base: Path):
 
     def fake_run_stream(cmd, cwd=None, env=None, logf=print, collect=None, **kwargs):
         state["launched"] = True
+        state["train_env"] = dict(env or {})
         return 0
 
     def fake_find_latest(out_dir):
@@ -2472,6 +2477,39 @@ def test_at_image_pre_download(base: Path):
         assert state["yaml_info"]["model_id"].replace("\\", "/") == expected, state["yaml_info"]
         assert state["launched"], "Qwen-Image-2.1 没启动 AI Toolkit 训练入口"
         assert str(out).endswith("lora.safetensors"), out
+
+        # 本地 ComfyUI checkpoint 同时有 clip/TE 与 VAE 时，训练进程必须收到两条本地路径，
+        # 且不应触发底模下载。
+        comfy_models = base / "ComfyUI" / "models"
+        checkpoint = comfy_models / "unet" / "qwen_image_2.1_bf16.safetensors"
+        te_file = comfy_models / "clip" / "qwen3vl_8b_bf16.safetensors"
+        vae_file = comfy_models / "vae" / "qwen_image_2.1_vae_bf16.safetensors"
+        for path in (checkpoint, te_file, vae_file):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("wb") as f:
+                f.truncate(2 * 1024 * 1024)
+        qwen_src = Path(at_dir) / "extensions_built_in" / "diffusion_models" / "qwen_image_2" / "qwen_image_2.py"
+        qwen_src.parent.mkdir(parents=True, exist_ok=True)
+        qwen_src.write_text(
+            "import os\n"
+            "class QwenImage2Model:\n"
+            "    arch = 'qwen_image_2'\n"
+            "    def load_model(self):\n"
+            "        self.print_and_status_update(\"Loading text encoder\")\n"
+            "        text_encoder = QwenImage21TextEncoder.load_model(\n"
+            "            base_model_path, dtype=dtype, subfolder=\"text_encoder\"\n"
+            "        )\n"
+            "        self.print_and_status_update(\"Loading VAE\")\n"
+            "        vae = AutoencoderKLQwenImage21.load(\n"
+            "            base_model_path, **self.component_load_kwargs(\"vae\")\n"
+            "        )\n", encoding="utf-8")
+        state.update(downloaded=False, ms_call=None, yaml_info=None, launched=False,
+                     local_model=str(checkpoint), train_env=None)
+        out = core.train_at_image(lambda _: None, mode="qwen_image", params={"project": "at_qwen21_local"})
+        assert state["ms_call"] is None, "本地模型已指定时不应触发底模下载"
+        assert state["train_env"].get("AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH") == str(te_file), state["train_env"]
+        assert state["train_env"].get("AI_TOOLKIT_QWEN21_VAE_PATH") == str(vae_file), state["train_env"]
+        assert str(out).endswith("lora.safetensors"), out
     print("AT_IMAGE_PRE_DOWNLOAD_OK")
 
 def test_ai_toolkit_engine_update(base: Path):
@@ -2497,7 +2535,18 @@ def test_ai_toolkit_engine_update(base: Path):
         (model_dir / "__init__.py").write_text(
             "from .qwen_image_2 import QwenImage2Model\n", encoding="utf-8")
         (qwen_dir / "qwen_image_2.py").write_text(
-            "class QwenImage2Model:\n    arch = 'qwen_image_2'\n", encoding="utf-8")
+            "import os\n"
+            "class QwenImage2Model:\n"
+            "    arch = 'qwen_image_2'\n"
+            "    def load_model(self):\n"
+            "        self.print_and_status_update(\"Loading text encoder\")\n"
+            "        text_encoder = QwenImage21TextEncoder.load_model(\n"
+            "            base_model_path, dtype=dtype, subfolder=\"text_encoder\"\n"
+            "        )\n"
+            "        self.print_and_status_update(\"Loading VAE\")\n"
+            "        vae = AutoencoderKLQwenImage21.load(\n"
+            "            base_model_path, **self.component_load_kwargs(\"vae\")\n"
+            "        )\n", encoding="utf-8")
 
     lock = SimpleNamespace()
 
@@ -2520,6 +2569,9 @@ def test_ai_toolkit_engine_update(base: Path):
         result_info = core.update_ai_toolkit_engine(lambda *_a: None)
         assert result_info.get("updated") is True, result_info
         assert core._ai_toolkit_qwen21_source_ready(str(good_engine)) is True
+        patched_source = (good_engine / "extensions_built_in" / "diffusion_models" / "qwen_image_2" / "qwen_image_2.py").read_text(encoding="utf-8")
+        assert "AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH" in patched_source, patched_source
+        assert "AI_TOOLKIT_QWEN21_VAE_PATH" in patched_source, patched_source
         assert (good_engine / "run.py").read_text(encoding="utf-8") == "# updated source\n"
         assert good_python.is_file(), "更新引擎不应重建/移动独立 Python 环境"
         backup = Path(result_info["backup_dir"])
@@ -2550,6 +2602,64 @@ def test_ai_toolkit_engine_update(base: Path):
     assert "_animate_at_engine_update_arrow" in gui and "一键更新" in gui
     assert '"AT_ENGINE_UPDATE_DONE"' in gui
     print("AI_TOOLKIT_ENGINE_UPDATE_OK")
+
+def test_qwen21_reuses_comfy_components(base: Path):
+    """Qwen-Image-2.1 自动复用 ComfyUI clip/vae 权重，并给 AI Toolkit 注入本地文件。"""
+    models = base / "qwen21_comfy" / "ComfyUI" / "models"
+    clip = models / "clip"
+    vae = models / "vae"
+    clip.mkdir(parents=True)
+    vae.mkdir(parents=True)
+    te_file = clip / "qwen3vl_8b_bf16.safetensors"
+    vae_file = vae / "qwen_image_2.1_vae_bf16.safetensors"
+    for path in (te_file, vae_file):
+        with path.open("wb") as f:
+            f.truncate(2 * 1024 * 1024)
+
+    checkpoint = models / "unet" / "qwen_image_2.1_bf16.safetensors"
+    checkpoint.parent.mkdir()
+    with checkpoint.open("wb") as f:
+        f.truncate(2 * 1024 * 1024)
+    components = core.at_image_qwen21_local_components(str(checkpoint))
+    assert components == {"text_encoder_path": str(te_file), "vae_path": str(vae_file)}, components
+
+    # The extension patch accepts direct local safetensors paths and leaves the
+    # Qwen repo as the source of the small configs/processor.
+    engine = base / "qwen21_engine" / "ai-toolkit"
+    qwen = engine / "extensions_built_in" / "diffusion_models" / "qwen_image_2"
+    qwen.mkdir(parents=True)
+    source = (
+        "import os\n"
+        "class QwenImage2Model:\n"
+        "    def load_model(self):\n"
+        "        self.print_and_status_update(\"Loading text encoder\")\n"
+        "        text_encoder = QwenImage21TextEncoder.load_model(\n"
+        "            base_model_path, dtype=dtype, subfolder=\"text_encoder\"\n"
+        "        )\n"
+        "        self.print_and_status_update(\"Loading VAE\")\n"
+        "        vae = AutoencoderKLQwenImage21.load(\n"
+        "            base_model_path, **self.component_load_kwargs(\"vae\")\n"
+        "        )\n"
+    )
+    model_file = qwen / "qwen_image_2.py"
+    model_file.write_text(source, encoding="utf-8")
+    assert core._patch_ai_toolkit_qwen21_local_components(str(engine), lambda *_a: None)
+    patched = model_file.read_text(encoding="utf-8")
+    assert "AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH" in patched, patched
+    assert "AI_TOOLKIT_QWEN21_VAE_PATH" in patched, patched
+    assert "local_text_encoder_path or base_model_path" in patched, patched
+    assert "local_vae_path or base_model_path" in patched, patched
+    before = patched
+    assert core._patch_ai_toolkit_qwen21_local_components(str(engine), lambda *_a: None)
+    assert model_file.read_text(encoding="utf-8") == before, "引擎补丁必须幂等"
+
+    # New ComfyUI layouts use text_encoders; keep that path working as well.
+    (models / "text_encoders").mkdir()
+    modern_te = models / "text_encoders" / "qwen3vl_8b_bf16.safetensors"
+    modern_te.write_bytes(b"x" * (2 * 1024 * 1024))
+    modern = core.at_image_qwen21_local_components(str(checkpoint))
+    assert modern["text_encoder_path"] == str(modern_te), modern
+    print("QWEN21_REUSES_COMFY_COMPONENTS_OK")
 
 def test_wd14_triton_noise_collapse(base: Path):
     """WD14 无 Triton 告警/traceback 折叠成一行友好提示，不吞正常输出。"""
@@ -3711,6 +3821,7 @@ def main():
         test_at_image_model_ready_local(base)
         test_at_image_pre_download(base)
         test_ai_toolkit_engine_update(base)
+        test_qwen21_reuses_comfy_components(base)
         test_wd14_triton_noise_collapse(base)
         test_musubi_version_check(base)
         test_quarantine_input_corrupt(base)

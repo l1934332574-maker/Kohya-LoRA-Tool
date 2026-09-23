@@ -1367,7 +1367,7 @@ class App:
                                            font=ui_font(FONT_BODY), command=self.cmd_at_custom_model)
         self.btn_at_custom.pack(side="left", padx=(4, 4))
         self._tip(self.btn_at_custom,
-                  "从下拉列表选择模型，或指定已有的 Diffusers 目录；Qwen-Image-2.1 也可选 ComfyUI safetensors 权重文件。\n"
+                  "从下拉列表选择模型，或指定已有的 Diffusers 目录；Qwen-Image-2.1 也可选 ComfyUI safetensors 权重文件，并自动复用同一 models 目录下已有的文本编码器和 VAE。\n"
                   "架构和显存建议由工具按模型自动填写。")
 
         # AMD 兼容模式（实验性）：仅 AMD 显卡显示
@@ -6048,8 +6048,21 @@ class App:
             if source_var.get() == "local" and local_path_var.get().strip():
                 local_path = local_path_var.get().strip()
                 if os.path.isfile(local_path):
-                    source_info = "来源：本地 Qwen-Image-2.1 权重（训练时仍需联网加载其它模型组件）"
-                    local_display_var.set("权重文件：" + local_path)
+                    if c.get("arch") == "qwen_image_2":
+                        components = core.at_image_qwen21_local_components(local_path)
+                        source_info = "来源：本地 Qwen-Image-2.1 权重；训练会自动复用找到的 ComfyUI 文本编码器和 VAE"
+                        component_lines = []
+                        component_lines.append("文本编码器：" + (
+                            components["text_encoder_path"] if components.get("text_encoder_path")
+                            else "未找到，训练时只下载此组件"))
+                        component_lines.append("VAE：" + (
+                            components["vae_path"] if components.get("vae_path")
+                            else "未找到，训练时只下载此组件"))
+                        local_display_var.set("权重文件：%s\n%s" % (
+                            local_path, "\n".join(component_lines)))
+                    else:
+                        source_info = "来源：本地模型权重"
+                        local_display_var.set("权重文件：" + local_path)
                 else:
                     source_info = "来源：本地 Diffusers 模型目录（不会下载底模）"
                     local_display_var.set("本地目录：" + local_path)
@@ -6205,7 +6218,7 @@ class App:
                 "📖 Qwen-Image LoRA · 操作步骤\n\n"
                 "1. 如果顶部状态提示「第三引擎未装」，点「⚙ 安装第三引擎」。\n"
                 "2. 点「选择训练模型」：选 Qwen-Image-2512（默认）或 Qwen-Image-2.1，再点「使用所选模型」。架构由工具自动设置；选择会保存在本机，之后其他项目也沿用。两个版本分别缓存，各占约 40GB。\n"
-                "3. 若模型已在本机，可选完整 Diffusers 模型目录（含 model_index.json、transformer/config.json、text_encoder/config.json 和权重文件）。训练 Qwen-Image-2.1 时，也可选 ComfyUI 的 qwen_image_2.1_*.safetensors 权重文件；首次训练仍需联网从 Qwen 仓库加载配置、文本编码器和 VAE。\n"
+                "3. 若模型已在本机，可选完整 Diffusers 模型目录（含 model_index.json、transformer/config.json、text_encoder/config.json 和权重文件）。训练 Qwen-Image-2.1 时，也可选 ComfyUI 的 qwen_image_2.1_*.safetensors 权重文件；工具会自动复用同一 ComfyUI models 目录下 clip（或 text_encoders）和 vae 中已有的文本编码器与 VAE，只从 Qwen 仓库加载较小的配置和 processor 文件。缺少的组件才会单独下载。\n"
                 "4. 选择训练类型（人物 / 画风 / 概念）和原始图片文件夹。人物、概念建议填写专属 Trigger；至少准备 15 张清晰、同一人物或同一风格的图片。\n"
                 "5. 点左侧「🚀 一键开始训练」。它会先自动去重、过滤过小或模糊图片、按裁切设置处理并用 WD14 打标签，再弹窗确认参数；确认后才开始训练。WD14 标签可在训练前用「标签编辑器」检查。\n\n"
                 f"当前模型：{info.get('model_id', '')}（约 {info.get('size', '')}）\n"

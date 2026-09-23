@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.16"
+APP_VERSION = "0.17.17"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -4125,20 +4125,96 @@ def _ai_toolkit_qwen21_source_ready(at_dir):
         return False
 
 
+def _ai_toolkit_qwen21_local_components_patch_ready(at_dir):
+    """只读检查 Qwen-Image-2.1 loader 是否已有本地 TE/VAE 路径支持。"""
+    model_file = os.path.join(
+        at_dir, "extensions_built_in", "diffusion_models", "qwen_image_2",
+        "qwen_image_2.py")
+    try:
+        source = open(model_file, encoding="utf-8", errors="replace").read()
+        return ("AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH" in source and
+                "AI_TOOLKIT_QWEN21_VAE_PATH" in source)
+    except Exception:
+        return False
+
+
+def _patch_ai_toolkit_qwen21_local_components(at_dir, logf=print):
+    """让 Qwen-Image-2.1 loader 接受 ComfyUI 已有的 TE/VAE 单文件权重路径。"""
+    model_file = os.path.join(
+        at_dir, "extensions_built_in", "diffusion_models", "qwen_image_2",
+        "qwen_image_2.py")
+    if not os.path.isfile(model_file):
+        return False
+    try:
+        with open(model_file, "r", encoding="utf-8") as f:
+            source = f.read()
+        te_marker = 'AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH'
+        vae_marker = 'AI_TOOLKIT_QWEN21_VAE_PATH'
+        if te_marker in source and vae_marker in source:
+            return True
+        if "import os" not in source:
+            raise RuntimeError("Qwen-Image-2.1 loader 缺少 os 导入，无法接入本地组件")
+
+        te_status = 'self.print_and_status_update("Loading text encoder")'
+        vae_status = 'self.print_and_status_update("Loading VAE")'
+        te_call = re.compile(
+            r'(QwenImage21TextEncoder\.load_model\(\s*)base_model_path'
+            r'(?=\s*,\s*dtype\s*=\s*dtype)')
+        vae_call = re.compile(
+            r'(AutoencoderKLQwenImage21\.load\(\s*)base_model_path'
+            r'(?=\s*,)')
+        if source.count(te_status) != 1 or source.count(vae_status) != 1:
+            raise RuntimeError("Qwen-Image-2.1 加载代码结构已变化，无法安全加入本地组件路径")
+        if len(te_call.findall(source)) != 1 or len(vae_call.findall(source)) != 1:
+            raise RuntimeError("Qwen-Image-2.1 TE/VAE 加载调用已变化，无法安全加入本地组件路径")
+
+        te_injection = (
+            te_status + "\n"
+            "        local_text_encoder_path = os.environ.get(\"AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH\")\n"
+            "        if local_text_encoder_path and not os.path.isfile(local_text_encoder_path):\n"
+            "            raise FileNotFoundError(f\"Configured Qwen-Image-2.1 text encoder not found: {local_text_encoder_path}\")\n"
+            "        if local_text_encoder_path:\n"
+            "            self.print_and_status_update(f\"Using local Qwen-Image-2.1 text encoder: {local_text_encoder_path}\")")
+        vae_injection = (
+            vae_status + "\n"
+            "        local_vae_path = os.environ.get(\"AI_TOOLKIT_QWEN21_VAE_PATH\")\n"
+            "        if local_vae_path and not os.path.isfile(local_vae_path):\n"
+            "            raise FileNotFoundError(f\"Configured Qwen-Image-2.1 VAE not found: {local_vae_path}\")\n"
+            "        if local_vae_path:\n"
+            "            self.print_and_status_update(f\"Using local Qwen-Image-2.1 VAE: {local_vae_path}\")")
+        source = source.replace(te_status, te_injection, 1)
+        source = source.replace(vae_status, vae_injection, 1)
+        source, te_count = te_call.subn(r'\1local_text_encoder_path or base_model_path', source, count=1)
+        source, vae_count = vae_call.subn(r'\1local_vae_path or base_model_path', source, count=1)
+        if te_count != 1 or vae_count != 1:
+            raise RuntimeError("加入 Qwen-Image-2.1 本地组件路径失败")
+        with open(model_file, "w", encoding="utf-8", newline="") as f:
+            f.write(source)
+        logf("[第三引擎] 已接入 Qwen-Image-2.1 的 ComfyUI 本地文本编码器和 VAE 路径")
+        return True
+    except Exception as e:
+        logf(f"[第三引擎] Qwen-Image-2.1 本地组件接入失败：{e}")
+        return False
+
+
 def ai_toolkit_engine_update_status():
     """返回 AI Toolkit 是否已安装，以及是否缺少本软件当前需要的 Qwen-Image-2.1 架构。"""
     try:
         vpy, at_dir = _at_dirs()
         installed = os.path.isfile(vpy) and os.path.isfile(os.path.join(at_dir, "run.py"))
         supported = installed and _ai_toolkit_qwen21_source_ready(at_dir)
+        local_components_supported = (
+            supported and _ai_toolkit_qwen21_local_components_patch_ready(at_dir))
         return {
             "installed": bool(installed),
             "qwen_image_2_supported": bool(supported),
-            "update_available": bool(installed and not supported),
+            "local_components_supported": bool(local_components_supported),
+            "update_available": bool(installed and (not supported or not local_components_supported)),
             "engine_dir": at_dir,
         }
     except Exception:
         return {"installed": False, "qwen_image_2_supported": False,
+                "local_components_supported": False,
                 "update_available": False, "engine_dir": ""}
 
 
@@ -4148,8 +4224,12 @@ def update_ai_toolkit_engine(logf=print):
     if not os.path.isfile(vpy) or not os.path.isfile(os.path.join(at_dir, "run.py")):
         raise RuntimeError("没有找到已安装的 AI Toolkit 引擎，请先安装或导入引擎。")
     if _ai_toolkit_qwen21_source_ready(at_dir):
-        logf("[第三引擎] 当前源码已支持 Qwen-Image-2.1，无需更新。")
-        return {"updated": False, "already_current": True, "backup_dir": ""}
+        patched = _patch_ai_toolkit_qwen21_local_components(at_dir, logf)
+        if patched:
+            logf("[第三引擎] 当前源码已支持 Qwen-Image-2.1，无需替换引擎源码。")
+            return {"updated": False, "already_current": True, "local_components_patched": True,
+                    "backup_dir": ""}
+        logf("[第三引擎] 当前源码缺少本地 TE/VAE 加载支持，准备更新到兼容版本…")
 
     lock_f = _acquire_kohya_install_lock(get_kohya_dir(), logf)
     if lock_f is None:
@@ -4173,6 +4253,8 @@ def update_ai_toolkit_engine(logf=print):
         _extract_zip(zip_path, stage_dir)
         if not _ai_toolkit_qwen21_source_ready(stage_dir):
             raise RuntimeError("下载的源码包没有注册 qwen_image_2，已取消更新。")
+        if not _patch_ai_toolkit_qwen21_local_components(stage_dir, logf):
+            raise RuntimeError("下载的 AI Toolkit Qwen-Image-2.1 加载器结构不兼容，已取消更新。")
 
         logf("[第三引擎] 源码包校验通过，开始替换（保留现有 Python 环境和模型）…")
         os.rename(at_dir, backup_dir)
@@ -6254,6 +6336,81 @@ def at_image_model_dir_ready(local_dir, arch=None):
     return _at_image_download_complete(local_dir)
 
 
+def _at_image_qwen21_find_component(models_root, folders, filenames):
+    """在 ComfyUI models 类别目录中找指定 Qwen-Image-2.1 权重。"""
+    for folder in folders:
+        root = os.path.join(models_root, folder)
+        if not os.path.isdir(root):
+            continue
+        # 先查类别目录根部，再查 ComfyUI 常见的子目录；只遍历对应类别。
+        for filename in filenames:
+            direct = os.path.join(root, filename)
+            try:
+                if os.path.isfile(direct) and os.path.getsize(direct) >= 1024 * 1024:
+                    return os.path.abspath(direct)
+            except OSError:
+                pass
+        for current, dirs, names in os.walk(root):
+            dirs.sort()
+            for filename in filenames:
+                if filename in names:
+                    found = os.path.join(current, filename)
+                    try:
+                        if os.path.getsize(found) >= 1024 * 1024:
+                            return os.path.abspath(found)
+                    except OSError:
+                        pass
+    return None
+
+
+def at_image_qwen21_local_components(model_path):
+    """由 ComfyUI diffusion/unet 单文件路径自动定位已有 Qwen TE 和 VAE。"""
+    if not _at_image_qwen21_checkpoint_ready(model_path):
+        return {}
+    start = os.path.abspath(os.path.dirname(model_path))
+    roots = []
+    current = start
+    # 通常 checkpoint 在 models/unet 或 models/diffusion_models；向上最多四层
+    # 可覆盖 ComfyUI/models、少数管理器再嵌一层的目录结构。
+    for _ in range(4):
+        if current not in roots:
+            roots.append(current)
+        current = os.path.dirname(current)
+    text_names = (
+        "qwen3vl_8b_bf16.safetensors",
+        "qwen3vl_8b_int8_convrot.safetensors",
+    )
+    vae_names = ("qwen_image_2.1_vae_bf16.safetensors",)
+    for root in roots:
+        text_path = _at_image_qwen21_find_component(
+            root, ("text_encoders", "clip"), text_names)
+        vae_path = _at_image_qwen21_find_component(root, ("vae",), vae_names)
+        found = {}
+        if text_path:
+            found["text_encoder_path"] = text_path
+        if vae_path:
+            found["vae_path"] = vae_path
+        if found:
+            # Continue ancestor search only for components still missing; do not
+            # let a parent ComfyUI installation override a closer models folder.
+            if "text_encoder_path" not in found:
+                for parent in roots[roots.index(root) + 1:]:
+                    found_path = _at_image_qwen21_find_component(
+                        parent, ("text_encoders", "clip"), text_names)
+                    if found_path:
+                        found["text_encoder_path"] = found_path
+                        break
+            if "vae_path" not in found:
+                for parent in roots[roots.index(root) + 1:]:
+                    found_path = _at_image_qwen21_find_component(
+                        parent, ("vae",), vae_names)
+                    if found_path:
+                        found["vae_path"] = found_path
+                        break
+            return found
+    return {}
+
+
 def _ensure_ai_toolkit_triton(vpy, logf=print):
     """第三引擎 venv 缺 Triton 时自动补装 triton-windows（torchao 量化矩阵内核依赖）。
 
@@ -7039,6 +7196,14 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     # 下载完成或已存在时，训练 yaml 的 name_or_path 指向本地目录，离线加载。
     _custom_model = at_image_custom_get(mode)
     _is_local_model = bool(_custom_model.get("local_dir"))
+    _qwen21_components = {}
+    if info.get("arch") == "qwen_image_2" and _is_local_model:
+        _qwen21_components = at_image_qwen21_local_components(_custom_model.get("local_dir"))
+        if _qwen21_components and not _patch_ai_toolkit_qwen21_local_components(at_dir, logf):
+            raise RuntimeError(
+                "已找到本机 Qwen-Image-2.1 文本编码器/VAE，但 AI Toolkit 本地组件加载补丁未能应用。\n"
+                "为避免又开始下载大文件，本次训练已停止；请更新第三引擎后重试。"
+            )
     _model_ok = at_image_model_ready(mode)
     if _is_local_model and not _model_ok:
         raise RuntimeError(
@@ -7074,6 +7239,16 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     logf(f"[{info['label']}] LoRA: dim={params.get('rank',16)}, alpha={params.get('alpha',16)}, lr={params.get('unet_lr','1e-4')}, steps={steps}")
     env = build_direct_env()
     env["HF_ENDPOINT"] = "https://hf-mirror.com"
+    if _qwen21_components.get("text_encoder_path"):
+        env["AI_TOOLKIT_QWEN21_TEXT_ENCODER_PATH"] = _qwen21_components["text_encoder_path"]
+        logf("[Qwen-Image-2.1] 复用本机文本编码器：%s" % _qwen21_components["text_encoder_path"])
+    elif info.get("arch") == "qwen_image_2" and _is_local_model:
+        logf("[Qwen-Image-2.1] 未在 ComfyUI models\\clip / models\\text_encoders 找到文本编码器，将只下载该组件")
+    if _qwen21_components.get("vae_path"):
+        env["AI_TOOLKIT_QWEN21_VAE_PATH"] = _qwen21_components["vae_path"]
+        logf("[Qwen-Image-2.1] 复用本机 VAE：%s" % _qwen21_components["vae_path"])
+    elif info.get("arch") == "qwen_image_2" and _is_local_model:
+        logf("[Qwen-Image-2.1] 未在 ComfyUI models\\vae 找到 VAE，将只下载该组件")
     if progress is not None:
         try:
             progress.set_total(steps)

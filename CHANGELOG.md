@@ -1,4 +1,20 @@
-﻿## v0.17.16（2026-09-23）
+﻿## v0.17.17（2026-09-23）
+
+### 优化：Qwen-Image-2.1 复用 ComfyUI 文本编码器和 VAE
+
+- 选择 ComfyUI 的 Qwen-Image-2.1 单文件权重后，自动在同一 `models` 目录的 `clip` / `text_encoders` 和 `vae` 中查找本地组件。
+- 训练时将已找到的 safetensors 路径直接交给 AI Toolkit 加载；不再因 AI Toolkit 模型目录不同而重新下载文本编码器或 VAE。
+- AI Toolkit 缺少本地组件加载支持时，更新提示会显示可更新，并在更新源码后验证加载补丁；缺失的组件仍单独下载。
+- 仍需联网读取 Qwen 仓库中的小型配置和 processor 文件；完整 Qwen Diffusers 目录的行为不变。
+
+### 验证
+
+- 自动定位 `models/clip` 与 `models/vae`、本地加载补丁幂等性、训练子进程路径传递和引擎更新回滚回归测试通过。
+- 当前环境没有截图中 D 盘的 ComfyUI 模型文件，无法在此实际加载 17GB 文本编码器或跑完整训练。
+
+---
+
+## v0.17.16（2026-09-23）
 
 ### 修复：Qwen-Image-2.1 可直接使用 ComfyUI 单文件权重
 
