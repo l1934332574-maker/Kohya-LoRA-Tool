@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.17.15"
+APP_VERSION = "0.17.16"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -6230,12 +6230,28 @@ def at_image_model_ready(mode):
     info = at_image_info(mode)
     if not info:
         return False
-    return at_image_model_dir_ready(at_image_local_dir(mode))
+    return at_image_model_dir_ready(at_image_local_dir(mode), info.get("arch"))
 
 
-def at_image_model_dir_ready(local_dir):
-    """检查用户直接指定的本地 AI Toolkit diffusers 模型目录是否完整。"""
-    return bool(local_dir and _at_image_download_complete(local_dir))
+def _at_image_qwen21_checkpoint_ready(path):
+    """检查 AI Toolkit 支持的 Qwen-Image-2.1 Comfy 单文件权重。"""
+    try:
+        name = os.path.basename(path).lower()
+        return (os.path.isfile(path) and name.endswith(".safetensors") and
+                any(tag in name for tag in ("qwen_image_2.1", "qwen-image-2.1",
+                                            "qwen_image_2_1", "qwen-image-2-1")) and
+                os.path.getsize(path) >= 1024 * 1024)
+    except Exception:
+        return False
+
+
+def at_image_model_dir_ready(local_dir, arch=None):
+    """检查本地 AI Toolkit Diffusers 模型；Qwen-Image-2.1 也支持 Comfy 单文件权重。"""
+    if not local_dir:
+        return False
+    if arch == "qwen_image_2" and os.path.isfile(local_dir):
+        return _at_image_qwen21_checkpoint_ready(local_dir)
+    return _at_image_download_complete(local_dir)
 
 
 def _ensure_ai_toolkit_triton(vpy, logf=print):

@@ -1,7 +1,7 @@
 {
-  "version": "v0.17.15",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.17.15/Setup.exe",
+  "version": "v0.17.16",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.17.16/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "setup_sha256": "d0477ab6e668a6ce7e841e3bf926e08141a1c9b1c1a34736c38a32b3c674181c",
-  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.17.15 更新（2026-09-23）\n\n· Qwen-Image：可直接选择 2512 或 2.1，也可指定已有模型目录。\n· AI Toolkit 缺少 Qwen-Image-2.1 架构时，界面会显示动态箭头提示；\n  点击即可打开窗口并一键更新引擎。\n· 更新保留 Python 环境和已下载模型，并备份旧源码；更新检查失败会回滚。"
+  "setup_sha256": "8dfb1a4d486e399f8251dd6bb395040ebb666cc0c72774aa0148ca9894372cc0",
+  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.17.16 更新（2026-09-23）\n\n· Qwen-Image-2.1 可直接选用 ComfyUI 的单文件 safetensors 权重，\n  无需先整理成完整 Diffusers 文件夹；训练时会加载其余模型组件。\n· 同时保留完整 Diffusers 模型目录和下拉下载选项。"
 }

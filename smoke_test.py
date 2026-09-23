@@ -2551,6 +2551,49 @@ def test_at_image_custom_model():
     print("AT_IMAGE_CUSTOM_MODEL_OK")
 
 
+def test_at_image_qwen21_single_file():
+    """Qwen-Image-2.1 的 Comfy-Org 单文件权重可直接作为 AI Toolkit 底模。"""
+    import tempfile
+    import shutil
+    import yaml
+    import Kohya一键工具 as core
+
+    tmp = tempfile.mkdtemp(prefix="qwen21_single_file_")
+    try:
+        checkpoint = os.path.join(tmp, "qwen_image_2.1_bf16.safetensors")
+        with open(checkpoint, "wb") as f:
+            f.write(b"0" * (2 * 1024 * 1024))
+
+        assert core.at_image_model_dir_ready(checkpoint, arch="qwen_image_2"), \
+            "AI Toolkit 可接受的 Qwen-Image-2.1 safetensors 文件被误判为不完整模型"
+        assert not core.at_image_model_dir_ready(checkpoint, arch="qwen_image"), \
+            "单文件 Qwen-Image-2.1 权重不应被其它架构当作可用模型"
+
+        with patch.object(core, "_settings_path", return_value=os.path.join(tmp, "settings.json")), \
+             patch.object(core, "data_sub", side_effect=lambda *parts: os.path.join(tmp, *parts)):
+            core.at_image_custom_set("qwen_image", {
+                "local_dir": checkpoint, "model_id": "Qwen/Qwen-Image-2.1", "arch": "qwen_image_2"})
+            assert core.at_image_model_ready("qwen_image"), \
+                "指定本地 2.1 权重后仍被训练前检查判成未下载"
+            info = core.at_image_info("qwen_image")
+            info["model_id"] = core.at_image_local_dir("qwen_image")
+            params = {"project": "qwen21_local", "rank": 16, "alpha": 16,
+                      "unet_lr": "1e-4", "video_steps": 2000}
+            cfg = os.path.join(tmp, "train.yaml")
+            core.write_at_image_yaml(params, info, tmp, tmp, cfg)
+            data = yaml.safe_load(open(cfg, encoding="utf-8"))
+            model = data["config"]["process"][0]["model"]
+            assert model.get("arch") == "qwen_image_2", model
+            assert model.get("name_or_path") == checkpoint, model
+
+        gui = open(os.path.join(ROOT, "kohya_gui.py"), encoding="utf-8-sig").read()
+        assert "askopenfilename" in gui and "选择 Qwen-Image-2.1 权重文件" in gui, \
+            "模型选择窗口没有提供 Qwen-Image-2.1 单文件选择入口"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("AT_IMAGE_QWEN21_SINGLE_FILE_OK")
+
+
 def main():
     print("== Kohya-LoRA 工具 · 冒烟测试 ==")
     check("语法检查", test_syntax)
@@ -2580,6 +2623,7 @@ def main():
     check("环境自检能抓到「包装不全」", test_env_selftest_catches_broken_env)
     check("Fizgig 分辨率钳制只对 int8 生效", test_fizgig_clamp_resolution_only_for_int8)
     check("第三引擎可自定义模型（默认不变+能恢复）", test_at_image_custom_model)
+    check("Qwen-Image-2.1 可选择现有 safetensors 权重文件", test_at_image_qwen21_single_file)
     check("选了新打标模型就不能偷偷用旧模型", test_wd14_respects_selected_model)
     check("Anima 指定 Qwen3：选错要拦、能恢复默认、失效要说", test_anima_qwen3_pick_guards)
     check("Fizgig 采样间隔按「轮」算（填 10 = 每 10 轮）", test_fizgig_sample_interval_is_epochs)

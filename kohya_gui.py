@@ -1360,14 +1360,14 @@ class App:
                                             text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY),
                                             command=self.cmd_import_at_env)
         self.btn_at_import2.pack(side="left", padx=(4, 4))
-        # 用下拉菜单选已适配的下载模型，或浏览选择本地模型目录。
+        # 用下拉菜单选已适配的下载模型，或指定已有的 Diffusers 目录 / Qwen-2.1 权重文件。
         self.btn_at_custom = ctk.CTkButton(self.at_row, text="选择训练模型", width=112, height=30,
                                            fg_color=CARD2, hover_color="#343a46", border_width=1,
                                            border_color=BORDER, text_color=TXT, corner_radius=6,
                                            font=ui_font(FONT_BODY), command=self.cmd_at_custom_model)
         self.btn_at_custom.pack(side="left", padx=(4, 4))
         self._tip(self.btn_at_custom,
-                  "从下拉列表选择要下载的模型，或浏览选择已有的本地模型目录。\n"
+                  "从下拉列表选择模型，或指定已有的 Diffusers 目录；Qwen-Image-2.1 也可选 ComfyUI safetensors 权重文件。\n"
                   "架构和显存建议由工具按模型自动填写。")
 
         # AMD 兼容模式（实验性）：仅 AMD 显卡显示
@@ -6046,11 +6046,16 @@ class App:
             c = _selected_choice()
             vram = "最低 %sG · 推荐 %sG" % (c.get("min_vram") or "—", c.get("rec_vram") or "—")
             if source_var.get() == "local" and local_path_var.get().strip():
-                source_info = "来源：本地目录（不会下载）"
-                local_display_var.set("本地目录：" + local_path_var.get())
+                local_path = local_path_var.get().strip()
+                if os.path.isfile(local_path):
+                    source_info = "来源：本地 Qwen-Image-2.1 权重（训练时仍需联网加载其它模型组件）"
+                    local_display_var.set("权重文件：" + local_path)
+                else:
+                    source_info = "来源：本地 Diffusers 模型目录（不会下载底模）"
+                    local_display_var.set("本地目录：" + local_path)
             else:
                 source_info = "下载仓库：%s" % c.get("model_id", "")
-                local_display_var.set("也可以选择已有的本地模型目录。")
+                local_display_var.set("也可以选择 Diffusers 目录；Qwen-Image-2.1 还支持直接选择 safetensors 权重文件。")
             info_var.set("%s\n架构：%s    %s\n%s" % (
                 source_info, c.get("arch", ""), vram, c.get("hint", "")))
 
@@ -6063,42 +6068,92 @@ class App:
                 source_var.set("download")
                 local_path_var.set("")
             _refresh_model_info()
+            local_checkpoint_btn.configure(
+                state="normal" if choice.get("arch") == "qwen_image_2" else "disabled")
 
         model_menu.configure(command=_on_model_change)
 
         def _browse_local():
             start = local_path_var.get().strip() or core.data_sub("models", "at_image")
+            if os.path.isfile(start):
+                start = os.path.dirname(start)
             if not os.path.isdir(start):
                 start = None
-            options = {"title": "选择已有的 AI Toolkit 模型目录"}
+            options = {"title": "选择完整的 AI Toolkit Diffusers 模型目录"}
             if start:
                 options["initialdir"] = start
             path = filedialog.askdirectory(**options)
             if not path:
                 return
-            if not core.at_image_model_dir_ready(path):
+            c = _selected_choice()
+            if not core.at_image_model_dir_ready(path, arch=c.get("arch")):
                 messagebox.showerror(
                     core.APP_NAME,
-                    "这个目录不是完整的 AI Toolkit diffusers 模型。\n\n"
-                    "需要包含 model_index.json，以及 transformer/config.json、"
-                    "text_encoder/config.json 和对应权重文件。",
+                    "这个目录不是完整的 AI Toolkit Diffusers 模型。\n\n"
+                    "需要包含 model_index.json、transformer/config.json、"
+                    "text_encoder/config.json 和对应权重文件。\n\n"
+                    + ("如果手头是 ComfyUI 的 Qwen-Image-2.1 单文件权重，请用旁边的「选择 Qwen-Image-2.1 权重文件」。"
+                       if c.get("arch") == "qwen_image_2" else ""),
                     parent=w)
                 return
             source_var.set("local")
             local_path_var.set(path)
             _refresh_model_info()
 
-        ctk.CTkButton(body, text="📂 选择已有模型目录…", width=180, height=32,
+        def _browse_qwen21_checkpoint():
+            c = _selected_choice()
+            if c.get("arch") != "qwen_image_2":
+                return
+            start = local_path_var.get().strip()
+            if os.path.isfile(start):
+                start = os.path.dirname(start)
+            elif not os.path.isdir(start):
+                start = None
+            options = {
+                "title": "选择 Qwen-Image-2.1 safetensors 权重文件",
+                "filetypes": [("Qwen-Image-2.1 权重", "*.safetensors"), ("所有文件", "*.*")],
+            }
+            if start:
+                options["initialdir"] = start
+            path = filedialog.askopenfilename(**options)
+            if not path:
+                return
+            if not core.at_image_model_dir_ready(path, arch="qwen_image_2"):
+                messagebox.showerror(
+                    core.APP_NAME,
+                    "这不是可识别的 Qwen-Image-2.1 safetensors 权重文件。\n\n"
+                    "请选择完整的 qwen_image_2.1_*.safetensors 模型权重（文件需大于 1 MB；不要选 LoRA）。",
+                    parent=w)
+                return
+            source_var.set("local")
+            local_path_var.set(path)
+            _refresh_model_info()
+
+        local_buttons = ctk.CTkFrame(body, fg_color="transparent")
+        local_buttons.pack(fill="x", pady=(0, 4))
+        ctk.CTkButton(local_buttons, text="📂 选择 Diffusers 模型目录…", width=196, height=32,
                       fg_color=CARD2, hover_color="#343a46", border_width=1,
                       border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY),
-                      command=_browse_local).pack(anchor="w", pady=(0, 4))
+                      command=_browse_local).pack(side="left")
+        local_checkpoint_btn = ctk.CTkButton(
+            local_buttons, text="📄 选择 Qwen-Image-2.1 权重文件…", width=222, height=32,
+            fg_color=CARD2, hover_color="#343a46", border_width=1,
+            border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY),
+            command=_browse_qwen21_checkpoint)
+        local_checkpoint_btn.pack(side="left", padx=(8, 0))
+        local_checkpoint_btn.configure(
+            state="normal" if _selected_choice().get("arch") == "qwen_image_2" else "disabled")
 
         def _save():
             c = _selected_choice()
             if source_var.get() == "local":
                 path = local_path_var.get().strip()
-                if not path or not core.at_image_model_dir_ready(path):
-                    messagebox.showerror(core.APP_NAME, "请先选择一个完整的本地模型目录。", parent=w)
+                if not path or not core.at_image_model_dir_ready(path, arch=c.get("arch")):
+                    messagebox.showerror(
+                        core.APP_NAME,
+                        "请先选择一个完整的本地模型目录"
+                        + ("或有效的 Qwen-Image-2.1 权重文件。" if c.get("arch") == "qwen_image_2" else "。"),
+                        parent=w)
                     return
                 d = {
                     "local_dir": path, "model_id": c.get("model_id"), "arch": c.get("arch"),
@@ -6150,7 +6205,7 @@ class App:
                 "📖 Qwen-Image LoRA · 操作步骤\n\n"
                 "1. 如果顶部状态提示「第三引擎未装」，点「⚙ 安装第三引擎」。\n"
                 "2. 点「选择训练模型」：选 Qwen-Image-2512（默认）或 Qwen-Image-2.1，再点「使用所选模型」。架构由工具自动设置；选择会保存在本机，之后其他项目也沿用。两个版本分别缓存，各占约 40GB。\n"
-                "3. 若模型已在本机，先选对应版本，再点「选择已有模型目录…」。要选完整 diffusers 模型文件夹，需含 model_index.json、transformer/config.json、text_encoder/config.json 和权重文件；选好后不会下载。\n"
+                "3. 若模型已在本机，可选完整 Diffusers 模型目录（含 model_index.json、transformer/config.json、text_encoder/config.json 和权重文件）。训练 Qwen-Image-2.1 时，也可选 ComfyUI 的 qwen_image_2.1_*.safetensors 权重文件；首次训练仍需联网从 Qwen 仓库加载配置、文本编码器和 VAE。\n"
                 "4. 选择训练类型（人物 / 画风 / 概念）和原始图片文件夹。人物、概念建议填写专属 Trigger；至少准备 15 张清晰、同一人物或同一风格的图片。\n"
                 "5. 点左侧「🚀 一键开始训练」。它会先自动去重、过滤过小或模糊图片、按裁切设置处理并用 WD14 打标签，再弹窗确认参数；确认后才开始训练。WD14 标签可在训练前用「标签编辑器」检查。\n\n"
                 f"当前模型：{info.get('model_id', '')}（约 {info.get('size', '')}）\n"
