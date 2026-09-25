@@ -1,4 +1,5 @@
 import json
+import mimetypes
 import sys
 import tempfile
 import time
@@ -8,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from gui.modern_host import ModernUIBridge
+from gui.modern_host import ModernUIBridge, _ensure_web_asset_mimetypes
 
 
 class FakeStopRequested(Exception):
@@ -229,7 +230,57 @@ class AvifCountingCore(FakeCore):
         return 0
 
 
+class ProjectCreationCore:
+    PRESET_VERSION = 3
+    MODE_LABELS = {"style": "画风", "character": "人物"}
+    BASE_TYPE_LABELS = {"sdxl": "SDXL"}
+    MODE_KEYS = ("style", "character")
+    PROJECT_TEMPLATES = {"人物 LoRA（SDXL）": {"mode": "character", "base_type": "sdxl"}}
+
+    def __init__(self, imported_config=None):
+        self.projects = {}
+        self.imported_config = imported_config
+
+    def list_projects(self):
+        return [{"name": name, **data} for name, data in self.projects.items()]
+
+    def save_project(self, name, data):
+        self.projects[name] = dict(data)
+        return True
+
+    def parse_config_json(self, _config_json):
+        return dict(self.imported_config), {"applied": 1, "ignored": 0}
+
+
 class ModernTrainingTests(unittest.TestCase):
+    def test_web_asset_mime_types_override_contaminated_registry_mappings(self):
+        database = mimetypes.MimeTypes()
+        for extension in (".js", ".mjs", ".css"):
+            database.add_type("text/plain", extension, strict=True)
+
+        with patch.object(mimetypes, "_db", database):
+            _ensure_web_asset_mimetypes()
+
+            self.assertEqual(mimetypes.guess_type("assets/app.js")[0], "text/javascript")
+            self.assertEqual(mimetypes.guess_type("assets/app.mjs")[0], "text/javascript")
+            self.assertEqual(mimetypes.guess_type("assets/app.css")[0], "text/css")
+
+    def test_new_modern_projects_store_current_preset_version(self):
+        core = ProjectCreationCore()
+        result = ModernUIBridge(core).create_project("new-project", "人物 LoRA（SDXL）")
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(core.projects["new-project"]["preset_version"], core.PRESET_VERSION)
+
+    def test_imported_modern_projects_store_current_preset_version(self):
+        core = ProjectCreationCore({"mode": "character", "base_type": "sdxl", "params": {"rank": 32}})
+        result = ModernUIBridge(core).create_project(
+            "imported-project", "自定义", '{"params": {"rank": 32}}',
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(core.projects["imported-project"]["preset_version"], core.PRESET_VERSION)
+
     def test_task_log_cursor_keeps_working_when_old_logs_are_trimmed(self):
         bridge = ModernUIBridge(object())
         task_id = bridge._begin_task("test", "training")
@@ -529,12 +580,21 @@ class ModernTrainingTests(unittest.TestCase):
                 "h3_guide", "video_caption_stub", "video_caption", "amd_env",
             )
             global_actions = ("tools", "check_update", "data_dir", "queue", "env_locations")
+            messages = {}
             for action in project_actions:
                 result = bridge.run_action(action, "demo")
                 self.assertTrue(result["ok"], result)
+                messages[action] = result["message"]
             for action in global_actions:
                 result = bridge.run_action(action)
                 self.assertTrue(result["ok"], result)
+                messages[action] = result["message"]
+
+            self.assertIn("标签编辑器", messages["label_editor"])
+            self.assertIn("新版训练页和当前项目会保留", messages["label_editor"])
+            self.assertIn("关闭此窗口即可继续操作", messages["label_editor"])
+            self.assertEqual(messages["tools"], "已在单独窗口打开「小工具」；新版训练页保持打开，关闭工具窗口即可返回。")
+            self.assertNotIn("check_update", messages["check_update"])
 
             self.assertEqual(len(launched), len(project_actions) + len(global_actions))
             for args in launched:

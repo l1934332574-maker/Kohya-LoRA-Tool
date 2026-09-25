@@ -96,7 +96,10 @@ export interface DesktopApi {
   open_project(name: string): Promise<{ ok: boolean; error?: string }>
   load_project_config(name: string): Promise<{ ok: boolean; error?: string; config?: ProjectConfig }>
   save_project_config(name: string, patch: ProjectConfig): Promise<{ ok: boolean; error?: string; project?: ProjectCard | null }>
-  choose_path(kind: 'folder' | 'model'): Promise<{ ok: boolean; error?: string; cancelled?: boolean; path?: string }>
+  choose_path(kind: 'folder' | 'model' | 'image'): Promise<{ ok: boolean; error?: string; cancelled?: boolean; path?: string }>
+  get_appearance_settings(): Promise<{ ok: boolean; settings?: AppearanceSettings; error?: string }>
+  set_appearance_settings(theme: AppearanceSettings['theme'], background_path: string, background_opacity: number): Promise<{ ok: boolean; settings?: AppearanceSettings; error?: string }>
+  get_appearance_background(): Promise<{ ok: boolean; data_url?: string; error?: string }>
   get_qwen_model_setup(mode?: 'qwen_image' | 'zimage'): Promise<QwenModelSetup>
   save_qwen_model_setup(selection: QwenModelSelection): Promise<QwenModelSetup>
   prepare_training(project_name: string): Promise<{ ok: boolean; error?: string; plan?: TrainingPlan }>
@@ -114,6 +117,12 @@ export interface DesktopApi {
   set_env_location(kind: 'python' | 'git', directory: string): Promise<EnvLocations>
   reset_env_locations(): Promise<EnvLocations>
   run_action(action: string, project_name?: string): Promise<{ ok: boolean; error?: string; message?: string; log?: string }>
+}
+
+export interface AppearanceSettings {
+  theme: 'dark' | 'light' | 'system'
+  background_path: string
+  background_opacity: number
 }
 
 export interface GuideStep {
@@ -242,7 +251,7 @@ const demoTemplates: ProjectTemplate[] = [
   { name: 'FLUX.2（musubi）', mode: 'flux2', mode_label: 'FLUX.2', base_type: 'sdxl', note: '第二引擎 FLUX.2 图像训练。' },
   { name: '视频 LoRA（H3）', mode: 'video', mode_label: '视频 H3', base_type: 'sdxl', note: '使用视频数据、训练步数与帧数设置。' },
   { name: 'Krea2（AI Toolkit）', mode: 'krea2_at', mode_label: 'Krea2 AI Toolkit', base_type: 'sdxl', note: '第三引擎 Krea2 训练。' },
-  { name: 'Qwen-Image', mode: 'qwen_image', mode_label: 'Qwen-Image', base_type: 'qwen_image', note: '可选 Qwen-Image-2.1 或 2512；训练工作区支持指定本地组件。' },
+  { name: 'Qwen-Image', mode: 'qwen_image', mode_label: 'Qwen-Image', base_type: 'qwen_image', note: '可选 Qwen-Image-2.1 或 2512；新版训练页支持指定本地组件。' },
   { name: 'Z-Image', mode: 'zimage', mode_label: 'Z-Image', base_type: 'zimage', note: '第三引擎图像训练，按总训练步数运行。' },
   { name: 'Krea2（Fizgig）', mode: 'krea2_fz', mode_label: 'Krea2 Fizgig', base_type: 'sdxl', note: '第四引擎 Krea2 图像训练。' },
   { name: 'FLUX.2 Klein 9B（Fizgig）', mode: 'flux2_fz', mode_label: 'Klein 9B', base_type: 'sdxl', note: '第四引擎 Klein 9B 图像训练。' },

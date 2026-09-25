@@ -133,24 +133,24 @@ onUnmounted(stopPolling)
 
 <style scoped>
 .task-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 20px; background: rgb(10 12 16 / 52%); }
-.task-dialog { display: flex; width: min(100%, 640px); max-height: min(80vh, 720px); flex-direction: column; padding: 18px; border: 1px solid #41464f; border-radius: 8px; background: #272a32; box-shadow: 0 16px 44px rgb(0 0 0 / 32%); }
+.task-dialog { display: flex; width: min(100%, 640px); max-height: min(80vh, 720px); flex-direction: column; padding: 18px; border: 1px solid var(--tone-41464f); border-radius: 8px; background: var(--tone-272a32); box-shadow: 0 16px 44px rgb(0 0 0 / 32%); }
 .task-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.task-kicker { color: #858a93; font-size: 10px; }
-.task-header h2 { margin: 3px 0 0; color: #cbd0d7; font-size: 17px; font-weight: 350; }
-.task-close { width: 30px; height: 30px; border: 0; border-radius: 5px; color: #999da6; background: transparent; font-size: 22px; cursor: pointer; }
-.task-close:hover:not(:disabled) { color: #d0d3d9; background: #32363e; }
+.task-kicker { color: var(--tone-858a93); font-size: 10px; }
+.task-header h2 { margin: 3px 0 0; color: var(--tone-cbd0d7); font-size: 17px; font-weight: 350; }
+.task-close { width: 30px; height: 30px; border: 0; border-radius: 5px; color: var(--tone-999da6); background: transparent; font-size: 22px; cursor: pointer; }
+.task-close:hover:not(:disabled) { color: var(--tone-d0d3d9); background: var(--tone-32363e); }
 .task-close:disabled { opacity: .4; cursor: wait; }
-.task-description { margin: 12px 0; color: #a0a5ae; font-size: 11px; line-height: 1.5; }
-.task-note { margin: 0 0 12px; padding: 10px; border: 1px solid #373b44; border-radius: 5px; color: #959ba5; background: #22252c; font-size: 11px; line-height: 1.55; }
-.task-state { display: flex; align-items: center; gap: 8px; min-height: 31px; color: #aeb5c0; font-size: 11px; }
-.task-state.completed { color: #a8bea9; }
-.task-state.failed, .task-state.cancelled { color: #c6a8aa; }
-.task-spinner { width: 13px; height: 13px; border: 1.5px solid #515763; border-top-color: #aeb5c0; border-radius: 50%; animation: spin .8s linear infinite; }
-.task-log { min-height: 170px; max-height: 48vh; margin: 0; padding: 9px; overflow: auto; border: 1px solid #393d47; border-radius: 5px; color: #aeb4be; background: #1d2026; font: 10px/1.5 Consolas, "Microsoft YaHei UI", sans-serif; white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-description { margin: 12px 0; color: var(--tone-a0a5ae); font-size: 11px; line-height: 1.5; }
+.task-note { margin: 0 0 12px; padding: 10px; border: 1px solid var(--tone-373b44); border-radius: 5px; color: var(--tone-959ba5); background: var(--tone-22252c); font-size: 11px; line-height: 1.55; }
+.task-state { display: flex; align-items: center; gap: 8px; min-height: 31px; color: var(--tone-aeb5c0); font-size: 11px; }
+.task-state.completed { color: var(--tone-a8bea9); }
+.task-state.failed, .task-state.cancelled { color: var(--tone-c6a8aa); }
+.task-spinner { width: 13px; height: 13px; border: 1.5px solid var(--tone-515763); border-top-color: var(--tone-aeb5c0); border-radius: 50%; animation: spin .8s linear infinite; }
+.task-log { min-height: 170px; max-height: 48vh; margin: 0; padding: 9px; overflow: auto; border: 1px solid var(--tone-393d47); border-radius: 5px; color: var(--tone-aeb4be); background: var(--tone-1d2026); font: 10px/1.5 Consolas, "Microsoft YaHei UI", sans-serif; white-space: pre-wrap; overflow-wrap: anywhere; }
 .task-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 14px; }
-.task-button { min-width: 82px; min-height: 31px; padding: 0 10px; border: 1px solid #3d424b; border-radius: 5px; color: #b8bdc6; background: transparent; font-size: 11px; cursor: pointer; }
-.task-button:hover:not(:disabled) { border-color: #555c68; background: #2e323a; }
-.task-button.primary { border-color: transparent; color: #eff0f2; background: #626f81; }
+.task-button { min-width: 82px; min-height: 31px; padding: 0 10px; border: 1px solid var(--tone-3d424b); border-radius: 5px; color: var(--tone-b8bdc6); background: transparent; font-size: 11px; cursor: pointer; }
+.task-button:hover:not(:disabled) { border-color: var(--tone-555c68); background: var(--tone-2e323a); }
+.task-button.primary { border-color: transparent; color: var(--tone-eff0f2); background: var(--tone-626f81); }
 .task-button:disabled { opacity: .55; cursor: wait; }
 .dialog-enter-active, .dialog-leave-active { transition: opacity 140ms ease; }
 .dialog-enter-active .task-dialog, .dialog-leave-active .task-dialog { transition: opacity 140ms ease, transform 170ms var(--ease-out); }

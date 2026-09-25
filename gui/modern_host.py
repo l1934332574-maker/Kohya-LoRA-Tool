@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import mimetypes
 import subprocess
 import sys
 import threading
@@ -76,6 +77,20 @@ def _has_webview2_runtime() -> bool:
     return False
 
 
+def _ensure_web_asset_mimetypes() -> None:
+    """Protect local WebView assets from Windows registry MIME overrides.
+
+    ``mimetypes`` imports Windows extension mappings from the registry. A bad
+    ``.js`` Content Type makes pywebview's Bottle server return JavaScript as
+    ``text/plain``; Chromium then refuses the module script and leaves a blank
+    page. Add the standard web types after registry initialization to override
+    any per-machine or per-user mapping.
+    """
+    mimetypes.add_type("text/javascript", ".js", strict=True)
+    mimetypes.add_type("text/javascript", ".mjs", strict=True)
+    mimetypes.add_type("text/css", ".css", strict=True)
+
+
 class ModernUIBridge:
     """Expose a small JSON-shaped interface to the Vue frontend."""
 
@@ -89,7 +104,7 @@ class ModernUIBridge:
         self._window = None
         self.logs = [
             "欢迎使用 Kohya-LoRA 一键训练工具",
-            "按左侧新手引导顺序操作；打开项目后进入训练工作区。",
+            "按左侧新手引导顺序操作；打开项目后进入新版训练页。",
         ]
         self._task_lock = threading.RLock()
         self._task = None
@@ -189,7 +204,7 @@ class ModernUIBridge:
         }
         spec = installers.get(action)
         if not spec:
-            return {"ok": False, "error": "这个安装任务尚未接入现代界面。"}
+            return {"ok": False, "error": "这个安装任务尚未接入新版训练页。"}
         title, installer = spec
         task_id = self._begin_task(title, "setup")
         if not task_id:
@@ -233,7 +248,7 @@ class ModernUIBridge:
     def get_model_downloads(self, mode):
         spec = self._model_download_spec(mode)
         if not spec:
-            return {"ok": False, "error": "该模式没有可在现代界面管理的模型下载列表。"}
+            return {"ok": False, "error": "该模式没有可在新版训练页管理的模型下载列表。"}
         title, description, links_name, dir_name, files_name, required = spec
         links = getattr(self.core, links_name, {})
         asset_dir = str(getattr(self.core, dir_name)())
@@ -363,7 +378,7 @@ class ModernUIBridge:
             return {"ok": False, "error": "项目不存在或配置文件已损坏。"}
         raw_dir = str(config.get("raw_dir") or "").strip()
         if not raw_dir or not os.path.isdir(raw_dir):
-            return {"ok": False, "error": "请先在新界面选择有效的数据文件夹。"}
+            return {"ok": False, "error": "请先在新版训练页选择有效的数据文件夹。"}
 
         mode = str(config.get("mode") or "character")
         if mode == "video":
@@ -464,7 +479,7 @@ class ModernUIBridge:
                     pass
 
         threading.Thread(target=worker, name="ModernPreprocess", daemon=True).start()
-        self._log("[预处理] 已从现代界面启动「%s」项目的数据预处理。" % project_name)
+        self._log("[预处理] 已从新版训练页启动「%s」项目的数据预处理。" % project_name)
         return {"ok": True, "task_id": task_id}
 
     @staticmethod
@@ -480,7 +495,7 @@ class ModernUIBridge:
         """Build the existing AI Toolkit argument shape from a saved modern project."""
         mode = str(config.get("mode") or "")
         if mode not in ("qwen_image", "zimage"):
-            raise ValueError("现代界面直连训练目前只接入 Qwen-Image / Z-Image。")
+            raise ValueError("新版训练页直连训练目前只接入 Qwen-Image / Z-Image。")
         stored = config.get("params") if isinstance(config.get("params"), dict) else {}
         base_type = str(config.get("base_type") or "sdxl")
         preset = dict(self.core.preset_for(mode, base_type) or {})
@@ -557,7 +572,7 @@ class ModernUIBridge:
             return {"ok": False, "error": "无法读取训练参数：%s" % exc}
         raw_dir = params.get("raw_dir") or ""
         if not raw_dir or not os.path.isdir(raw_dir):
-            return {"ok": False, "error": "请先在现代工作区选择有效的数据集文件夹。"}
+            return {"ok": False, "error": "请先在新版训练页选择有效的数据集文件夹。"}
         try:
             details = self.get_mode_workspace(mode, project_name)
         except Exception as exc:
@@ -585,7 +600,7 @@ class ModernUIBridge:
             if image_count < min_count:
                 return {"ok": False, "error": "视频数据只有 %d 段；至少需要 %d 段。" % (image_count, min_count)}
             if no_caption == image_count:
-                return {"ok": False, "error": "所有视频都没有同名 .txt 字幕；先用现代界面的占位字幕或 AI 描述工具生成字幕。"}
+                return {"ok": False, "error": "所有视频都没有同名 .txt 字幕；先用新版训练页的占位字幕或 AI 描述工具生成字幕。"}
             if no_caption:
                 warnings.append("有 %d 段视频缺少字幕，训练引擎会忽略无字幕视频。" % no_caption)
             if str(details.get("gpu_vendor") or "").lower() == "amd":
@@ -615,7 +630,7 @@ class ModernUIBridge:
         vram = self._safe_vram()
         supports_amd = bool(getattr(self.core, "param_supports", lambda *_: False)("amd_mode", mode))
         if vendor == "amd" and supports_amd and not params.get("amd_mode"):
-            return {"ok": False, "error": "检测到 AMD 显卡；请在现代工作区开启 AMD 兼容模式并保存，再开始训练。"}
+            return {"ok": False, "error": "检测到 AMD 显卡；请在新版训练页开启 AMD 兼容模式并保存，再开始训练。"}
         if vendor != "amd":
             try:
                 if not self.core.detect_nvidia_gpu():
@@ -690,7 +705,7 @@ class ModernUIBridge:
             return {"ok": False, "error": "学习率必须是大于 0 的有限数值。"}
         raw_dir = params["raw_dir"]
         if not raw_dir or not os.path.isdir(raw_dir):
-            return {"ok": False, "error": "请先在新界面选择一个有效的原始图片文件夹。"}
+            return {"ok": False, "error": "请先在新版训练页选择一个有效的原始图片文件夹。"}
         try:
             image_count = self._count_preprocessable_images(raw_dir)
         except Exception as exc:
@@ -945,11 +960,11 @@ class ModernUIBridge:
         base_type = params["base_type"]
         base_label = getattr(self.core, "BASE_TYPE_LABELS", {}).get(base_type, base_type)
         if not params["base_model"] or not os.path.isfile(params["base_model"]):
-            return {"ok": False, "error": "请在现代工作区选择有效的 %s 底模文件（.safetensors 或 .ckpt）。" % base_label}
+            return {"ok": False, "error": "请在新版训练页选择有效的 %s 底模文件（.safetensors 或 .ckpt）。" % base_label}
         if not params["base_model"].lower().endswith((".safetensors", ".ckpt")):
             return {"ok": False, "error": "%s 底模需为 .safetensors 或 .ckpt 文件。" % base_label}
         if not params["raw_dir"] or not os.path.isdir(params["raw_dir"]):
-            return {"ok": False, "error": "请先在现代工作区选择有效的原始图片文件夹。"}
+            return {"ok": False, "error": "请先在新版训练页选择有效的原始图片文件夹。"}
         try:
             detected_type = str(self.core.detect_base_type(params["base_model"]) or "")
         except Exception:
@@ -998,7 +1013,7 @@ class ModernUIBridge:
             vram_gb = None
         if vendor == "amd":
             if not params["amd_mode"]:
-                return {"ok": False, "error": "检测到 AMD 显卡；请在现代工作区开启「AMD 兼容模式」，保存后再开始训练。"}
+                return {"ok": False, "error": "检测到 AMD 显卡；请在新版训练页开启「AMD 兼容模式」，保存后再开始训练。"}
             try:
                 vpy = self.core.venv_python(self.core.get_kohya_dir())
                 if params["train_env"]:
@@ -1255,7 +1270,7 @@ class ModernUIBridge:
                         vram_gb=plan.get("vram_gb"), resume_from=resume_path, progress=monitor,
                     )
                 else:
-                    raise RuntimeError("现代训练桥接尚未注册模式：%s" % mode)
+                    raise RuntimeError("新版训练页尚未注册「%s」训练模式。" % mode)
                 try:
                     self.core.export_project_named_lora(
                         params.get("mode"), project_name,
@@ -1304,7 +1319,7 @@ class ModernUIBridge:
                     pass
 
         threading.Thread(target=worker, name="ModernTraining", daemon=True).start()
-        self._log("[训练] 已从现代界面启动「%s」项目。" % project_name)
+        self._log("[训练] 已从新版训练页启动「%s」项目。" % project_name)
         return {"ok": True, "task_id": task_id}
 
     def get_env_locations(self):
@@ -1368,7 +1383,7 @@ class ModernUIBridge:
                 "name": "Qwen-Image",
                 "mode": "qwen_image",
                 "mode_label": labels.get("qwen_image", "Qwen-Image"),
-                "note": "创建 Qwen-Image 项目；模型选择、参数配置和训练均在现代工作区完成。",
+                "note": "创建 Qwen-Image 项目；模型选择、参数配置和训练均在新版训练页完成。",
             })
         existing_template_names = {item["name"] for item in public_templates}
         for name, template in _MODERN_PROJECT_TEMPLATES.items():
@@ -1482,7 +1497,7 @@ class ModernUIBridge:
             return {"ok": False, "error": "训练参数格式无效。"}
         for key, value in incoming_params.items():
             if key not in param_fields:
-                return {"ok": False, "error": "现代界面尚未接入训练参数「%s」。" % key}
+                return {"ok": False, "error": "新版训练页尚未接入训练参数「%s」。" % key}
             if key == "sample_preview" and value is None:
                 params.pop(key, None)
                 continue
@@ -1505,7 +1520,12 @@ class ModernUIBridge:
         try:
             import webview
 
-            if kind == "model":
+            if kind == "image":
+                selected = self._window.create_file_dialog(
+                    webview.FileDialog.OPEN,
+                    file_types=("Image files (*.png;*.jpg;*.jpeg;*.webp;*.bmp)",),
+                )
+            elif kind == "model":
                 selected = self._window.create_file_dialog(
                     webview.FileDialog.OPEN,
                     file_types=("Model files (*.safetensors;*.ckpt;*.pt;*.pth)", "All files (*.*)"),
@@ -1518,6 +1538,79 @@ class ModernUIBridge:
             return {"ok": True, "path": str(path or "")}
         except Exception as exc:
             return {"ok": False, "error": "无法打开文件选择器：%s" % exc}
+
+    @staticmethod
+    def _appearance_settings_from_core(core):
+        settings = core._load_app_settings() or {}
+        if not isinstance(settings, dict):
+            settings = {}
+        theme = str(settings.get("modern_ui_theme") or "dark")
+        if theme not in ("dark", "light", "system"):
+            theme = "dark"
+        background = str(settings.get("modern_ui_background") or "")
+        if background and not os.path.isfile(background):
+            # Keep the path so reconnecting a removable drive can restore it later.
+            background = os.path.abspath(background)
+        opacity = settings.get("modern_ui_background_opacity", 18)
+        try:
+            opacity = max(0, min(100, int(opacity)))
+        except (TypeError, ValueError):
+            opacity = 18
+        return {"theme": theme, "background_path": background, "background_opacity": opacity}
+
+    def get_appearance_settings(self):
+        return {"ok": True, "settings": self._appearance_settings_from_core(self.core)}
+
+    def set_appearance_settings(self, theme="dark", background_path="", background_opacity=18):
+        theme = str(theme or "dark")
+        if theme not in ("dark", "light", "system"):
+            return {"ok": False, "error": "颜色主题选项无效。"}
+        background_path = str(background_path or "").strip()
+        if background_path:
+            background_path = os.path.abspath(background_path)
+            if not os.path.isfile(background_path):
+                return {"ok": False, "error": "背景图片文件不存在，请重新选择。"}
+            if os.path.splitext(background_path)[1].lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+                return {"ok": False, "error": "背景图片需为 PNG、JPG、WebP 或 BMP 格式。"}
+            try:
+                if os.path.getsize(background_path) > 8 * 1024 * 1024:
+                    return {"ok": False, "error": "背景图片不能超过 8 MB。"}
+            except OSError:
+                return {"ok": False, "error": "无法读取背景图片，请检查文件权限。"}
+        try:
+            opacity = max(0, min(100, int(background_opacity)))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "背景图片显现程度无效。"}
+        current_settings = self.core._load_app_settings() or {}
+        settings = dict(current_settings) if isinstance(current_settings, dict) else {}
+        settings["modern_ui_theme"] = theme
+        settings["modern_ui_background"] = background_path
+        settings["modern_ui_background_opacity"] = opacity
+        if not self.core._save_app_settings(settings):
+            return {"ok": False, "error": "设置保存失败，请检查用户设置目录的写入权限。"}
+        self._log("[外观] 已保存新版训练页显示设置。")
+        return {"ok": True, "settings": self._appearance_settings_from_core(self.core)}
+
+    def get_appearance_background(self):
+        import base64
+        path = self._appearance_settings_from_core(self.core).get("background_path", "")
+        if not path or not os.path.isfile(path):
+            return {"ok": False, "error": "背景图片文件不存在，请在外观设置中重新选择。"}
+        try:
+            with open(path, "rb") as handle:
+                content = handle.read(8 * 1024 * 1024 + 1)
+            if len(content) > 8 * 1024 * 1024:
+                return {"ok": False, "error": "背景图片超过 8 MB，无法载入。"}
+            mime = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".webp": "image/webp", ".bmp": "image/bmp",
+            }.get(os.path.splitext(path)[1].lower())
+            if not mime:
+                return {"ok": False, "error": "背景图片格式不支持。"}
+            data_url = "data:%s;base64,%s" % (mime, base64.b64encode(content).decode("ascii"))
+            return {"ok": True, "data_url": data_url}
+        except OSError as exc:
+            return {"ok": False, "error": "读取背景图片失败：%s" % exc}
 
     def inspect_base_model(self, path):
         path = str(path or "").strip()
@@ -1534,7 +1627,7 @@ class ModernUIBridge:
     def get_qwen_model_setup(self, mode="qwen_image"):
         mode = str(mode or "qwen_image")
         if mode not in ("qwen_image", "zimage"):
-            return {"ok": False, "error": "该 AI Toolkit 模型模式暂不支持现代设置。"}
+            return {"ok": False, "error": "该 AI Toolkit 模型模式暂不支持新版训练页设置。"}
         choices = self.core.at_image_model_choices(mode)
         custom = self.core.at_image_custom_get(mode)
         info = self.core.at_image_info(mode)
@@ -1577,7 +1670,7 @@ class ModernUIBridge:
             return {"ok": False, "error": "模型设置格式无效。"}
         mode = str(selection.get("mode") or "qwen_image")
         if mode not in ("qwen_image", "zimage"):
-            return {"ok": False, "error": "该 AI Toolkit 模型模式暂不支持现代设置。"}
+            return {"ok": False, "error": "该 AI Toolkit 模型模式暂不支持新版训练页设置。"}
         choices = self.core.at_image_model_choices(mode)
         key = str(selection.get("key") or "")
         choice = next((item for item in choices if item.get("key") == key), None)
@@ -1850,6 +1943,7 @@ class ModernUIBridge:
             "template": template_name if template_name in templates or template_name in _MODERN_PROJECT_TEMPLATES or template_name == "Qwen-Image" else "自定义",
             "mode": mode,
             "base_type": base_type,
+            "preset_version": int(self.core.PRESET_VERSION),
             "params": {},
         }
         if imported_config:
@@ -1957,7 +2051,7 @@ class ModernUIBridge:
         name = str(name or "").strip()
         if not name or not self.core.load_project(name):
             return {"ok": False, "error": "项目不存在或配置文件已损坏。"}
-        self._log("[项目] 已载入「%s」；训练配置由现代工作区承接，训练时直调现有引擎函数。" % name)
+        self._log("[项目] 已载入「%s」；训练配置由新版训练页承接，训练时直调现有引擎函数。" % name)
         return {"ok": True}
 
     @staticmethod
@@ -1983,7 +2077,7 @@ class ModernUIBridge:
         """Open legacy secondary utilities as isolated popups; never fall back to its workspace."""
         action = str(action or "")
         if action.startswith("mode:") or action == "train":
-            return {"ok": False, "error": "训练模式与训练任务由现代工作区直接承接。"}
+            return {"ok": False, "error": "训练模式与训练任务由新版训练页直接承接。"}
         if action == "preprocess":
             # Keep every caller on the modern task/review workflow. The classic
             # command remains available for the classic UI, but must not be
@@ -2055,8 +2149,22 @@ class ModernUIBridge:
                 self._spawn_classic("--project", project_name, "--action", action, "--utility-only")
             except Exception as exc:
                 return {"ok": False, "error": "无法打开该工具窗口：%s" % exc}
-            message = "已打开「%s」的%s窗口；训练工作区仍保留在现代界面。" % (
-                project_name, {"label_editor": "标签编辑器", "export_config": "配置导出"}.get(action, action))
+            tool_name = {
+                "label_editor": "标签编辑器",
+                "export_config": "配置导出",
+                "readme": "使用说明",
+                "at_model_help": "模型说明",
+                "at_engine_update": "训练引擎更新",
+                "anima_components": "Anima 组件",
+                "krea2_guide": "Krea 2 使用引导",
+                "flux2_guide": "FLUX.2 使用引导",
+                "h3_guide": "H3 视频引导",
+                "video_caption_stub": "视频字幕工具",
+                "video_caption": "视频字幕工具",
+                "amd_env": "AMD 环境检查",
+            }.get(action, "工具")
+            message = "已在单独窗口打开「%s」的%s；新版训练页和当前项目会保留，关闭此窗口即可继续操作。" % (
+                project_name, tool_name)
             self._log("[工具] " + message)
             return {"ok": True, "message": message, "log": "[工具] " + message}
 
@@ -2066,26 +2174,34 @@ class ModernUIBridge:
                 self._spawn_classic("--action", action, "--utility-only")
             except Exception as exc:
                 return {"ok": False, "error": "无法打开工具窗口：%s" % exc}
-            message = "已打开「%s」独立工具窗口；训练工作区未切换。" % action
+            tool_name = {
+                "tools": "小工具",
+                "check_update": "检查更新",
+                "data_dir": "数据目录",
+                "queue": "训练队列",
+                "env_locations": "环境位置",
+            }.get(action, "工具")
+            message = "已在单独窗口打开「%s」；新版训练页保持打开，关闭工具窗口即可返回。" % tool_name
             self._log("[工具] " + message)
             return {"ok": True, "message": message, "log": "[工具] " + message}
 
-        return {"ok": False, "error": "这个操作尚未接入现代界面。"}
+        return {"ok": False, "error": "这个操作尚未接入新版训练页。"}
 
 
 def launch(core, dev=False, debug=False, engine_groups=(), short_mode_labels=None):
     if sys.platform != "win32":
-        raise RuntimeError("现代界面目前仅支持 Windows。")
+        raise RuntimeError("新版训练页目前仅支持 Windows。")
     if not _has_webview2_runtime():
         raise RuntimeError(
-            "未检测到 Microsoft Edge WebView2 Runtime。请先安装 WebView2 Runtime 后再使用现代界面；"
+            "未检测到 Microsoft Edge WebView2 Runtime。请先安装 WebView2 Runtime 后再使用新版训练页；"
             "Windows 11 通常已内置，部分 Windows 10 需要单独安装。"
         )
+    _ensure_web_asset_mimetypes()
     try:
         import webview
     except ImportError as exc:
         raise RuntimeError(
-            "现代界面运行组件尚未安装。开发环境请运行 `python -m pip install -r requirements-ui.txt`。"
+            "新版训练页运行组件尚未安装。开发环境请运行 `python -m pip install -r requirements-ui.txt`。"
         ) from exc
 
     root = _app_root()
@@ -2096,12 +2212,12 @@ def launch(core, dev=False, debug=False, engine_groups=(), short_mode_labels=Non
         url = str(index)
     else:
         raise RuntimeError(
-            "现代界面资源尚未构建。请先在 modern_ui 目录运行 `npm install` 和 `npm run build`。"
+            "新版训练页资源尚未构建。请先在 modern_ui 目录运行 `npm install` 和 `npm run build`。"
         )
 
     bridge = ModernUIBridge(core, engine_groups, short_mode_labels)
     window = webview.create_window(
-        title=getattr(core, "APP_NAME", "Kohya-LoRA") + " · 现代界面",
+        title=getattr(core, "APP_NAME", "Kohya-LoRA") + " · 新版训练页",
         url=url,
         js_api=bridge,
         width=1360,

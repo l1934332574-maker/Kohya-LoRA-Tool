@@ -145,64 +145,23 @@ def default_resolution(mode, base_type):
     return str(core.RESOLUTIONS.get(base_type, 512))
 
 
-def _prepare_data_dir_startup():
-    """Keep existing users on their populated data root before showing either UI."""
-    info = core.inspect_data_dir_startup()
-    status = info.get("status")
-    if status == "conflict":
-        appdata = info.get("appdata") or ""
-        install = info.get("install") or ""
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            answer = messagebox.askyesnocancel(
-                "选择训练数据目录",
-                "检测到两个目录都含有项目或训练数据。请选择这次要打开的那一份：\n\n"
-                "是：旧版用户数据（AppData）\n%s\n\n"
-                "否：当前安装目录的数据\n%s\n\n"
-                "取消：退出，不更改数据目录。\n\n"
-                "这里只切换读取位置，不会复制、覆盖或删除任一目录。"
-                % (appdata, install),
-                parent=root,
-            )
-        finally:
-            root.destroy()
-        if answer is None:
-            return False
-        choice = appdata if answer else install
-        resolved = core.resolve_data_dir_startup(choice)
-    else:
-        resolved = core.resolve_data_dir_startup()
+def _schedule_initial_project_action(root, open_project, action_callback,
+                                     project_is_open, on_skip=None, delay=160):
+    """Open a project-scoped popup only after project restoration has fully returned.
 
-    if not resolved.get("ok"):
-        messagebox.showerror(
-            core.APP_NAME,
-            "无法确定训练数据目录。现有数据没有被修改，请检查数据目录设置后重试。",
-        )
-        return False
+    Tk message boxes run a nested event loop. If project loading and the popup
+    action have independent timers, the latter can run while project loading is
+    paused in a preset confirmation, before ``current_project`` is assigned.
+    """
+    def _open_project_then_action():
+        open_project()
+        if not project_is_open():
+            if on_skip is not None:
+                root.after_idle(on_skip)
+            return
+        root.after_idle(action_callback)
 
-    if status == "adopt":
-        messagebox.showinfo(
-            "已接续原有数据",
-            "已找到原有训练数据，并将继续使用：\n\n%s\n\n"
-            "项目、图集、输出和训练环境都保留在原位置，没有搬动或删除。"
-            % resolved.get("path", ""),
-        )
-    elif status == "conflict":
-        messagebox.showinfo(
-            "数据目录已选择",
-            "本次将使用：\n\n%s\n\n"
-            "另一目录的数据仍保留原处；之后可在环境设置中切换。"
-            % resolved.get("path", ""),
-        )
-    if not resolved.get("persisted", True):
-        messagebox.showwarning(
-            "数据目录设置未能保存",
-            "本次运行仍会使用：\n%s\n\n"
-            "但下次启动时可能需要重新选择。请检查设置文件的写入权限。"
-            % resolved.get("path", ""),
-        )
-    return True
+    return root.after(delay, _open_project_then_action)
 
 # 安装包目前未做代码签名（签名证书年费数千元），Windows / 第三方杀软常报
 # "无法识别的应用" 或 "检测到威胁"。这段提示放在「发现新版本」确认框里，
@@ -662,10 +621,7 @@ class App:
                 self.root.after(1200, self._preload_tag_dict)
             except Exception:
                 pass
-        if initial_project:
-            self.root.after(160, lambda: self.cmd_open_project(initial_project))
-        elif initial_mode:
-            self.root.after(160, lambda: self._nav_cmd(initial_mode))
+        _action_callback = None
         if initial_action:
             _action_map = {
                 "tools": self.cmd_open_tools,
@@ -701,7 +657,27 @@ class App:
                         return
                     self._finish_utility_only()
 
-                self.root.after(420, _run_initial_action)
+                _action_callback = _run_initial_action
+
+        if initial_project:
+            if _action_callback:
+                _schedule_initial_project_action(
+                    self.root,
+                    lambda: self.cmd_open_project(initial_project),
+                    _action_callback,
+                    lambda: self.current_project == initial_project,
+                    on_skip=self._finish_utility_only if self._utility_only else None,
+                )
+            else:
+                self.root.after(160, lambda: self.cmd_open_project(initial_project))
+        elif initial_mode:
+            self.root.after(160, lambda: self._nav_cmd(initial_mode))
+
+        # Project-scoped popup actions must wait for project restoration above.
+        # A fixed independent timer can fire inside the nested event loop of an
+        # old-preset confirmation and open the tool with ``current_project=None``.
+        if _action_callback and not initial_project:
+            self.root.after(420, _action_callback)
 
     def _find_utility_popup(self):
         """Find an existing secondary window without changing its implementation."""
@@ -9809,9 +9785,6 @@ def main(argv=None):
                         help="Hide the classic workspace and show only the requested popup utility")
     args, _unknown = parser.parse_known_args(argv)
 
-    if not _prepare_data_dir_startup():
-        return 1
-
     if args.ui == "next":
         try:
             from gui.modern_host import launch
@@ -9820,7 +9793,7 @@ def main(argv=None):
         except Exception as exc:
             use_classic = messagebox.askyesno(
                 core.APP_NAME,
-                "现代界面启动失败：\n\n%s\n\n是否改用经典界面？" % exc,
+                "新版训练页启动失败：\n\n%s\n\n是否改用经典界面？" % exc,
             )
             if not use_classic:
                 return 1

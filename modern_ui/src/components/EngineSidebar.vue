@@ -23,7 +23,7 @@ defineProps<{
   guideSteps: GuideStep[]
 }>()
 const modeTips: Record<string, string> = {
-  _kohya: '第一引擎（kohya）：画风 / 人物 / 概念在训练工作区的「训练类型」里切换。',
+  _kohya: '第一引擎（kohya）：画风 / 人物 / 概念在新版训练页的「训练类型」里切换。',
   krea2: '第二引擎 musubi：Krea 2 图像 LoRA；需准备 models/krea2 中的 RAW、VAE 与文本编码器。',
   flux2: '第二引擎 musubi：FLUX.2 图像 LoRA；使用 models/flux2 中的模型组件。',
   video: '第三引擎 AI Toolkit：MiniMax H3 视频 LoRA；使用视频和同名字幕文件。',

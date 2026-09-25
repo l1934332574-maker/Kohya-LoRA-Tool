@@ -92,19 +92,19 @@ const sections = computed(() => {
 
 <style scoped>
 .help-backdrop { position: fixed; inset: 0; z-index: 33; display: grid; place-items: center; padding: 20px; background: rgb(10 12 16 / 52%); }
-.help-dialog { display: flex; width: min(100%, 700px); max-height: min(84vh, 790px); flex-direction: column; padding: 18px; border: 1px solid #41464f; border-radius: 8px; background: #272a32; box-shadow: 0 16px 44px rgb(0 0 0 / 32%); }
-.help-header { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid #393d46; }
-.help-kicker { color: #858a93; font-size: 10px; }
-.help-header h2 { margin: 3px 0 0; color: #cbd0d7; font-size: 17px; font-weight: 350; }
-.help-close { width: 29px; height: 29px; border: 0; border-radius: 5px; color: #999da6; background: transparent; font-size: 22px; cursor: pointer; }
-.help-close:hover { color: #d0d3d9; background: #32363e; }
-.help-scroll { min-height: 0; padding: 3px 4px 2px 0; overflow-y: auto; scrollbar-color: #555a64 transparent; scrollbar-width: thin; }
+.help-dialog { display: flex; width: min(100%, 700px); max-height: min(84vh, 790px); flex-direction: column; padding: 18px; border: 1px solid var(--tone-41464f); border-radius: 8px; background: var(--tone-272a32); box-shadow: 0 16px 44px rgb(0 0 0 / 32%); }
+.help-header { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--tone-393d46); }
+.help-kicker { color: var(--tone-858a93); font-size: 10px; }
+.help-header h2 { margin: 3px 0 0; color: var(--tone-cbd0d7); font-size: 17px; font-weight: 350; }
+.help-close { width: 29px; height: 29px; border: 0; border-radius: 5px; color: var(--tone-999da6); background: transparent; font-size: 22px; cursor: pointer; }
+.help-close:hover { color: var(--tone-d0d3d9); background: var(--tone-32363e); }
+.help-scroll { min-height: 0; padding: 3px 4px 2px 0; overflow-y: auto; scrollbar-color: var(--tone-555a64) transparent; scrollbar-width: thin; }
 .help-section { padding: 11px 2px 3px; }
-.help-section h3 { margin: 0 0 5px; color: #b8bec8; font-size: 12px; font-weight: 400; }
-.help-section p { margin: 0; color: #979ea8; font-size: 11px; line-height: 1.65; white-space: pre-line; }
-.help-dialog footer { display: flex; justify-content: flex-end; padding-top: 12px; border-top: 1px solid #393d46; }
-.help-done { min-width: 76px; min-height: 30px; border: 1px solid transparent; border-radius: 4px; color: #eff0f2; background: #626f81; font-size: 10px; cursor: pointer; }
-.help-done:hover { background: #6a7789; }
+.help-section h3 { margin: 0 0 5px; color: var(--tone-b8bec8); font-size: 12px; font-weight: 400; }
+.help-section p { margin: 0; color: var(--tone-979ea8); font-size: 11px; line-height: 1.65; white-space: pre-line; }
+.help-dialog footer { display: flex; justify-content: flex-end; padding-top: 12px; border-top: 1px solid var(--tone-393d46); }
+.help-done { min-width: 76px; min-height: 30px; border: 1px solid transparent; border-radius: 4px; color: var(--tone-eff0f2); background: var(--tone-626f81); font-size: 10px; cursor: pointer; }
+.help-done:hover { background: var(--tone-6a7789); }
 .dialog-enter-active, .dialog-leave-active { transition: opacity 140ms ease; }
 .dialog-enter-active .help-dialog, .dialog-leave-active .help-dialog { transition: opacity 140ms ease, transform 170ms var(--ease-out); }
 .dialog-enter-from, .dialog-leave-to { opacity: 0; }

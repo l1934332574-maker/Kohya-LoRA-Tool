@@ -10,44 +10,65 @@ from kohya_core import KIT_DIR, KOHYA_DIR_FILE
 
 __all__ = [
     "get_kohya_dir", "base_models_dir", "data_dir", "data_sub", "_sanitize_dirname",
-    "_settings_path", "save_data_setting", "inspect_data_dir_startup",
-    "resolve_data_dir_startup",
+    "_settings_path", "save_data_setting",
     "dataset_train_dir", "projects_dir", "_project_path", "list_projects",
     "load_project", "save_project", "delete_project", "default_project_name",
     "project_data_dir", "project_output_dir", "dir_stats", "delete_project_data",
     "find_orphan_project_dirs", "delete_orphan_project_dirs",
 ]
 
-_STARTUP_DATA_DIR = ""
-
 def get_kohya_dir():
     """定位 kohya_ss 训练内核目录。
 
     优先级：
-    1) kohya_dir.txt 记录（最优先，尊重用户/历史选择）
-    2) 当前数据目录下的 kohya_ss（由数据目录选择/升级接续逻辑决定）
-    3) 安装目录内 kohya_ss（旧版位置，向后兼容：老用户覆盖升级不重装）
-    4) 用户主目录下的 kohya_ss（更早版本的兜底位置）
-    5) 都不存在 -> 返回当前数据目录下的 kohya_ss
+    1) kohya_dir.txt 记录及其中的有效训练源码
+    2) 当前数据目录、历史 AppData 数据目录、安装目录旁数据目录里的 kohya_ss
+    3) 安装目录 / 用户主目录下的旧位置
+    4) 都不存在 -> 返回当前数据目录下的 kohya_ss，供首次安装使用
     """
+    pinned = ""
     if os.path.isfile(KOHYA_DIR_FILE):
         with open(KOHYA_DIR_FILE, "r", encoding="utf-8") as f:
             p = f.read().strip().lstrip("\ufeff").strip()
         if p and os.path.isdir(p):
-            return p
-    # 训练环境跟随当前选择的数据目录。
-    d = os.path.join(data_dir(), "kohya_ss")
-    if os.path.isdir(d):
-        return d
-    # 向后兼容：安装目录内（旧版位置，覆盖升级不重装）
-    d_old = os.path.join(KIT_DIR, "kohya_ss")
-    if os.path.isdir(d_old):
-        return d_old
-    # 更早版本的兜底位置
-    d_legacy = os.path.join(os.path.expanduser("~"), "kohya_ss")
-    if os.path.isdir(d_legacy):
-        return d_legacy
-    return d
+            pinned = os.path.abspath(p)
+
+    # 数据根目录可能因安装位置变化而切换；训练内核始终留在原目录。
+    # 在当前根、历史 AppData 根和安装目录旁的旧根中找现存源码，防止 UI 将其误报为未安装。
+    candidates = [pinned]
+    for root in (data_dir(), _appdata_data_dir(), _install_data_dir()):
+        if root:
+            candidates.append(os.path.join(root, "kohya_ss"))
+    candidates.extend((
+        os.path.join(KIT_DIR, "kohya_ss"),
+        os.path.join(os.path.expanduser("~"), "kohya_ss"),
+    ))
+
+    seen = set()
+    existing_dirs = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        candidate = os.path.abspath(candidate)
+        key = os.path.normcase(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not os.path.isdir(candidate):
+            continue
+        existing_dirs.append(candidate)
+        if (os.path.isdir(os.path.join(candidate, ".git"))
+                or os.path.isfile(os.path.join(candidate, "kohya_gui.py"))
+                or os.path.isfile(os.path.join(candidate, "setup", "setup_windows.py"))
+                or os.path.isdir(os.path.join(candidate, "sd-scripts"))):
+            return candidate
+
+    # 保留已记录的部分安装目录，允许原有安装器继续修复；新安装仍落在当前数据根。
+    if pinned and os.path.isdir(pinned):
+        return pinned
+    if existing_dirs:
+        return existing_dirs[0]
+    return os.path.join(data_dir(), "kohya_ss")
 
 def base_models_dir():
     """默认基础底模存放目录（项目内 models/base，软件不内置底模）。"""
@@ -89,34 +110,6 @@ def _install_data_dir():
     return os.path.abspath(os.path.join(parent, "KohyaLoraTool_data"))
 
 
-def _has_user_data(path):
-    """Check whether a candidate contains user files, ignoring only app settings/markers."""
-    if not path or not os.path.isdir(path):
-        return False
-    pending = [path]
-    root_path = os.path.normcase(os.path.abspath(path))
-    while pending:
-        current = pending.pop()
-        try:
-            with os.scandir(current) as entries:
-                for entry in entries:
-                    if (os.path.normcase(os.path.abspath(current)) == root_path
-                            and entry.name.casefold() == "settings.json"):
-                        continue
-                    if entry.name.casefold() == ".write_test":
-                        continue
-                    try:
-                        if entry.is_file(follow_symlinks=False):
-                            return True
-                        if entry.is_dir(follow_symlinks=False):
-                            pending.append(entry.path)
-                    except OSError:
-                        continue
-        except OSError:
-            continue
-    return False
-
-
 def save_data_setting(dir):
     """保存用户指定的数据目录（保留已有设置项）。返回是否成功。"""
     try:
@@ -132,76 +125,6 @@ def save_data_setting(dir):
         return True
     except Exception:
         return False
-
-
-def inspect_data_dir_startup():
-    """启动界面前检查旧版和当前数据目录；只检查，不复制或删除数据。"""
-    configured = _read_data_setting()
-    appdata = _appdata_data_dir()
-    install = _install_data_dir()
-    if configured:
-        return {
-            "status": "configured", "selected": os.path.abspath(configured),
-            "appdata": appdata, "install": install, "options": [],
-        }
-
-    candidates = []
-    for candidate in (appdata, install):
-        if not candidate:
-            continue
-        normalized = os.path.normcase(os.path.abspath(candidate))
-        if all(os.path.normcase(os.path.abspath(item)) != normalized for item in candidates):
-            candidates.append(candidate)
-    populated = [candidate for candidate in candidates if _has_user_data(candidate)]
-    if len(populated) == 1:
-        return {
-            "status": "adopt", "selected": populated[0],
-            "appdata": appdata, "install": install, "options": populated,
-        }
-    if len(populated) > 1:
-        return {
-            "status": "conflict", "selected": "",
-            "appdata": appdata, "install": install, "options": populated,
-        }
-
-    # No existing user data: preserve the established default for new installs.
-    default = _install_data_dir()
-    if default:
-        default = _follow_install_dir() or appdata
-    else:
-        default = appdata
-    return {
-        "status": "default", "selected": default,
-        "appdata": appdata, "install": install, "options": [],
-    }
-
-
-def resolve_data_dir_startup(choice=None):
-    """启动时接续选定的数据目录，所有文件都留在原位置。"""
-    global _STARTUP_DATA_DIR
-    info = inspect_data_dir_startup()
-    status = info["status"]
-    if status == "configured":
-        _STARTUP_DATA_DIR = info["selected"]
-        return {"ok": True, "status": status, "path": info["selected"], "persisted": True}
-    if status == "conflict":
-        if not choice:
-            return {"ok": False, "status": status, "options": info["options"]}
-        normalized = os.path.normcase(os.path.abspath(choice))
-        selected = next((item for item in info["options"]
-                         if os.path.normcase(os.path.abspath(item)) == normalized), "")
-        if not selected:
-            return {"ok": False, "status": status, "options": info["options"]}
-    else:
-        selected = info["selected"]
-
-    _STARTUP_DATA_DIR = os.path.abspath(selected)
-    # Persist adopted/conflict choices so later app updates keep reading the same root.
-    persisted = status == "default" or save_data_setting(_STARTUP_DATA_DIR)
-    return {
-        "ok": True, "status": status, "path": _STARTUP_DATA_DIR,
-        "persisted": bool(persisted),
-    }
 
 
 def _follow_install_dir():
@@ -227,21 +150,74 @@ def data_dir():
 
     优先级：
     1) 用户设置的数据目录（settings.json 的 data_dir，任意盘）
-    2) 启动时接续的现有数据目录（旧版 AppData 或已有安装目录数据）
-    3) 新打包安装默认 <安装目录同级>/KohyaLoraTool_data
-    4) 源码运行/安装目录不可写时使用 %APPDATA%\\KohyaLoraTool
+    2) 打包版默认 <安装目录同级>/KohyaLoraTool_data（沿用 0.17.x 路径规则）
+    3) 源码运行/安装目录不可写时使用 %APPDATA%\\KohyaLoraTool
 
     output / dataset / logs / tokenizers / cache / anima / kohya_ss 等全部跟随此目录。
     """
     v = _read_data_setting()
     if v:
         return v
-    if _STARTUP_DATA_DIR:
-        return _STARTUP_DATA_DIR
     v = _follow_install_dir()
     if v:
         return v
     return os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "KohyaLoraTool")
+
+
+def _known_data_roots():
+    """Return the selected and legacy data roots, preserving their current on-disk contents."""
+    roots = [data_dir(), _appdata_data_dir(), _install_data_dir()]
+    try:
+        with open(KOHYA_DIR_FILE, "r", encoding="utf-8") as handle:
+            kernel_dir = handle.read().strip().lstrip("\ufeff").strip()
+        if kernel_dir:
+            kernel_dir = os.path.abspath(kernel_dir)
+            if os.path.basename(os.path.normpath(kernel_dir)).casefold() == "kohya_ss":
+                roots.append(os.path.dirname(kernel_dir))
+            elif any(os.path.isdir(os.path.join(kernel_dir, child))
+                     for child in ("kohya_ss", "projects", "dataset")):
+                # Older builds also accepted the data root itself in kohya_dir.txt.
+                roots.append(kernel_dir)
+    except (OSError, UnicodeError):
+        pass
+
+    unique = []
+    seen = set()
+    for root in roots:
+        if not root:
+            continue
+        root = os.path.abspath(root)
+        key = os.path.normcase(root)
+        if key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
+
+
+_DATASET_IMAGE_EXTS = {
+    ".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".webp", ".bmp",
+    ".tif", ".tiff", ".gif", ".avif",
+}
+
+
+def _has_dataset_images(directory):
+    if not directory or not os.path.isdir(directory):
+        return False
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [name for name in dirs if not name.startswith(".")]
+        if any(os.path.splitext(name)[1].lower() in _DATASET_IMAGE_EXTS for name in files):
+            return True
+    return False
+
+
+def _directory_has_files(directory):
+    if not directory or not os.path.isdir(directory):
+        return False
+    for _root, dirs, files in os.walk(directory):
+        dirs[:] = [name for name in dirs if not name.startswith(".")]
+        if files:
+            return True
+    return False
 
 def data_sub(*parts):
     d = os.path.join(data_dir(), *parts)
@@ -265,22 +241,57 @@ def dataset_train_dir(mode="style", project=None):
     proj = _sanitize_dirname(project)
     sub = "train" if mode == "style" else "train_character"
     if proj:
-        return os.path.join(data_dir(), "dataset", proj, sub)
-    return os.path.join(data_dir(), "dataset", sub)
+        current_root = data_dir()
+        current = os.path.join(current_root, "dataset", proj, sub)
+        if not _has_dataset_images(current):
+            for root in _known_data_roots():
+                if os.path.normcase(root) == os.path.normcase(os.path.abspath(current_root)):
+                    continue
+                legacy = os.path.join(root, "dataset", proj, sub)
+                if _has_dataset_images(legacy):
+                    return legacy
+        return current
+    current_root = data_dir()
+    current = os.path.join(current_root, "dataset", sub)
+    if not _has_dataset_images(current):
+        for root in _known_data_roots():
+            if os.path.normcase(root) == os.path.normcase(os.path.abspath(current_root)):
+                continue
+            legacy = os.path.join(root, "dataset", sub)
+            if _has_dataset_images(legacy):
+                return legacy
+    return current
 
 def projects_dir():
     """项目保存目录（数据目录下，随软件重装保留）。"""
     return data_sub("projects")
 
 def _project_path(name):
-    return os.path.join(projects_dir(), (name or "").strip() + ".json")
+    filename = (name or "").strip() + ".json"
+    current = os.path.join(projects_dir(), filename)
+    if os.path.isfile(current):
+        return current
+    current_root = data_dir()
+    for root in _known_data_roots():
+        if os.path.normcase(root) == os.path.normcase(os.path.abspath(current_root)):
+            continue
+        legacy = os.path.join(root, "projects", filename)
+        if os.path.isfile(legacy):
+            return legacy
+    return current
 
 def list_projects():
     """列出所有项目，按修改时间倒序。返回 [{name, updated, mode, base_type, raw_dir, base_model}]。"""
-    d = projects_dir()
     out = []
-    try:
-        for fn in os.listdir(d):
+    seen = set()
+    roots = _known_data_roots()
+    for root in roots:
+        d = os.path.join(root, "projects")
+        try:
+            filenames = os.listdir(d)
+        except OSError:
+            continue
+        for fn in filenames:
             if not fn.lower().endswith(".json"):
                 continue
             fp = os.path.join(d, fn)
@@ -289,16 +300,21 @@ def list_projects():
                     data = json.load(f)
             except Exception:
                 continue
+            if not isinstance(data, dict):
+                continue
+            name = str(data.get("name") or os.path.splitext(fn)[0])
+            key = name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
             out.append({
-                "name": data.get("name") or os.path.splitext(fn)[0],
+                "name": name,
                 "updated": data.get("updated", ""),
                 "mode": data.get("mode", "style"),
                 "base_type": data.get("base_type", "sd15"),
                 "raw_dir": data.get("raw_dir", ""),
                 "base_model": data.get("base_model", ""),
             })
-    except Exception:
-        pass
     out.sort(key=lambda x: x.get("updated", ""), reverse=True)
     return out
 
@@ -352,7 +368,18 @@ def project_data_dir(name):
     可见它就是「一个项目的数据边界」，删除项目时理应一并处理。
     """
     proj = _sanitize_dirname(name)
-    return os.path.join(data_dir(), "dataset", proj) if proj else ""
+    if not proj:
+        return ""
+    current_root = data_dir()
+    current = os.path.join(current_root, "dataset", proj)
+    if not _directory_has_files(current):
+        for root in _known_data_roots():
+            if os.path.normcase(root) == os.path.normcase(os.path.abspath(current_root)):
+                continue
+            legacy = os.path.join(root, "dataset", proj)
+            if _directory_has_files(legacy):
+                return legacy
+    return current
 
 
 def project_output_dir(name):
@@ -362,7 +389,18 @@ def project_output_dir(name):
     （也是删除确认框里一直写「训练产物仍在 output 文件夹」的原因。）
     """
     proj = _sanitize_dirname(name)
-    return os.path.join(data_dir(), "output", proj) if proj else ""
+    if not proj:
+        return ""
+    current_root = data_dir()
+    current = os.path.join(current_root, "output", proj)
+    if not _directory_has_files(current):
+        for root in _known_data_roots():
+            if os.path.normcase(root) == os.path.normcase(os.path.abspath(current_root)):
+                continue
+            legacy = os.path.join(root, "output", proj)
+            if _directory_has_files(legacy):
+                return legacy
+    return current
 
 
 def dir_stats(d):

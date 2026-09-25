@@ -161,45 +161,45 @@ onUnmounted(stopPolling)
 
 <style scoped>
 .assets-backdrop { position: fixed; inset: 0; z-index: 31; display: grid; place-items: center; padding: 18px; background: rgb(10 12 16 / 52%); }
-.assets-dialog { display: flex; width: min(100%, 700px); max-height: min(84vh, 780px); flex-direction: column; padding: 17px; border: 1px solid #41464f; border-radius: 8px; background: #272a32; box-shadow: 0 16px 44px rgb(0 0 0 / 32%); }
+.assets-dialog { display: flex; width: min(100%, 700px); max-height: min(84vh, 780px); flex-direction: column; padding: 17px; border: 1px solid var(--tone-41464f); border-radius: 8px; background: var(--tone-272a32); box-shadow: 0 16px 44px rgb(0 0 0 / 32%); }
 .assets-header { display: flex; justify-content: space-between; gap: 12px; }
-.assets-kicker { color: #858a93; font-size: 10px; }
-.assets-header h2 { margin: 3px 0 0; color: #cbd0d7; font-size: 17px; font-weight: 350; }
-.assets-close { width: 29px; height: 29px; border: 0; border-radius: 5px; color: #999da6; background: transparent; font-size: 22px; cursor: pointer; }
-.assets-close:hover:not(:disabled) { color: #d0d3d9; background: #32363e; }
+.assets-kicker { color: var(--tone-858a93); font-size: 10px; }
+.assets-header h2 { margin: 3px 0 0; color: var(--tone-cbd0d7); font-size: 17px; font-weight: 350; }
+.assets-close { width: 29px; height: 29px; border: 0; border-radius: 5px; color: var(--tone-999da6); background: transparent; font-size: 22px; cursor: pointer; }
+.assets-close:hover:not(:disabled) { color: var(--tone-d0d3d9); background: var(--tone-32363e); }
 .assets-close:disabled { opacity: .45; cursor: wait; }
-.assets-description { margin: 10px 0; color: #9ea4ae; font-size: 11px; line-height: 1.5; }
-.assets-location { display: flex; align-items: center; gap: 7px; min-width: 0; margin-bottom: 8px; color: #9097a2; font-size: 10px; }
+.assets-description { margin: 10px 0; color: var(--tone-9ea4ae); font-size: 11px; line-height: 1.5; }
+.assets-location { display: flex; align-items: center; gap: 7px; min-width: 0; margin-bottom: 8px; color: var(--tone-9097a2); font-size: 10px; }
 .assets-location span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.assets-location button { padding: 4px 7px; border: 1px solid #3a3f48; border-radius: 4px; color: #b9bec7; background: transparent; font-size: 10px; cursor: pointer; }
-.assets-note { margin-bottom: 9px; padding: 7px 9px; border-radius: 4px; color: #9da4ae; background: #22252c; font-size: 10px; line-height: 1.45; }
+.assets-location button { padding: 4px 7px; border: 1px solid var(--tone-3a3f48); border-radius: 4px; color: var(--tone-b9bec7); background: transparent; font-size: 10px; cursor: pointer; }
+.assets-note { margin-bottom: 9px; padding: 7px 9px; border-radius: 4px; color: var(--tone-9da4ae); background: var(--tone-22252c); font-size: 10px; line-height: 1.45; }
 .assets-list { display: grid; gap: 5px; min-height: 0; overflow-y: auto; padding-right: 3px; }
-.asset-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 8px; border: 1px solid #363b44; border-radius: 5px; background: #23262d; }
-.asset-row.present { border-color: #343d38; }
-.asset-row.active { border-color: #586477; }
-.asset-state { color: #8b7274; font-size: 12px; }
-.asset-state.ready { color: #8ca58f; }
+.asset-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 8px; border: 1px solid var(--tone-363b44); border-radius: 5px; background: var(--tone-23262d); }
+.asset-row.present { border-color: var(--tone-343d38); }
+.asset-row.active { border-color: var(--tone-586477); }
+.asset-state { color: var(--tone-8b7274); font-size: 12px; }
+.asset-state.ready { color: var(--tone-8ca58f); }
 .asset-copy { display: grid; flex: 1; min-width: 0; gap: 3px; }
-.asset-copy strong { overflow: hidden; color: #bbc0c9; font-size: 11px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
-.asset-copy span { overflow: hidden; color: #838a95; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-.asset-copy small { color: #a99f83; font-size: 9px; }
-.asset-download, .asset-primary, .asset-secondary { min-width: 66px; min-height: 28px; padding: 0 8px; border: 1px solid #3c424b; border-radius: 4px; color: #b9bec7; background: transparent; font-size: 10px; cursor: pointer; }
-.asset-download:hover:not(:disabled), .asset-secondary:hover { border-color: #575e69; background: #2d3139; }
+.asset-copy strong { overflow: hidden; color: var(--tone-bbc0c9); font-size: 11px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+.asset-copy span { overflow: hidden; color: var(--tone-838a95); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.asset-copy small { color: var(--tone-a99f83); font-size: 9px; }
+.asset-download, .asset-primary, .asset-secondary { min-width: 66px; min-height: 28px; padding: 0 8px; border: 1px solid var(--tone-3c424b); border-radius: 4px; color: var(--tone-b9bec7); background: transparent; font-size: 10px; cursor: pointer; }
+.asset-download:hover:not(:disabled), .asset-secondary:hover { border-color: var(--tone-575e69); background: var(--tone-2d3139); }
 .asset-download:disabled, .asset-primary:disabled { opacity: .48; cursor: wait; }
-.assets-loading { display: flex; align-items: center; gap: 8px; min-height: 90px; color: #999fa9; font-size: 11px; }
-.assets-spinner { width: 12px; height: 12px; border: 1.5px solid #505763; border-top-color: #b3bbc6; border-radius: 50%; animation: spin .8s linear infinite; }
-.assets-error { margin: 8px 0 0; color: #c69da1; font-size: 10px; white-space: pre-line; }
-.download-status { display: flex; justify-content: space-between; gap: 9px; margin-top: 10px; color: #aab2bd; font-size: 10px; }
-.download-status.completed { color: #a8bea9; }
-.download-status.failed, .download-status.cancelled { color: #c6a8aa; }
-.download-track { height: 4px; margin-top: 5px; overflow: hidden; border-radius: 5px; background: #1c1f25; }
-.download-track span { display: block; height: 100%; border-radius: inherit; background: #78869b; transition: width 180ms ease-out; }
+.assets-loading { display: flex; align-items: center; gap: 8px; min-height: 90px; color: var(--tone-999fa9); font-size: 11px; }
+.assets-spinner { width: 12px; height: 12px; border: 1.5px solid var(--tone-505763); border-top-color: var(--tone-b3bbc6); border-radius: 50%; animation: spin .8s linear infinite; }
+.assets-error { margin: 8px 0 0; color: var(--tone-c69da1); font-size: 10px; white-space: pre-line; }
+.download-status { display: flex; justify-content: space-between; gap: 9px; margin-top: 10px; color: var(--tone-aab2bd); font-size: 10px; }
+.download-status.completed { color: var(--tone-a8bea9); }
+.download-status.failed, .download-status.cancelled { color: var(--tone-c6a8aa); }
+.download-track { height: 4px; margin-top: 5px; overflow: hidden; border-radius: 5px; background: var(--tone-1c1f25); }
+.download-track span { display: block; height: 100%; border-radius: inherit; background: var(--tone-78869b); transition: width 180ms ease-out; }
 .download-track span.indeterminate { width: 32%; animation: slide 1.3s ease-in-out infinite alternate; }
-.download-detail { margin: 4px 0 0; color: #838a95; font-size: 9px; }
-.download-log { max-height: 72px; margin: 6px 0 0; padding: 6px; overflow: auto; border: 1px solid #373b44; border-radius: 4px; color: #959ca7; background: #1d2026; font: 9px/1.4 Consolas, sans-serif; white-space: pre-wrap; }
+.download-detail { margin: 4px 0 0; color: var(--tone-838a95); font-size: 9px; }
+.download-log { max-height: 72px; margin: 6px 0 0; padding: 6px; overflow: auto; border: 1px solid var(--tone-373b44); border-radius: 4px; color: var(--tone-959ca7); background: var(--tone-1d2026); font: 9px/1.4 Consolas, sans-serif; white-space: pre-wrap; }
 .assets-footer { display: flex; justify-content: flex-end; gap: 7px; padding-top: 12px; }
-.asset-primary { border-color: transparent; color: #f0f1f3; background: #626f81; }
-.asset-primary:hover:not(:disabled) { background: #6a7789; }
+.asset-primary { border-color: transparent; color: var(--tone-f0f1f3); background: var(--tone-626f81); }
+.asset-primary:hover:not(:disabled) { background: var(--tone-6a7789); }
 .dialog-enter-active, .dialog-leave-active { transition: opacity 140ms ease; }
 .dialog-enter-active .assets-dialog, .dialog-leave-active .assets-dialog { transition: opacity 140ms ease, transform 170ms var(--ease-out); }
 .dialog-enter-from, .dialog-leave-to { opacity: 0; }

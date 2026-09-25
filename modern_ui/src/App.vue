@@ -12,6 +12,7 @@ import ModernTrainingDialog from './components/ModernTrainingDialog.vue'
 import ModelDownloadDialog from './components/ModelDownloadDialog.vue'
 import EnvironmentDialog from './components/EnvironmentDialog.vue'
 import ModernHelpDialog from './components/ModernHelpDialog.vue'
+import AppearanceDialog from './components/AppearanceDialog.vue'
 import {
   loadBootstrap,
   type BootstrapData,
@@ -23,6 +24,7 @@ import {
   type ModeWorkspaceData,
   type GuideStep,
   type TrainingPlan,
+  type AppearanceSettings,
 } from './bridge'
 
 const data = ref<BootstrapData | null>(null)
@@ -61,6 +63,11 @@ const envDialogOpen = ref(false)
 const helpDialogOpen = ref(false)
 const helpDialogKind = ref<'readme' | 'mode'>('mode')
 const helpDialogMode = ref('')
+const appearanceDialogOpen = ref(false)
+const appearanceSaving = ref(false)
+const appearance = ref<AppearanceSettings>({ theme: 'dark', background_path: '', background_opacity: 18 })
+const appearanceImage = ref('')
+const systemPrefersLight = ref(false)
 const nameInput = ref<HTMLInputElement | null>(null)
 const importFileInput = ref<HTMLInputElement | null>(null)
 const importedConfigJson = ref('')
@@ -69,6 +76,15 @@ const importedConfigLabel = ref('')
 let previousFocus: HTMLElement | null = null
 let projectNameSuggestionRequest = 0
 const reservedPreviewProjectNames = new Set<string>()
+let systemThemeQuery: MediaQueryList | null = null
+const updateSystemTheme = (event: MediaQueryListEvent) => { systemPrefersLight.value = event.matches }
+const activeTheme = computed(() => appearance.value.theme === 'system'
+  ? (systemPrefersLight.value ? 'light' : 'dark')
+  : appearance.value.theme)
+const appShellStyle = computed(() => ({
+  '--wallpaper-image': appearanceImage.value ? `url("${appearanceImage.value}")` : 'none',
+  '--wallpaper-opacity': appearanceImage.value ? String(appearance.value.background_opacity / 100) : '0',
+}) as Record<string, string>)
 
 const projects = computed(() => data.value?.projects ?? [])
 const templates = computed(() => data.value?.templates ?? [])
@@ -79,7 +95,7 @@ const topActions = [
   { key: 'data_dir', icon: 'database', label: '数据目录', tip: '打开本机程序数据目录，查看项目配置、模型和缓存文件。' },
   { key: 'queue', icon: 'queue', label: '训练队列', tip: '选择多个项目，按顺序执行数据预处理和训练。' },
 ] as const
-const trainActionLabel = computed(() => workspaceOpen.value ? '一键开始训练' : '打开训练工作区')
+const trainActionLabel = computed(() => workspaceOpen.value ? '一键开始训练' : '打开新版训练页')
 const guideSteps = computed(() => modeWorkspace.value?.guide_steps ?? [])
 const guideLabel = computed(() => workspaceProject.value?.mode_label || modeWorkspace.value?.label || '')
 const selectedGuideMode = computed(() => selectedMode.value === '_kohya'
@@ -130,7 +146,7 @@ function previewProject(mode: string): ProjectCard {
   const template = templates.value.find((item) => item.mode === mode)
   const qwen = mode === 'qwen_image'
   return {
-    name: `${template?.mode_label || mode} 训练页预览`, updated: '', mode,
+    name: `${template?.mode_label || mode} 新版训练页预览`, updated: '', mode,
     mode_label: template?.mode_label || mode,
     base_type: template?.base_type || (qwen ? 'qwen_image' : 'sdxl'),
     base_type_label: qwen ? 'Qwen-Image' : template?.mode_label || mode,
@@ -370,7 +386,7 @@ async function saveDialog() {
         : `[项目] 已新建项目「${name}」（模板：${templateName.value}）`)
       const project = data.value!.projects.find((item) => item.name === name)
       if (project && isModernProject(project)) await openProject(project)
-      else showToast('项目已创建，但该训练模式暂未接入现代工作区。')
+      else showToast('项目已创建，但该训练模式暂未接入新版训练页。')
     }
     dialogOpen.value = false
     showToast(dialogKind.value === 'create' ? `「${name}」已创建` : `项目已改名为「${name}」`)
@@ -453,10 +469,10 @@ async function openProject(project: ProjectCard) {
     selectedMode.value = nextKind === 'kohya' ? '_kohya' : project.mode
     workspaceOpen.value = true
     appendLog(nextKind === 'qwen'
-      ? `[项目] 已在现代工作区打开「${project.name}」的 ${project.mode === 'zimage' ? 'Z-Image' : 'Qwen-Image'} 设置。`
+      ? `[项目] 已在新版训练页打开「${project.name}」的 ${project.mode === 'zimage' ? 'Z-Image' : 'Qwen-Image'} 设置。`
       : nextKind === 'kohya'
-        ? `[项目] 已在现代工作区打开「${project.name}」。`
-        : `[项目] 已在现代工作区打开「${project.name}」的 ${nextDetails?.label} 模式。`)
+        ? `[项目] 已在新版训练页打开「${project.name}」。`
+        : `[项目] 已在新版训练页打开「${project.name}」的 ${nextDetails?.label} 模式。`)
   } catch (error) {
     showToast(error instanceof Error ? `读取项目失败：${error.message}` : '读取项目失败。')
   }
@@ -524,7 +540,7 @@ async function startModernTraining(patch: ProjectConfig) {
   const project = workspaceProject.value
   const api = window.pywebview?.api
   if (!project) return showToast('请先打开一个项目。')
-  if (preview.value || !api) return showToast('训练需要在现代界面的 Windows 桌面版中运行；浏览器预览不会启动本机训练。')
+  if (preview.value || !api) return showToast('训练需要在新版训练页的 Windows 桌面版中运行；浏览器预览不会启动本机训练。')
   if (Object.keys(patch).length && !(await saveKohyaConfig(patch))) return
   try {
     const result = await api.prepare_training(project.name)
@@ -620,7 +636,7 @@ async function onGuideAction(step: GuideStep) {
     if (patch && Object.keys(patch).length) await saveKohyaConfig(patch)
     return
   }
-  showToast(step.tip || '该引导步骤暂未接入现代界面。')
+  showToast(step.tip || '该引导步骤暂未接入新版训练页。')
 }
 
 function openHelp(kind: 'readme' | 'mode', mode = workspaceProject.value?.mode || selectedMode.value) {
@@ -680,6 +696,74 @@ async function runAction(action: string) {
   else if (result.message) showToast(result.message)
 }
 
+async function chooseAppearanceBackground(): Promise<string | null> {
+  const api = window.pywebview?.api
+  if (!api) {
+    showToast('请选择 Windows 桌面版中的图片；浏览器预览不会访问本机文件。')
+    return null
+  }
+  try {
+    const result = await api.choose_path('image')
+    if (!result.ok) showToast(result.error ?? '选择背景图片失败。')
+    return result.ok && result.path ? result.path : null
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : '选择背景图片失败。')
+    return null
+  }
+}
+
+async function saveAppearance(next: AppearanceSettings) {
+  if (appearanceSaving.value) return
+  appearanceSaving.value = true
+  try {
+    if (preview.value || !window.pywebview?.api) {
+      appearance.value = { ...next }
+      appearanceImage.value = ''
+      appearanceDialogOpen.value = false
+      showToast('预览设置已应用；桌面版会保存背景图片。')
+      return
+    }
+    const saved = await window.pywebview.api.set_appearance_settings(
+      next.theme, next.background_path, next.background_opacity,
+    )
+    if (!saved.ok) {
+      showToast(saved.error ?? '外观设置保存失败。')
+      return
+    }
+    appearance.value = saved.settings ?? next
+    appearanceImage.value = ''
+    if (appearance.value.background_path) {
+      const image = await window.pywebview.api.get_appearance_background()
+      if (image.ok && image.data_url) appearanceImage.value = image.data_url
+      else showToast(image.error ?? '背景图片无法读取，已保存主题设置。')
+    }
+    appearanceDialogOpen.value = false
+    appendLog('[外观] 已保存新版训练页显示设置。')
+    if (!appearance.value.background_path) showToast('外观设置已保存。')
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : '外观设置保存失败。')
+  } finally {
+    appearanceSaving.value = false
+  }
+}
+
+async function loadAppearanceSettings() {
+  const api = window.pywebview?.api
+  if (!api) return
+  try {
+    const loaded = await api.get_appearance_settings()
+    if (!loaded.ok || !loaded.settings) return
+    appearance.value = loaded.settings
+    if (appearance.value.background_path) {
+      const image = await api.get_appearance_background()
+      if (image.ok && image.data_url) appearanceImage.value = image.data_url
+      else appendLog(`[外观] 背景图片不可用：${image.error ?? '文件无法读取。'}`)
+    }
+  } catch (error) {
+    appendLog(`[外观] 无法读取显示设置：${error instanceof Error ? error.message : '未知错误'}`)
+  }
+}
+
 async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
   if (!workspaceProject.value) return showToast('请先打开一个项目。')
   if (patch && Object.keys(patch).length && (await saveKohyaConfig(patch)) === false) return
@@ -710,7 +794,7 @@ function chooseMode(mode: string) {
     modeWorkspace.value = demoModeWorkspace(mode === '_kohya' ? selectedGuideMode.value : mode)
     if (mode === '_kohya') {
       workspaceProject.value = projects.value.find(isKohyaProject) ?? {
-        name: '人物 LoRA 训练页预览', updated: '', mode: 'character', mode_label: '人物 LoRA',
+        name: '人物 LoRA 新版训练页预览', updated: '', mode: 'character', mode_label: '人物 LoRA',
         base_type: 'sdxl', base_type_label: 'SDXL 1.0（1024px）', raw_dir: '', base_model: '',
       }
       workspaceConfig.value = previewConfigs.value[workspaceProject.value.name] ?? null
@@ -771,16 +855,24 @@ async function returnWorkspace(patch?: ProjectConfig) {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && appearanceDialogOpen.value) {
+    appearanceDialogOpen.value = false
+    return
+  }
   if (event.key === 'Escape' && dialogOpen.value) dialogOpen.value = false
 }
 
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
+  systemThemeQuery = window.matchMedia('(prefers-color-scheme: light)')
+  systemPrefersLight.value = systemThemeQuery.matches
+  systemThemeQuery.addEventListener('change', updateSystemTheme)
   try {
     const loaded = await loadBootstrap()
     data.value = loaded.data
     preview.value = loaded.preview
     logs.value = [...loaded.data.logs]
+    if (!loaded.preview) await loadAppearanceSettings()
     if (loaded.preview) modeWorkspace.value = demoModeWorkspace('character')
     else await refreshHomeGuide(projects.value.find(isKohyaProject)?.mode || 'character')
   } catch (error) {
@@ -799,16 +891,19 @@ watch(dialogOpen, (isOpen) => {
   }
 })
 
-onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown)
+  systemThemeQuery?.removeEventListener('change', updateSystemTheme)
+})
 </script>
 
 <template>
-  <div class="app-shell">
+  <div class="app-shell" :data-theme="activeTheme" :data-wallpaper="appearanceImage ? 'true' : 'false'" :style="appShellStyle">
     <EngineSidebar
       :groups="data?.engine_groups ?? []"
       :selected-mode="selectedMode"
       :train-label="trainActionLabel"
-      :status-text="projects.length ? '✓ 选择项目后进入训练工作区' : '新建项目后开始配置训练'"
+      :status-text="projects.length ? '✓ 选择项目后进入新版训练页' : '新建项目后开始配置训练'"
       :workspace-active="workspaceOpen"
       :guide-label="guideLabel"
       :guide-steps="guideSteps"
@@ -875,6 +970,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             <button v-for="action in topActions" :key="action.key" class="toolbar-button" type="button" :title="action.tip" @click="runAction(action.key)">
               <UiIcon :name="action.icon" />{{ action.label }}
             </button>
+            <button class="toolbar-button appearance-button" type="button" title="新版训练页外观设置" aria-label="新版训练页外观设置" @click="appearanceDialogOpen = true"><UiIcon name="settings" /></button>
             <button class="toolbar-button new-project" type="button" title="创建新的训练项目；可以从模式模板开始，也可以新建自定义项目。" @click="openCreate()"><UiIcon name="plus" /> 新建项目</button>
           </div>
         </header>
@@ -944,6 +1040,15 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       :steps="guideSteps"
       :details="modeWorkspace"
       @close="helpDialogOpen = false"
+    />
+    <AppearanceDialog
+      :open="appearanceDialogOpen"
+      :settings="appearance"
+      :desktop="!preview"
+      :saving="appearanceSaving"
+      :choose-background="chooseAppearanceBackground"
+      @close="appearanceDialogOpen = false"
+      @save="saveAppearance"
     />
 
     <Transition name="dialog">

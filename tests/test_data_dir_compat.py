@@ -4,12 +4,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kohya_core import paths
-import kohya_gui
 
 
 class DataDirCompatibilityTests(unittest.TestCase):
@@ -26,7 +25,6 @@ class DataDirCompatibilityTests(unittest.TestCase):
             patch.dict(os.environ, {"APPDATA": str(self.appdata)}, clear=False),
             patch.object(paths, "KIT_DIR", str(self.kit_dir)),
             patch.object(sys, "frozen", True, create=True),
-            patch.object(paths, "_STARTUP_DATA_DIR", ""),
         ]
         for item in self._patches:
             item.start()
@@ -42,88 +40,132 @@ class DataDirCompatibilityTests(unittest.TestCase):
         path.write_text('{"name":"legacy"}', encoding="utf-8")
         return path
 
-    def test_adopts_populated_appdata_and_persists_it(self):
-        marker = self._write_data(self.data_root)
+    def test_packaged_app_keeps_the_existing_install_adjacent_data_root(self):
+        # A populated AppData root must not silently replace the established 0.17.x location.
+        self._write_data(self.data_root)
+        self._write_data(self.install_data, "output/current.safetensors")
 
-        result = paths.resolve_data_dir_startup()
-
-        self.assertEqual(result["status"], "adopt")
-        self.assertTrue(result["persisted"])
-        self.assertEqual(Path(paths.data_dir()), self.data_root)
-        self.assertTrue(marker.is_file())
-        settings = json.loads(Path(paths._settings_path()).read_text(encoding="utf-8"))
-        self.assertEqual(settings["data_dir"], str(self.data_root))
-
-    def test_adopts_populated_install_data_when_it_is_the_only_existing_root(self):
-        marker = self._write_data(self.install_data, "output/legacy.safetensors")
-
-        result = paths.resolve_data_dir_startup()
-
-        self.assertEqual(result["status"], "adopt")
         self.assertEqual(Path(paths.data_dir()), self.install_data)
-        self.assertTrue(marker.is_file())
 
-    def test_conflict_requires_a_choice_and_keeps_both_roots(self):
-        appdata_marker = self._write_data(self.data_root)
-        install_marker = self._write_data(self.install_data, "output/current.safetensors")
-
-        unresolved = paths.resolve_data_dir_startup()
-        self.assertFalse(unresolved["ok"])
-        self.assertEqual(unresolved["status"], "conflict")
-        self.assertEqual(len(unresolved["options"]), 2)
-
-        chosen = paths.resolve_data_dir_startup(str(self.data_root))
-
-        self.assertTrue(chosen["ok"])
-        self.assertEqual(Path(paths.data_dir()), self.data_root)
-        self.assertTrue(appdata_marker.is_file())
-        self.assertTrue(install_marker.is_file())
-
-    def test_empty_new_install_uses_adjacent_root_without_migrating_settings(self):
-        # The settings file alone is not treated as user data.
+    def test_empty_packaged_install_uses_adjacent_root_without_persisting_it(self):
         paths._settings_path()
 
-        inspected = paths.inspect_data_dir_startup()
-        result = paths.resolve_data_dir_startup()
-
-        self.assertEqual(inspected["status"], "default")
-        self.assertEqual(Path(result["path"]), self.install_data)
         self.assertEqual(Path(paths.data_dir()), self.install_data)
         settings_path = Path(paths._settings_path())
         if settings_path.is_file():
             self.assertNotIn("data_dir", json.loads(settings_path.read_text(encoding="utf-8")))
 
-    def test_explicit_data_root_wins_even_when_another_root_has_files(self):
+    def test_source_run_uses_appdata_when_install_following_is_unavailable(self):
+        with patch.object(sys, "frozen", False):
+            self.assertEqual(Path(paths.data_dir()), self.data_root)
+
+    def test_explicit_data_root_wins_even_when_install_root_has_files(self):
         custom = self.root / "ChosenData"
         custom.mkdir()
         self._write_data(self.install_data, "projects/other.json")
         self.assertTrue(paths.save_data_setting(str(custom)))
 
-        inspected = paths.inspect_data_dir_startup()
-        result = paths.resolve_data_dir_startup()
-
-        self.assertEqual(inspected["status"], "configured")
-        self.assertEqual(Path(result["path"]), custom)
         self.assertEqual(Path(paths.data_dir()), custom)
 
-    def test_startup_prompt_routes_yes_to_appdata_and_no_to_install(self):
-        appdata = str(self.data_root)
-        install = str(self.install_data)
-        info = {"status": "conflict", "appdata": appdata, "install": install}
+    def test_get_kohya_dir_reuses_kernel_from_other_known_data_root(self):
+        custom = self.root / "ChosenData"
+        custom.mkdir()
+        kernel = self.install_data / "kohya_ss"
+        (kernel / "sd-scripts").mkdir(parents=True)
+        (kernel / "sd-scripts" / "train_network.py").write_text("# installed", encoding="utf-8")
+        pointer = self.root / "Install" / "kohya_dir.txt"
 
-        for answer, expected in ((True, appdata), (False, install)):
-            with self.subTest(answer=answer):
-                root = Mock()
-                with patch.object(kohya_gui.core, "inspect_data_dir_startup", return_value=info), \
-                        patch.object(kohya_gui.core, "resolve_data_dir_startup",
-                                     return_value={"ok": True, "path": expected, "persisted": True}), \
-                        patch.object(kohya_gui.tk, "Tk", return_value=root), \
-                        patch.object(kohya_gui.messagebox, "askyesnocancel", return_value=answer), \
-                        patch.object(kohya_gui.messagebox, "showinfo"):
-                    self.assertTrue(kohya_gui._prepare_data_dir_startup())
-                    kohya_gui.core.resolve_data_dir_startup.assert_called_with(expected)
-                root.destroy.assert_called_once_with()
+        with patch.object(paths, "_read_data_setting", return_value=str(custom)), \
+                patch.object(paths, "KOHYA_DIR_FILE", str(pointer)):
+            self.assertEqual(Path(paths.get_kohya_dir()), kernel)
 
+    def test_get_kohya_dir_keeps_explicit_installed_kernel_precedence(self):
+        custom = self.root / "ChosenData"
+        custom.mkdir()
+        kernel = self.root / "ManualKernel"
+        (kernel / "sd-scripts").mkdir(parents=True)
+        (kernel / "sd-scripts" / "train_network.py").write_text("# installed", encoding="utf-8")
+        pointer = self.root / "Install" / "kohya_dir.txt"
+        pointer.write_text(str(kernel), encoding="utf-8")
+
+        with patch.object(paths, "_read_data_setting", return_value=str(custom)), \
+                patch.object(paths, "KOHYA_DIR_FILE", str(pointer)):
+            self.assertEqual(Path(paths.get_kohya_dir()), kernel)
+
+    def test_project_training_images_fall_back_to_the_existing_legacy_root(self):
+        selected = self.root / "ChosenData"
+        selected.mkdir()
+        current_train = selected / "dataset" / "project-a" / "train_character"
+        current_train.mkdir(parents=True)
+        legacy_train = self.data_root / "dataset" / "project-a" / "train_character"
+        legacy_train.mkdir(parents=True)
+        (legacy_train / "image.jpg").write_bytes(b"image")
+        pointer = self.root / "Install" / "kohya_dir.txt"
+
+        with patch.object(paths, "_read_data_setting", return_value=str(selected)), \
+                patch.object(paths, "KOHYA_DIR_FILE", str(pointer)):
+            self.assertEqual(
+                Path(paths.dataset_train_dir("character", "project-a")), legacy_train,
+            )
+
+    def test_shared_legacy_training_images_remain_available(self):
+        selected = self.root / "ChosenData"
+        selected.mkdir()
+        current_train = selected / "dataset" / "train"
+        current_train.mkdir(parents=True)
+        legacy_train = self.data_root / "dataset" / "train"
+        legacy_train.mkdir(parents=True)
+        (legacy_train / "style.png").write_bytes(b"image")
+        pointer = self.root / "Install" / "kohya_dir.txt"
+
+        with patch.object(paths, "_read_data_setting", return_value=str(selected)), \
+                patch.object(paths, "KOHYA_DIR_FILE", str(pointer)):
+            self.assertEqual(Path(paths.dataset_train_dir("style")), legacy_train)
+
+    def test_project_data_folder_falls_back_to_the_root_with_existing_files(self):
+        selected = self.root / "ChosenData"
+        selected.mkdir()
+        current_project = selected / "dataset" / "project-a"
+        current_project.mkdir(parents=True)
+        legacy_project = self.data_root / "dataset" / "project-a"
+        legacy_project.mkdir(parents=True)
+        (legacy_project / "train_character" / "image.txt").parent.mkdir()
+        (legacy_project / "train_character" / "image.txt").write_text("caption", encoding="utf-8")
+        pointer = self.root / "Install" / "kohya_dir.txt"
+
+        with patch.object(paths, "_read_data_setting", return_value=str(selected)), \
+                patch.object(paths, "KOHYA_DIR_FILE", str(pointer)):
+            self.assertEqual(Path(paths.project_data_dir("project-a")), legacy_project)
+
+    def test_projects_in_an_alternate_known_root_remain_listed_and_edit_in_place(self):
+        selected = self.root / "ChosenData"
+        selected.mkdir()
+        legacy_project = self.data_root / "projects" / "project-a.json"
+        legacy_project.parent.mkdir(parents=True)
+        legacy_project.write_text(
+            json.dumps({"name": "project-a", "mode": "character"}), encoding="utf-8",
+        )
+        pointer = self.root / "Install" / "kohya_dir.txt"
+
+        with patch.object(paths, "_read_data_setting", return_value=str(selected)), \
+                patch.object(paths, "KOHYA_DIR_FILE", str(pointer)):
+            self.assertEqual([p["name"] for p in paths.list_projects()], ["project-a"])
+            self.assertEqual(paths.load_project("project-a")["mode"], "character")
+            self.assertTrue(paths.save_project("project-a", {"mode": "style"}))
+
+        self.assertEqual(json.loads(legacy_project.read_text(encoding="utf-8"))["mode"], "style")
+
+    def test_project_output_falls_back_to_existing_legacy_output(self):
+        selected = self.root / "ChosenData"
+        selected.mkdir()
+        legacy_output = self.data_root / "output" / "project-a"
+        legacy_output.mkdir(parents=True)
+        (legacy_output / "trained.safetensors").write_bytes(b"model")
+        pointer = self.root / "Install" / "kohya_dir.txt"
+
+        with patch.object(paths, "_read_data_setting", return_value=str(selected)), \
+                patch.object(paths, "KOHYA_DIR_FILE", str(pointer)):
+            self.assertEqual(Path(paths.project_output_dir("project-a")), legacy_output)
 
 if __name__ == "__main__":
     unittest.main()

@@ -63,7 +63,7 @@
 
 > ⚠️ 底模路径不要有空格；kohya_ss 会自动装到无空格目录。套件自身路径可含中文/空格（已兼容）。
 
-> 💡 **升级时接续原数据**：启动时会尊重设置中已记录的数据目录。若没有记录，会检查旧版 `%APPDATA%\KohyaLoraTool` 和当前安装目录旁的数据区；只有一处含有用户数据时自动接续该目录，两处都有数据时会让你选择。程序只切换读取位置，不会自动复制、覆盖或删除数据。新安装仍使用打包版默认的数据目录；设置中记录的目录会在后续升级中继续使用。
+> 💡 **升级时接续原数据**：优先使用设置中已记录的数据目录；没有单独设置时，打包版沿用安装目录同级的 `KohyaLoraTool_data`，源码运行使用 `%APPDATA%\KohyaLoraTool`。启动时不会自动在两个目录之间改选。若项目配置、图集、训练产物或内核仍在已知旧目录，程序会按项目查找并复用，不会搬动或删除原文件。
 
 ---
 
@@ -295,7 +295,7 @@ dataset/train_character/
 - **便携版**：`release.py` 生成 `build_exe\dist\KohyaLoraTool_v<版本>_portable.zip`，解压后双击 `Kohya一键工具.exe` 即用
 - **安装包版**：`release.py` 调用 Inno Setup 生成 `build_exe\installer\Setup.exe`，带桌面/开始菜单快捷方式与卸载入口
 - 打包不包含 torch/大模型/用户数据；`models\base`、`configs` 保留在程序目录
-- 新打包安装默认把训练/日志等运行数据写入**安装目录同级的 `KohyaLoraTool_data`**；源码运行默认使用 `%APPDATA%\KohyaLoraTool`。升级时按上方规则接续原有数据目录。
+- 打包版默认把训练/日志等运行数据写入**安装目录同级的 `KohyaLoraTool_data`**；源码运行默认使用 `%APPDATA%\KohyaLoraTool`。升级时按上方规则复用已记录的数据目录和旧项目文件。
 
 ## 11. 常见坑提醒
 

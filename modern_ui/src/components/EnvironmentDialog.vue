@@ -100,25 +100,25 @@ watch(() => props.open, (open) => { if (open) void refresh() })
 
 <style scoped>
 .environment-backdrop { position: fixed; inset: 0; z-index: 32; display: grid; place-items: center; padding: 20px; background: rgb(10 12 16 / 52%); }
-.environment-dialog { width: min(100%, 600px); padding: 18px; border: 1px solid #41464f; border-radius: 8px; background: #272a32; box-shadow: 0 16px 44px rgb(0 0 0 / 32%); }
+.environment-dialog { width: min(100%, 600px); padding: 18px; border: 1px solid var(--tone-41464f); border-radius: 8px; background: var(--tone-272a32); box-shadow: 0 16px 44px rgb(0 0 0 / 32%); }
 .environment-header { display: flex; justify-content: space-between; gap: 12px; }
-.environment-kicker { color: #858a93; font-size: 10px; }
-.environment-header h2 { margin: 3px 0 0; color: #cbd0d7; font-size: 17px; font-weight: 350; }
-.environment-close { width: 29px; height: 29px; border: 0; border-radius: 5px; color: #999da6; background: transparent; font-size: 22px; cursor: pointer; }
-.environment-close:hover { color: #d0d3d9; background: #32363e; }
-.environment-description { margin: 11px 0 14px; color: #9ea4ae; font-size: 11px; line-height: 1.55; }
-.environment-item { display: flex; align-items: center; gap: 10px; min-width: 0; margin-top: 7px; padding: 10px; border: 1px solid #373b44; border-radius: 5px; background: #23262d; }
-.environment-item-icon { display: grid; width: 30px; height: 30px; flex: 0 0 auto; place-items: center; border: 1px solid #3c424b; border-radius: 5px; color: #9ea7b4; }
+.environment-kicker { color: var(--tone-858a93); font-size: 10px; }
+.environment-header h2 { margin: 3px 0 0; color: var(--tone-cbd0d7); font-size: 17px; font-weight: 350; }
+.environment-close { width: 29px; height: 29px; border: 0; border-radius: 5px; color: var(--tone-999da6); background: transparent; font-size: 22px; cursor: pointer; }
+.environment-close:hover { color: var(--tone-d0d3d9); background: var(--tone-32363e); }
+.environment-description { margin: 11px 0 14px; color: var(--tone-9ea4ae); font-size: 11px; line-height: 1.55; }
+.environment-item { display: flex; align-items: center; gap: 10px; min-width: 0; margin-top: 7px; padding: 10px; border: 1px solid var(--tone-373b44); border-radius: 5px; background: var(--tone-23262d); }
+.environment-item-icon { display: grid; width: 30px; height: 30px; flex: 0 0 auto; place-items: center; border: 1px solid var(--tone-3c424b); border-radius: 5px; color: var(--tone-9ea7b4); }
 .environment-copy { display: grid; flex: 1; min-width: 0; gap: 3px; }
-.environment-copy strong { color: #bdc2cb; font-size: 11px; font-weight: 400; }
-.environment-copy span { overflow: hidden; color: #9299a4; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.environment-copy small { color: #777e89; font-size: 9px; }
-.environment-button { min-height: 29px; padding: 0 9px; border: 1px solid #3c424b; border-radius: 4px; color: #b9bec7; background: transparent; font-size: 10px; cursor: pointer; }
-.environment-button:hover:not(:disabled) { border-color: #575e69; background: #2d3139; }
+.environment-copy strong { color: var(--tone-bdc2cb); font-size: 11px; font-weight: 400; }
+.environment-copy span { overflow: hidden; color: var(--tone-9299a4); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.environment-copy small { color: var(--tone-777e89); font-size: 9px; }
+.environment-button { min-height: 29px; padding: 0 9px; border: 1px solid var(--tone-3c424b); border-radius: 4px; color: var(--tone-b9bec7); background: transparent; font-size: 10px; cursor: pointer; }
+.environment-button:hover:not(:disabled) { border-color: var(--tone-575e69); background: var(--tone-2d3139); }
 .environment-button:disabled { opacity: .5; cursor: wait; }
-.environment-button.primary { border-color: transparent; color: #f0f1f3; background: #626f81; }
-.environment-error { margin: 9px 0 0; color: #c69da1; font-size: 10px; white-space: pre-line; }
-.environment-footer { display: flex; justify-content: flex-end; gap: 7px; margin-top: 16px; padding-top: 12px; border-top: 1px solid #373b44; }
+.environment-button.primary { border-color: transparent; color: var(--tone-f0f1f3); background: var(--tone-626f81); }
+.environment-error { margin: 9px 0 0; color: var(--tone-c69da1); font-size: 10px; white-space: pre-line; }
+.environment-footer { display: flex; justify-content: flex-end; gap: 7px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--tone-373b44); }
 .dialog-enter-active, .dialog-leave-active { transition: opacity 140ms ease; }
 .dialog-enter-active .environment-dialog, .dialog-leave-active .environment-dialog { transition: opacity 140ms ease, transform 170ms var(--ease-out); }
 .dialog-enter-from, .dialog-leave-to { opacity: 0; }
