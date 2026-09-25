@@ -10,30 +10,32 @@ from kohya_core import KIT_DIR, KOHYA_DIR_FILE
 
 __all__ = [
     "get_kohya_dir", "base_models_dir", "data_dir", "data_sub", "_sanitize_dirname",
-    "_settings_path", "save_data_setting",
+    "_settings_path", "save_data_setting", "inspect_data_dir_startup",
+    "resolve_data_dir_startup",
     "dataset_train_dir", "projects_dir", "_project_path", "list_projects",
     "load_project", "save_project", "delete_project", "default_project_name",
     "project_data_dir", "project_output_dir", "dir_stats", "delete_project_data",
     "find_orphan_project_dirs", "delete_orphan_project_dirs",
 ]
 
+_STARTUP_DATA_DIR = ""
+
 def get_kohya_dir():
     """定位 kohya_ss 训练内核目录。
 
     优先级：
     1) kohya_dir.txt 记录（最优先，尊重用户/历史选择）
-    2) APPDATA 数据目录下的 KohyaLoraTool 文件夹里的 kohya_ss（新默认：
-       和 dataset/output 放一起，升级/重装软件不删 APPDATA，训练环境直接保留，不用每次重装）
+    2) 当前数据目录下的 kohya_ss（由数据目录选择/升级接续逻辑决定）
     3) 安装目录内 kohya_ss（旧版位置，向后兼容：老用户覆盖升级不重装）
     4) 用户主目录下的 kohya_ss（更早版本的兜底位置）
-    5) 都不存在 -> 返回 APPDATA 数据目录下的 kohya_ss（新装到这里）
+    5) 都不存在 -> 返回当前数据目录下的 kohya_ss
     """
     if os.path.isfile(KOHYA_DIR_FILE):
         with open(KOHYA_DIR_FILE, "r", encoding="utf-8") as f:
             p = f.read().strip().lstrip("\ufeff").strip()
         if p and os.path.isdir(p):
             return p
-    # 新默认：数据目录（升级/重装软件保留，不用重装环境）
+    # 训练环境跟随当前选择的数据目录。
     d = os.path.join(data_dir(), "kohya_ss")
     if os.path.isdir(d):
         return d
@@ -74,6 +76,47 @@ def _read_data_setting():
         return ""
 
 
+def _appdata_data_dir():
+    ap = os.environ.get("APPDATA", os.path.expanduser("~"))
+    return os.path.abspath(os.path.join(ap, "KohyaLoraTool"))
+
+
+def _install_data_dir():
+    """Return the packaged app's adjacent data path without creating it."""
+    if not getattr(sys, "frozen", False):
+        return ""
+    parent = os.path.dirname(os.path.abspath(KIT_DIR))
+    return os.path.abspath(os.path.join(parent, "KohyaLoraTool_data"))
+
+
+def _has_user_data(path):
+    """Check whether a candidate contains user files, ignoring only app settings/markers."""
+    if not path or not os.path.isdir(path):
+        return False
+    pending = [path]
+    root_path = os.path.normcase(os.path.abspath(path))
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if (os.path.normcase(os.path.abspath(current)) == root_path
+                            and entry.name.casefold() == "settings.json"):
+                        continue
+                    if entry.name.casefold() == ".write_test":
+                        continue
+                    try:
+                        if entry.is_file(follow_symlinks=False):
+                            return True
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(entry.path)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return False
+
+
 def save_data_setting(dir):
     """保存用户指定的数据目录（保留已有设置项）。返回是否成功。"""
     try:
@@ -91,9 +134,79 @@ def save_data_setting(dir):
         return False
 
 
+def inspect_data_dir_startup():
+    """启动界面前检查旧版和当前数据目录；只检查，不复制或删除数据。"""
+    configured = _read_data_setting()
+    appdata = _appdata_data_dir()
+    install = _install_data_dir()
+    if configured:
+        return {
+            "status": "configured", "selected": os.path.abspath(configured),
+            "appdata": appdata, "install": install, "options": [],
+        }
+
+    candidates = []
+    for candidate in (appdata, install):
+        if not candidate:
+            continue
+        normalized = os.path.normcase(os.path.abspath(candidate))
+        if all(os.path.normcase(os.path.abspath(item)) != normalized for item in candidates):
+            candidates.append(candidate)
+    populated = [candidate for candidate in candidates if _has_user_data(candidate)]
+    if len(populated) == 1:
+        return {
+            "status": "adopt", "selected": populated[0],
+            "appdata": appdata, "install": install, "options": populated,
+        }
+    if len(populated) > 1:
+        return {
+            "status": "conflict", "selected": "",
+            "appdata": appdata, "install": install, "options": populated,
+        }
+
+    # No existing user data: preserve the established default for new installs.
+    default = _install_data_dir()
+    if default:
+        default = _follow_install_dir() or appdata
+    else:
+        default = appdata
+    return {
+        "status": "default", "selected": default,
+        "appdata": appdata, "install": install, "options": [],
+    }
+
+
+def resolve_data_dir_startup(choice=None):
+    """启动时接续选定的数据目录，所有文件都留在原位置。"""
+    global _STARTUP_DATA_DIR
+    info = inspect_data_dir_startup()
+    status = info["status"]
+    if status == "configured":
+        _STARTUP_DATA_DIR = info["selected"]
+        return {"ok": True, "status": status, "path": info["selected"], "persisted": True}
+    if status == "conflict":
+        if not choice:
+            return {"ok": False, "status": status, "options": info["options"]}
+        normalized = os.path.normcase(os.path.abspath(choice))
+        selected = next((item for item in info["options"]
+                         if os.path.normcase(os.path.abspath(item)) == normalized), "")
+        if not selected:
+            return {"ok": False, "status": status, "options": info["options"]}
+    else:
+        selected = info["selected"]
+
+    _STARTUP_DATA_DIR = os.path.abspath(selected)
+    # Persist adopted/conflict choices so later app updates keep reading the same root.
+    persisted = status == "default" or save_data_setting(_STARTUP_DATA_DIR)
+    return {
+        "ok": True, "status": status, "path": _STARTUP_DATA_DIR,
+        "persisted": bool(persisted),
+    }
+
+
 def _follow_install_dir():
-    """跟随安装位置：安装目录同级放 KohyaLoraTool_data（升级/重装不删）。
-    仅打包运行启用；源码开发环境保持 APPDATA 稳定。无写权限（如 Program Files）返回 None。"""
+    """新打包安装默认在安装目录同级放 KohyaLoraTool_data；源码运行使用 APPDATA。
+    仅打包运行启用；无写权限（如 Program Files）返回 None。"""
     if not getattr(sys, "frozen", False):
         return None
     try:
@@ -114,14 +227,17 @@ def data_dir():
 
     优先级：
     1) 用户设置的数据目录（settings.json 的 data_dir，任意盘）
-    2) 跟随安装位置：打包版默认 <安装目录同级>/KohyaLoraTool_data（装 D 盘数据就在 D 盘）
-    3) %APPDATA%\\KohyaLoraTool（兜底，现状）
+    2) 启动时接续的现有数据目录（旧版 AppData 或已有安装目录数据）
+    3) 新打包安装默认 <安装目录同级>/KohyaLoraTool_data
+    4) 源码运行/安装目录不可写时使用 %APPDATA%\\KohyaLoraTool
 
     output / dataset / logs / tokenizers / cache / anima / kohya_ss 等全部跟随此目录。
     """
     v = _read_data_setting()
     if v:
         return v
+    if _STARTUP_DATA_DIR:
+        return _STARTUP_DATA_DIR
     v = _follow_install_dir()
     if v:
         return v

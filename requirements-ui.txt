@@ -1,0 +1,2 @@
+# Optional runtime for the Windows modern UI preview.
+pywebview==6.2.1

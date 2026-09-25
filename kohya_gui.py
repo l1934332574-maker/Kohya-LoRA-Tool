@@ -144,6 +144,66 @@ def default_resolution(mode, base_type):
         return "1024"
     return str(core.RESOLUTIONS.get(base_type, 512))
 
+
+def _prepare_data_dir_startup():
+    """Keep existing users on their populated data root before showing either UI."""
+    info = core.inspect_data_dir_startup()
+    status = info.get("status")
+    if status == "conflict":
+        appdata = info.get("appdata") or ""
+        install = info.get("install") or ""
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            answer = messagebox.askyesnocancel(
+                "选择训练数据目录",
+                "检测到两个目录都含有项目或训练数据。请选择这次要打开的那一份：\n\n"
+                "是：旧版用户数据（AppData）\n%s\n\n"
+                "否：当前安装目录的数据\n%s\n\n"
+                "取消：退出，不更改数据目录。\n\n"
+                "这里只切换读取位置，不会复制、覆盖或删除任一目录。"
+                % (appdata, install),
+                parent=root,
+            )
+        finally:
+            root.destroy()
+        if answer is None:
+            return False
+        choice = appdata if answer else install
+        resolved = core.resolve_data_dir_startup(choice)
+    else:
+        resolved = core.resolve_data_dir_startup()
+
+    if not resolved.get("ok"):
+        messagebox.showerror(
+            core.APP_NAME,
+            "无法确定训练数据目录。现有数据没有被修改，请检查数据目录设置后重试。",
+        )
+        return False
+
+    if status == "adopt":
+        messagebox.showinfo(
+            "已接续原有数据",
+            "已找到原有训练数据，并将继续使用：\n\n%s\n\n"
+            "项目、图集、输出和训练环境都保留在原位置，没有搬动或删除。"
+            % resolved.get("path", ""),
+        )
+    elif status == "conflict":
+        messagebox.showinfo(
+            "数据目录已选择",
+            "本次将使用：\n\n%s\n\n"
+            "另一目录的数据仍保留原处；之后可在环境设置中切换。"
+            % resolved.get("path", ""),
+        )
+    if not resolved.get("persisted", True):
+        messagebox.showwarning(
+            "数据目录设置未能保存",
+            "本次运行仍会使用：\n%s\n\n"
+            "但下次启动时可能需要重新选择。请检查设置文件的写入权限。"
+            % resolved.get("path", ""),
+        )
+    return True
+
 # 安装包目前未做代码签名（签名证书年费数千元），Windows / 第三方杀软常报
 # "无法识别的应用" 或 "检测到威胁"。这段提示放在「发现新版本」确认框里，
 # 让用户装之前就知道怎么放行，而不是被拦后一头雾水。
@@ -482,7 +542,9 @@ def _export_log_text(log_text, project, env_lines=None):
     return "\n".join(L)
 
 class App:
-    def __init__(self):
+    def __init__(self, initial_project=None, initial_mode=None, initial_action=None, utility_only=False):
+        self._utility_only = bool(utility_only)
+        self._utility_initial_action = initial_action
         self.q = queue.Queue()
         # 完整运行日志（不分行数保留，导出用；界面日志框另有 3000 行显示上限，避免 Tk 内存/GDI 耗尽）
         self._full_log = []
@@ -503,6 +565,7 @@ class App:
         self._sdl_after = None             # 进度轮询 after id
         self.ui_proc = None
         self._label_editor = None
+        self._utility_popup = None
         # ---- 项目化管理状态 ----
         self.current_project = None          # 当前打开的项目名（None=主页）
         self._saving = False                 # 自动保存防递归标志
@@ -581,17 +644,145 @@ class App:
         self._show_home()
         self._bind_autosave_traces()
         # 环境/显卡检测放后台线程预热，界面先秒开，避免启动卡顿
-        self._refresh_status_async()
+        if not self._utility_only:
+            self._refresh_status_async()
         self.root.after(100, self._poll)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        if self._utility_only:
+            self.root.withdraw()
         # 启动 8 秒后后台检查新版本（不阻塞界面，有新版本才提示）
-        try:
-            self.root.after(8000, self._auto_check_update)
-        except Exception:
-            pass
+        if not self._utility_only:
+            try:
+                self.root.after(8000, self._auto_check_update)
+            except Exception:
+                pass
         # 闲时后台预热离线词典（约 1.2s 后开线程，不占主线程）
+        if not self._utility_only:
+            try:
+                self.root.after(1200, self._preload_tag_dict)
+            except Exception:
+                pass
+        if initial_project:
+            self.root.after(160, lambda: self.cmd_open_project(initial_project))
+        elif initial_mode:
+            self.root.after(160, lambda: self._nav_cmd(initial_mode))
+        if initial_action:
+            _action_map = {
+                "tools": self.cmd_open_tools,
+                "check_update": self.cmd_check_update,
+                "data_dir": self.cmd_data_dir,
+                "queue": self.cmd_train_queue,
+                "env_locations": self.cmd_env_locations,
+                "preprocess": self.cmd_preprocess,
+                "train": self.cmd_one_click_train,
+                "label_editor": self.cmd_label_editor,
+                "export_config": self.cmd_export_config,
+                "readme": self.cmd_readme,
+                "at_model_help": self.cmd_at_model_help,
+                "at_engine_update": self.cmd_at_engine_update,
+                "anima_components": lambda: self._show_anima_components(),
+                "krea2_guide": self._show_krea2_guide,
+                "flux2_guide": self._show_flux2_guide,
+                "h3_guide": self._show_h3_guide,
+                "video_caption_stub": self.cmd_gen_h3_captions,
+                "video_caption": self.cmd_video_caption,
+                "amd_env": self.cmd_amd_env,
+            }
+            _callback = _action_map.get(initial_action)
+            if _callback:
+                def _run_initial_action():
+                    if self._utility_only and initial_action == "check_update":
+                        # The update result is asynchronous and is presented with a
+                        # native message box, so keep the hidden Tk owner alive
+                        # until _handle_update_check has finished showing it.
+                        self._utility_wait_for_update_result = True
+                    _callback()
+                    if not self._utility_only:
+                        return
+                    self._finish_utility_only()
+
+                self.root.after(420, _run_initial_action)
+
+    def _find_utility_popup(self):
+        """Find an existing secondary window without changing its implementation."""
+        candidates = [
+            getattr(self, "_utility_popup", None),
+            getattr(getattr(self, "_label_editor", None), "win", None),
+            getattr(getattr(self, "_queue_win", None), "win", None),
+            getattr(self, "_tools_win", None),
+            getattr(self, "_data_dir_win", None),
+            getattr(self, "_at_update_popup", {}).get("window")
+            if isinstance(getattr(self, "_at_update_popup", None), dict) else None,
+        ]
+        for candidate in candidates:
+            try:
+                if candidate is not None and candidate.winfo_exists() and candidate.winfo_ismapped():
+                    return candidate
+            except Exception:
+                pass
+
+        # Most legacy dialogs do not expose a common window handle. Walk the Tk
+        # tree and pick the visible Toplevel created by the requested action.
+        pending = list(self.root.winfo_children())
+        while pending:
+            widget = pending.pop(0)
+            try:
+                if widget is not self.root and widget.winfo_toplevel() is widget and widget.winfo_ismapped():
+                    return widget
+                pending.extend(widget.winfo_children())
+            except Exception:
+                continue
+        return None
+
+    def _finish_utility_only(self):
+        """Keep only the requested legacy popup alive beside the modern host."""
+        if not self._utility_only:
+            return
+        popup = self._find_utility_popup()
+        if popup is not None:
+            if getattr(self, "_utility_bound_popup", None) is popup:
+                return
+            self._utility_popup = popup
+            self._utility_bound_popup = popup
+
+            def _close_utility(event):
+                if event.widget is popup:
+                    try:
+                        self.root.after_idle(self.root.destroy)
+                    except Exception:
+                        pass
+
+            try:
+                popup.bind("<Destroy>", _close_utility, add="+")
+            except Exception:
+                pass
+            return
+
+        if getattr(self, "_utility_wait_for_update_result", False):
+            return
+        if (getattr(self, "busy", False) or getattr(self, "_checking_update", False)
+                or getattr(self, "_updating", False)):
+            if not getattr(self, "_utility_close_poll_pending", False):
+                self._utility_close_poll_pending = True
+
+                def _check_idle():
+                    self._utility_close_poll_pending = False
+                    self._finish_utility_only()
+
+                try:
+                    self.root.after(250, _check_idle)
+                except Exception:
+                    pass
+            return
+        if not getattr(self, "_utility_final_check_done", False):
+            self._utility_final_check_done = True
+            try:
+                self.root.after(120, self._finish_utility_only)
+            except Exception:
+                pass
+            return
         try:
-            self.root.after(1200, self._preload_tag_dict)
+            self.root.after_idle(self.root.destroy)
         except Exception:
             pass
 
@@ -2231,10 +2422,17 @@ class App:
                 "optimizer": params.get("optimizer") or "auto",
                 "strong_bind": bool(params.get("strong_bind", True)),
                 "clean_concept": bool(params.get("clean_concept", True)),
+                "sample_preview": bool(params.get("sample_preview", True)),
+                "compile": bool(params.get("compile")),
                 "crop_ratio": params.get("crop_ratio") or "",
                 "sample_prompt": params.get("sample_prompt") or "",
                 "noise_offset": params.get("noise_offset") or "",
                 "min_snr_gamma": params.get("min_snr_gamma") or "",
+                "quant_mode": params.get("quant_mode") or "auto",
+                "blocks_to_swap": params.get("blocks_to_swap") or "",
+                "wd14_model": params.get("wd14_model") or "swinv2-v3",
+                "overwrite": bool(params.get("overwrite")),
+                "amd_mode": bool(params.get("amd_mode")),
             },
         }
 
@@ -2337,11 +2535,24 @@ class App:
             except Exception:
                 pass
             try:
+                self.overwrite_var.set(bool(p.get("overwrite", False)))
+            except Exception:
+                pass
+            try:
+                self.amd_var.set(bool(p.get("amd_mode", False)))
+            except Exception:
+                pass
+            try:
                 self.compile_var.set(bool(p.get("compile")))
             except Exception:
                 pass
+            if "sample_preview" in p:
+                try:
+                    self.sample_preview_var.set(bool(p.get("sample_preview")))
+                except Exception:
+                    pass
             for k, v in p.items():
-                if k in ("optimizer", "quant_mode", "blocks_to_swap", "compile"):
+                if k in ("optimizer", "quant_mode", "blocks_to_swap", "compile", "sample_preview", "overwrite", "amd_mode", "wd14_model"):
                     continue
                 if k == "strong_bind":
                     try:
@@ -4411,6 +4622,8 @@ class App:
             messagebox.showinfo(core.APP_NAME, "请先打开或新建一个项目，再导出配置。")
             return
         dlg = ctk.CTkToplevel(self.root)
+        if self._utility_only:
+            self._utility_popup = dlg
         dlg.title("导出配置")
         dlg.geometry("480x240")
         dlg.transient(self.root)
@@ -4663,10 +4876,12 @@ class App:
             self._log("[更新] 检查失败（网络或 GitHub 限流），可稍后重试。")
             messagebox.showinfo(core.APP_NAME,
                                 "检查更新失败：无法连接 GitHub（网络或限流问题）。\n可稍后重试，或直接到 GitHub Releases 手动下载。")
+            self._complete_utility_update_check()
             return
         if not info.get("newer"):
             self._log(f"[更新] 已是最新版本 v{core.APP_VERSION}")
             messagebox.showinfo(core.APP_NAME, f"当前已是最新版本 v{core.APP_VERSION} ✅")
+            self._complete_utility_update_check()
             return
         ver = info["version"]
         self._log(f"[更新] 发现新版本 {ver}")
@@ -4677,6 +4892,13 @@ class App:
                 "是否下载并安装？\n（约 445MB，支持断点续传，装完自动重启）\n\n" + UPDATE_AV_HINT):
             self._start_update(info["setup_url"], ver, info.get("setup_url_cn"),
                                info.get("setup_sha256") or "")
+        self._complete_utility_update_check()
+
+    def _complete_utility_update_check(self):
+        if not self._utility_only or not getattr(self, "_utility_wait_for_update_result", False):
+            return
+        self._utility_wait_for_update_result = False
+        self._finish_utility_only()
 
     def _auto_check_update(self):
         """启动后台静默检查：有新版本才提示。"""
@@ -5774,8 +5996,12 @@ class App:
             params = self._collect_params()
             params["project"] = self.current_project or ""
             self._label_editor = LabelEditorWindow(self.root, self, params)
+            if self._utility_only:
+                self._utility_popup = self._label_editor.win
         except Exception as e:
             self._log(f"[ERROR] 打开标签编辑器失败：{e}")
+            if self._utility_only:
+                messagebox.showerror("标签编辑器", "打开标签编辑器失败：\n%s" % e)
             traceback.print_exc()
 
     def cmd_open_flux2_models(self):
@@ -7303,6 +7529,9 @@ class App:
 
             def work():
                 try:
+                    ok_env, env_msg = core.create_python_venv(pv, venv, self._log)
+                    if not ok_env:
+                        raise RuntimeError("AMD 训练环境预检/重建失败：%s" % env_msg)
                     core.install_amd_rocm(venv, self._log, _amd_download_progress, _amd_install_status)
                     core.install_amd_torch(venv, self._log, _amd_download_progress, _amd_install_status)
                     _set_progress_phase("阶段 3/3 · 正在安装训练依赖",
@@ -9554,8 +9783,50 @@ class LabelEditorWindow:
         except Exception:
             pass
 
-def main():
-    app = App()
+def main(argv=None):
+    import argparse
+
+    classic_actions = (
+        "tools", "check_update", "data_dir", "queue", "env_locations",
+        "preprocess", "train", "label_editor", "export_config", "readme",
+        "at_model_help", "at_engine_update", "anima_components",
+        "krea2_guide", "flux2_guide", "h3_guide",
+        "video_caption_stub", "video_caption", "amd_env",
+    )
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--ui", choices=("classic", "next"), default="next")
+    parser.add_argument("--ui-dev", action="store_true",
+                        help="Load the modern UI from the Vite development server")
+    parser.add_argument("--ui-debug", action="store_true",
+                        help="Enable WebView2 devtools for the modern UI")
+    parser.add_argument("--project", default=None,
+                        help="Open a saved project on launch (used by the modern dashboard)")
+    parser.add_argument("--mode", choices=("_kohya", *core.MODE_KEYS), default=None,
+                        help="Select a training mode on launch")
+    parser.add_argument("--action", choices=classic_actions, default=None,
+                        help="Open a classic UI utility on launch")
+    parser.add_argument("--utility-only", action="store_true",
+                        help="Hide the classic workspace and show only the requested popup utility")
+    args, _unknown = parser.parse_known_args(argv)
+
+    if not _prepare_data_dir_startup():
+        return 1
+
+    if args.ui == "next":
+        try:
+            from gui.modern_host import launch
+            return launch(core, dev=args.ui_dev, debug=args.ui_debug,
+                          engine_groups=ENGINE_GROUPS, short_mode_labels=SHORT_MODE_LABELS)
+        except Exception as exc:
+            use_classic = messagebox.askyesno(
+                core.APP_NAME,
+                "现代界面启动失败：\n\n%s\n\n是否改用经典界面？" % exc,
+            )
+            if not use_classic:
+                return 1
+
+    app = App(initial_project=args.project, initial_mode=args.mode,
+              initial_action=args.action, utility_only=args.utility_only)
     app.root.mainloop()
     return 0
 

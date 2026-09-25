@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import subprocess
 import sys
@@ -1560,6 +1561,170 @@ def test_tokenizer_cache(base: Path):
 
     print("TOKENIZER_CACHE_UNIT_TESTS_OK")
 
+def test_anima_tokenizer_local_vocab_and_training_path(base: Path):
+    """Anima tokenizer 接受 vocab+merges，并修到训练器实际读取的 --qwen3 目录。"""
+    model_dir = base / "anima_model" / "Qwen3-0.6B"
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text('{"model_type":"qwen3"}', encoding="utf-8")
+
+    cache_root = base / "data" / "tokenizers"
+    cache = cache_root / "Qwen_Qwen3-0.6B"
+    cache.mkdir(parents=True)
+    (cache / "tokenizer_config.json").write_text('{"tokenizer_class":"Qwen2Tokenizer"}', encoding="utf-8")
+    (cache / "vocab.json").write_text('{"hello":0}', encoding="utf-8")
+    (cache / "merges.txt").write_text("#version: 0.2\n", encoding="utf-8")
+
+    with patch.object(core, "data_sub", side_effect=lambda *parts: str(base / "data" / Path(*parts))):
+        assert core._anima_qwen3_tokenizer_complete(str(cache)) is True
+        assert core._ensure_anima_qwen3_tokenizer(str(model_dir), lambda _line: None) is True
+        assert core._anima_qwen3_tokenizer_complete(str(model_dir)) is True
+        assert (model_dir / "vocab.json").is_file() and (model_dir / "merges.txt").is_file()
+
+    # 通用 auto tokenizer 完整性也承认同一组 vocab+merges，不会再清理后重下。
+    logs = []
+    target = base / "flat_cache" / "Qwen_Qwen3-0.6B"
+    target.mkdir(parents=True)
+    for name, content in (("tokenizer_config.json", '{"tokenizer_class":"Qwen2Tokenizer"}'),
+                          ("vocab.json", '{"hello":0}'), ("merges.txt", "#version: 0.2\n")):
+        (target / name).write_text(content, encoding="utf-8")
+    assert core._ensure_tokenizer_cached(str(target.parent), "Qwen/Qwen3-0.6B", logs.append, "auto") is True
+    assert not any("清理重建" in line for line in logs), logs
+
+    assert ("Qwen/Qwen3-0.6B", "auto") not in core._training_tokenizers(
+        core.ARCH_INFO["anima"], "anima"), "Anima must not rely on a separate, unused tokenizer cache"
+    print("ANIMA_TOKENIZER_LOCAL_AND_TRAINING_PATH_OK")
+
+
+def test_anima_tokenizer_downloads_to_training_path(base: Path):
+    """缺 tokenizer 时先缓存到 app staging，再同步到 --qwen3 实际读取目录。"""
+    model_dir = base / "external" / "Qwen3-0.6B"
+    model_dir.mkdir(parents=True)
+
+    def fake_download(url, dest, logf=print, direct=False, **kwargs):
+        assert direct is True
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        name = Path(dest).name
+        content = {
+            "tokenizer_config.json": '{"tokenizer_class":"Qwen2Tokenizer"}',
+            "tokenizer.json": '{"version":"1.0","model":{"type":"BPE"}}',
+            "special_tokens_map.json": '{"eos_token":"<|endoftext|>"}',
+        }.get(name, "ok")
+        Path(dest).write_text(content, encoding="utf-8")
+        return True
+
+    logs = []
+    with patch.object(core, "data_sub", side_effect=lambda *parts: str(base / "data" / Path(*parts))), \
+         patch.object(core, "_download_with_resume", side_effect=fake_download):
+        assert core._ensure_anima_qwen3_tokenizer(str(model_dir), logs.append) is True
+    assert core._anima_qwen3_tokenizer_complete(str(model_dir)) is True
+    assert (model_dir / "tokenizer_config.json").is_file()
+    assert (model_dir / "tokenizer.json").is_file()
+    assert any("训练器实际读取" in line for line in logs), logs
+    print("ANIMA_TOKENIZER_DOWNLOAD_TRAINING_PATH_OK")
+
+
+def test_anima_base_model_guard(base: Path):
+    """Qwen3-0.6B 文本编码器作为 Anima 底模时必须在训练启动前明确拦截。"""
+    qwen = base / "models" / "Qwen3-0.6B.safetensors"
+    qwen.parent.mkdir(parents=True, exist_ok=True)
+    qwen.write_bytes(b"fixture")
+    try:
+        core.train(base_model=str(qwen), params={"base_type": "anima"})
+        raise AssertionError("Qwen3 encoder must not be accepted as an Anima base model")
+    except RuntimeError as e:
+        assert "文本编码器" in str(e) and "anima-base-v1.0.safetensors" in str(e), str(e)
+    core._guard_anima_base_model("sdxl", str(qwen))
+    core._guard_anima_base_model("anima", str(base / "anima-base-v1.0.safetensors"))
+    print("ANIMA_BASE_MODEL_GUARD_OK")
+
+
+def test_amd_distributed_patch_preserves_sitecustomize(base: Path):
+    """AMD distributed shim 应幂等追加，并保留环境已有的 sitecustomize 内容。"""
+    venv = base / "amd_dist" / "venv_amd"
+    sp = venv / "Lib" / "site-packages"
+    sp.mkdir(parents=True)
+    fake_python(venv / "Scripts" / "python.exe")
+    site = sp / "sitecustomize.py"
+    site.write_text("# existing user hook\nVALUE = 1\n", encoding="utf-8")
+    logs = []
+    def _probe(cmd, **kwargs):
+        compile(cmd[-1], "<amd-distributed-probe>", "exec")
+        return result(0, "KOHYA_DIST_BAD\nKOHYA_DTENSOR_BAD\n")
+    with patch.object(core.subprocess, "run", side_effect=_probe):
+        assert core._ensure_amd_distributed_compat(str(venv / "Scripts" / "python.exe"), logs.append) is True
+    first = site.read_text(encoding="utf-8")
+    assert "# existing user hook" in first and "VALUE = 1" in first
+    assert "KohyaLoRA AMD distributed compatibility patch v1" in first
+    with patch.object(core.subprocess, "run", side_effect=_probe):
+        assert core._ensure_amd_distributed_compat(str(venv / "Scripts" / "python.exe"), logs.append) is True
+    assert site.read_text(encoding="utf-8") == first
+    print("AMD_DISTRIBUTED_PATCH_PRESERVES_CUSTOM_SITE_OK")
+
+
+def test_amd_distributed_probe_and_complete_run_fallback(base: Path):
+    """DTensor-only gaps get patched; only a complete run with a fresh valid LoRA is rescued."""
+    venv = base / "amd_dtensor" / "venv_amd"
+    sp = venv / "Lib" / "site-packages"
+    sp.mkdir(parents=True)
+    fake_python(venv / "Scripts" / "python.exe")
+    logs = []
+
+    def _dtensor_missing(cmd, **kwargs):
+        compile(cmd[-1], "<amd-distributed-probe>", "exec")
+        return result(0, "KOHYA_DIST_OK\nKOHYA_DTENSOR_BAD\n")
+    with patch.object(core.subprocess, "run", side_effect=_dtensor_missing):
+        assert core._ensure_amd_distributed_compat(str(venv / "Scripts" / "python.exe"), logs.append) is True
+    assert "KohyaLoRA AMD distributed compatibility patch v1" in (sp / "sitecustomize.py").read_text(encoding="utf-8")
+
+    model = base / "fresh-lora.safetensors"
+    header = json.dumps({"lora.weight": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}},
+                        separators=(",", ":")).encode("utf-8")
+    header += b" " * ((8 - len(header) % 8) % 8)
+    model.write_bytes(len(header).to_bytes(8, "little") + header + bytes(4))
+    complete_log = ["steps: 100%|██████████| 648/648 [10:00<00:00, 1.08it/s, avr_loss=0.00977]"]
+    with patch.object(core, "_file_signature", return_value=(100, 2, 2)):
+        assert core._amd_run_saved_complete_model(complete_log, str(model), None) is True
+    with patch.object(core, "_file_signature", return_value=(100, 1, 1)):
+        assert core._amd_run_saved_complete_model(complete_log, str(model), (100, 1, 1)) is False
+    with patch.object(core, "_file_signature", return_value=(100, 2, 2)):
+        assert core._amd_run_saved_complete_model(["steps: 99%|█████████▉| 647/648, avr_loss=0.00977"],
+                                                  str(model), None) is False
+    with patch.object(core, "_file_signature", return_value=(100, 2, 2)):
+        assert core._amd_run_saved_complete_model(["steps: 100%|██████████| 648/648"],
+                                                  str(model), None) is False
+    with patch.object(core, "_file_signature", return_value=(100, 2, 2)):
+        assert core._amd_run_saved_complete_model(
+            ["steps: 100%|██████████| 648/648, avr_loss=nan"], str(model), None) is False
+    model.write_bytes(b"truncated")
+    with patch.object(core, "_file_signature", return_value=(9, 2, 2)):
+        assert core._amd_run_saved_complete_model(complete_log, str(model), None) is False
+    print("AMD_DTENSOR_PROBE_AND_COMPLETE_RUN_FALLBACK_OK")
+
+
+def test_amd_distributed_patch_does_not_overwrite_unreadable_sitecustomize(base: Path):
+    """An unreadable pre-existing sitecustomize is left byte-for-byte intact."""
+    import builtins
+    venv = base / "amd_unreadable" / "venv_amd"
+    sp = venv / "Lib" / "site-packages"
+    sp.mkdir(parents=True)
+    fake_python(venv / "Scripts" / "python.exe")
+    site = sp / "sitecustomize.py"
+    site.write_text("# preserve this hook\n", encoding="utf-8")
+    original = site.read_bytes()
+    real_open = builtins.open
+
+    def _open(path, mode="r", *args, **kwargs):
+        if os.fspath(path) == str(site) and "r" in mode:
+            raise PermissionError("fixture: unreadable")
+        return real_open(path, mode, *args, **kwargs)
+
+    with patch.object(core.subprocess, "run", return_value=result(0, "KOHYA_DIST_BAD\nKOHYA_DTENSOR_BAD\n")), \
+         patch("builtins.open", side_effect=_open):
+        assert core._ensure_amd_distributed_compat(str(venv / "Scripts" / "python.exe"), lambda _line: None) is False
+    assert site.read_bytes() == original
+    print("AMD_UNREADABLE_SITECUSTOMIZE_PRESERVED_OK")
+
+
 def test_external_python_safe_cwd(base: Path):
     """_external_python_safe_cwd：当前 cwd 含 python312.dll（打包版应用目录）时必须切走，
     避免 Windows DLL 搜索命中打包版 DLL 导致 venv 的 _ctypes/numpy 崩溃。"""
@@ -1627,13 +1792,14 @@ def test_amd_download_progress(base: Path):
 
     patches = (
         patch.object(core, "data_dir", return_value=str(base / "data")),
+        patch.object(core, "_require_healthy_amd_venv", return_value="fake-venv/Scripts/python.exe"),
         patch.object(core, "AMD_ROC_WHEELS", rocm_urls),
         patch.object(core, "_amd_torch_wheels", return_value=torch_urls),
         patch.object(core, "_wheel_valid", return_value=False),
         patch.object(core, "_download_with_resume", side_effect=fake_download),
         patch.object(core, "run_pip_in_venv", return_value=0),
     )
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
         core.install_amd_rocm("fake-venv", logs.append, progress)
         core.install_amd_torch("fake-venv", logs.append, progress)
     assert events[0][:2] == ("ROCm", "rocm_a-1.0-py3-none-win_amd64.whl"), events
@@ -1654,13 +1820,15 @@ def test_amd_torch_verification(base: Path):
         "GPU_AVAILABLE=True\n"
         "GPU_NAME=AMD Radeon RX 7900 XTX\n"
     ))
-    with patch.object(core.subprocess, "run", return_value=ok_result):
+    with patch.object(core, "_venv_python_ok", return_value=(True, "3.12")), \
+         patch.object(core.subprocess, "run", return_value=ok_result):
         ok, info, avail = core.verify_amd_torch(str(venv))
     assert ok and avail, (ok, info, avail)
     assert "2.9.1+rocm7.2.1" in info and "HIP 7.2.1" in info, info
 
     import_error = result(1, "", "OSError: [WinError 126] 找不到指定的模块。\nError loading amdhip64_7.dll")
-    with patch.object(core.subprocess, "run", return_value=import_error):
+    with patch.object(core, "_venv_python_ok", return_value=(True, "3.12")), \
+         patch.object(core.subprocess, "run", return_value=import_error):
         ok, info, avail = core.verify_amd_torch(str(venv))
     assert not ok and not avail, (ok, info, avail)
     assert "amdhip64_7.dll" in info and info != "?", info
@@ -1672,12 +1840,53 @@ def test_amd_torch_verification(base: Path):
         "GPU_AVAILABLE=False\n"
         "GPU_NAME=\n"
     ))
-    with patch.object(core.subprocess, "run", return_value=cpu_result):
+    with patch.object(core, "_venv_python_ok", return_value=(True, "3.12")), \
+         patch.object(core.subprocess, "run", return_value=cpu_result):
         ok, info, avail = core.verify_amd_torch(str(venv))
     assert not ok and not avail, (ok, info, avail)
     assert "GPU 不可用" in info and "HIP 7.2.1" in info, info
 
     print("AMD_TORCH_VERIFICATION_UNIT_TEST_OK")
+
+
+def test_amd_venv_rebuild_and_preflight(base: Path):
+    """跨用户搬运的 AMD venv 会改名保留并重建；安装步骤拒绝直接写坏环境。"""
+    venv = base / "amd_rebuild" / "venv_amd"
+    fake_python(venv / "Scripts" / "python.exe")
+    (venv / "pyvenv.cfg").write_text("home = C:\\Users\\former-user\\Python312\n", encoding="utf-8")
+    (venv / "old-user-marker.txt").write_text("preserve", encoding="utf-8")
+    calls = {"health": 0, "created": False}
+
+    def health(_vpy):
+        calls["health"] += 1
+        return (False, "venv 指向的 Python 已不存在") if calls["health"] == 1 else (True, "3.12")
+
+    def create(cmd, *args, **kwargs):
+        cmd = [str(x) for x in cmd]
+        assert cmd[:3] == ["py", "-3.12", "-m"] and cmd[3] == "venv", cmd
+        target = Path(cmd[4])
+        fake_python(target / "Scripts" / "python.exe")
+        (target / "pyvenv.cfg").write_text("home = C:\\Python312\n", encoding="utf-8")
+        calls["created"] = True
+        return result(0)
+
+    with patch.object(core, "_venv_python_ok", side_effect=health), \
+         patch.object(core, "_ensure_venv_pip", return_value=True), \
+         patch.object(core, "custom_python_exe", return_value=None), \
+         patch.object(core.subprocess, "run", side_effect=create):
+        ok, msg = core.create_python_venv("3.12", str(venv), lambda _line: None)
+    assert ok and calls["created"], (ok, msg, calls)
+    assert (venv / "Scripts" / "python.exe").is_file()
+    backups = list(venv.parent.glob("venv_amd_broken_*"))
+    assert len(backups) == 1 and (backups[0] / "old-user-marker.txt").read_text() == "preserve", backups
+
+    with patch.object(core, "_venv_python_ok", return_value=(False, "No Python at old path")):
+        try:
+            core.install_amd_rocm(str(venv), lambda _line: None)
+            raise AssertionError("AMD package install should reject a damaged venv before downloading")
+        except RuntimeError as e:
+            assert "自动创建训练环境" in str(e) and "已损坏" in str(e), str(e)
+    print("AMD_VENV_REBUILD_AND_PREFLIGHT_OK")
 
 def test_accelerate_module_launcher(base: Path):
     """训练启动器必须使用当前 venv 的 Python 模块，而不是系统 accelerate.exe。"""
@@ -4293,6 +4502,12 @@ def main():
         test_preinstall_torch_mirror_fallback(base)
         test_preinstall_torch_force_reinstall_on_import_failure(base)
         test_tokenizer_cache(base)
+        test_anima_tokenizer_local_vocab_and_training_path(base)
+        test_anima_tokenizer_downloads_to_training_path(base)
+        test_anima_base_model_guard(base)
+        test_amd_distributed_patch_preserves_sitecustomize(base)
+        test_amd_distributed_probe_and_complete_run_fallback(base)
+        test_amd_distributed_patch_does_not_overwrite_unreadable_sitecustomize(base)
         test_preprocess_auto_retry(base)
         test_preprocess_crop_ratio(base)
         test_preprocess_mode_mapping(base)
@@ -4308,6 +4523,7 @@ def main():
         test_external_python_safe_cwd(base)
         test_amd_download_progress(base)
         test_amd_torch_verification(base)
+        test_amd_venv_rebuild_and_preflight(base)
         test_accelerate_module_launcher(base)
         test_main_engine_accel_always_defined(base)
         test_quant_mode_resolution(base)

@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+modern_ui/node_modules/
+modern_ui/.vite/
 
 # 生成/运行数据（不要提交到 GitHub）
 dataset/
@@ -22,6 +24,7 @@ build_exe/dist*/
 build_exe/*_bak*/
 build_exe/installer/*
 !build_exe/installer/installer.iss
+build_exe/beta-*/
 build/
 dist/
 *.spec.bak

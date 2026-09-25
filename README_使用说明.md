@@ -28,7 +28,7 @@
 | `wd14_tagger_model/` | **内置 WD14 打标模型**（人物模式自动打标，开箱即用、自动走 GPU） |
 | `LICENSE` / `THIRD_PARTY_NOTICES.md` | MIT 许可 + 第三方开源声明 |
 
-> 运行数据（dataset / output / logs / tokenizers）自动写入 `%APPDATA%\KohyaLoraTool\`，程序目录只保留只读资源（models/base、configs）。
+> 运行数据写入当前选定的数据目录。打包版新安装默认放在安装目录同级的 `KohyaLoraTool_data`；源码运行默认使用 `%APPDATA%\KohyaLoraTool`。
 
 ---
 
@@ -38,9 +38,9 @@
 - 每个项目自动保存一套完整配置：训练模式（画风/人物）、底模、图片文件夹、触发词、正则图、全部高级参数、全局提示词。
 - 新建项目时可选预设模板：**动漫画风 / 写实人物 / SD1.5 动漫 / 自定义**。
 - 项目配置**自动保存**（改参数/换路径即存），下次打开软件点项目卡片直接恢复，不用重填。
-- 项目文件存 `%APPDATA%\KohyaLoraTool\projects\`，随软件重装保留。
-- 训练产物按项目分组输出到 `%APPDATA%\KohyaLoraTool\output\<项目名>\`。
-- **数据集按项目隔离**：每个项目有自己的数据集目录 `%APPDATA%\KohyaLoraTool\dataset\<项目名>\train_character`（人物）或 `train`（画风），预处理、标签编辑器、训练都只读当前项目的数据，**不同项目之间互不混用**。打开旧项目时若检测到旧版共享数据集，会询问是否一次性导入到当前项目。
+- 项目文件存于 `<数据目录>\projects\`，随软件重装保留。
+- 训练产物按项目分组输出到 `<数据目录>\output\<项目名>\`。
+- **数据集按项目隔离**：每个项目有自己的数据集目录 `<数据目录>\dataset\<项目名>\train_character`（人物）或 `train`（画风），预处理、标签编辑器、训练都只读当前项目的数据，**不同项目之间互不混用**。打开旧项目时若检测到旧版共享数据集，会询问是否一次性导入到当前项目。
 
 ---
 
@@ -63,7 +63,7 @@
 
 > ⚠️ 底模路径不要有空格；kohya_ss 会自动装到无空格目录。套件自身路径可含中文/空格（已兼容）。
 
-> 💡 **升级/重装软件不丢环境**：kohya_ss 训练内核（venv + 依赖）和训练数据（dataset/output/logs）一样，默认存放在 `%APPDATA%\KohyaLoraTool\` 数据目录。以后更新软件时**直接覆盖安装即可，不用删旧目录、不用重装 kohya 环境**（省 10~30 分钟）。只有第一次使用需要安装环境。
+> 💡 **升级时接续原数据**：启动时会尊重设置中已记录的数据目录。若没有记录，会检查旧版 `%APPDATA%\KohyaLoraTool` 和当前安装目录旁的数据区；只有一处含有用户数据时自动接续该目录，两处都有数据时会让你选择。程序只切换读取位置，不会自动复制、覆盖或删除数据。新安装仍使用打包版默认的数据目录；设置中记录的目录会在后续升级中继续使用。
 
 ---
 
@@ -295,7 +295,7 @@ dataset/train_character/
 - **便携版**：`release.py` 生成 `build_exe\dist\KohyaLoraTool_v<版本>_portable.zip`，解压后双击 `Kohya一键工具.exe` 即用
 - **安装包版**：`release.py` 调用 Inno Setup 生成 `build_exe\installer\Setup.exe`，带桌面/开始菜单快捷方式与卸载入口
 - 打包不包含 torch/大模型/用户数据；`models\base`、`configs` 保留在程序目录
-- 训练/日志等运行数据默认写入**安装目录同级的数据目录**（打包安装版为 `KohyaLoraTool_data`；绿色/老版本为 `%APPDATA%\KohyaLoraTool`）
+- 新打包安装默认把训练/日志等运行数据写入**安装目录同级的 `KohyaLoraTool_data`**；源码运行默认使用 `%APPDATA%\KohyaLoraTool`。升级时按上方规则接续原有数据目录。
 
 ## 11. 常见坑提醒
 
