@@ -22,9 +22,10 @@ DisableProgramGroupPage=yes
 DisableDirPage=no
 ; 自动覆盖升级：记住上次安装目录，第二次装默认还是那个目录（同目录=覆盖旧文件）
 UsePreviousAppDir=yes
-; 安装前自动关闭正在运行的软件，避免 exe 被占用导致覆盖失败
+; 安装前自动关闭所有占用程序文件的实例；应用内更新会明确传入 /CLOSEAPPLICATIONS
 CloseApplications=yes
-RestartApplications=yes
+; 升级完成后保持退出，由用户手动启动，避免“更新后又自动打开”
+RestartApplications=no
 PrivilegesRequired=lowest
 OutputDir=.
 OutputBaseFilename=Setup

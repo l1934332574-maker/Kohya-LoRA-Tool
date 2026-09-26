@@ -105,8 +105,11 @@ export interface DesktopApi {
     component_opacity?: number,
     idle_fade_enabled?: boolean,
     background_history?: string[],
+    background_source_path?: string,
+    background_data_url?: string,
   ): Promise<{ ok: boolean; settings?: AppearanceSettings; error?: string }>
   get_appearance_background(): Promise<{ ok: boolean; data_url?: string; error?: string }>
+  get_appearance_image_preview(path: string, thumbnail?: boolean): Promise<{ ok: boolean; data_url?: string; error?: string }>
   get_qwen_model_setup(mode?: 'qwen_image' | 'zimage'): Promise<QwenModelSetup>
   save_qwen_model_setup(selection: QwenModelSelection): Promise<QwenModelSetup>
   prepare_training(project_name: string): Promise<{ ok: boolean; error?: string; plan?: TrainingPlan }>
@@ -129,11 +132,13 @@ export interface DesktopApi {
 export interface AppearanceSettings {
   theme: 'dark' | 'light' | 'system'
   background_path: string
+  background_source_path: string
   background_opacity: number
   background_available: boolean
   background_history: AppearanceBackgroundHistoryEntry[]
   component_opacity: number
   idle_fade_enabled: boolean
+  background_data_url?: string
 }
 
 export interface AppearanceBackgroundHistoryEntry {

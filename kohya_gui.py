@@ -163,6 +163,48 @@ def _schedule_initial_project_action(root, open_project, action_callback,
 
     return root.after(delay, _open_project_then_action)
 
+
+def _resolve_label_editor_project(current_project, utility_only=False,
+                                  expected_project=None):
+    """Resolve the dataset scope for the label editor.
+
+    The classic workspace may still edit the historical shared dataset when no
+    project is open. A popup launched for the modern workspace must stay bound
+    to the project named on its command line and must never silently fall back
+    to that shared dataset.
+    """
+    current = str(current_project or "").strip()
+    if not utility_only:
+        return current
+
+    expected = str(expected_project or "").strip()
+    if not expected:
+        raise ValueError("标签编辑器没有关联到项目，已停止打开以避免误用共享数据集。")
+    if current != expected:
+        raise ValueError("当前项目与请求的项目不一致，已停止打开标签编辑器。")
+    return expected
+
+
+def _run_mainloop_and_destroy(root):
+    """Run Tk until it quits, then destroy the root after callbacks unwind."""
+    try:
+        root.mainloop()
+    finally:
+        try:
+            exists = bool(root.winfo_exists())
+        except tk.TclError:
+            # An existing updater path may destroy the Tk interpreter in-loop.
+            exists = False
+        except AttributeError:
+            # Small test doubles may not implement Tk's existence query.
+            exists = True
+        if exists:
+            try:
+                root.destroy()
+            except tk.TclError:
+                # WM_DELETE_WINDOW may already have destroyed the classic root.
+                pass
+
 # 安装包目前未做代码签名（签名证书年费数千元），Windows / 第三方杀软常报
 # "无法识别的应用" 或 "检测到威胁"。这段提示放在「发现新版本」确认框里，
 # 让用户装之前就知道怎么放行，而不是被拦后一头雾水。
@@ -174,6 +216,18 @@ UPDATE_AV_HINT = (
     "  · 360 / 火绒 → 把安装目录加进信任区\n"
     "  万一被拦截，本软件不会退出，会保留当前版本并告诉你怎么办。"
 )
+
+# Inno Setup: close every running instance that holds files being replaced,
+# and do not let Restart Manager relaunch the application after the upgrade.
+UPDATE_INSTALLER_FLAGS = (
+    "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+    "/CLOSEAPPLICATIONS", "/NORESTARTAPPLICATIONS",
+)
+
+
+def _update_installer_command(setup_path):
+    """Build the silent in-place upgrade command with explicit app shutdown policy."""
+    return [setup_path, *UPDATE_INSTALLER_FLAGS]
 
 
 def _sha256_file(path):
@@ -504,6 +558,7 @@ class App:
     def __init__(self, initial_project=None, initial_mode=None, initial_action=None, utility_only=False):
         self._utility_only = bool(utility_only)
         self._utility_initial_action = initial_action
+        self._utility_project_name = str(initial_project or "").strip()
         self.q = queue.Queue()
         # 完整运行日志（不分行数保留，导出用；界面日志框另有 3000 行显示上限，避免 Tk 内存/GDI 耗尽）
         self._full_log = []
@@ -724,7 +779,7 @@ class App:
             def _close_utility(event):
                 if event.widget is popup:
                     try:
-                        self.root.after_idle(self.root.destroy)
+                        self.root.after_idle(self.root.quit)
                     except Exception:
                         pass
 
@@ -758,7 +813,7 @@ class App:
                 pass
             return
         try:
-            self.root.after_idle(self.root.destroy)
+            self.root.after_idle(self.root.quit)
         except Exception:
             pass
 
@@ -4865,7 +4920,7 @@ class App:
                 core.APP_NAME,
                 f"发现新版本 {ver}（当前 v{core.APP_VERSION}）\n\n"
                 f"{(info.get('notes') or '').strip()[:180]}\n\n"
-                "是否下载并安装？\n（约 445MB，支持断点续传，装完自动重启）\n\n" + UPDATE_AV_HINT):
+                "是否下载并安装？\n（约 445MB，支持断点续传；安装期间会退出程序，完成后请手动重新打开）\n\n" + UPDATE_AV_HINT):
             self._start_update(info["setup_url"], ver, info.get("setup_url_cn"),
                                info.get("setup_sha256") or "")
         self._complete_utility_update_check()
@@ -4904,7 +4959,7 @@ class App:
                 core.APP_NAME,
                 f"发现新版本 {ver}（当前 v{core.APP_VERSION}）\n\n"
                 f"{(info.get('notes') or '').strip()[:180]}\n\n"
-                "是否下载并安装？\n（约 445MB，支持断点续传，装完自动重启）\n\n" + UPDATE_AV_HINT):
+                "是否下载并安装？\n（约 445MB，支持断点续传；安装期间会退出程序，完成后请手动重新打开）\n\n" + UPDATE_AV_HINT):
             self._start_update(info["setup_url"], ver, info.get("setup_url_cn"),
                                info.get("setup_sha256") or "")
 
@@ -4923,7 +4978,7 @@ class App:
         self._set_busy(True)
         self._upd_ver = ver
         self._upd_sha = (sha256 or "").strip().lower()   # 官方公布的 SHA256（可能为空）
-        self._log(f"[更新] 开始下载 {ver}（约 445MB，断点续传，完成自动重启）…")
+        self._log(f"[更新] 开始下载 {ver}（约 445MB，断点续传；完成后需手动重新打开）…")
         self._log(f"[更新] 下载源：{'国内魔搭镜像' if (url_cn or '').strip() else 'GitHub 兜底'}")
         def work():
             ok = False
@@ -5003,9 +5058,9 @@ class App:
                 "通常是下载中断或网络被劫持导致文件损坏。\n"
                 "请重试；若反复出现，请到 GitHub Releases 或魔搭手动下载安装包。")
             return
-        self._log(f"[更新] 下载完成，正在安装 {ver} …（装完自动重启）")
+        self._log(f"[更新] 下载完成，正在安装 {ver} …（安装将关闭程序，完成后请手动重新打开）")
         try:
-            proc = subprocess.Popen([dest, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+            proc = subprocess.Popen(_update_installer_command(dest))
         except Exception as e:
             self._log(f"[更新] 启动安装失败：{e}")
             self._update_blocked_help(dest, "启动安装器失败：%s" % e)
@@ -5022,7 +5077,9 @@ class App:
         except Exception:
             rc = None
         if rc is None:
-            # 仍在运行 = 正常安装中，此时才能安全退出，让安装器覆盖文件
+            # 仍在运行 = 正常安装中。Inno 的 Restart Manager 会先关闭所有占用
+            # 安装文件的实例（包括新版训练页宿主），命令行已禁止安装后重启它们。
+            # 此处再关闭本次启动的隐藏经典工具窗口。
             self._log("[更新] 安装器已启动，退出当前程序以完成覆盖安装…")
             try:
                 self.root.destroy()
@@ -5956,6 +6013,11 @@ class App:
     def cmd_label_editor(self):
         """打开标签编辑器（浏览/修改/批量操作/统计/整理数据集）。"""
         try:
+            project = _resolve_label_editor_project(
+                self.current_project,
+                utility_only=self._utility_only,
+                expected_project=getattr(self, "_utility_project_name", None),
+            )
             if self._collect_params().get("mode") == "video":
                 messagebox.showinfo(core.APP_NAME,
                                     "视频模式没有「标签编辑器」。\n\n"
@@ -5970,7 +6032,7 @@ class App:
                 except Exception:
                     self._label_editor = None
             params = self._collect_params()
-            params["project"] = self.current_project or ""
+            params["project"] = project
             self._label_editor = LabelEditorWindow(self.root, self, params)
             if self._utility_only:
                 self._utility_popup = self._label_editor.win
@@ -9754,6 +9816,12 @@ class LabelEditorWindow:
                 self.app._label_editor = None
         except Exception:
             pass
+        if self._prev_job:
+            try:
+                self.win.after_cancel(self._prev_job)
+            except Exception:
+                pass
+            self._prev_job = None
         try:
             self.win.destroy()
         except Exception:
@@ -9800,7 +9868,7 @@ def main(argv=None):
 
     app = App(initial_project=args.project, initial_mode=args.mode,
               initial_action=args.action, utility_only=args.utility_only)
-    app.root.mainloop()
+    _run_mainloop_and_destroy(app.root)
     return 0
 
 if __name__ == "__main__":

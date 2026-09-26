@@ -1553,6 +1553,9 @@ class ModernUIBridge:
         if background:
             # Keep missing paths so removable drives can be reconnected later.
             background = os.path.abspath(background)
+        background_source = str(settings.get("modern_ui_background_source") or background).strip()
+        if background_source:
+            background_source = os.path.abspath(background_source)
         opacity = settings.get("modern_ui_background_opacity", 18)
         try:
             opacity = max(0, min(100, int(opacity)))
@@ -1565,10 +1568,13 @@ class ModernUIBridge:
             component_opacity = 100
         idle_fade_enabled = settings.get("modern_ui_idle_fade_enabled", False)
         background_history = settings.get("modern_ui_background_history", [])
-        history_paths = ModernUIBridge._normalize_appearance_background_history(background_history, background)
+        history_paths = ModernUIBridge._normalize_appearance_background_history(
+            background_history, background, background_source
+        )
         return {
             "theme": theme,
             "background_path": background,
+            "background_source_path": background_source,
             "background_opacity": opacity,
             "background_available": bool(background and os.path.isfile(background)),
             "background_history": [
@@ -1579,12 +1585,13 @@ class ModernUIBridge:
         }
 
     @staticmethod
-    def _normalize_appearance_background_history(paths, selected=""):
+    def _normalize_appearance_background_history(paths, selected="", selected_source=""):
         if not isinstance(paths, (list, tuple)):
             paths = []
         normalized = []
         seen = set()
-        for raw_path in ([selected] if selected else []) + list(paths):
+        preferred = selected_source or selected
+        for raw_path in ([preferred] if preferred else []) + list(paths):
             if not isinstance(raw_path, (str, os.PathLike)):
                 continue
             path = str(raw_path).strip()
@@ -1611,6 +1618,8 @@ class ModernUIBridge:
         component_opacity=None,
         idle_fade_enabled=None,
         background_history=None,
+        background_source_path=None,
+        background_data_url=None,
     ):
         theme = str(theme or "dark")
         if theme not in ("dark", "light", "system"):
@@ -1618,21 +1627,21 @@ class ModernUIBridge:
         background_path = str(background_path or "").strip()
         if background_path:
             background_path = os.path.abspath(background_path)
-            if not os.path.isfile(background_path):
-                return {"ok": False, "error": "背景图片文件不存在，请重新选择。"}
-            if os.path.splitext(background_path)[1].lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
-                return {"ok": False, "error": "背景图片需为 PNG、JPG、WebP 或 BMP 格式。"}
-            try:
-                if os.path.getsize(background_path) > 8 * 1024 * 1024:
-                    return {"ok": False, "error": "背景图片不能超过 8 MB。"}
-            except OSError:
-                return {"ok": False, "error": "无法读取背景图片，请检查文件权限。"}
+            error = self._validate_appearance_image_path(background_path)
+            if error:
+                return {"ok": False, "error": error}
+        if background_source_path is None:
+            background_source_path = background_path
+        background_source_path = str(background_source_path or "").strip()
+        if background_source_path:
+            background_source_path = os.path.abspath(background_source_path)
         try:
             opacity = max(0, min(100, int(background_opacity)))
         except (TypeError, ValueError):
             return {"ok": False, "error": "背景图片显现程度无效。"}
         current_settings = self.core._load_app_settings() or {}
         current_settings = current_settings if isinstance(current_settings, dict) else {}
+        old_background_path = str(current_settings.get("modern_ui_background") or "")
         settings = dict(current_settings) if isinstance(current_settings, dict) else {}
         if component_opacity is None:
             component_opacity = current_settings.get("modern_ui_component_opacity", 100)
@@ -1644,17 +1653,109 @@ class ModernUIBridge:
             idle_fade_enabled = current_settings.get("modern_ui_idle_fade_enabled", False)
         if background_history is None:
             background_history = current_settings.get("modern_ui_background_history", [])
-        history_paths = self._normalize_appearance_background_history(background_history, background_path)
+        history_paths = self._normalize_appearance_background_history(
+            background_history, background_path, background_source_path
+        )
+        created_background_path = ""
+        if background_data_url:
+            if not background_source_path:
+                return {"ok": False, "error": "裁切图片的原图路径无效，请重新选择。"}
+            source_error = self._validate_appearance_image_path(background_source_path)
+            if source_error:
+                return {"ok": False, "error": source_error}
+            try:
+                crop_bytes, crop_extension = self._decode_appearance_crop_data_url(background_data_url)
+                created_background_path = self._write_appearance_crop(crop_bytes, crop_extension)
+                background_path = created_background_path
+            except (OSError, ValueError) as exc:
+                return {"ok": False, "error": str(exc) or "保存裁切图片失败。"}
         settings["modern_ui_theme"] = theme
         settings["modern_ui_background"] = background_path
+        settings["modern_ui_background_source"] = background_source_path
         settings["modern_ui_background_opacity"] = opacity
         settings["modern_ui_component_opacity"] = component_opacity
         settings["modern_ui_idle_fade_enabled"] = bool(idle_fade_enabled)
         settings["modern_ui_background_history"] = history_paths
         if not self.core._save_app_settings(settings):
+            if created_background_path:
+                try:
+                    os.remove(created_background_path)
+                except OSError:
+                    pass
             return {"ok": False, "error": "设置保存失败，请检查用户设置目录的写入权限。"}
+        if old_background_path and os.path.normcase(os.path.abspath(old_background_path)) != os.path.normcase(os.path.abspath(background_path)):
+            self._remove_owned_appearance_crop(old_background_path)
         self._log("[外观] 已保存新版训练页显示设置。")
         return {"ok": True, "settings": self._appearance_settings_from_core(self.core)}
+
+    @staticmethod
+    def _validate_appearance_image_path(path):
+        if not path or not os.path.isfile(path):
+            return "背景图片文件不存在，请重新选择。"
+        if os.path.splitext(path)[1].lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+            return "背景图片需为 PNG、JPG、WebP 或 BMP 格式。"
+        try:
+            if os.path.getsize(path) > 8 * 1024 * 1024:
+                return "背景图片不能超过 8 MB。"
+        except OSError:
+            return "无法读取背景图片，请检查文件权限。"
+        return ""
+
+    @staticmethod
+    def _appearance_assets_dir():
+        from kohya_core.paths import _settings_path
+
+        return os.path.join(os.path.dirname(os.path.abspath(_settings_path())), "modern_ui_backgrounds")
+
+    @staticmethod
+    def _decode_appearance_crop_data_url(data_url):
+        import base64
+        import binascii
+        import re
+
+        match = re.fullmatch(r"data:image/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)", str(data_url or ""))
+        if not match:
+            raise ValueError("裁切图片格式无效，请重新裁切。")
+        if len(match.group(2)) > 11_184_812:
+            raise ValueError("裁切后的图片不能超过 8 MB。")
+        try:
+            content = base64.b64decode(match.group(2), validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("裁切图片数据无效，请重新裁切。")
+        if not content or len(content) > 8 * 1024 * 1024:
+            raise ValueError("裁切后的图片不能超过 8 MB。")
+        try:
+            from io import BytesIO
+            from PIL import Image
+
+            with Image.open(BytesIO(content)) as image:
+                expected_format = {"png": "PNG", "jpeg": "JPEG", "webp": "WEBP"}[match.group(1)]
+                if image.format != expected_format:
+                    raise ValueError("裁切图片的文件格式与标记不一致。")
+                image.verify()
+        except Exception as exc:
+            raise ValueError("无法读取裁切后的图片，请重新裁切。") from exc
+        return content, {"png": ".png", "jpeg": ".jpg", "webp": ".webp"}[match.group(1)]
+
+    def _write_appearance_crop(self, content, extension):
+        import uuid
+
+        directory = self._appearance_assets_dir()
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.abspath(os.path.join(directory, "background-%s%s" % (uuid.uuid4().hex, extension)))
+        with open(path, "xb") as handle:
+            handle.write(content)
+        return path
+
+    def _remove_owned_appearance_crop(self, path):
+        try:
+            root = os.path.normcase(os.path.abspath(self._appearance_assets_dir()))
+            candidate = os.path.normcase(os.path.abspath(path))
+            if os.path.commonpath((root, candidate)) != root:
+                return
+            os.remove(candidate)
+        except (OSError, ValueError):
+            pass
 
     def get_appearance_background(self):
         import base64
@@ -1676,6 +1777,43 @@ class ModernUIBridge:
             return {"ok": True, "data_url": data_url}
         except OSError as exc:
             return {"ok": False, "error": "读取背景图片失败：%s" % exc}
+
+    def get_appearance_image_preview(self, path, thumbnail=False):
+        import base64
+        from io import BytesIO
+
+        path = os.path.abspath(str(path or "").strip()) if str(path or "").strip() else ""
+        error = self._validate_appearance_image_path(path)
+        if error:
+            return {"ok": False, "error": error}
+        mime_by_extension = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".webp": "image/webp", ".bmp": "image/bmp",
+        }
+        mime = mime_by_extension.get(os.path.splitext(path)[1].lower())
+        try:
+            if thumbnail:
+                from PIL import Image, ImageOps
+
+                with Image.open(path) as source:
+                    source.load()
+                    resampling = getattr(Image, "Resampling", Image)
+                    image = ImageOps.fit(source.convert("RGB"), (144, 144), method=resampling.LANCZOS)
+                    buffer = BytesIO()
+                    image.save(buffer, format="WEBP", quality=74, method=4)
+                    content = buffer.getvalue()
+                    mime = "image/webp"
+            else:
+                with open(path, "rb") as handle:
+                    content = handle.read(8 * 1024 * 1024 + 1)
+                if len(content) > 8 * 1024 * 1024:
+                    return {"ok": False, "error": "背景图片不能超过 8 MB。"}
+            return {
+                "ok": True,
+                "data_url": "data:%s;base64,%s" % (mime, base64.b64encode(content).decode("ascii")),
+            }
+        except Exception as exc:
+            return {"ok": False, "error": "读取图片预览失败：%s" % exc}
 
     def inspect_base_model(self, path):
         path = str(path or "").strip()
@@ -2281,8 +2419,10 @@ def launch(core, dev=False, debug=False, engine_groups=(), short_mode_labels=Non
         )
 
     bridge = ModernUIBridge(core, engine_groups, short_mode_labels)
+    app_name = getattr(core, "APP_NAME", "Kohya-LoRA")
+    app_version = getattr(core, "APP_VERSION", "0.0.0")
     window = webview.create_window(
-        title=getattr(core, "APP_NAME", "Kohya-LoRA") + " · 新版训练页",
+        title="%s · v%s · 新版训练页" % (app_name, app_version),
         url=url,
         js_api=bridge,
         width=1360,

@@ -66,7 +66,7 @@ const helpDialogMode = ref('')
 const appearanceDialogOpen = ref(false)
 const appearanceSaving = ref(false)
 const appearance = ref<AppearanceSettings>({
-  theme: 'dark', background_path: '', background_opacity: 18, background_available: false,
+  theme: 'dark', background_path: '', background_source_path: '', background_opacity: 18, background_available: false,
   background_history: [], component_opacity: 100, idle_fade_enabled: false,
 })
 const appearanceImage = ref('')
@@ -733,6 +733,22 @@ async function chooseAppearanceBackground(): Promise<string | null> {
   }
 }
 
+async function getAppearanceImagePreview(path: string, thumbnail = false): Promise<string | null> {
+  const api = window.pywebview?.api
+  if (preview.value || !api) return null
+  try {
+    const result = await api.get_appearance_image_preview(path, thumbnail)
+    if (!result.ok || !result.data_url) {
+      if (!thumbnail) showToast(result.error ?? '无法读取这张图片，请重新选择。')
+      return null
+    }
+    return result.data_url
+  } catch (error) {
+    if (!thumbnail) showToast(error instanceof Error ? error.message : '无法读取这张图片。')
+    return null
+  }
+}
+
 async function saveAppearance(next: AppearanceSettings) {
   if (appearanceSaving.value) return
   appearanceSaving.value = true
@@ -752,6 +768,8 @@ async function saveAppearance(next: AppearanceSettings) {
       next.component_opacity,
       next.idle_fade_enabled,
       next.background_history.map((entry) => entry.path),
+      next.background_source_path || next.background_path,
+      next.background_data_url ?? '',
     )
     if (!saved.ok) {
       showToast(saved.error ?? '外观设置保存失败。')
@@ -1014,7 +1032,14 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
       />
       <div v-else-if="!loading && !loadError" key="home" class="home-view">
         <header class="project-toolbar">
-          <h1><UiIcon name="home" /> 我的项目</h1>
+          <h1>
+            <UiIcon name="home" /> 我的项目
+            <small
+              class="app-version"
+              v-if="data?.version"
+              :title="preview ? '浏览器界面预览' : '当前应用版本'"
+            >{{ preview ? data.version : `版本 ${data.version}` }}</small>
+          </h1>
           <div class="toolbar-actions">
             <button v-for="action in topActions" :key="action.key" class="toolbar-button" type="button" :title="action.tip" @click="runAction(action.key)">
               <UiIcon :name="action.icon" />{{ action.label }}
@@ -1097,12 +1122,13 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
       :desktop="!preview"
       :saving="appearanceSaving"
       :choose-background="chooseAppearanceBackground"
+      :get-background-preview="getAppearanceImagePreview"
       @close="appearanceDialogOpen = false"
       @save="saveAppearance"
     />
 
     <Transition name="dialog">
-      <div v-if="dialogOpen" class="dialog-backdrop" @click.self="dialogOpen = false">
+      <div v-if="dialogOpen" class="dialog-backdrop" @dblclick.self="dialogOpen = false">
         <section class="project-dialog" role="dialog" aria-modal="true" :aria-labelledby="dialogKind === 'create' ? 'dialog-title-create' : 'dialog-title-rename'">
           <header class="dialog-header">
             <h2 :id="dialogKind === 'create' ? 'dialog-title-create' : 'dialog-title-rename'">{{ dialogKind === 'create' ? '新建项目' : '重命名项目' }}</h2>
@@ -1138,3 +1164,20 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
     <Transition name="toast"><div v-if="toast" class="toast-message">{{ toast }}</div></Transition>
   </div>
 </template>
+
+<style scoped>
+.project-toolbar h1 .app-version {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 2px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--hint);
+  background: color-mix(in srgb, var(--bg) 50%, transparent);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.4;
+  letter-spacing: 0;
+}
+</style>
