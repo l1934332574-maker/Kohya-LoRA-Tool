@@ -98,6 +98,9 @@ export interface DesktopApi {
   save_project_config(name: string, patch: ProjectConfig): Promise<{ ok: boolean; error?: string; project?: ProjectCard | null }>
   choose_path(kind: 'folder' | 'model' | 'image', current_path?: string, memory_key?: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean; path?: string }>
   get_appearance_settings(): Promise<{ ok: boolean; settings?: AppearanceSettings; error?: string }>
+  get_appearance_presets(): Promise<{ ok: boolean; presets?: AppearancePreset[]; error?: string }>
+  save_appearance_preset(name: string): Promise<{ ok: boolean; presets?: AppearancePreset[]; error?: string }>
+  delete_appearance_preset(id: string): Promise<{ ok: boolean; presets?: AppearancePreset[]; error?: string }>
   set_appearance_settings(
     theme: AppearanceSettings['theme'],
     background_path: string,
@@ -139,6 +142,19 @@ export interface AppearanceSettings {
   component_opacity: number
   idle_fade_enabled: boolean
   background_data_url?: string
+}
+
+export interface AppearancePreset {
+  id: string
+  name: string
+  built_in: boolean
+  theme: AppearanceSettings['theme']
+  background_path: string
+  background_source_path?: string
+  background_opacity: number
+  component_opacity: number
+  idle_fade_enabled: boolean
+  available: boolean
 }
 
 export interface AppearanceBackgroundHistoryEntry {

@@ -15,6 +15,9 @@ modern_ui_root = os.path.normpath(os.path.join(os.path.dirname(SPEC), "..", "mod
 modern_ui_dist = os.path.join(modern_ui_root, "dist")
 if not os.path.isfile(os.path.join(modern_ui_dist, "index.html")):
     raise RuntimeError("现代 UI 尚未构建。请先运行 npm --prefix modern_ui ci && npm --prefix modern_ui run build。")
+for _theme_name in ("light.png", "dark.png"):
+    if not os.path.isfile(os.path.join(modern_ui_dist, "themes", _theme_name)):
+        raise RuntimeError(f"现代 UI 内置主题图片缺失：{os.path.join(modern_ui_dist, 'themes', _theme_name)}")
 modern_ui_datas = [(modern_ui_dist, "modern_ui/dist")]
 try:
     import webview as _webview  # noqa: F401

@@ -44,15 +44,76 @@ class ModernAppearanceTests(unittest.TestCase):
         self.assertEqual(self.bridge.get_appearance_settings()["settings"], result["settings"])
 
     def test_background_image_is_served_as_a_data_url_without_copying_user_file(self):
+        from PIL import Image
+
         image = Path(self.temp.name) / "wallpaper.webp"
-        image.write_bytes(b"webp-fixture")
+        Image.new("RGB", (80, 60), (20, 80, 140)).save(image, format="WEBP")
+        original = image.read_bytes()
         self.bridge.set_appearance_settings("dark", str(image), 18)
 
         result = self.bridge.get_appearance_background()
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["data_url"].startswith("data:image/webp;base64,"))
-        self.assertEqual(image.read_bytes(), b"webp-fixture")
+        self.assertEqual(image.read_bytes(), original)
+
+    def test_bundled_examples_use_compact_preview_and_background_payloads(self):
+        themes = Path(__file__).resolve().parents[1] / "modern_ui" / "public" / "themes"
+        for filename in ("light.png", "dark.png"):
+            with self.subTest(filename=filename):
+                image = themes / filename
+                original = image.read_bytes()
+                preview = self.bridge.get_appearance_image_preview(str(image))
+                self.assertTrue(preview["ok"], preview.get("error"))
+                self.assertLess(len(preview["data_url"]), 2_000_000)
+                self.bridge.set_appearance_settings("dark", str(image), 90)
+                background = self.bridge.get_appearance_background()
+                self.assertTrue(background["ok"], background.get("error"))
+                self.assertLess(len(background["data_url"]), 2_000_000)
+                self.assertEqual(image.read_bytes(), original)
+
+    def test_bundled_theme_presets_and_custom_theme_survive_reload(self):
+        bundled = self.bridge.get_appearance_presets()["presets"]
+        self.assertEqual([item["name"] for item in bundled], ["深色示例", "浅色示例"])
+        self.assertEqual([item["theme"] for item in bundled], ["dark", "light"])
+        self.assertTrue(all(item["available"] for item in bundled))
+        self.assertTrue(all(item["background_opacity"] == 90 and item["component_opacity"] == 80
+                            and item["idle_fade_enabled"] for item in bundled))
+
+        image = Path(self.temp.name) / "custom.png"
+        from PIL import Image
+        Image.new("RGB", (80, 60), (50, 80, 120)).save(image)
+        self.bridge.set_appearance_settings("light", str(image), 74, 62, False)
+        saved = self.bridge.save_appearance_preset("我的主题")
+        self.assertTrue(saved["ok"], saved.get("error"))
+        custom = saved["presets"][-1]
+        self.assertEqual((custom["theme"], custom["background_opacity"], custom["component_opacity"]),
+                         ("light", 74, 62))
+        self.assertEqual(custom["background_path"], str(image))
+        self.assertEqual(ModernUIBridge(self.core).get_appearance_presets()["presets"][-1]["id"], custom["id"])
+        self.assertFalse(self.bridge.save_appearance_preset("我的主题")["ok"])
+        self.assertFalse(self.bridge.delete_appearance_preset("builtin-dark")["ok"])
+        self.assertEqual(len(self.bridge.delete_appearance_preset(custom["id"])["presets"]), 2)
+
+    def test_saved_custom_theme_keeps_its_cropped_background_until_deleted(self):
+        from PIL import Image
+
+        source = Path(self.temp.name) / "source.png"
+        Image.new("RGB", (80, 60), (80, 40, 20)).save(source)
+        crop = BytesIO()
+        Image.new("RGB", (32, 24), (40, 100, 180)).save(crop, format="PNG")
+        crop_data_url = "data:image/png;base64," + base64.b64encode(crop.getvalue()).decode("ascii")
+        self.bridge._appearance_assets_dir = lambda: str(Path(self.temp.name) / "appearance-assets")
+        saved = self.bridge.set_appearance_settings(
+            "dark", str(source), 90, 80, True, [str(source)], str(source), crop_data_url
+        )
+        crop_path = Path(saved["settings"]["background_path"])
+        preset = self.bridge.save_appearance_preset("裁切主题")["presets"][-1]
+
+        self.bridge.set_appearance_settings("light", "", 0, 100, False)
+        self.assertTrue(crop_path.is_file())
+        self.bridge.delete_appearance_preset(preset["id"])
+        self.assertFalse(crop_path.exists())
 
     def test_recent_image_preview_returns_a_small_thumbnail_and_rejects_missing_paths(self):
         from PIL import Image

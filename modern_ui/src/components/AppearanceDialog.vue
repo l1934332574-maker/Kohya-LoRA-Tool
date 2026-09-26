@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { AppearanceSettings } from '../bridge'
+import type { AppearancePreset, AppearanceSettings } from '../bridge'
 
 interface CropRect { x: number; y: number; width: number; height: number }
 interface CropDrag { mode: 'create' | 'move' | 'resize'; handle?: string; startX: number; startY: number; origin: CropRect }
@@ -8,6 +8,7 @@ interface CropDrag { mode: 'create' | 'move' | 'resize'; handle?: string; startX
 const props = defineProps<{
   open: boolean
   settings: AppearanceSettings
+  presets: AppearancePreset[]
   desktop: boolean
   saving: boolean
   chooseBackground: () => Promise<string | null>
@@ -15,14 +16,22 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   close: []
-  save: [settings: AppearanceSettings]
+  save: [settings: AppearanceSettings, presetName?: string]
+  deletePreset: [id: string]
 }>()
 
 const draft = ref<AppearanceSettings>({ ...props.settings })
 const backgroundName = computed(() => fileName(draft.value.background_source_path || draft.value.background_path))
 const historyPreviews = ref<Record<string, string>>({})
 const historyPreviewFailed = ref<Record<string, boolean>>({})
+const presetPreviews = ref<Record<string, string>>({})
 const activeBackgroundPreview = ref('')
+const presetName = ref('')
+const namingPreset = ref(false)
+const presetNameError = ref('')
+const selectingBackground = ref(false)
+const recentHistory = computed(() => draft.value.background_history.filter((entry) =>
+  !props.presets.some((preset) => preset.built_in && preset.background_path === entry.path)))
 const cropOpen = ref(false)
 const cropSourcePath = ref('')
 const cropPreviewUrl = ref('')
@@ -34,6 +43,7 @@ const cropBounds = ref<HTMLElement | null>(null)
 const cropImage = ref<HTMLImageElement | null>(null)
 let cropDrag: CropDrag | null = null
 let historyLoadToken = 0
+let presetLoadToken = 0
 
 const cropSelectionStyle = computed(() => ({
   left: `${cropRect.value.x * 100}%`,
@@ -80,30 +90,84 @@ async function loadHistoryPreviews() {
   historyPreviewFailed.value = failed
 }
 
+async function loadPresetPreviews() {
+  const token = ++presetLoadToken
+  const loaded = await Promise.all(props.presets.filter((preset) => preset.available && preset.background_path)
+    .map(async (preset) => [preset.id, await props.getBackgroundPreview(preset.background_path, true)] as const))
+  if (token !== presetLoadToken) return
+  presetPreviews.value = Object.fromEntries(loaded.filter((entry) => entry[1])) as Record<string, string>
+}
+
+watch(() => props.presets, () => { if (props.open) void loadPresetPreviews() })
+
 watch(() => props.open, (open) => {
   if (open) {
     draft.value = { ...props.settings, background_source_path: props.settings.background_source_path || props.settings.background_path }
     cropDataUrl.value = ''
     cropSelectionMode.value = false
+    namingPreset.value = false
+    presetName.value = ''
+    presetNameError.value = ''
     void loadHistoryPreviews()
+    void loadPresetPreviews()
   } else {
     historyLoadToken += 1
+    presetLoadToken += 1
     cropOpen.value = false
   }
 })
 
+function presetSelected(preset: AppearancePreset) {
+  return draft.value.theme === preset.theme
+    && draft.value.background_path === preset.background_path
+    && draft.value.background_opacity === preset.background_opacity
+    && draft.value.component_opacity === preset.component_opacity
+    && draft.value.idle_fade_enabled === preset.idle_fade_enabled
+}
+
+function selectPreset(preset: AppearancePreset) {
+  if (props.saving || !preset.available) return
+  draft.value = {
+    ...draft.value,
+    theme: preset.theme,
+    background_path: preset.background_path,
+    background_source_path: preset.background_source_path || preset.background_path,
+    background_available: true,
+    background_opacity: preset.background_opacity,
+    component_opacity: preset.component_opacity,
+    idle_fade_enabled: preset.idle_fade_enabled,
+  }
+  cropDataUrl.value = ''
+  namingPreset.value = false
+}
+
+function saveCustomPreset() {
+  const name = presetName.value.trim()
+  if (!name || name.length > 30) return presetNameError.value = '主题名称请填写 1–30 个字符。'
+  if (props.presets.some((preset) => preset.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+    return presetNameError.value = '已有同名主题，请换一个名称。'
+  }
+  presetNameError.value = ''
+  emit('save', { ...draft.value, ...(cropDataUrl.value ? { background_data_url: cropDataUrl.value } : {}) }, name)
+}
+
 async function selectBackground() {
-  if (props.saving) return
-  const selected = await props.chooseBackground()
-  if (!selected) return
-  const preview = await props.getBackgroundPreview(selected)
-  if (!preview) return
-  cropSourcePath.value = selected
-  cropPreviewUrl.value = preview
-  cropRect.value = { x: 0, y: 0, width: 1, height: 1 }
-  cropSelectionMode.value = false
-  cropError.value = ''
-  cropOpen.value = true
+  if (props.saving || selectingBackground.value) return
+  selectingBackground.value = true
+  try {
+    const selected = await props.chooseBackground()
+    if (!selected) return
+    const preview = await props.getBackgroundPreview(selected)
+    if (!preview) return
+    cropSourcePath.value = selected
+    cropPreviewUrl.value = preview
+    cropRect.value = { x: 0, y: 0, width: 1, height: 1 }
+    cropSelectionMode.value = false
+    cropError.value = ''
+    cropOpen.value = true
+  } finally {
+    selectingBackground.value = false
+  }
 }
 
 function selectHistory(entry: AppearanceSettings['background_history'][number]) {
@@ -284,6 +348,35 @@ function save() {
           <button class="appearance-close" type="button" aria-label="关闭" @click="emit('close')">×</button>
         </header>
 
+        <div class="appearance-section">
+          <div class="appearance-section-heading"><span>主题方案</span><small>选中后可继续调整下方设置</small></div>
+          <div class="appearance-theme-gallery">
+            <div v-for="preset in presets" :key="preset.id" class="appearance-theme-item">
+              <button
+                class="appearance-theme-card" type="button" :disabled="saving || !preset.available"
+                :class="{ selected: presetSelected(preset) }"
+                :aria-label="`应用${preset.name}`" :aria-pressed="presetSelected(preset)"
+                @click="selectPreset(preset)"
+              >
+                <span class="appearance-theme-image" :class="preset.theme">
+                  <img v-if="presetPreviews[preset.id]" :src="presetPreviews[preset.id]" alt="" />
+                  <span v-else>{{ preset.available ? '载入中' : '图片不可用' }}</span>
+                  <i class="appearance-theme-window" aria-hidden="true"><b></b><b></b></i>
+                </span>
+                <span class="appearance-theme-name">{{ preset.name }}<small>{{ preset.built_in ? '内置' : '自定义' }}</small></span>
+              </button>
+              <button v-if="!preset.built_in" class="appearance-theme-remove" type="button" :disabled="saving" :aria-label="`删除主题 ${preset.name}`" title="删除此主题" @click="emit('deletePreset', preset.id)">×</button>
+            </div>
+            <button class="appearance-theme-add" type="button" :disabled="saving" @click="namingPreset = true"><span>＋</span>保存当前配置</button>
+          </div>
+          <div v-if="namingPreset" class="appearance-theme-save">
+            <input v-model="presetName" type="text" maxlength="30" aria-label="自定义主题名称" placeholder="给当前配置起个名字" @keydown.enter="saveCustomPreset" />
+            <button class="appearance-button" type="button" :disabled="saving" @click="saveCustomPreset">保存为主题</button>
+            <button class="appearance-button subtle" type="button" @click="namingPreset = false">取消</button>
+          </div>
+          <small v-if="presetNameError" class="appearance-missing">{{ presetNameError }}</small>
+        </div>
+
         <label class="appearance-field">
           <span>颜色主题</span>
           <select v-model="draft.theme" class="appearance-select">
@@ -302,7 +395,7 @@ function save() {
               <small v-if="draft.background_path && !draft.background_available" class="appearance-missing">当前图片不可用，请重新选择或移除。</small>
               <small v-else>{{ desktop ? '图片按显现程度与主题底色混合；界面卡片保留文字对比度。' : '浏览器预览不读取本机图片；桌面版可选择背景。' }}</small>
             </div>
-            <button class="appearance-button" type="button" :disabled="!desktop || saving" @click="selectBackground">选择图片</button>
+            <button class="appearance-button" type="button" :disabled="!desktop || saving || selectingBackground" @click="selectBackground">{{ selectingBackground ? '载入图片…' : '选择图片' }}</button>
             <button v-if="draft.background_path" class="appearance-button subtle" type="button" :disabled="saving" @click="clearBackground">移除</button>
           </div>
           <label class="appearance-field opacity-field" :class="{ disabled: !draft.background_path }">
@@ -310,10 +403,10 @@ function save() {
             <input v-model.number="draft.background_opacity" type="range" min="0" max="100" step="1" :disabled="!draft.background_path" />
             <small>0% 使用主题底色，100% 显示选定背景；此数值只调透明度，不叠加暗色遮罩。</small>
           </label>
-          <div v-if="draft.background_history.length" class="appearance-history">
+          <div v-if="recentHistory.length" class="appearance-history">
             <div class="appearance-history-title">最近使用的图片</div>
             <div class="appearance-history-gallery">
-              <div v-for="entry in draft.background_history" :key="entry.path" class="appearance-history-card">
+              <div v-for="entry in recentHistory" :key="entry.path" class="appearance-history-card">
               <button
                 class="appearance-history-select"
                 type="button"
@@ -415,6 +508,26 @@ function save() {
 .appearance-select { width: 100%; height: 34px; padding: 0 9px; border: 1px solid var(--border); border-radius: 5px; color: var(--text); background: var(--bg); }
 .appearance-section { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: color-mix(in srgb, var(--bg) 44%, var(--card)); }
 .appearance-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text); font-size: 11px; }
+.appearance-theme-gallery { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.appearance-theme-item { position: relative; min-width: 0; }
+.appearance-theme-card,.appearance-theme-add { display: grid; width: 100%; min-height: 120px; overflow: hidden; padding: 0; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--card); text-align: left; cursor: pointer; }
+.appearance-theme-card:hover:not(:disabled),.appearance-theme-add:hover:not(:disabled) { border-color: var(--accent); }
+.appearance-theme-card.selected { outline: 2px solid var(--accent); outline-offset: 1px; }
+.appearance-theme-card:disabled { opacity: .58; cursor: not-allowed; }
+.appearance-theme-image { position: relative; display: grid; height: 85px; place-items: center; overflow: hidden; color: var(--hint); background: var(--bg); font-size: 10px; }
+.appearance-theme-image img { position: absolute; width: 100%; height: 100%; object-fit: cover; }
+.appearance-theme-image.dark { background: #283446; }
+.appearance-theme-image.light { background: #e2e9ee; }
+.appearance-theme-window { position: relative; display: flex; flex-direction: column; gap: 5px; width: 46%; height: 58%; margin-left: 22%; padding: 8px; border-radius: 3px; background: color-mix(in srgb, var(--card) 90%, transparent); box-shadow: 0 3px 12px rgb(0 0 0 / 22%); }
+.appearance-theme-window b { display: block; width: 76%; height: 3px; border-radius: 2px; background: var(--hint); opacity: .7; }
+.appearance-theme-window b:last-child { width: 46%; background: var(--accent); opacity: 1; }
+.appearance-theme-name { display: flex; justify-content: space-between; gap: 4px; align-items: center; min-width: 0; padding: 6px 8px; font-size: 10px; }
+.appearance-theme-name small { color: var(--hint); font-size: 9px; white-space: nowrap; }
+.appearance-theme-add { place-items: center; align-content: center; gap: 5px; border-style: dashed; color: var(--sub); text-align: center; font-size: 10px; }
+.appearance-theme-add span { font-size: 24px; line-height: 1; }
+.appearance-theme-remove { position: absolute; top: 5px; right: 5px; width: 22px; height: 22px; border: 0; border-radius: 4px; color: #fff; background: rgb(20 24 30 / 75%); cursor: pointer; }
+.appearance-theme-save { display: flex; flex-wrap: wrap; gap: 6px; }
+.appearance-theme-save input { flex: 1; min-width: 155px; min-height: 30px; padding: 0 9px; border: 1px solid var(--border); border-radius: 5px; color: var(--text); background: var(--bg); }
 .appearance-file-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .appearance-file-copy { display: grid; flex: 1; min-width: 0; gap: 3px; }
 .appearance-file-copy strong { overflow: hidden; color: var(--text); font-size: 11px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
@@ -488,6 +601,7 @@ function save() {
   .appearance-dialog,.appearance-crop-dialog { max-height: 96vh; padding: 13px; }
   .appearance-file-row { flex-wrap: wrap; }
   .appearance-file-copy { flex-basis: 100%; }
+  .appearance-theme-gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .crop-stage { min-height: 180px; }
   .crop-bounds img { max-width: min(100%, 480px); }
 }

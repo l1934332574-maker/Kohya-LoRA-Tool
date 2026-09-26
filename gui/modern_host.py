@@ -1655,6 +1655,74 @@ class ModernUIBridge:
     def get_appearance_settings(self):
         return {"ok": True, "settings": self._appearance_settings_from_core(self.core)}
 
+    @staticmethod
+    def _bundled_appearance_presets():
+        root = _app_root() / "modern_ui" / "dist" / "themes"
+        if not root.is_dir() and not getattr(sys, "frozen", False):
+            root = _app_root() / "modern_ui" / "public" / "themes"
+        return [
+            {"id": "builtin-dark", "name": "深色示例", "built_in": True, "theme": "dark",
+             "background_path": str(root / "dark.png"), "background_opacity": 90,
+             "component_opacity": 80, "idle_fade_enabled": True},
+            {"id": "builtin-light", "name": "浅色示例", "built_in": True, "theme": "light",
+             "background_path": str(root / "light.png"), "background_opacity": 90,
+             "component_opacity": 80, "idle_fade_enabled": True},
+        ]
+
+    def get_appearance_presets(self):
+        settings = self.core._load_app_settings() or {}
+        custom = settings.get("modern_ui_custom_presets", []) if isinstance(settings, dict) else []
+        presets = self._bundled_appearance_presets()
+        if isinstance(custom, list):
+            presets += [item for item in custom if isinstance(item, dict)]
+        return {"ok": True, "presets": [
+            {**item, "available": not item.get("background_path") or not self._validate_appearance_image_path(item["background_path"])}
+            for item in presets
+        ]}
+
+    def save_appearance_preset(self, name):
+        name = str(name or "").strip()
+        if not name or len(name) > 30:
+            return {"ok": False, "error": "主题名称请填写 1–30 个字符。"}
+        settings = self.core._load_app_settings() or {}
+        if not isinstance(settings, dict):
+            settings = {}
+        custom = settings.get("modern_ui_custom_presets", [])
+        custom = list(custom) if isinstance(custom, list) else []
+        if len(custom) >= 20:
+            return {"ok": False, "error": "最多保存 20 个自定义主题。"}
+        if any(str(item.get("name", "")).casefold() == name.casefold() for item in self._bundled_appearance_presets() + custom if isinstance(item, dict)):
+            return {"ok": False, "error": "已有同名主题，请换一个名称。"}
+        current = self._appearance_settings_from_core(self.core)
+        custom.append({
+            "id": uuid.uuid4().hex, "name": name, "built_in": False,
+            "theme": current["theme"], "background_path": current["background_path"],
+            "background_source_path": current["background_source_path"],
+            "background_opacity": current["background_opacity"],
+            "component_opacity": current["component_opacity"],
+            "idle_fade_enabled": current["idle_fade_enabled"],
+        })
+        settings["modern_ui_custom_presets"] = custom
+        if not self.core._save_app_settings(settings):
+            return {"ok": False, "error": "保存主题失败，请检查用户设置目录。"}
+        return self.get_appearance_presets()
+
+    def delete_appearance_preset(self, preset_id):
+        settings = self.core._load_app_settings() or {}
+        if not isinstance(settings, dict):
+            settings = {}
+        custom = settings.get("modern_ui_custom_presets", [])
+        custom = list(custom) if isinstance(custom, list) else []
+        removed = next((item for item in custom if isinstance(item, dict) and item.get("id") == preset_id), None)
+        if not removed:
+            return {"ok": False, "error": "找不到可删除的自定义主题。"}
+        settings["modern_ui_custom_presets"] = [item for item in custom if item is not removed]
+        if not self.core._save_app_settings(settings):
+            return {"ok": False, "error": "删除主题失败，请检查用户设置目录。"}
+        if removed.get("background_path"):
+            self._remove_owned_appearance_crop(removed["background_path"])
+        return self.get_appearance_presets()
+
     def set_appearance_settings(
         self,
         theme="dark",
@@ -1798,29 +1866,44 @@ class ModernUIBridge:
             candidate = os.path.normcase(os.path.abspath(path))
             if os.path.commonpath((root, candidate)) != root:
                 return
+            settings = self.core._load_app_settings() or {}
+            if isinstance(settings, dict):
+                current = settings.get("modern_ui_background")
+                custom = settings.get("modern_ui_custom_presets", [])
+                references = [current]
+                if isinstance(custom, list):
+                    references.extend(item.get("background_path") for item in custom if isinstance(item, dict))
+                if any(ref and os.path.normcase(os.path.abspath(ref)) == candidate for ref in references):
+                    return
             os.remove(candidate)
         except (OSError, ValueError):
             pass
 
-    def get_appearance_background(self):
+    @staticmethod
+    def _appearance_display_data_url(path):
+        """Send a compact display image through pywebview, not a multi-MB source PNG."""
         import base64
+        from io import BytesIO
+        from PIL import Image, ImageOps
+
+        with Image.open(path) as source:
+            image = ImageOps.exif_transpose(source)
+            resampling = getattr(Image, "Resampling", Image)
+            image.thumbnail((3840, 3840), resampling.LANCZOS)
+            has_alpha = "A" in image.getbands() or "transparency" in image.info
+            image = image.convert("RGBA" if has_alpha else "RGB")
+            buffer = BytesIO()
+            image.save(buffer, format="WEBP", quality=84, method=4)
+        return "data:image/webp;base64,%s" % base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    def get_appearance_background(self):
         path = self._appearance_settings_from_core(self.core).get("background_path", "")
-        if not path or not os.path.isfile(path):
-            return {"ok": False, "error": "背景图片文件不存在，请在外观设置中重新选择。"}
+        error = self._validate_appearance_image_path(path)
+        if error:
+            return {"ok": False, "error": error}
         try:
-            with open(path, "rb") as handle:
-                content = handle.read(8 * 1024 * 1024 + 1)
-            if len(content) > 8 * 1024 * 1024:
-                return {"ok": False, "error": "背景图片超过 8 MB，无法载入。"}
-            mime = {
-                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                ".webp": "image/webp", ".bmp": "image/bmp",
-            }.get(os.path.splitext(path)[1].lower())
-            if not mime:
-                return {"ok": False, "error": "背景图片格式不支持。"}
-            data_url = "data:%s;base64,%s" % (mime, base64.b64encode(content).decode("ascii"))
-            return {"ok": True, "data_url": data_url}
-        except OSError as exc:
+            return {"ok": True, "data_url": self._appearance_display_data_url(path)}
+        except Exception as exc:
             return {"ok": False, "error": "读取背景图片失败：%s" % exc}
 
     def get_appearance_image_preview(self, path, thumbnail=False):
@@ -1831,11 +1914,6 @@ class ModernUIBridge:
         error = self._validate_appearance_image_path(path)
         if error:
             return {"ok": False, "error": error}
-        mime_by_extension = {
-            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-            ".webp": "image/webp", ".bmp": "image/bmp",
-        }
-        mime = mime_by_extension.get(os.path.splitext(path)[1].lower())
         try:
             if thumbnail:
                 from PIL import Image, ImageOps
@@ -1847,15 +1925,12 @@ class ModernUIBridge:
                     buffer = BytesIO()
                     image.save(buffer, format="WEBP", quality=74, method=4)
                     content = buffer.getvalue()
-                    mime = "image/webp"
+                data_url = "data:image/webp;base64,%s" % base64.b64encode(content).decode("ascii")
             else:
-                with open(path, "rb") as handle:
-                    content = handle.read(8 * 1024 * 1024 + 1)
-                if len(content) > 8 * 1024 * 1024:
-                    return {"ok": False, "error": "背景图片不能超过 8 MB。"}
+                data_url = self._appearance_display_data_url(path)
             return {
                 "ok": True,
-                "data_url": "data:%s;base64,%s" % (mime, base64.b64encode(content).decode("ascii")),
+                "data_url": data_url,
             }
         except Exception as exc:
             return {"ok": False, "error": "读取图片预览失败：%s" % exc}

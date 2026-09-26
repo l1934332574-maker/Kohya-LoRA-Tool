@@ -25,6 +25,7 @@ import {
   type GuideStep,
   type TrainingPlan,
   type AppearanceSettings,
+  type AppearancePreset,
 } from './bridge'
 
 const data = ref<BootstrapData | null>(null)
@@ -70,6 +71,7 @@ const appearance = ref<AppearanceSettings>({
   background_history: [], component_opacity: 100, idle_fade_enabled: false,
 })
 const appearanceImage = ref('')
+const appearancePresets = ref<AppearancePreset[]>([])
 const systemPrefersLight = ref(false)
 const uiIdle = ref(false)
 const nameInput = ref<HTMLInputElement | null>(null)
@@ -735,7 +737,8 @@ async function chooseAppearanceBackground(): Promise<string | null> {
 
 async function getAppearanceImagePreview(path: string, thumbnail = false): Promise<string | null> {
   const api = window.pywebview?.api
-  if (preview.value || !api) return null
+  if (preview.value) return /^\/themes\/(dark|light)\.png$/.test(path) ? path : null
+  if (!api) return null
   try {
     const result = await api.get_appearance_image_preview(path, thumbnail)
     if (!result.ok || !result.data_url) {
@@ -749,13 +752,53 @@ async function getAppearanceImagePreview(path: string, thumbnail = false): Promi
   }
 }
 
-async function saveAppearance(next: AppearanceSettings) {
+async function loadAppearancePresets() {
+  const api = window.pywebview?.api
+  if (preview.value) {
+    appearancePresets.value = [
+      { id: 'builtin-dark', name: '深色示例', built_in: true, theme: 'dark', background_path: '/themes/dark.png', background_opacity: 90, component_opacity: 80, idle_fade_enabled: true, available: true },
+      { id: 'builtin-light', name: '浅色示例', built_in: true, theme: 'light', background_path: '/themes/light.png', background_opacity: 90, component_opacity: 80, idle_fade_enabled: true, available: true },
+      ...appearancePresets.value.filter((preset) => !preset.built_in),
+    ]
+    return
+  }
+  if (!api) return
+  try {
+    const result = await api.get_appearance_presets()
+    if (result?.ok && result.presets) appearancePresets.value = result.presets
+  } catch (error) {
+    appendLog(`[外观] 无法读取主题方案：${error instanceof Error ? error.message : '未知错误'}`)
+  }
+}
+
+function openAppearanceDialog() {
+  appearanceDialogOpen.value = true
+  void loadAppearancePresets()
+}
+
+async function deleteAppearancePreset(id: string) {
+  if (preview.value || !window.pywebview?.api) {
+    appearancePresets.value = appearancePresets.value.filter((preset) => preset.id !== id)
+    return
+  }
+  const result = await window.pywebview.api.delete_appearance_preset(id)
+  if (!result?.ok) return showToast(result?.error ?? '删除主题失败。')
+  appearancePresets.value = result.presets ?? []
+}
+
+async function saveAppearance(next: AppearanceSettings, presetName = '') {
   if (appearanceSaving.value) return
   appearanceSaving.value = true
   try {
     if (preview.value || !window.pywebview?.api) {
       appearance.value = { ...next }
-      appearanceImage.value = ''
+      if (presetName) appearancePresets.value = [...appearancePresets.value, {
+        id: `preview-${Date.now()}`, name: presetName, built_in: false, theme: next.theme,
+        background_path: next.background_path, background_source_path: next.background_source_path,
+        background_opacity: next.background_opacity, component_opacity: next.component_opacity,
+        idle_fade_enabled: next.idle_fade_enabled, available: true,
+      }]
+      appearanceImage.value = /^\/themes\/(dark|light)\.png$/.test(next.background_path) ? next.background_path : ''
       appearanceDialogOpen.value = false
       scheduleUiIdleFade()
       showToast('预览设置已应用；桌面版会保存背景图片。')
@@ -776,6 +819,14 @@ async function saveAppearance(next: AppearanceSettings) {
       return
     }
     appearance.value = saved.settings ?? next
+    if (presetName) {
+      const presetResult = await window.pywebview.api.save_appearance_preset(presetName)
+      if (!presetResult?.ok) {
+        showToast(presetResult?.error ?? '当前外观已保存，但主题方案保存失败。')
+        return
+      }
+      appearancePresets.value = presetResult.presets ?? []
+    }
     scheduleUiIdleFade()
     appearanceImage.value = ''
     if (appearance.value.background_path) {
@@ -1044,7 +1095,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
             <button v-for="action in topActions" :key="action.key" class="toolbar-button" type="button" :title="action.tip" @click="runAction(action.key)">
               <UiIcon :name="action.icon" />{{ action.label }}
             </button>
-            <button class="toolbar-button appearance-button" type="button" title="新版训练页外观设置" aria-label="新版训练页外观设置" @click="appearanceDialogOpen = true"><UiIcon name="settings" /></button>
+            <button class="toolbar-button appearance-button" type="button" title="新版训练页外观设置" aria-label="新版训练页外观设置" @click="openAppearanceDialog"><UiIcon name="settings" /></button>
             <button class="toolbar-button new-project" type="button" title="创建新的训练项目；可以从模式模板开始，也可以新建自定义项目。" @click="openCreate()"><UiIcon name="plus" /> 新建项目</button>
           </div>
         </header>
@@ -1119,12 +1170,14 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
     <AppearanceDialog
       :open="appearanceDialogOpen"
       :settings="appearance"
+      :presets="appearancePresets"
       :desktop="!preview"
       :saving="appearanceSaving"
       :choose-background="chooseAppearanceBackground"
       :get-background-preview="getAppearanceImagePreview"
       @close="appearanceDialogOpen = false"
       @save="saveAppearance"
+      @delete-preset="deleteAppearancePreset"
     />
 
     <Transition name="dialog">
