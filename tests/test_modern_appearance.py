@@ -29,6 +29,15 @@ class ModernAppearanceTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
 
+    def test_first_launch_keeps_plain_dark_theme_until_user_selects_a_preset(self):
+        settings = self.bridge.get_appearance_settings()["settings"]
+        self.assertEqual(settings["theme"], "dark")
+        self.assertEqual(settings["background_path"], "")
+        self.assertEqual(settings["component_opacity"], 100)
+        self.assertFalse(settings["idle_fade_enabled"])
+        self.assertEqual(len(self.bridge.get_appearance_presets()["presets"]), 2)
+        self.assertEqual(self.core.settings, {})
+
     def test_theme_and_background_preferences_are_saved_in_namespaced_settings(self):
         image = Path(self.temp.name) / "wallpaper.png"
         image.write_bytes(b"png-fixture")
