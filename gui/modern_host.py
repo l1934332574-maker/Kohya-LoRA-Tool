@@ -287,6 +287,7 @@ class ModernUIBridge:
             "ok": True, "mode": mode, "title": title, "description": description,
             "asset_dir": asset_dir, "note": note, "items": items,
         }
+        return params
 
     def start_model_download(self, mode, key):
         spec = self._model_download_spec(mode)

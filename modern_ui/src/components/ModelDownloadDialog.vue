@@ -35,7 +35,7 @@ async function loadList() {
   error.value = ''
   try {
     const result = await api.get_model_downloads(props.mode)
-    if (!result.ok) error.value = result.error ?? '读取模型清单失败。'
+    if (!result?.ok) error.value = result?.error ?? '读取模型清单失败，请重试。'
     else list.value = result
   } catch (exception) {
     error.value = exception instanceof Error ? exception.message : '读取模型清单失败。'
@@ -123,7 +123,7 @@ onUnmounted(stopPolling)
           <div><span class="assets-kicker">模型文件管理</span><h2 id="assets-title">{{ list?.title || '训练模型' }}</h2></div>
           <button class="assets-close" type="button" aria-label="关闭" :disabled="!canClose" @click="close">×</button>
         </header>
-        <p class="assets-description">{{ list?.description || '正在读取当前模式的模型文件清单…' }}</p>
+        <p class="assets-description">{{ list?.description || (error ? '模型文件清单读取失败。' : '正在读取当前模式的模型文件清单…') }}</p>
         <div v-if="list?.asset_dir" class="assets-location"><UiIcon name="folder" /><span :title="list.asset_dir">保存位置：{{ list.asset_dir }}</span><button type="button" @click="openFolder">打开文件夹</button></div>
         <div v-if="list?.note" class="assets-note">{{ list.note }}</div>
         <div v-if="loading" class="assets-loading"><span class="assets-spinner"></span>正在检查本机模型文件…</div>
@@ -140,7 +140,7 @@ onUnmounted(stopPolling)
             </button>
           </article>
         </div>
-        <p v-if="error" class="assets-error">{{ error }}</p>
+        <div v-if="error" class="assets-error"><span>{{ error }}</span><button v-if="!loading && !running" type="button" @click="loadList">重试</button></div>
         <template v-if="taskId">
           <div class="download-status" :class="task?.status">
             <span>{{ task?.message || '正在下载…' }}</span>
@@ -188,7 +188,8 @@ onUnmounted(stopPolling)
 .asset-download:disabled, .asset-primary:disabled { opacity: .48; cursor: wait; }
 .assets-loading { display: flex; align-items: center; gap: 8px; min-height: 90px; color: var(--tone-999fa9); font-size: 11px; }
 .assets-spinner { width: 12px; height: 12px; border: 1.5px solid var(--tone-505763); border-top-color: var(--tone-b3bbc6); border-radius: 50%; animation: spin .8s linear infinite; }
-.assets-error { margin: 8px 0 0; color: var(--tone-c69da1); font-size: 10px; white-space: pre-line; }
+.assets-error { display: flex; align-items: center; gap: 10px; margin: 8px 0 0; color: var(--tone-c69da1); font-size: 10px; white-space: pre-line; }
+.assets-error button { padding: 4px 9px; border: 1px solid var(--tone-3c424b); border-radius: 4px; color: var(--tone-b9bec7); background: transparent; cursor: pointer; }
 .download-status { display: flex; justify-content: space-between; gap: 9px; margin-top: 10px; color: var(--tone-aab2bd); font-size: 10px; }
 .download-status.completed { color: var(--tone-a8bea9); }
 .download-status.failed, .download-status.cancelled { color: var(--tone-c6a8aa); }

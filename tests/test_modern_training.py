@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -253,6 +254,26 @@ class ProjectCreationCore:
 
 
 class ModernTrainingTests(unittest.TestCase):
+    def test_model_download_list_returns_items_for_flux2(self):
+        with tempfile.TemporaryDirectory() as temp:
+            links = {
+                "dit": ("model.safetensors", "FLUX.2 base", "https://example.test/model"),
+                "te": ("text.safetensors", "Qwen3", "https://example.test/text"),
+                "vae": ("vae.safetensors", "VAE", "https://example.test/vae"),
+            }
+            core = SimpleNamespace(
+                FLUX2_MODEL_LINKS=links,
+                flux2_models_dir=lambda: temp,
+                flux2_model_files=lambda: {},
+            )
+            result = ModernUIBridge(core).get_model_downloads("flux2")
+
+            self.assertIsInstance(result, dict)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["asset_dir"], temp)
+            self.assertEqual([item["key"] for item in result["items"]], ["dit", "te", "vae"])
+            self.assertTrue(all(item["required"] for item in result["items"]))
+
     def test_web_asset_mime_types_override_contaminated_registry_mappings(self):
         database = mimetypes.MimeTypes()
         for extension in (".js", ".mjs", ".css"):
