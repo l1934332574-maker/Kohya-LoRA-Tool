@@ -1671,11 +1671,15 @@ class ModernUIBridge:
 
     def get_appearance_presets(self):
         settings = self.core._load_app_settings() or {}
-        custom = settings.get("modern_ui_custom_presets", []) if isinstance(settings, dict) else []
-        presets = self._bundled_appearance_presets()
+        settings = settings if isinstance(settings, dict) else {}
+        custom = settings.get("modern_ui_custom_presets", [])
+        hidden = settings.get("modern_ui_hidden_builtin_presets", [])
+        builtin_ids = {item["id"] for item in self._bundled_appearance_presets()}
+        hidden_ids = [item for item in hidden if isinstance(item, str) and item in builtin_ids] if isinstance(hidden, list) else []
+        presets = [item for item in self._bundled_appearance_presets() if item["id"] not in hidden_ids]
         if isinstance(custom, list):
             presets += [item for item in custom if isinstance(item, dict)]
-        return {"ok": True, "presets": [
+        return {"ok": True, "hidden_builtin_ids": hidden_ids, "presets": [
             {**item, "available": not item.get("background_path") or not self._validate_appearance_image_path(item["background_path"])}
             for item in presets
         ]}
@@ -1711,6 +1715,14 @@ class ModernUIBridge:
         settings = self.core._load_app_settings() or {}
         if not isinstance(settings, dict):
             settings = {}
+        builtin_ids = {item["id"] for item in self._bundled_appearance_presets()}
+        if preset_id in builtin_ids:
+            hidden = settings.get("modern_ui_hidden_builtin_presets", [])
+            hidden = [item for item in hidden if isinstance(item, str) and item in builtin_ids] if isinstance(hidden, list) else []
+            settings["modern_ui_hidden_builtin_presets"] = list(dict.fromkeys(hidden + [preset_id]))
+            if not self.core._save_app_settings(settings):
+                return {"ok": False, "error": "隐藏内置主题失败，请检查用户设置目录。"}
+            return self.get_appearance_presets()
         custom = settings.get("modern_ui_custom_presets", [])
         custom = list(custom) if isinstance(custom, list) else []
         removed = next((item for item in custom if isinstance(item, dict) and item.get("id") == preset_id), None)
@@ -1721,6 +1733,15 @@ class ModernUIBridge:
             return {"ok": False, "error": "删除主题失败，请检查用户设置目录。"}
         if removed.get("background_path"):
             self._remove_owned_appearance_crop(removed["background_path"])
+        return self.get_appearance_presets()
+
+    def restore_appearance_builtin_presets(self):
+        settings = self.core._load_app_settings() or {}
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["modern_ui_hidden_builtin_presets"] = []
+        if not self.core._save_app_settings(settings):
+            return {"ok": False, "error": "恢复内置主题失败，请检查用户设置目录。"}
         return self.get_appearance_presets()
 
     def set_appearance_settings(

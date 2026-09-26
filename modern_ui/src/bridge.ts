@@ -98,9 +98,10 @@ export interface DesktopApi {
   save_project_config(name: string, patch: ProjectConfig): Promise<{ ok: boolean; error?: string; project?: ProjectCard | null }>
   choose_path(kind: 'folder' | 'model' | 'image', current_path?: string, memory_key?: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean; path?: string }>
   get_appearance_settings(): Promise<{ ok: boolean; settings?: AppearanceSettings; error?: string }>
-  get_appearance_presets(): Promise<{ ok: boolean; presets?: AppearancePreset[]; error?: string }>
+  get_appearance_presets(): Promise<{ ok: boolean; presets?: AppearancePreset[]; hidden_builtin_ids?: string[]; error?: string }>
   save_appearance_preset(name: string): Promise<{ ok: boolean; presets?: AppearancePreset[]; error?: string }>
-  delete_appearance_preset(id: string): Promise<{ ok: boolean; presets?: AppearancePreset[]; error?: string }>
+  delete_appearance_preset(id: string): Promise<{ ok: boolean; presets?: AppearancePreset[]; hidden_builtin_ids?: string[]; error?: string }>
+  restore_appearance_builtin_presets(): Promise<{ ok: boolean; presets?: AppearancePreset[]; hidden_builtin_ids?: string[]; error?: string }>
   set_appearance_settings(
     theme: AppearanceSettings['theme'],
     background_path: string,

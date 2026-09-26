@@ -92,8 +92,26 @@ class ModernAppearanceTests(unittest.TestCase):
         self.assertEqual(custom["background_path"], str(image))
         self.assertEqual(ModernUIBridge(self.core).get_appearance_presets()["presets"][-1]["id"], custom["id"])
         self.assertFalse(self.bridge.save_appearance_preset("我的主题")["ok"])
-        self.assertFalse(self.bridge.delete_appearance_preset("builtin-dark")["ok"])
         self.assertEqual(len(self.bridge.delete_appearance_preset(custom["id"])["presets"]), 2)
+
+    def test_bundled_theme_can_be_hidden_and_restored_without_deleting_its_image(self):
+        bundled = self.bridge.get_appearance_presets()["presets"]
+        dark_path = bundled[0]["background_path"]
+        self.bridge.set_appearance_settings("dark", dark_path, 90, 80, True)
+
+        hidden = self.bridge.delete_appearance_preset("builtin-dark")
+        self.assertTrue(hidden["ok"])
+        self.assertEqual([item["id"] for item in hidden["presets"]], ["builtin-light"])
+        self.assertEqual(hidden["hidden_builtin_ids"], ["builtin-dark"])
+        self.assertTrue(Path(dark_path).is_file())
+        self.assertTrue(self.bridge.get_appearance_background()["ok"])
+        self.assertEqual([item["id"] for item in ModernUIBridge(self.core).get_appearance_presets()["presets"]],
+                         ["builtin-light"])
+
+        restored = self.bridge.restore_appearance_builtin_presets()
+        self.assertTrue(restored["ok"])
+        self.assertEqual([item["id"] for item in restored["presets"]], ["builtin-dark", "builtin-light"])
+        self.assertEqual(restored["hidden_builtin_ids"], [])
 
     def test_saved_custom_theme_keeps_its_cropped_background_until_deleted(self):
         from PIL import Image

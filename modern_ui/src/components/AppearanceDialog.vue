@@ -9,6 +9,7 @@ const props = defineProps<{
   open: boolean
   settings: AppearanceSettings
   presets: AppearancePreset[]
+  hiddenBuiltinCount: number
   desktop: boolean
   saving: boolean
   chooseBackground: () => Promise<string | null>
@@ -18,6 +19,7 @@ const emit = defineEmits<{
   close: []
   save: [settings: AppearanceSettings, presetName?: string]
   deletePreset: [id: string]
+  restoreBuiltinPresets: []
 }>()
 
 const draft = ref<AppearanceSettings>({ ...props.settings })
@@ -365,10 +367,11 @@ function save() {
                 </span>
                 <span class="appearance-theme-name">{{ preset.name }}<small>{{ preset.built_in ? '内置' : '自定义' }}</small></span>
               </button>
-              <button v-if="!preset.built_in" class="appearance-theme-remove" type="button" :disabled="saving" :aria-label="`删除主题 ${preset.name}`" title="删除此主题" @click="emit('deletePreset', preset.id)">×</button>
+              <button class="appearance-theme-remove" type="button" :disabled="saving" :aria-label="`从列表移除 ${preset.name}`" :title="preset.built_in ? '从列表移除内置主题，之后可恢复' : '删除此主题'" @click="emit('deletePreset', preset.id)">×</button>
             </div>
             <button class="appearance-theme-add" type="button" :disabled="saving" @click="namingPreset = true"><span>＋</span>保存当前配置</button>
           </div>
+          <button v-if="hiddenBuiltinCount" class="appearance-restore-builtins" type="button" :disabled="saving" @click="emit('restoreBuiltinPresets')">恢复已移除的内置主题（{{ hiddenBuiltinCount }}）</button>
           <div v-if="namingPreset" class="appearance-theme-save">
             <input v-model="presetName" type="text" maxlength="30" aria-label="自定义主题名称" placeholder="给当前配置起个名字" @keydown.enter="saveCustomPreset" />
             <button class="appearance-button" type="button" :disabled="saving" @click="saveCustomPreset">保存为主题</button>
@@ -526,6 +529,8 @@ function save() {
 .appearance-theme-add { place-items: center; align-content: center; gap: 5px; border-style: dashed; color: var(--sub); text-align: center; font-size: 10px; }
 .appearance-theme-add span { font-size: 24px; line-height: 1; }
 .appearance-theme-remove { position: absolute; top: 5px; right: 5px; width: 22px; height: 22px; border: 0; border-radius: 4px; color: #fff; background: rgb(20 24 30 / 75%); cursor: pointer; }
+.appearance-restore-builtins { justify-self: start; padding: 0; border: 0; color: var(--sub); background: transparent; font-size: 10px; cursor: pointer; }
+.appearance-restore-builtins:hover { color: var(--accent); }
 .appearance-theme-save { display: flex; flex-wrap: wrap; gap: 6px; }
 .appearance-theme-save input { flex: 1; min-width: 155px; min-height: 30px; padding: 0 9px; border: 1px solid var(--border); border-radius: 5px; color: var(--text); background: var(--bg); }
 .appearance-file-row { display: flex; align-items: center; gap: 7px; min-width: 0; }

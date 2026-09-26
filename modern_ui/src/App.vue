@@ -72,6 +72,7 @@ const appearance = ref<AppearanceSettings>({
 })
 const appearanceImage = ref('')
 const appearancePresets = ref<AppearancePreset[]>([])
+const hiddenBuiltinPresetIds = ref<string[]>([])
 const systemPrefersLight = ref(false)
 const uiIdle = ref(false)
 const nameInput = ref<HTMLInputElement | null>(null)
@@ -755,9 +756,12 @@ async function getAppearanceImagePreview(path: string, thumbnail = false): Promi
 async function loadAppearancePresets() {
   const api = window.pywebview?.api
   if (preview.value) {
-    appearancePresets.value = [
+    const builtins: AppearancePreset[] = [
       { id: 'builtin-dark', name: '深色示例', built_in: true, theme: 'dark', background_path: '/themes/dark.png', background_opacity: 90, component_opacity: 80, idle_fade_enabled: true, available: true },
       { id: 'builtin-light', name: '浅色示例', built_in: true, theme: 'light', background_path: '/themes/light.png', background_opacity: 90, component_opacity: 80, idle_fade_enabled: true, available: true },
+    ]
+    appearancePresets.value = [
+      ...builtins.filter((preset) => !hiddenBuiltinPresetIds.value.includes(preset.id)),
       ...appearancePresets.value.filter((preset) => !preset.built_in),
     ]
     return
@@ -765,7 +769,10 @@ async function loadAppearancePresets() {
   if (!api) return
   try {
     const result = await api.get_appearance_presets()
-    if (result?.ok && result.presets) appearancePresets.value = result.presets
+    if (result?.ok && result.presets) {
+      appearancePresets.value = result.presets
+      hiddenBuiltinPresetIds.value = result.hidden_builtin_ids ?? []
+    }
   } catch (error) {
     appendLog(`[外观] 无法读取主题方案：${error instanceof Error ? error.message : '未知错误'}`)
   }
@@ -779,11 +786,33 @@ function openAppearanceDialog() {
 async function deleteAppearancePreset(id: string) {
   if (preview.value || !window.pywebview?.api) {
     appearancePresets.value = appearancePresets.value.filter((preset) => preset.id !== id)
+    if (id.startsWith('builtin-')) hiddenBuiltinPresetIds.value = [...hiddenBuiltinPresetIds.value, id]
     return
   }
-  const result = await window.pywebview.api.delete_appearance_preset(id)
-  if (!result?.ok) return showToast(result?.error ?? '删除主题失败。')
-  appearancePresets.value = result.presets ?? []
+  try {
+    const result = await window.pywebview.api.delete_appearance_preset(id)
+    if (!result?.ok) return showToast(result?.error ?? '删除主题失败。')
+    appearancePresets.value = result.presets ?? []
+    hiddenBuiltinPresetIds.value = result.hidden_builtin_ids ?? []
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : '删除主题失败。')
+  }
+}
+
+async function restoreAppearanceBuiltinPresets() {
+  if (preview.value || !window.pywebview?.api) {
+    hiddenBuiltinPresetIds.value = []
+    await loadAppearancePresets()
+    return
+  }
+  try {
+    const result = await window.pywebview.api.restore_appearance_builtin_presets()
+    if (!result?.ok) return showToast(result?.error ?? '恢复内置主题失败。')
+    appearancePresets.value = result.presets ?? []
+    hiddenBuiltinPresetIds.value = result.hidden_builtin_ids ?? []
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : '恢复内置主题失败。')
+  }
 }
 
 async function saveAppearance(next: AppearanceSettings, presetName = '') {
@@ -1171,6 +1200,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
       :open="appearanceDialogOpen"
       :settings="appearance"
       :presets="appearancePresets"
+      :hidden-builtin-count="hiddenBuiltinPresetIds.length"
       :desktop="!preview"
       :saving="appearanceSaving"
       :choose-background="chooseAppearanceBackground"
@@ -1178,6 +1208,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
       @close="appearanceDialogOpen = false"
       @save="saveAppearance"
       @delete-preset="deleteAppearancePreset"
+      @restore-builtin-presets="restoreAppearanceBuiltinPresets"
     />
 
     <Transition name="dialog">
