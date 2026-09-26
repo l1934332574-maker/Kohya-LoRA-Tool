@@ -11,8 +11,10 @@ import shutil
 import json
 import threading
 import time
+import tempfile
 import urllib.request
 import socket
+from pathlib import Path
 from urllib.parse import urlparse
 
 from kohya_core.configs import PY_MIN, PY_MAX
@@ -34,6 +36,7 @@ __all__ = [
     # 又被那里的 `except Exception: pass` 吞掉 → **"装完 Python 却识别不到"的兜底扫描静默失效** ✗
     # （同一天第三次同类问题：用了却没导入/没导出 ✓ 靠静态审计兜住整类 ✓）
     "_py_has_venv",
+    "repair_relocated_venv",
     # 用户指定的环境路径（自带 Python / Git）
     "get_env_paths", "set_env_paths", "clear_env_paths",
     "check_python_exe", "check_git_exe", "scan_python_dir", "scan_git_dir",
@@ -520,6 +523,210 @@ def find_python():
             continue
         return c, s
     return None, None
+
+
+def _installed_python_candidates():
+    """Return likely installed Python executables without selecting a preferred version."""
+    candidates = []
+    seen = set()
+
+    def add(path):
+        if not path:
+            return
+        path = os.path.abspath(path.strip().strip('"'))
+        key = os.path.normcase(path)
+        if key not in seen and os.path.isfile(path):
+            seen.add(key)
+            candidates.append(path)
+
+    try:
+        custom = custom_python_exe()
+        add(custom)
+    except Exception:
+        pass
+
+    # The launcher reports all registered installations, including custom locations.
+    try:
+        result = subprocess.run(["py", "-0p"], capture_output=True, text=True,
+                                errors="replace", timeout=20, env=build_env())
+        if result.returncode == 0:
+            for line in (result.stdout or "").splitlines():
+                parts = line.split()
+                if not parts or not parts[0].startswith("-V:"):
+                    continue
+                if len(parts) > 1 and parts[1] == "*":
+                    parts.pop(1)
+                if len(parts) > 1:
+                    add(" ".join(parts[1:]))
+    except Exception:
+        pass
+
+    # Include user installs even when the Python launcher registration is stale.
+    base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python")
+    try:
+        for name in os.listdir(base):
+            if re.match(r"^Python\d+$", name, re.I):
+                add(os.path.join(base, name, "python.exe"))
+    except OSError:
+        pass
+
+    # Include standard all-users installs and PATH's selected executable.
+    for minor in (10, 11, 12, 13):
+        version_dir = "Python3%d" % minor
+        for root in ("C:\\", r"C:\Program Files", r"C:\Program Files (x86)"):
+            add(os.path.join(root, version_dir, "python.exe"))
+    add(shutil.which("python"))
+    return candidates
+
+
+def _atomic_replace_bytes(path, content, prefix):
+    """Write bytes beside path and atomically replace it."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temporary = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        except OSError:
+            pass
+
+
+def _repair_candidate_python_version(candidate):
+    """Probe a candidate's exact version and standard library in a clean child env."""
+    code = (
+        "import ctypes, socket, ssl, sqlite3, sys;"
+        "print('%d.%d.%d' % sys.version_info[:3])"
+    )
+    try:
+        result = subprocess.run(
+            [candidate, "-c", code], capture_output=True, text=True,
+            errors="replace", timeout=60, env=build_env(),
+        )
+    except Exception:
+        return None, None
+    if result.returncode != 0:
+        return None, None
+    version = (result.stdout or "").strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        return None, None
+    return version, tuple(int(part) for part in version.split("."))
+
+
+def repair_relocated_venv(vpy, validate, logf=print, candidates=None):
+    """Repair a Windows venv only when its exact recorded base Python still exists.
+
+    A venv contains its own site-packages but ``pyvenv.cfg`` retains the absolute
+    base-Python directory and its recorded version. If the directory disappeared,
+    or its existing ``python.exe`` reports a different version, re-point only
+    ``home`` to an installed interpreter with the exact recorded patch version,
+    validate the venv, and restore the original config atomically if validation
+    fails. An existing base interpreter whose version/stdlib cannot be verified is
+    left untouched. This helper never changes the venv location or installs/replaces
+    packages. A caller's validation callback may check or repair only the
+    app-specific preprocessing dependencies; a failed callback always restores the
+    original config.
+
+    Returns ``(repaired, detail)``. ``validate`` must check that the venv starts and
+    its standard library works; the caller should separately verify its app-specific
+    dependencies (Pillow/numpy for preprocessing).
+    """
+    if not vpy or not os.path.isfile(vpy):
+        return False, "venv 的 python.exe 不存在"
+    cfg = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(vpy))), "pyvenv.cfg")
+    try:
+        original = Path(cfg).read_bytes()
+        text = original.decode("utf-8-sig")
+    except (OSError, UnicodeError):
+        return False, "无法读取 pyvenv.cfg"
+
+    lines = text.splitlines(keepends=True)
+    home_index = None
+    home = ""
+    version = ""
+    for index, line in enumerate(lines):
+        match = re.match(r"^\ufeff?\s*home\s*=\s*(.*?)\r?\n?$", line, re.I)
+        if match:
+            if home_index is not None:
+                return False, "pyvenv.cfg 包含多个 home 项，跳过自动修复"
+            home_index = index
+            home = match.group(1).strip()
+        version_match = re.match(r"^\ufeff?\s*version\s*=\s*(\d+\.\d+\.\d+)", line, re.I)
+        if version_match:
+            version = version_match.group(1)
+    if home_index is None or not home:
+        return False, "pyvenv.cfg 缺少 home 项"
+    if not version:
+        return False, "pyvenv.cfg 未记录完整 Python 版本，无法安全匹配基座"
+
+    expected_parts = tuple(int(part) for part in version.split("."))
+    current_base = os.path.join(home, "python.exe")
+    if os.path.isfile(current_base):
+        current_version, current_parts = _repair_candidate_python_version(current_base)
+        if not current_version or not current_parts:
+            return False, "venv 基座 Python 文件仍存在，但版本/标准库自检失败；拒绝自动改写"
+        if current_version == version and current_parts == expected_parts:
+            return False, "venv 基座 Python 版本与 pyvenv.cfg 一致，无需修复"
+
+    selected = None
+    for candidate in list(candidates) if candidates is not None else _installed_python_candidates():
+        if not candidate or not os.path.isfile(candidate):
+            continue
+        candidate_version, candidate_parts = _repair_candidate_python_version(candidate)
+        if candidate_version == version and candidate_parts == expected_parts:
+            selected = os.path.dirname(os.path.abspath(candidate))
+            break
+    if not selected:
+        return False, "未找到可运行的同版本 Python %s，保留现有训练环境" % version
+
+    # Preserve the exact original bytes in a uniquely named sibling backup first.
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    backup = "%s.preprocess-repair-%s-%d.bak" % (cfg, stamp, os.getpid())
+    suffix = 1
+    while os.path.exists(backup):
+        backup = "%s.preprocess-repair-%s-%d-%d.bak" % (cfg, stamp, os.getpid(), suffix)
+        suffix += 1
+    try:
+        fd, temporary_backup = tempfile.mkstemp(
+            prefix="pyvenv-backup-", suffix=".tmp", dir=os.path.dirname(cfg))
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(original)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.rename(temporary_backup, backup)
+        finally:
+            if os.path.exists(temporary_backup):
+                os.remove(temporary_backup)
+
+        line = lines[home_index]
+        ending = "\r\n" if line.endswith("\r\n") else ("\n" if line.endswith("\n") else "")
+        prefix_match = re.match(r"^(\ufeff?\s*home\s*=\s*)", line, re.I)
+        lines[home_index] = (prefix_match.group(1) if prefix_match else "home = ") + selected + ending
+        updated = (b"\xef\xbb\xbf" if original.startswith(b"\xef\xbb\xbf") else b"") + "".join(lines).encode("utf-8")
+        _atomic_replace_bytes(cfg, updated, "pyvenv-repair-")
+    except OSError as exc:
+        return False, "无法安全更新 pyvenv.cfg（%s）" % exc
+
+    try:
+        valid, detail = validate(vpy)
+    except Exception as exc:
+        valid, detail = False, str(exc)
+    if not valid:
+        try:
+            _atomic_replace_bytes(cfg, original, "pyvenv-restore-")
+        except OSError as exc:
+            return False, "venv 验证失败且无法恢复 pyvenv.cfg（备份保留在 %s；%s）" % (backup, exc)
+        return False, "同版本 Python %s 已匹配，但 venv 验证失败；已恢复原配置" % version
+
+    message = "已校正 venv 的 Python %s 基座，复用原 venv 及其依赖；原配置备份：%s" % (version, backup)
+    logf("[预处理] " + message)
+    return True, message
 
 def venv_python(kdir=None):
     kdir = kdir or get_kohya_dir()

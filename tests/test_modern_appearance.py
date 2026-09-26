@@ -68,6 +68,56 @@ class ModernAppearanceTests(unittest.TestCase):
         self.assertTrue(below_range["ok"])
         self.assertEqual(below_range["settings"]["background_opacity"], 0)
 
+    def test_ui_opacity_and_idle_fade_settings_are_saved_and_clamped(self):
+        low = self.bridge.set_appearance_settings("dark", "", 18, 0, True)
+        self.assertTrue(low["ok"])
+        self.assertEqual(low["settings"]["component_opacity"], 0)
+        self.assertTrue(low["settings"]["idle_fade_enabled"])
+
+        high = self.bridge.set_appearance_settings("dark", "", 18, 140, False)
+        self.assertTrue(high["ok"])
+        self.assertEqual(high["settings"]["component_opacity"], 100)
+        self.assertFalse(high["settings"]["idle_fade_enabled"])
+
+    def test_background_history_keeps_local_paths_marks_missing_and_is_limited(self):
+        existing = Path(self.temp.name) / "wallpaper.png"
+        existing.write_bytes(b"png-fixture")
+        missing = Path(self.temp.name) / "removed-drive" / "old-wallpaper.png"
+        history = [str(Path(self.temp.name) / f"image-{index}.png") for index in range(10)]
+
+        saved = self.bridge.set_appearance_settings(
+            "light", str(existing), 36, 82, True, [str(missing), *history]
+        )
+
+        self.assertTrue(saved["ok"])
+        entries = saved["settings"]["background_history"]
+        self.assertEqual(len(entries), 8)
+        self.assertEqual(entries[0], {"path": str(existing), "available": True})
+        self.assertEqual(entries[1], {"path": str(missing), "available": False})
+        self.assertEqual(self.core.settings["modern_ui_background_history"][0], str(existing))
+        self.assertEqual(existing.read_bytes(), b"png-fixture")
+
+        removed = self.bridge.set_appearance_settings("light", "", 36, 82, True, [])
+        self.assertTrue(removed["ok"])
+        self.assertEqual(removed["settings"]["background_history"], [])
+
+    def test_legacy_appearance_settings_receive_new_defaults_and_keep_missing_current_path(self):
+        missing = Path(self.temp.name) / "offline.png"
+        self.core.settings.update({
+            "modern_ui_theme": "light",
+            "modern_ui_background": str(missing),
+            "modern_ui_background_opacity": 43,
+        })
+
+        settings = self.bridge.get_appearance_settings()["settings"]
+
+        self.assertEqual(settings["theme"], "light")
+        self.assertEqual(settings["background_opacity"], 43)
+        self.assertFalse(settings["background_available"])
+        self.assertEqual(settings["background_history"], [{"path": str(missing), "available": False}])
+        self.assertEqual(settings["component_opacity"], 100)
+        self.assertFalse(settings["idle_fade_enabled"])
+
     def test_invalid_theme_and_unreadable_or_oversized_image_are_rejected(self):
         image = Path(self.temp.name) / "wallpaper.gif"
         image.write_bytes(b"image")

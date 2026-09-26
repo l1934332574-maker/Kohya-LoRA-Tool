@@ -98,7 +98,14 @@ export interface DesktopApi {
   save_project_config(name: string, patch: ProjectConfig): Promise<{ ok: boolean; error?: string; project?: ProjectCard | null }>
   choose_path(kind: 'folder' | 'model' | 'image'): Promise<{ ok: boolean; error?: string; cancelled?: boolean; path?: string }>
   get_appearance_settings(): Promise<{ ok: boolean; settings?: AppearanceSettings; error?: string }>
-  set_appearance_settings(theme: AppearanceSettings['theme'], background_path: string, background_opacity: number): Promise<{ ok: boolean; settings?: AppearanceSettings; error?: string }>
+  set_appearance_settings(
+    theme: AppearanceSettings['theme'],
+    background_path: string,
+    background_opacity: number,
+    component_opacity?: number,
+    idle_fade_enabled?: boolean,
+    background_history?: string[],
+  ): Promise<{ ok: boolean; settings?: AppearanceSettings; error?: string }>
   get_appearance_background(): Promise<{ ok: boolean; data_url?: string; error?: string }>
   get_qwen_model_setup(mode?: 'qwen_image' | 'zimage'): Promise<QwenModelSetup>
   save_qwen_model_setup(selection: QwenModelSelection): Promise<QwenModelSetup>
@@ -123,6 +130,15 @@ export interface AppearanceSettings {
   theme: 'dark' | 'light' | 'system'
   background_path: string
   background_opacity: number
+  background_available: boolean
+  background_history: AppearanceBackgroundHistoryEntry[]
+  component_opacity: number
+  idle_fade_enabled: boolean
+}
+
+export interface AppearanceBackgroundHistoryEntry {
+  path: string
+  available: boolean
 }
 
 export interface GuideStep {

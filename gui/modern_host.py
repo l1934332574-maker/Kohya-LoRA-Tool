@@ -44,6 +44,8 @@ _MODERN_IMPORT_EXTRA_PARAMS = {
     "wd14_model", "overwrite", "amd_mode",
 }
 
+_APPEARANCE_BACKGROUND_HISTORY_LIMIT = 8
+
 
 def _app_root() -> Path:
     if getattr(sys, "frozen", False):
@@ -1547,21 +1549,69 @@ class ModernUIBridge:
         theme = str(settings.get("modern_ui_theme") or "dark")
         if theme not in ("dark", "light", "system"):
             theme = "dark"
-        background = str(settings.get("modern_ui_background") or "")
-        if background and not os.path.isfile(background):
-            # Keep the path so reconnecting a removable drive can restore it later.
+        background = str(settings.get("modern_ui_background") or "").strip()
+        if background:
+            # Keep missing paths so removable drives can be reconnected later.
             background = os.path.abspath(background)
         opacity = settings.get("modern_ui_background_opacity", 18)
         try:
             opacity = max(0, min(100, int(opacity)))
         except (TypeError, ValueError):
             opacity = 18
-        return {"theme": theme, "background_path": background, "background_opacity": opacity}
+        component_opacity = settings.get("modern_ui_component_opacity", 100)
+        try:
+            component_opacity = max(0, min(100, int(component_opacity)))
+        except (TypeError, ValueError):
+            component_opacity = 100
+        idle_fade_enabled = settings.get("modern_ui_idle_fade_enabled", False)
+        background_history = settings.get("modern_ui_background_history", [])
+        history_paths = ModernUIBridge._normalize_appearance_background_history(background_history, background)
+        return {
+            "theme": theme,
+            "background_path": background,
+            "background_opacity": opacity,
+            "background_available": bool(background and os.path.isfile(background)),
+            "background_history": [
+                {"path": path, "available": os.path.isfile(path)} for path in history_paths
+            ],
+            "component_opacity": component_opacity,
+            "idle_fade_enabled": bool(idle_fade_enabled),
+        }
+
+    @staticmethod
+    def _normalize_appearance_background_history(paths, selected=""):
+        if not isinstance(paths, (list, tuple)):
+            paths = []
+        normalized = []
+        seen = set()
+        for raw_path in ([selected] if selected else []) + list(paths):
+            if not isinstance(raw_path, (str, os.PathLike)):
+                continue
+            path = str(raw_path).strip()
+            if not path:
+                continue
+            path = os.path.abspath(path)
+            key = os.path.normcase(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(path)
+            if len(normalized) >= _APPEARANCE_BACKGROUND_HISTORY_LIMIT:
+                break
+        return normalized
 
     def get_appearance_settings(self):
         return {"ok": True, "settings": self._appearance_settings_from_core(self.core)}
 
-    def set_appearance_settings(self, theme="dark", background_path="", background_opacity=18):
+    def set_appearance_settings(
+        self,
+        theme="dark",
+        background_path="",
+        background_opacity=18,
+        component_opacity=None,
+        idle_fade_enabled=None,
+        background_history=None,
+    ):
         theme = str(theme or "dark")
         if theme not in ("dark", "light", "system"):
             return {"ok": False, "error": "颜色主题选项无效。"}
@@ -1582,10 +1632,25 @@ class ModernUIBridge:
         except (TypeError, ValueError):
             return {"ok": False, "error": "背景图片显现程度无效。"}
         current_settings = self.core._load_app_settings() or {}
+        current_settings = current_settings if isinstance(current_settings, dict) else {}
         settings = dict(current_settings) if isinstance(current_settings, dict) else {}
+        if component_opacity is None:
+            component_opacity = current_settings.get("modern_ui_component_opacity", 100)
+        try:
+            component_opacity = max(0, min(100, int(component_opacity)))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "界面组件透明度无效。"}
+        if idle_fade_enabled is None:
+            idle_fade_enabled = current_settings.get("modern_ui_idle_fade_enabled", False)
+        if background_history is None:
+            background_history = current_settings.get("modern_ui_background_history", [])
+        history_paths = self._normalize_appearance_background_history(background_history, background_path)
         settings["modern_ui_theme"] = theme
         settings["modern_ui_background"] = background_path
         settings["modern_ui_background_opacity"] = opacity
+        settings["modern_ui_component_opacity"] = component_opacity
+        settings["modern_ui_idle_fade_enabled"] = bool(idle_fade_enabled)
+        settings["modern_ui_background_history"] = history_paths
         if not self.core._save_app_settings(settings):
             return {"ok": False, "error": "设置保存失败，请检查用户设置目录的写入权限。"}
         self._log("[外观] 已保存新版训练页显示设置。")

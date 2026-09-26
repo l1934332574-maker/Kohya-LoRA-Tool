@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.18.1"
+APP_VERSION = "0.18.2"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -8371,7 +8371,7 @@ def _ensure_preprocess_deps(vpy, kdir, logf=print, force=False):
     def _deps_importable():
         try:
             r = subprocess.run([vpy, "-c", "from PIL import Image; import numpy"],
-                               capture_output=True, text=True, timeout=120)
+                               capture_output=True, text=True, timeout=120, env=build_env())
             return r.returncode == 0
         except Exception:
             return False
@@ -8385,7 +8385,7 @@ def _ensure_preprocess_deps(vpy, kdir, logf=print, force=False):
     def _ctypes_ok():
         try:
             r = subprocess.run([vpy, "-c", "import ctypes; print('ctypes-ok')"],
-                               capture_output=True, text=True, timeout=120)
+                               capture_output=True, text=True, timeout=120, env=build_env())
             return r.returncode == 0 and "ctypes-ok" in (r.stdout or "")
         except Exception:
             return False
@@ -9259,6 +9259,27 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         raise RuntimeError("尚未安装任何训练引擎（Kohya / 第二引擎 / 第三引擎）。\n"
                            "请先按左侧引导安装对应引擎后再试。")
     _vok, _vdetail = _venv_python_ok(vpy)
+    _preprocess_deps_ready = False
+    if not _vok:
+        # Windows venv 保留创建时 Python 的绝对 home 路径。若该 Python 后来被移走，
+        # 或 home 仍存在但实际版本与 pyvenv.cfg 记录不符（例如 3.10 venv 混入 3.12 标准库），
+        # 而机器上仍有完全相同的记录版本，可只修复 pyvenv.cfg 并复用 venv 包，
+        # 避免把“预处理”升级成数 GB 的整个训练环境重装。
+        def _validate_repaired_preprocess_venv(_candidate_vpy):
+            _ok, _detail = _venv_python_ok(_candidate_vpy)
+            if not _ok:
+                return False, _detail
+            if not _ensure_preprocess_deps(_candidate_vpy, get_kohya_dir(), logf):
+                return False, "Pillow/numpy 预处理依赖检查失败"
+            return True, _detail
+
+        _repaired, _repair_detail = repair_relocated_venv(
+            vpy, _validate_repaired_preprocess_venv, logf)
+        if _repaired:
+            _vok, _vdetail = True, _repair_detail
+            _preprocess_deps_ready = True
+        else:
+            logf("[预处理] 自动修复旧 venv 未通过校验：%s" % _repair_detail)
     if not _vok:
         raise RuntimeError(
             "训练环境已损坏（%s）。\n"
@@ -9268,7 +9289,7 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         raise RuntimeError("请选择图片文件夹")
     # 预处理依赖自检：kohya venv 必须能 import PIL.Image/numpy（部分中断安装会缺，导致预处理永远失败）。
     # 缺失时自动补装（内置离线 wheel → 清华 → 阿里），实现自愈，不用重装整个 kohya。
-    if not _ensure_preprocess_deps(vpy, get_kohya_dir(), logf):
+    if not _preprocess_deps_ready and not _ensure_preprocess_deps(vpy, get_kohya_dir(), logf):
         raise RuntimeError(
             "自动补装 Pillow/numpy 失败（网络不稳或镜像不可达），请检查网络后重试，"
             "或重跑【② 安装训练内核】重建环境")
@@ -9593,11 +9614,12 @@ AMD_TRAIN_DEPS = "transformers==4.54.1 diffusers==0.32.1 accelerate==1.6.0 safet
 
 
 def _venv_python_ok(vpy):
-    """检测 venv 是否“重度损坏”（base 解释器缺失 / 标准库 DLL 跨版本混用）。
+    """检测 venv 是否“重度损坏”（base 解释器缺失/版本错配/标准库 DLL 混用）。
 
     Windows venv 跨盘复制 / 更换系统用户 / 原 Python 被卸载 / 混入其他版本
     Python 的依赖后：
     - pyvenv.cfg 里 home 指向的 base Python 不存在 → 启动即报 "No Python at ..."；
+    - home 仍存在但实际运行版本与 pyvenv.cfg 记录不同 → 可能从另一版本加载标准库；
     - venv 是 3.10 却混入 3.12 编译的扩展 → import socket/ssl 报
       "Module use of python312.dll conflicts with this version of Python"。
     这些都属于重度损坏，任何依赖检查/安装都会失败，返回 (False, detail)。
@@ -9606,6 +9628,7 @@ def _venv_python_ok(vpy):
     if not vpy or not os.path.isfile(vpy):
         return False, "venv 的 python.exe 不存在"
     # 1) base 解释器是否还在（pyvenv.cfg 的 home 指向的 python.exe）
+    recorded_minor = None
     try:
         cfg = os.path.join(os.path.dirname(os.path.dirname(vpy)), "pyvenv.cfg")
         if os.path.isfile(cfg):
@@ -9613,9 +9636,17 @@ def _venv_python_ok(vpy):
             try:
                 with open(cfg, encoding="utf-8", errors="replace") as _f:
                     for _line in _f:
-                        if _line.lower().startswith("home"):
-                            home = _line.split("=", 1)[1].strip()
-                            break
+                        _key, _sep, _value = _line.partition("=")
+                        if not _sep:
+                            continue
+                        _key = _key.strip().lower()
+                        _value = _value.strip()
+                        if _key == "home" and home is None:
+                            home = _value
+                        elif _key == "version":
+                            _version_match = re.match(r"^(\d+\.\d+)(?:\.\d+)?\b", _value)
+                            if _version_match:
+                                recorded_minor = _version_match.group(1)
             except Exception:
                 home = None
             if home and not os.path.isfile(os.path.join(home, "python.exe")):
@@ -9627,11 +9658,17 @@ def _venv_python_ok(vpy):
             "import socket, ssl, ctypes, sqlite3;"
             "print('%d.%d'%sys.version_info[:2])")
     try:
-        r = subprocess.run([vpy, "-c", code], capture_output=True, text=True, timeout=60)
+        r = subprocess.run([vpy, "-c", code], capture_output=True, text=True,
+                           timeout=60, env=build_env())
     except Exception as e:
         return False, str(e)[:160]
-    if r.returncode == 0 and re.match(r"^\d+\.\d+", (r.stdout or "").strip()):
-        return True, (r.stdout or "").strip()
+    reported_version = (r.stdout or "").strip()
+    if r.returncode == 0 and re.match(r"^\d+\.\d+", reported_version):
+        runtime_minor = re.match(r"^(\d+\.\d+)", reported_version).group(1)
+        if recorded_minor and runtime_minor != recorded_minor:
+            return False, "venv 实际 Python %s 与 pyvenv.cfg 记录的 %s 不一致（标准库版本错配）" % (
+                runtime_minor, recorded_minor)
+        return True, reported_version
     err = ((r.stderr or "") + (r.stdout or "")).strip()
     if "No Python" in err:
         return False, "venv 指向的 Python 已不存在（No Python at ...），venv 已损坏"

@@ -1,7 +1,7 @@
 {
-  "version": "v0.18.1",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.18.1/Setup.exe",
+  "version": "v0.18.2",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.18.2/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "setup_sha256": "488cbf377b09b46b7fe51a85dd436ec70fa0528323a559964420505b8eb7f28f",
-  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.18.1 更新（2026-09-25）\n\n· 更新训练界面，原有项目和训练环境可继续使用。\n· 修复预处理和部分操作流程。\n· 新增浅色主题和背景图片显现程度设置。"
+  "setup_sha256": "692beae061c7ad26b1568741fc4d6357c9d5a14d71a6c3d23561e2b47de74ea7",
+  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.18.2 更新（2026-09-26）\n\n· 修复预处理复用旧 venv 时的 Python 基座错配：按 pyvenv.cfg 记录版本匹配基座，并校验配置与实际运行时，避免混版本环境导致依赖导入失败。\n· 外观设置新增背景图片历史，支持调节背景图与界面组件透明度，并可启用闲置渐隐。"
 }

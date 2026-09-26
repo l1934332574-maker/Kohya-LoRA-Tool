@@ -65,9 +65,13 @@ const helpDialogKind = ref<'readme' | 'mode'>('mode')
 const helpDialogMode = ref('')
 const appearanceDialogOpen = ref(false)
 const appearanceSaving = ref(false)
-const appearance = ref<AppearanceSettings>({ theme: 'dark', background_path: '', background_opacity: 18 })
+const appearance = ref<AppearanceSettings>({
+  theme: 'dark', background_path: '', background_opacity: 18, background_available: false,
+  background_history: [], component_opacity: 100, idle_fade_enabled: false,
+})
 const appearanceImage = ref('')
 const systemPrefersLight = ref(false)
+const uiIdle = ref(false)
 const nameInput = ref<HTMLInputElement | null>(null)
 const importFileInput = ref<HTMLInputElement | null>(null)
 const importedConfigJson = ref('')
@@ -75,6 +79,8 @@ const importedConfigPreview = ref<ProjectConfig | null>(null)
 const importedConfigLabel = ref('')
 let previousFocus: HTMLElement | null = null
 let projectNameSuggestionRequest = 0
+let uiIdleFadeTimer: ReturnType<typeof setTimeout> | undefined
+const UI_IDLE_FADE_DELAY_MS = 45_000
 const reservedPreviewProjectNames = new Set<string>()
 let systemThemeQuery: MediaQueryList | null = null
 const updateSystemTheme = (event: MediaQueryListEvent) => { systemPrefersLight.value = event.matches }
@@ -84,7 +90,22 @@ const activeTheme = computed(() => appearance.value.theme === 'system'
 const appShellStyle = computed(() => ({
   '--wallpaper-image': appearanceImage.value ? `url("${appearanceImage.value}")` : 'none',
   '--wallpaper-opacity': appearanceImage.value ? String(appearance.value.background_opacity / 100) : '0',
+  '--ui-component-opacity': String(appearance.value.component_opacity / 100),
 }) as Record<string, string>)
+
+function scheduleUiIdleFade() {
+  if (uiIdleFadeTimer !== undefined) window.clearTimeout(uiIdleFadeTimer)
+  uiIdle.value = false
+  if (!appearance.value.idle_fade_enabled) return
+  uiIdleFadeTimer = window.setTimeout(() => {
+    uiIdle.value = true
+    uiIdleFadeTimer = undefined
+  }, UI_IDLE_FADE_DELAY_MS)
+}
+
+function registerUiActivity() {
+  scheduleUiIdleFade()
+}
 
 const projects = computed(() => data.value?.projects ?? [])
 const templates = computed(() => data.value?.templates ?? [])
@@ -720,17 +741,24 @@ async function saveAppearance(next: AppearanceSettings) {
       appearance.value = { ...next }
       appearanceImage.value = ''
       appearanceDialogOpen.value = false
+      scheduleUiIdleFade()
       showToast('预览设置已应用；桌面版会保存背景图片。')
       return
     }
     const saved = await window.pywebview.api.set_appearance_settings(
-      next.theme, next.background_path, next.background_opacity,
+      next.theme,
+      next.background_path,
+      next.background_opacity,
+      next.component_opacity,
+      next.idle_fade_enabled,
+      next.background_history.map((entry) => entry.path),
     )
     if (!saved.ok) {
       showToast(saved.error ?? '外观设置保存失败。')
       return
     }
     appearance.value = saved.settings ?? next
+    scheduleUiIdleFade()
     appearanceImage.value = ''
     if (appearance.value.background_path) {
       const image = await window.pywebview.api.get_appearance_background()
@@ -855,6 +883,7 @@ async function returnWorkspace(patch?: ProjectConfig) {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  registerUiActivity()
   if (event.key === 'Escape' && appearanceDialogOpen.value) {
     appearanceDialogOpen.value = false
     return
@@ -864,6 +893,10 @@ function onKeydown(event: KeyboardEvent) {
 
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
+  window.addEventListener('pointermove', registerUiActivity, { passive: true })
+  window.addEventListener('pointerdown', registerUiActivity, { passive: true })
+  window.addEventListener('wheel', registerUiActivity, { passive: true })
+  window.addEventListener('focusin', registerUiActivity)
   systemThemeQuery = window.matchMedia('(prefers-color-scheme: light)')
   systemPrefersLight.value = systemThemeQuery.matches
   systemThemeQuery.addEventListener('change', updateSystemTheme)
@@ -873,6 +906,7 @@ onMounted(async () => {
     preview.value = loaded.preview
     logs.value = [...loaded.data.logs]
     if (!loaded.preview) await loadAppearanceSettings()
+    scheduleUiIdleFade()
     if (loaded.preview) modeWorkspace.value = demoModeWorkspace('character')
     else await refreshHomeGuide(projects.value.find(isKohyaProject)?.mode || 'character')
   } catch (error) {
@@ -892,13 +926,27 @@ watch(dialogOpen, (isOpen) => {
 })
 
 onUnmounted(() => {
+  if (uiIdleFadeTimer !== undefined) window.clearTimeout(uiIdleFadeTimer)
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('pointermove', registerUiActivity)
+  window.removeEventListener('pointerdown', registerUiActivity)
+  window.removeEventListener('wheel', registerUiActivity)
+  window.removeEventListener('focusin', registerUiActivity)
   systemThemeQuery?.removeEventListener('change', updateSystemTheme)
 })
+
+watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
 </script>
 
 <template>
-  <div class="app-shell" :data-theme="activeTheme" :data-wallpaper="appearanceImage ? 'true' : 'false'" :style="appShellStyle">
+  <div
+    class="app-shell"
+    :data-theme="activeTheme"
+    :data-wallpaper="appearanceImage ? 'true' : 'false'"
+    :data-ui-idle="uiIdle ? 'true' : 'false'"
+    @pointerenter="registerUiActivity"
+    :style="appShellStyle"
+  >
     <EngineSidebar
       :groups="data?.engine_groups ?? []"
       :selected-mode="selectedMode"
@@ -913,6 +961,7 @@ onUnmounted(() => {
     />
 
     <main class="right-shell">
+      <div class="right-content">
       <Transition name="view" mode="out-in">
       <ModernQwenWorkspace
         v-if="!loading && !loadError && workspaceOpen && workspaceProject && workspaceKind === 'qwen'"
@@ -996,6 +1045,7 @@ onUnmounted(() => {
       <div v-else-if="loading" key="loading" class="loading-state"><span class="loader"></span>正在连接本机工作区…</div>
       <div v-else key="error" class="error-state"><strong>无法连接桌面工作区</strong><span>{{ loadError }}</span></div>
       </Transition>
+      </div>
       <LogDock v-if="!loading && !loadError" :entries="logs" @export="runAction('export_log')" />
       <span v-if="preview && !workspaceOpen" class="preview-pill">界面预览 · 不写入项目 / 不启动训练</span>
     </main>
