@@ -96,7 +96,7 @@ export interface DesktopApi {
   open_project(name: string): Promise<{ ok: boolean; error?: string }>
   load_project_config(name: string): Promise<{ ok: boolean; error?: string; config?: ProjectConfig }>
   save_project_config(name: string, patch: ProjectConfig): Promise<{ ok: boolean; error?: string; project?: ProjectCard | null }>
-  choose_path(kind: 'folder' | 'model' | 'image'): Promise<{ ok: boolean; error?: string; cancelled?: boolean; path?: string }>
+  choose_path(kind: 'folder' | 'model' | 'image', current_path?: string, memory_key?: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean; path?: string }>
   get_appearance_settings(): Promise<{ ok: boolean; settings?: AppearanceSettings; error?: string }>
   set_appearance_settings(
     theme: AppearanceSettings['theme'],

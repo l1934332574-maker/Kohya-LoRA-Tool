@@ -113,6 +113,7 @@ class ModernUIBridge:
         self._task = None
         self._task_downloader = None
         self._project_name_reservations = set()
+        self._picker_dirs = {}
 
     @staticmethod
     def _count_preprocessable_images(directory):
@@ -1523,28 +1524,65 @@ class ModernUIBridge:
         self._log("[项目] 已保存「%s」的训练配置。" % name)
         return {"ok": True, "project": next((p for p in self.list_projects() if p["name"] == name), None)}
 
-    def choose_path(self, kind="folder"):
+    @staticmethod
+    def _picker_initial_directory(path):
+        path = str(path or "").strip()
+        if not path:
+            return ""
+        path = os.path.abspath(os.path.expanduser(path))
+        if os.path.isdir(path):
+            return path
+        parent = os.path.dirname(path)
+        return parent if os.path.isdir(parent) else ""
+
+    def choose_path(self, kind="folder", current_path="", memory_key=""):
         if self._window is None:
             return {"ok": False, "error": "文件选择器尚未就绪。"}
         try:
             import webview
 
+            key = str(memory_key or kind or "folder")
+            loader = getattr(self.core, "_load_app_settings", None)
+            settings = loader() if callable(loader) else {}
+            settings = settings if isinstance(settings, dict) else {}
+            saved_dirs = settings.get("modern_ui_picker_dirs", {})
+            saved_dirs = saved_dirs if isinstance(saved_dirs, dict) else {}
+            directory = self._picker_initial_directory(current_path)
+            if not directory:
+                directory = self._picker_initial_directory(
+                    self._picker_dirs.get("__last__") or settings.get("modern_ui_last_browse_dir")
+                )
+            if not directory:
+                directory = self._picker_initial_directory(self._picker_dirs.get(key) or saved_dirs.get(key))
+
             if kind == "image":
                 selected = self._window.create_file_dialog(
                     webview.FileDialog.OPEN,
+                    directory=directory,
                     file_types=("Image files (*.png;*.jpg;*.jpeg;*.webp;*.bmp)",),
                 )
             elif kind == "model":
                 selected = self._window.create_file_dialog(
                     webview.FileDialog.OPEN,
+                    directory=directory,
                     file_types=("Model files (*.safetensors;*.ckpt;*.pt;*.pth)", "All files (*.*)"),
                 )
             else:
-                selected = self._window.create_file_dialog(webview.FileDialog.FOLDER)
+                selected = self._window.create_file_dialog(webview.FileDialog.FOLDER, directory=directory)
             if not selected:
                 return {"ok": True, "cancelled": True, "path": ""}
             path = selected[0] if isinstance(selected, (list, tuple)) else selected
-            return {"ok": True, "path": str(path or "")}
+            path = str(path or "")
+            chosen_dir = self._picker_initial_directory(path)
+            if chosen_dir:
+                self._picker_dirs["__last__"] = chosen_dir
+                self._picker_dirs[key] = chosen_dir
+                saver = getattr(self.core, "_save_app_settings", None)
+                if callable(saver):
+                    settings["modern_ui_last_browse_dir"] = chosen_dir
+                    settings["modern_ui_picker_dirs"] = {**saved_dirs, key: chosen_dir}
+                    saver(settings)
+            return {"ok": True, "path": path}
         except Exception as exc:
             return {"ok": False, "error": "无法打开文件选择器：%s" % exc}
 

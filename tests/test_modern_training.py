@@ -254,6 +254,58 @@ class ProjectCreationCore:
 
 
 class ModernTrainingTests(unittest.TestCase):
+    def test_file_picker_starts_at_field_path_and_remembers_each_location(self):
+        class PickerCore:
+            def __init__(self):
+                self.settings = {}
+
+            def _load_app_settings(self):
+                return dict(self.settings)
+
+            def _save_app_settings(self, settings):
+                self.settings = dict(settings)
+                return True
+
+        class PickerWindow:
+            def __init__(self):
+                self.calls = []
+                self.selection = None
+
+            def create_file_dialog(self, dialog_type, **kwargs):
+                self.calls.append((dialog_type, kwargs))
+                return self.selection
+
+        with tempfile.TemporaryDirectory() as temp:
+            model_dir = Path(temp) / "models"
+            image_dir = Path(temp) / "images"
+            next_image_dir = Path(temp) / "next-images"
+            for directory in (model_dir, image_dir, next_image_dir):
+                directory.mkdir()
+            model_file = model_dir / "model.safetensors"
+            model_file.write_bytes(b"model")
+            core = PickerCore()
+            window = PickerWindow()
+            bridge = ModernUIBridge(core)
+            bridge._window = window
+
+            window.selection = (str(model_file),)
+            self.assertTrue(bridge.choose_path("model", str(model_file), "base_model")["ok"])
+            self.assertEqual(window.calls[-1][1]["directory"], str(model_dir))
+
+            window.selection = (str(next_image_dir),)
+            self.assertTrue(bridge.choose_path("folder", str(image_dir), "raw_dir")["ok"])
+            self.assertEqual(window.calls[-1][1]["directory"], str(image_dir))
+
+            reopened = ModernUIBridge(core)
+            reopened._window = window
+            window.selection = None
+            self.assertTrue(reopened.choose_path("folder", "", "raw_dir")["cancelled"])
+            self.assertEqual(window.calls[-1][1]["directory"], str(next_image_dir))
+            self.assertTrue(reopened.choose_path("model", "", "base_model")["cancelled"])
+            self.assertEqual(window.calls[-1][1]["directory"], str(next_image_dir))
+            self.assertTrue(reopened.choose_path("model", str(model_file), "base_model")["cancelled"])
+            self.assertEqual(window.calls[-1][1]["directory"], str(model_dir))
+
     def test_model_download_list_returns_items_for_flux2(self):
         with tempfile.TemporaryDirectory() as temp:
             links = {

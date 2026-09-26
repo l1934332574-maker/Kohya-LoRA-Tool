@@ -5,7 +5,7 @@ import type { EnvLocations } from '../bridge'
 
 const props = defineProps<{
   open: boolean
-  choosePath: (kind: 'folder' | 'model') => Promise<string | null>
+  choosePath: (kind: 'folder' | 'model', currentPath?: string, memoryKey?: string) => Promise<string | null>
 }>()
 const emit = defineEmits<{
   close: []
@@ -32,7 +32,8 @@ async function refresh() {
 }
 
 async function choose(kind: 'python' | 'git') {
-  const directory = await props.choosePath('folder')
+  const current = kind === 'python' ? configured.value.python_dir || configured.value.python_exe || state.value?.python?.path : configured.value.git_exe || state.value?.git?.path
+  const directory = await props.choosePath('folder', current || '', `environment_${kind}`)
   if (!directory || !window.pywebview?.api) return
   busy.value = true
   error.value = ''

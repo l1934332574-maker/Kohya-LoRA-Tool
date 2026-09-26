@@ -13,7 +13,7 @@ const props = defineProps<{
   mode?: 'qwen_image' | 'zimage'
   modelSetup?: QwenModelSetup | null
   details?: ModeWorkspaceData | null
-  choosePath: (kind: 'folder' | 'model') => Promise<string | null>
+  choosePath: (kind: 'folder' | 'model', currentPath?: string, memoryKey?: string) => Promise<string | null>
   saveModel: (selection: QwenModelSelection) => Promise<QwenModelSaveResult>
 }>()
 const emit = defineEmits<{
@@ -240,7 +240,7 @@ function startTraining() {
 
 async function browseDataset() {
   if (!props.desktop) return previewOnly('选择图集')
-  const path = await props.choosePath('folder')
+  const path = await props.choosePath('folder', String(trainingDraft.raw_dir || ''), 'raw_dir')
   if (!path) return
   trainingDraft.raw_dir = path
   markRoot('raw_dir')
@@ -254,7 +254,7 @@ async function guideAction(action: string): Promise<ProjectConfig | null> {
 
 async function browseRegDirectory() {
   if (!props.desktop) return previewOnly('选择正则图片文件夹')
-  const path = await props.choosePath('folder')
+  const path = await props.choosePath('folder', String(trainingDraft.reg_dir || ''), 'reg_dir')
   if (!path) return
   trainingDraft.reg_dir = path
   markRoot('reg_dir')
@@ -326,13 +326,13 @@ function selectModel(key: string) {
 
 async function browseModel(kind: 'folder' | 'model') {
   if (!props.desktop) return previewOnly('浏览本地模型')
-  const path = await props.choosePath(kind)
+  const path = await props.choosePath(kind, draftLocalPath.value, 'qwen_local_model')
   if (path) draftLocalPath.value = path
 }
 
 async function browseComponent(kind: 'text_encoder_path' | 'vae_path') {
   if (!props.desktop) return previewOnly(kind === 'text_encoder_path' ? '浏览文本编码器' : '浏览 VAE')
-  const path = await props.choosePath('model')
+  const path = await props.choosePath('model', kind === 'text_encoder_path' ? draftTextEncoderPath.value : draftVaePath.value, kind)
   if (path) {
     if (kind === 'text_encoder_path') draftTextEncoderPath.value = path
     else draftVaePath.value = path

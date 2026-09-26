@@ -12,7 +12,7 @@ const props = defineProps<{
   config?: ProjectConfig | null
   details?: ModeWorkspaceData | null
   desktop: boolean
-  choosePath: (kind: BrowseKind) => Promise<string | null>
+  choosePath: (kind: BrowseKind, currentPath?: string, memoryKey?: string) => Promise<string | null>
 }>()
 const emit = defineEmits<{
   back: [patch: ProjectConfig]
@@ -200,7 +200,7 @@ function startTraining() {
 
 async function browse(target: 'raw_dir' | 'base_model' | 'reg_dir') {
   if (!props.desktop) return previewOnly(target === 'base_model' ? '选择训练底模' : target === 'reg_dir' ? '选择正则图片文件夹' : '选择图集文件夹')
-  const path = await props.choosePath(target === 'base_model' ? 'model' : 'folder')
+  const path = await props.choosePath(target === 'base_model' ? 'model' : 'folder', String(draft[target] || ''), target)
   if (!path) return
   draft[target] = path
   markRoot(target)
@@ -213,7 +213,7 @@ async function guideAction(action: string): Promise<ProjectConfig | null> {
   }
   if (action === 'cmd_pick_model_type') {
     if (!props.desktop) return previewOnly('选择模型架构和底模'), null
-    const path = await props.choosePath('model')
+    const path = await props.choosePath('model', String(draft.base_model || ''), 'base_model')
     if (!path) return null
     draft.base_model = path
     markRoot('base_model')
@@ -238,7 +238,7 @@ async function guideAction(action: string): Promise<ProjectConfig | null> {
 
 async function browseTrainEnv() {
   if (!props.desktop) return previewOnly('选择 AMD 训练环境')
-  const path = await props.choosePath('folder')
+  const path = await props.choosePath('folder', String(draft.train_env || ''), 'train_env')
   if (!path) return
   draft.train_env = path
   markRoot('train_env')

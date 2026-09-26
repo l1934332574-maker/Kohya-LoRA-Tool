@@ -13,7 +13,7 @@ const props = defineProps<{
   config?: ProjectConfig | null
   details: ModeWorkspaceData
   desktop: boolean
-  choosePath: (kind: BrowseKind) => Promise<string | null>
+  choosePath: (kind: BrowseKind, currentPath?: string, memoryKey?: string) => Promise<string | null>
 }>()
 const emit = defineEmits<{
   back: [patch: ProjectConfig]
@@ -157,7 +157,7 @@ function startTraining() {
 
 async function browseDataset() {
   if (!props.desktop) return emit('notify', '浏览器预览不会调用本机文件选择器。')
-  const path = await props.choosePath('folder')
+  const path = await props.choosePath('folder', String(draft.raw_dir || ''), 'raw_dir')
   if (path) { draft.raw_dir = path; markRoot('raw_dir') }
 }
 

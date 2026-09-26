@@ -580,10 +580,10 @@ async function startModernTraining(patch: ProjectConfig) {
   }
 }
 
-async function chooseWorkspacePath(kind: 'folder' | 'model'): Promise<string | null> {
+async function chooseWorkspacePath(kind: 'folder' | 'model', currentPath = '', memoryKey = ''): Promise<string | null> {
   if (!window.pywebview?.api || preview.value) return null
   try {
-    const result = await window.pywebview.api.choose_path(kind)
+    const result = await window.pywebview.api.choose_path(kind, currentPath, memoryKey)
     if (!result.ok) showToast(result.error ?? '选择路径失败。')
     return result.path || null
   } catch (error) {
@@ -724,7 +724,7 @@ async function chooseAppearanceBackground(): Promise<string | null> {
     return null
   }
   try {
-    const result = await api.choose_path('image')
+    const result = await api.choose_path('image', appearance.value.background_source_path || '', 'appearance_background')
     if (!result.ok) showToast(result.error ?? '选择背景图片失败。')
     return result.ok && result.path ? result.path : null
   } catch (error) {
