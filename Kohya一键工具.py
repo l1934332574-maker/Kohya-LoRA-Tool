@@ -334,7 +334,9 @@ class TrainMonitor:
             else:
                 # 格式1：独立的 'steps: N'（排除百分比 'steps: 1%'，排除 total/gradient/num 等前缀）
                 if not re.search(r"(?:total|gradient|num|infer|sampling|val)[^:]*steps:", s, re.I):
-                    m = re.search(r"steps:\s*(\d+)(?!%)", s)
+                    # `bucket_reso_steps: 64` and `gradient_accumulation_steps: N`
+                    # are configuration values, not the trainer's current step.
+                    m = re.search(r"(?<!\w)steps\s*:\s*(\d+)(?!%)", s, re.I)
                     if m:
                         step = int(m.group(1))
             # 训练开始标志：独立的 steps: / epoch: 日志 → 进入训练阶段
@@ -11834,30 +11836,54 @@ def _probe_nf4(vpy, logf=print, timeout=180):
 
 
 def _safetensors_complete(path):
-    """校验 safetensors 文件是否完整（头部声明的数据区不超过文件实际大小）。
+    """校验 safetensors 文件的数据区是否被张量 offsets 完整覆盖。
 
-    损坏/截断文件（下载中断但 .part 被改名、磁盘写坏等）头部声明的张量尺寸与实际数据
-    不符，加载时爆 "shape [...] is invalid for input of size ..."（如 T-strap 用户 Anima VAE，
-    2026-08-28）。返回 True=完整；False=损坏/不存在。
+    safetensors 要求张量 offsets 从 0 连续覆盖到文件末尾。仅比较最大 offset 和文件大小会
+    放过尾部垃圾字节、offset 间隙或重叠；Rust 加载器会以 MetadataIncompleteBuffer 拒绝这些文件。
+    返回 True=完整；False=损坏/不存在。
     """
     if not path or not os.path.isfile(path):
         return False
     try:
         import struct as _st
         with open(path, "rb") as f:
-            head_len = _st.unpack("<Q", f.read(8))[0]
+            prefix = f.read(8)
+            if len(prefix) != 8:
+                return False
+            head_len = _st.unpack("<Q", prefix)[0]
             if head_len <= 0 or head_len > 64 * 1024 * 1024:
                 return False
-            header = json.loads(f.read(head_len))
-        max_end = 0
+            head = f.read(head_len)
+            if len(head) != head_len:
+                return False
+            header = json.loads(head)
+        if not isinstance(header, dict):
+            return False
+        if "__metadata__" in header:
+            metadata = header["__metadata__"]
+            if not isinstance(metadata, dict) or not all(
+                    isinstance(k, str) and isinstance(v, str) for k, v in metadata.items()):
+                return False
+        ranges = []
         for _k, _v in header.items():
             if _k == "__metadata__" or not isinstance(_v, dict):
-                continue
+                if _k == "__metadata__":
+                    continue
+                return False
             _o = _v.get("data_offsets")
-            if isinstance(_o, (list, tuple)) and len(_o) == 2:
-                max_end = max(max_end, int(_o[1]))
-        need = 8 + head_len + max_end
-        return os.path.getsize(path) >= need
+            if not isinstance(_o, (list, tuple)) or len(_o) != 2:
+                return False
+            _start, _end = _o
+            if type(_start) is not int or type(_end) is not int or \
+                    _start < 0 or _end < _start:
+                return False
+            ranges.append((_start, _end))
+        cursor = 0
+        for _start, _end in sorted(ranges):
+            if _start != cursor:
+                return False
+            cursor = _end
+        return os.path.getsize(path) == 8 + head_len + cursor
     except Exception:
         return False
 
@@ -13892,6 +13918,8 @@ def _anima_component_ok(kind, path):
         # transformers 不认 → 训练时才会报找不到权重，这里提前拦下。
         if re.match(r"^model-\d+-of-\d+\.(safetensors|bin)$", _name) or \
                 _name in ("model.safetensors", "pytorch_model.bin"):
+            if not _qwen3_weight_file_ok(path):
+                return False, "这个 Qwen3 权重文件的 safetensors 数据区不完整或文件已损坏，请重新下载"
             return True, "就绪（单文件模式）"
         return False, ("文件名不是 transformers 认的标准名（model.safetensors / "
                        "pytorch_model.bin / model-00001-of-00002.safetensors）。\n"
@@ -13906,6 +13934,7 @@ def _anima_component_ok(kind, path):
     _cfg_p = os.path.join(path, "config.json")
     _has_cfg = os.path.isfile(_cfg_p)
     _std_here = _qwen3_std_weight_here(path)        # 本层的标准名权重
+    _std_ok = _qwen3_std_weights_ok(path, recursive=False)
     _sf_here = _weights_here(path)                  # 本层的 safetensors / bin
     _deeper = _has_weights_deeper(path)             # 子目录里还有别的模型 → 容器特征
     if _has_cfg:
@@ -13927,7 +13956,9 @@ def _anima_component_ok(kind, path):
             return False, ("这个文件夹里有 config.json，但**子文件夹里还有别的模型** —— "
                            "看起来是整个 models 大目录 ✗\n"
                            "请选 Qwen3-0.6B 模型**本身的文件夹**，或改用「📄 选文件」。")
-        if _std_here or _sf_here:
+        if _std_here and not _std_ok:
+            return False, "这个文件夹里的 Qwen3 safetensors 权重数据区不完整或文件已损坏，请重新下载"
+        if _std_ok:
             return True, "就绪（完整模型文件夹，已确认是 Qwen3）"
         return False, ("文件夹里有 config.json 但找不到权重文件"
                        "（model.safetensors / pytorch_model.bin / 分片）。")
@@ -14032,14 +14063,24 @@ def _anima_bases():
     """Anima 组件可能存在的根目录（兼容新旧安装目录）。
 
     老版本安装目录是 %APPDATA%\\Kohya_ss（提示让用户放 Kohya_ss\\Qwen3-0.6B），
-    新版本是 %APPDATA%\\KohyaLoraTool\\anima。都扫一遍，避免"放到指定文件夹也没用"。
+    新版本跟随当前选中的数据目录（<data_dir>\\anima）。旧版 AppData 和 Kohya_ss
+    位置继续作为回退，避免"放到指定文件夹也没用"，同时让自动下载落到选中的数据盘。
     """
     ap = os.environ.get("APPDATA", os.path.expanduser("~"))
-    return [
+    roots = [
+        os.path.join(data_dir(), "anima"),
         os.path.join(ap, "KohyaLoraTool", "anima"),
         os.path.join(ap, "Kohya_ss"),
         os.path.join(ap, "Kohya_ss", "kohya_ss"),
     ]
+    unique = []
+    seen = set()
+    for root in roots:
+        key = os.path.normcase(os.path.abspath(root))
+        if key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
 
 
 def _anima_find_qwen3_any():
@@ -14228,6 +14269,70 @@ def _qwen3_std_weight_here(dirpath):
     return False
 
 
+def _qwen3_weight_file_ok(path):
+    """检查可供 Qwen3 加载的单个标准权重文件。"""
+    if not path or not os.path.isfile(path):
+        return False
+    low = path.lower()
+    if low.endswith(".safetensors"):
+        return _safetensors_complete(path)
+    if low.endswith(".bin"):
+        try:
+            return os.path.getsize(path) > 0
+        except OSError:
+            return False
+    return False
+
+
+def _qwen3_std_weights_ok(dirpath, recursive=False):
+    """本层或目录树内是否有可用的 Transformers 标准 Qwen3 权重。"""
+    paths = []
+    try:
+        walker = os.walk(dirpath) if recursive else [(dirpath, [], os.listdir(dirpath))]
+        for root, _dirs, files in walker:
+            for name in files:
+                low = name.lower()
+                if low in ("model.safetensors", "pytorch_model.bin") or \
+                        re.match(r"^model-\d+-of-\d+\.(safetensors|bin)$", low):
+                    candidate = os.path.join(root, name)
+                    if os.path.isfile(candidate):
+                        paths.append(candidate)
+    except Exception:
+        return False
+    if not paths or not all(_qwen3_weight_file_ok(path) for path in paths):
+        return False
+
+    # Without an index, shard filenames themselves still declare the expected count.
+    shard_groups = {}
+    for path in paths:
+        match = re.match(r"^model-(\d+)-of-(\d+)\.(safetensors|bin)$",
+                         os.path.basename(path).lower())
+        if match:
+            shard_groups.setdefault((os.path.dirname(path), int(match.group(2))), set()).add(
+                int(match.group(1)))
+    for (_root, expected), indices in shard_groups.items():
+        if indices != set(range(1, expected + 1)):
+            return False
+
+    # If Transformers has an index, every named shard must be present and structurally valid.
+    for root in sorted({os.path.dirname(path) for path in paths}):
+        for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+            index = os.path.join(root, index_name)
+            if not os.path.isfile(index):
+                continue
+            try:
+                with open(index, "r", encoding="utf-8") as handle:
+                    weight_map = json.load(handle).get("weight_map")
+                if not isinstance(weight_map, dict) or not weight_map:
+                    return False
+                shards = {os.path.join(root, value) for value in weight_map.values()}
+                if not all(_qwen3_weight_file_ok(shard) for shard in shards):
+                    return False
+            except Exception:
+                return False
+    return True
+
+
 def _weights_here(dirpath):
     """**该目录本身**（不递归）的权重文件列表（.safetensors / .bin）。"""
     out = []
@@ -14268,14 +14373,7 @@ def _qwen3_std_weight_in(dirpath):
     浏览器手动下载常见 "model.safetensors (1).safetensors" 这种非标准名，
     transformers 不认，必须识别为未就绪，避免误判后训练崩在加载阶段。
     """
-    for root, _dirs, files in os.walk(dirpath):
-        for f in files:
-            low = f.lower()
-            if low in ("model.safetensors", "pytorch_model.bin"):
-                return True
-            if re.match(r"^model-\d+-of-\d+\.(safetensors|bin)$", low):
-                return True
-    return False
+    return _qwen3_std_weights_ok(dirpath, recursive=True)
 
 
 def _anima_find_qwen3(base):
@@ -14293,8 +14391,10 @@ def _anima_find_qwen3(base):
     if os.path.isdir(qwen3_dir):
         _has_cfg = os.path.isfile(os.path.join(qwen3_dir, "config.json"))
         if _has_cfg:
-            # 完整模型目录：config.json + transformers 标准权重名
-            if _qwen3_std_weight_in(qwen3_dir):
+            # 完整模型目录：config 必须标识 Qwen，且标准权重必须可完整读取。
+            _mt, _arch = _read_cfg_identity(os.path.join(qwen3_dir, "config.json"))
+            if ("qwen" in _mt.lower() or any("qwen" in a.lower() for a in _arch)) and \
+                    _qwen3_std_weight_in(qwen3_dir):
                 return qwen3_dir
             # config 在但权重缺失/名字不规范 → 未就绪（触发重新下载）
             return None
@@ -14302,12 +14402,16 @@ def _anima_find_qwen3(base):
         for root, _dirs, files in os.walk(qwen3_dir):
             for f in sorted(files):
                 if f.lower().endswith((".safetensors", ".bin")):
-                    return os.path.join(root, f)
+                    candidate = os.path.join(root, f)
+                    if _qwen3_weight_file_ok(candidate):
+                        return candidate
     # anima 根目录下直接放的单文件
     if os.path.isdir(base):
         for f in sorted(os.listdir(base)):
             if f.lower().endswith(".safetensors") and f.lower().startswith("qwen"):
-                return os.path.join(base, f)
+                candidate = os.path.join(base, f)
+                if _qwen3_weight_file_ok(candidate):
+                    return candidate
     return None
 
 def _download_qwen3_from_modelscope(qwen3_dir, logf=print):
@@ -14323,17 +14427,59 @@ def _download_qwen3_from_modelscope(qwen3_dir, logf=print):
         ("vocab.json", 100000),
         ("model.safetensors", 1_000_000_000),
     ]
+
+    def _asset_ok(name, path):
+        if name.endswith(".safetensors"):
+            return _safetensors_complete(path)
+        if name.endswith(".json"):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    parsed = json.load(handle)
+                if name == "config.json":
+                    model_type = str((parsed or {}).get("model_type") or "").lower()
+                    architectures = (parsed or {}).get("architectures") or []
+                    if isinstance(architectures, str):
+                        architectures = [architectures]
+                    return "qwen" in model_type or any("qwen" in str(a).lower() for a in architectures)
+                return True
+            except Exception:
+                return False
+        return True
+
+    def _backup_corrupt(path):
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        backup = "%s.corrupt_%s" % (path, stamp)
+        suffix = 1
+        while os.path.exists(backup):
+            backup = "%s.corrupt_%s_%d" % (path, stamp, suffix)
+            suffix += 1
+        try:
+            os.rename(path, backup)
+        except OSError as e:
+            raise RuntimeError("无法备份损坏的 Qwen3 文件 %s：%s" % (path, e))
+        logf("[Anima] 检测到损坏的 Qwen3 文件，已保留备份：%s" % backup)
+
     for _name, _minsize in _files:
         _dest = os.path.join(qwen3_dir, _name)
-        if os.path.isfile(_dest) and os.path.getsize(_dest) >= _minsize:
-            logf(f"[Anima] Qwen3 已存在 {_name}，跳过下载")
-            continue
+        if os.path.isfile(_dest):
+            _size = os.path.getsize(_dest)
+            _valid = _asset_ok(_name, _dest)
+            if _size >= _minsize and _valid:
+                logf(f"[Anima] Qwen3 已存在 {_name}，跳过下载")
+                continue
+            # 只备份看起来已经下载完、但结构无效的文件；更小的中断权重保留给
+            # _download_with_resume 续传。无效 JSON 是小文件，无法有意义地续传。
+            if not _valid and (_size >= _minsize or _name.endswith(".json")):
+                _backup_corrupt(_dest)
         logf(f"[Anima] 从魔搭下载 Qwen3-0.6B/{_name}…")
         if not _download_with_resume(_ms + _name, _dest, logf, direct=True):
             raise RuntimeError(f"魔搭下载失败：{_name}（已保留断点，可重试）")
         if os.path.getsize(_dest) < _minsize:
             raise RuntimeError(f"魔搭下载不完整：{_name}")
-    if _anima_find_qwen3(qwen3_dir) is None:
+        if not _asset_ok(_name, _dest):
+            _backup_corrupt(_dest)
+            raise RuntimeError("魔搭下载文件校验失败：%s（损坏版本已备份）" % _name)
+    if _anima_find_qwen3(os.path.dirname(os.path.abspath(qwen3_dir))) is None:
         raise RuntimeError("魔搭下载完成但 Qwen3-0.6B 仍不可用（文件缺失或命名异常）")
     return True
 
