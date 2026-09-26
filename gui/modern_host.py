@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import math
 import mimetypes
 import subprocess
 import sys
@@ -175,6 +176,7 @@ class ModernUIBridge:
                 "status": task["status"],
                 "message": task.get("message", ""),
                 "progress": task.get("progress"),
+                "eta_seconds": task.get("eta_seconds"),
                 "detail": task.get("detail", ""),
                 "logs": logs[max(0, offset - log_offset):],
                 "next_offset": log_offset + len(logs),
@@ -188,7 +190,7 @@ class ModernUIBridge:
             self._task = {
                 "id": task_id, "title": str(title), "kind": kind, "mode": mode,
                 "key": key, "status": "running", "message": "正在启动…",
-                "progress": None, "detail": "", "logs": [], "log_offset": 0,
+                "progress": None, "eta_seconds": None, "detail": "", "logs": [], "log_offset": 0,
                 "started": time.time(), "review_event": None,
             }
             self._task_downloader = None
@@ -1213,6 +1215,9 @@ class ModernUIBridge:
                         total = int(snapshot.get("total") or 0)
                         step = int(snapshot.get("step") or 0)
                         speed = float(snapshot.get("speed") or 0)
+                        eta = snapshot.get("eta")
+                        eta_seconds = (max(0, int(eta)) if isinstance(eta, (int, float))
+                                       and math.isfinite(eta) and total > 0 and step < total else None)
                         loss = snapshot.get("loss")
                         detail = ("Step %d / %d" % (step, total)) if total else (snapshot.get("phase_label") or "正在加载 / 缓存模型")
                         if speed > 0:
@@ -1222,8 +1227,9 @@ class ModernUIBridge:
                         with self._task_lock:
                             if self._task and self._task.get("id") == task_id and self._task.get("status") == "running":
                                 self._task.update(
-                                    message="训练中 · " + detail,
+                                    message="训练中",
                                     progress=(min(1.0, max(0.0, step / total)) if total else None),
+                                    eta_seconds=eta_seconds,
                                     detail=detail,
                                 )
 

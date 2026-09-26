@@ -164,6 +164,7 @@ export interface ModernTaskStatus {
   status?: 'running' | 'awaiting_review' | 'completed' | 'failed' | 'cancelled'
   message?: string
   progress?: number | null
+  eta_seconds?: number | null
   detail?: string
   logs?: string[]
   next_offset?: number
