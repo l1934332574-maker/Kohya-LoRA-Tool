@@ -683,9 +683,16 @@ class ModernUIBridge:
                 "video": "AI Toolkit", "krea2_at": "AI Toolkit", "qwen_image": "AI Toolkit", "zimage": "AI Toolkit"}.get(mode, "训练引擎")
 
     def _resume_path(self, project_name, mode, params):
+        if mode in ("video", "krea2_at", "qwen_image", "zimage"):
+            return None  # AI Toolkit trainers do not consume resume_from.
         try:
             output_dir = self.core.data_sub("output", project_name)
-            return self.core.find_latest_state(output_dir, self.core.output_name_for(mode, params.get("style_preset")))
+            output_name = self.core.output_name_for(mode, params.get("style_preset"))
+            if mode in ("krea2_fz", "flux2_fz"):
+                return self.core.find_fizgig_state(output_dir, output_name)
+            if mode in ("krea2", "flux2"):
+                return self.core.find_musubi_state(output_dir, output_name)
+            return self.core.find_latest_state(output_dir, output_name)
         except Exception:
             return None
 
@@ -777,13 +784,7 @@ class ModernUIBridge:
         if not model_ready:
             warnings.append("训练模型尚未完整保存在本机；开始后 AI Toolkit 会按需准备约 %s 的模型文件。" % (info.get("size") or "大体积"))
 
-        resume_path = None
-        try:
-            output_dir = self.core.data_sub("output", project_name)
-            output_name = self.core.output_name_for(params["mode"], params.get("style_preset"))
-            resume_path = self.core.find_latest_state(output_dir, output_name)
-        except Exception:
-            resume_path = None
+        resume_path = self._resume_path(project_name, params["mode"], params)
         return {
             "ok": True,
             "plan": {
@@ -1067,12 +1068,7 @@ class ModernUIBridge:
             except Exception:
                 pass
 
-        try:
-            output_dir = self.core.data_sub("output", project_name)
-            output_name = self.core.output_name_for(params["mode"], params.get("style_preset"))
-            resume_path = self.core.find_latest_state(output_dir, output_name)
-        except Exception:
-            resume_path = None
+        resume_path = self._resume_path(project_name, params["mode"], params)
         model_label = os.path.basename(params["base_model"]) or base_label
         training_type = {"character": "人物", "style": "画风", "concept": "概念"}[params["mode"]]
         target = "仅训练 DiT；Anima 的 Qwen3 文本编码器固定冻结" if base_type == "anima" else (
@@ -1296,13 +1292,7 @@ class ModernUIBridge:
                         self._task.update(status="completed", message="训练完成。", progress=1.0, detail="模型已保存到项目 output 文件夹")
                 self._task_log(task_id, "[完成] 训练结束；模型已保存到项目 output 文件夹。")
             except getattr(self.core, "StopRequested", Exception) as exc:
-                try:
-                    latest = self.core.find_latest_state(
-                        self.core.data_sub("output", project_name),
-                        self.core.output_name_for(params.get("mode"), params.get("style_preset")),
-                    )
-                except Exception:
-                    latest = None
+                latest = self._resume_path(project_name, params.get("mode"), params)
                 message = "训练已停止。" if latest else "训练已停止；本次没有可续训快照。"
                 with self._task_lock:
                     if self._task and self._task.get("id") == task_id:
@@ -2464,19 +2454,30 @@ class ModernUIBridge:
 
         if action == "export_log":
             import datetime
-            filename = "KohyaLoRA_运行日志_%s.txt" % datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            exported_at = datetime.datetime.now()
+            filename = "KohyaLoRA_运行日志_%s.txt" % exported_at.strftime("%Y%m%d_%H%M%S")
+            version = str(getattr(self.core, "APP_VERSION", "") or "").strip()
+            content = "\n".join([
+                "Kohya-LoRA 一键训练工具 · 运行日志",
+                "软件版本: v%s" % version if version else "软件版本: 未知",
+                "导出时间: %s" % exported_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "",
+                "【运行日志】",
+                *self.logs,
+                "",
+            ])
             desktop = self._desktop_directory()
             dest = os.path.join(desktop, filename)
             try:
                 os.makedirs(desktop, exist_ok=True)
                 with open(dest, "w", encoding="utf-8") as handle:
-                    handle.write("\n".join(self.logs) + "\n")
+                    handle.write(content)
             except OSError:
                 directory = self.core.data_sub("logs")
                 os.makedirs(directory, exist_ok=True)
                 dest = os.path.join(directory, filename)
                 with open(dest, "w", encoding="utf-8") as handle:
-                    handle.write("\n".join(self.logs) + "\n")
+                    handle.write(content)
             self._log("[导出] 运行日志已导出：%s" % dest)
             return {"ok": True, "message": "运行日志已导出：%s" % dest}
 

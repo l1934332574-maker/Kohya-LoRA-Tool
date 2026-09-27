@@ -171,9 +171,7 @@ watch(() => props.open, (open) => {
     state.value = null
     taskLogs.value = []
     offset.value = 0
-    return
   }
-  useResume.value = false
 })
 onUnmounted(stopPolling)
 </script>
@@ -198,7 +196,7 @@ onUnmounted(stopPolling)
           <div v-if="plan.model_download_required" class="train-warning"><strong>本机尚未准备好训练模型</strong><span>开始后可能会下载约 {{ plan.model_size || '较大体积' }} 的模型文件；下载由训练引擎执行，日志会显示进度。</span></div>
           <div v-for="warning in plan.warnings" :key="warning" class="train-warning"><span>{{ warning }}</span></div>
           <label v-if="hasResume" class="resume-choice"><input v-model="useResume" type="checkbox"><span><strong>发现可续训快照，默认从断点继续</strong><small>取消勾选即可从头训练 · {{ plan.resume_path }}</small></span></label>
-          <div class="train-note">预处理完成后会先暂停，供你查看、修改自动标签并二次确认。没有现成断点时，训练达到首个保存间隔后停止，才会出现续训选项。</div>
+          <div class="train-note">预处理完成后会先暂停，供你查看、修改自动标签并二次确认。{{ plan.training_engine === 'ai_toolkit' ? '当前 AI Toolkit 模式暂不支持从训练状态快照续训。' : '没有现成断点时，训练达到首个保存间隔后停止，才会出现续训选项。' }}</div>
           <footer class="train-actions">
             <button class="train-button" type="button" @click="close">返回检查设置</button>
             <button class="train-button primary" type="button" :disabled="starting" @click="start">{{ starting ? '正在启动…' : '确认并开始训练' }}</button>

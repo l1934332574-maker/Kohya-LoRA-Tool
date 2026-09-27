@@ -569,6 +569,22 @@ class ModernTrainingTests(unittest.TestCase):
             self.assertEqual(len(core.kohya_calls), 1)
             self.assertEqual(core.kohya_calls[0][4], resume_state)
 
+    def test_resume_state_lookup_uses_engine_specific_support(self):
+        with tempfile.TemporaryDirectory() as temp:
+            core = FakeCore(temp)
+            bridge = ModernUIBridge(core)
+            with patch.object(core, "find_latest_state", return_value="step-state") as latest, \
+                    patch.object(core, "find_musubi_state", return_value="musubi-state", create=True) as musubi, \
+                    patch.object(core, "find_fizgig_state", return_value="fizgig-state", create=True) as fizgig:
+                self.assertEqual(bridge._resume_path("demo", "character", {}), "step-state")
+                self.assertEqual(bridge._resume_path("demo", "krea2", {}), "musubi-state")
+                self.assertEqual(bridge._resume_path("demo", "krea2_fz", {}), "fizgig-state")
+                self.assertIsNone(bridge._resume_path("demo", "qwen_image", {}))
+                self.assertIsNone(bridge._resume_path("demo", "video", {}))
+            self.assertEqual(latest.call_count, 1)
+            self.assertEqual(musubi.call_count, 1)
+            self.assertEqual(fizgig.call_count, 1)
+
     def test_anima_sample_preview_explicit_off_and_auto_are_preserved(self):
         with tempfile.TemporaryDirectory() as temp:
             core = FakeCore(temp)
@@ -609,6 +625,7 @@ class ModernTrainingTests(unittest.TestCase):
     def test_export_log_defaults_to_desktop(self):
         with tempfile.TemporaryDirectory() as temp:
             core = FakeCore(temp)
+            core.APP_VERSION = "0.18.4"
             bridge = ModernUIBridge(core)
             desktop = Path(temp) / "Desktop"
 
@@ -619,6 +636,10 @@ class ModernTrainingTests(unittest.TestCase):
             exported = Path(result["message"].split("：", 1)[1])
             self.assertEqual(exported.parent, desktop)
             self.assertTrue(exported.is_file())
+            content = exported.read_text(encoding="utf-8")
+            self.assertIn("软件版本: v0.18.4", content)
+            self.assertIn("【运行日志】", content)
+            self.assertIn("欢迎使用 Kohya-LoRA 一键训练工具", content)
 
     def test_cancel_during_label_review_does_not_start_engine(self):
         with tempfile.TemporaryDirectory() as temp:

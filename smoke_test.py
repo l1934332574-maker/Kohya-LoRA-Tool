@@ -388,7 +388,7 @@ def test_monitor_sampling_and_fizgig_resume():
     _os.utime(st3, (9000, 9000))
     _os.utime(_os.path.join(d, "krea2_fizgig_lora.safetensors"), (1000, 1000))
     assert core.find_fizgig_state(d, "krea2_fizgig_lora") is not None, "旧成品+新断点未提示续训"
-    # kohya/musubi 断点：有 -step…-state 且无成品 → 提示续训；成品已生成 → 不提示
+    # Kohya 按步数保存的断点：有 -step…-state 且无成品 → 提示续训；成品已生成 → 不提示
     import tempfile as _tf2, os as _os2
     d2 = _tf2.mkdtemp()
     st2 = _os2.path.join(d2, "character_lora-step00000400-state")
@@ -873,7 +873,8 @@ def test_anima_component_picker():
     #      「Unrecognized model … Should have a model_type key in its config.json」✗
     with open(os.path.join(q3, "config.json"), "w", encoding="utf-8") as _f:
         _f.write('{"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"]}')
-    open(os.path.join(q3, "model.safetensors"), "wb").write(b"\x00" * 16)
+    # 此项验证路径选择，使用轻量 .bin 样本；单文件 safetensors 的完整性另有专门测试。
+    open(os.path.join(q3, "pytorch_model.bin"), "wb").write(b"\x00" * 16)
     bad = os.path.join(td, "model.safetensors (1).safetensors")
     open(bad, "wb").write(b"\x00" * 16)
     nodir = os.path.join(td, "empty")
@@ -2123,7 +2124,7 @@ def test_anima_qwen3_pick_guards():
         os.makedirs(okd, exist_ok=True)
         with open(os.path.join(okd, "config.json"), "w", encoding="utf-8") as f:
             f.write('{"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"]}')
-        with open(os.path.join(okd, "model.safetensors"), "wb") as f:
+        with open(os.path.join(okd, "pytorch_model.bin"), "wb") as f:
             f.write(b"0" * (2 * 1024 * 1024))
         _clear_manual()
         ok2, why2 = core.anima_set_component("qwen3", okd)
@@ -2147,7 +2148,7 @@ def test_anima_qwen3_pick_guards():
         #       （真要只给权重文件：请选**文件**，见 ②c ✓）
         _only = os.path.join(tmp, "only", "qwen3_weights")
         os.makedirs(_only, exist_ok=True)
-        with open(os.path.join(_only, "model.safetensors"), "wb") as f:
+        with open(os.path.join(_only, "pytorch_model.bin"), "wb") as f:
             f.write(b"0" * (2 * 1024 * 1024))
         _clear_manual()
         _ok_only, _why_only = core.anima_set_component("qwen3", _only)
@@ -2158,7 +2159,7 @@ def test_anima_qwen3_pick_guards():
 
         # ②c 但**直接选权重文件**（文件路径）这条路必须仍然可用 ✓（别收紧过头 ✗）
         assert core.anima_set_component(
-            "qwen3", os.path.join(_only, "model.safetensors"))[0], \
+            "qwen3", os.path.join(_only, "pytorch_model.bin"))[0], \
             "「选文件」这条路被误伤 ✗ —— 收紧不能连它一起砍掉"
 
         # ③ 指定后失效 → 必须明确说明（不得静默回落）

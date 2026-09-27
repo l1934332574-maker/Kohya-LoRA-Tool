@@ -1,7 +1,7 @@
 {
-  "version": "v0.18.4",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.18.4/Setup.exe",
+  "version": "v0.18.5",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.18.5/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "setup_sha256": "c18fd14e2eb1d6776c8bafac0ede3360e2767fc31ae7dfa30f839420c26ef3e1",
-  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.18.4 更新（2026-09-27）\n\n· 修复 FLUX.2 模型下载列表和文件夹浏览位置记忆。\n· 外观设置新增深浅色示例主题，可保存自己的主题或移除内置示例。\n· 修复较大背景图片选中后无响应的问题。"
+  "setup_sha256": "b114a5b3a19bd2486f97b7173811e23a208235623d4bd87113eeef6e7abd61c4",
+  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.18.5 更新（2026-09-27）\n\n· 修复新版训练页的断点续训选择，并接通 Musubi、Fizgig 快照查找；AI Toolkit 模式会标明暂不支持。\n· 改进 Anima 的 Qwen3 权重完整性检查，损坏时在训练前提示。\n· 导出的运行日志现在包含软件版本号。"
 }

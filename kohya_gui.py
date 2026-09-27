@@ -7960,9 +7960,13 @@ class App:
             _proj = (self.current_project or "").strip() or (params or {}).get("project") or ""
             _odir = core.data_sub("output", _proj) if _proj else core.data_sub("output")
             _name = core.output_name_for((params or {}).get("mode"), (params or {}).get("style_preset"))
+            if (params or {}).get("mode") in ("video", "krea2_at", "qwen_image", "zimage"):
+                return None  # These AI Toolkit modes do not consume training-state resume snapshots.
             # 第四引擎（Fizgig）断点目录是 {name}-NNNNNN-state（按 epoch 命名），另有专门查找
             if (params or {}).get("mode") in ("krea2_fz", "flux2_fz"):
                 return core.find_fizgig_state(_odir, _name)
+            if (params or {}).get("mode") in ("krea2", "flux2"):
+                return core.find_musubi_state(_odir, _name)
             return core.find_latest_state(_odir, _name)
         except Exception:
             return None

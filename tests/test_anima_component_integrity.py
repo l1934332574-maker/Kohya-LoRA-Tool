@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -86,6 +87,34 @@ class AnimaComponentIntegrityTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("safetensors", reason.lower())
 
+    def test_qwen_finder_rejects_undersized_official_single_weight(self):
+        with tempfile.TemporaryDirectory() as temp:
+            qwen_dir = Path(temp) / "Qwen3-0.6B"
+            qwen_dir.mkdir()
+            (qwen_dir / "config.json").write_text('{"model_type":"qwen3"}', encoding="utf-8")
+            weight = qwen_dir / "model.safetensors"
+            _write_sparse_model(weight, 925_000_000)
+
+            # This is below the standard Qwen3-0.6B download's existing 1 GB minimum.
+            self.assertTrue(legacy._safetensors_complete(str(weight)))
+            self.assertIsNone(legacy._anima_find_qwen3(str(Path(temp))))
+            ok, reason = legacy._anima_component_ok("qwen3", str(qwen_dir))
+            self.assertFalse(ok)
+            self.assertIn("权重", reason)
+
+    def test_anima_preflight_uses_training_loader_and_stops_on_bad_weight(self):
+        with tempfile.TemporaryDirectory() as temp:
+            weight = Path(temp) / "model.safetensors"
+            weight.write_bytes(b"broken")
+            response = SimpleNamespace(returncode=1, stderr="SafetensorError: MetadataIncompleteBuffer",
+                                       stdout="")
+            with patch.object(legacy.subprocess, "run", return_value=response) as run:
+                with self.assertRaisesRegex(RuntimeError, "MetadataIncompleteBuffer"):
+                    legacy._anima_verify_qwen3_loader(str(Path(temp)), "train-python.exe",
+                                                      logf=lambda _line: None)
+            self.assertEqual(run.call_args.args[0][0], "train-python.exe")
+            self.assertEqual(run.call_args.args[0][-1], str(weight))
+
     def test_qwen_shards_need_complete_index_or_filename_coverage(self):
         with tempfile.TemporaryDirectory() as temp:
             qwen_dir = Path(temp) / "Qwen3-0.6B"
@@ -141,6 +170,7 @@ class AnimaComponentIntegrityTests(unittest.TestCase):
             legacy_model = add_model(legacy_base)
             with patch.object(legacy, "data_dir", return_value=str(selected_data)), \
                     patch.object(legacy, "anima_get_component", return_value=None), \
+                    patch.object(legacy, "_QWEN3_STANDARD_SINGLE_MIN_BYTES", 0), \
                     patch.dict(os.environ, {"APPDATA": str(root / "Roaming")}):
                 self.assertEqual(legacy._anima_find_qwen3_any()[0], str(selected_model))
                 import shutil

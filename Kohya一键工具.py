@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.18.4"
+APP_VERSION = "0.18.5"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -3273,7 +3273,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         cmd.append(f"--resume={resume_from}")
         logf(f"[Krea2] 断点续训：从 {resume_from} 继续")
         if progress is not None:
-            _rs = resume_step_from(resume_from)
+            _rs = resume_step_from(resume_from, steps_per_epoch=per_epoch)
             if _rs:
                 progress.set_step(_rs)
                 logf("[Krea2] 监控续上：已完成 %d 步 / 共 %d 步，本次继续 %d 步" % (_rs, per_epoch * epochs, max(0, per_epoch * epochs - _rs)))
@@ -3510,7 +3510,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         cmd.append(f"--resume={resume_from}")
         logf(f"[FLUX.2] 断点续训：从 {resume_from} 继续")
         if progress is not None:
-            _rs = resume_step_from(resume_from)
+            _rs = resume_step_from(resume_from, steps_per_epoch=per_epoch)
             if _rs:
                 progress.set_step(_rs)
                 logf("[FLUX.2] 监控续上：已完成 %d 步 / 共 %d 步，本次继续 %d 步" % (_rs, per_epoch * epochs, max(0, per_epoch * epochs - _rs)))
@@ -11111,7 +11111,7 @@ def organize_dataset_repeats(train_dir, repeats, name):
 
 
 def find_latest_state(output_dir, output_name):
-    """在输出目录找最新的 kohya/musubi 训练状态目录（断点续训用）。
+    """在输出目录找最新的 Kohya 按步数保存的训练状态目录（断点续训用）。
 
     只找带 step 的目录（如 character_lora-step00000200-state），这些才是中断点；
     纯 '<name>-state' 是训练正常完成时保存的最终状态，不代表中断，不用于续训提示。
@@ -11137,18 +11137,49 @@ def find_latest_state(output_dir, output_name):
     if not cands:
         return None
 
+    try:
+        final = os.path.join(output_dir, output_name + ".safetensors")
+        if os.path.isfile(final):
+            final_mtime = os.path.getmtime(final)
+            cands = [path for path in cands if os.path.getmtime(path) > final_mtime]
+    except OSError:
+        pass
+    if not cands:
+        return None
+
     # 按 step 号取最大（比 mtime 可靠）
     def _step_no(p):
         m = re.search(r"-step(\d+)-state", os.path.basename(p))
         return int(m.group(1)) if m else -1
-    best = max(cands, key=_step_no)
+    return max(cands, key=_step_no)
+
+
+def find_musubi_state(output_dir, output_name):
+    """Find the latest Musubi epoch state ({name}-000001-state)."""
+    if not os.path.isdir(output_dir):
+        return None
+    pattern = re.compile(r"^" + re.escape(output_name) + r"-(\d{6})-state$")
+    candidates = []
+    for directory in (output_dir, os.path.join(output_dir, "snapshots")):
+        if not os.path.isdir(directory):
+            continue
+        for name in os.listdir(directory):
+            match = pattern.match(name)
+            if not match:
+                continue
+            path = os.path.join(directory, name)
+            if not os.path.isdir(path) or not os.listdir(path):
+                continue
+            candidates.append((int(match.group(1)), path))
     try:
         final = os.path.join(output_dir, output_name + ".safetensors")
-        if os.path.isfile(final) and os.path.getmtime(final) >= os.path.getmtime(best):
-            return None  # 成品比最新断点新/等 → 已正常跑完
+        if os.path.isfile(final):
+            final_mtime = os.path.getmtime(final)
+            candidates = [(epoch, path) for epoch, path in candidates
+                          if os.path.getmtime(path) > final_mtime]
     except OSError:
         pass
-    return best
+    return max(candidates)[1] if candidates else None
 
 def find_fizgig_state(output_dir, output_name):
     """找 Fizgig 断点状态目录（{name}-NNNNNN-state，按 epoch 命名，内含 training_state.json）。
@@ -11161,7 +11192,7 @@ def find_fizgig_state(output_dir, output_name):
     if not os.path.isdir(output_dir):
         return None
     pat = re.compile(r"^" + re.escape(output_name) + r"-(\d{6})-state$")
-    best, best_no = None, -1
+    candidates = []
     for _d in (output_dir, os.path.join(output_dir, "snapshots")):
         if not os.path.isdir(_d):
             continue
@@ -11172,20 +11203,19 @@ def find_fizgig_state(output_dir, output_name):
             p = os.path.join(_d, f)
             if not os.path.isdir(p) or not os.path.isfile(os.path.join(p, "training_state.json")):
                 continue
-            no = int(m.group(1))
-            if no > best_no:
-                best, best_no = p, no
-    if best is not None:
-        try:
-            final = os.path.join(output_dir, output_name + ".safetensors")
-            if os.path.isfile(final) and os.path.getmtime(final) >= os.path.getmtime(best):
-                return None  # 成品比最新断点新/等 → 已跑完
-        except OSError:
-            pass
-    return best
+            candidates.append((int(m.group(1)), p))
+    try:
+        final = os.path.join(output_dir, output_name + ".safetensors")
+        if os.path.isfile(final):
+            final_mtime = os.path.getmtime(final)
+            candidates = [(epoch, path) for epoch, path in candidates
+                          if os.path.getmtime(path) > final_mtime]
+    except OSError:
+        pass
+    return max(candidates)[1] if candidates else None
 
-def resume_step_from(resume_from):
-    """从断点快照解析已完成的训练步数（kohya/musubi 状态目录名 -stepNNNNNN-state）。
+def resume_step_from(resume_from, steps_per_epoch=None):
+    """从断点快照解析已完成步数；Musubi 按轮次保存时需传入每轮步数。
 
     断点续训时监控从该步续上（而不是从 0 重新计数）；解析失败返回 0（监控照旧从日志里读）。"""
     try:
@@ -11193,6 +11223,10 @@ def resume_step_from(resume_from):
         m = re.search(r"-step(\d+)-state", base)
         if m:
             return int(m.group(1))
+        if steps_per_epoch:
+            m = re.search(r"-(\d{6})-state$", base)
+            if m:
+                return int(m.group(1)) * int(steps_per_epoch)
         # 兜底：状态目录内 training_state.json 的 global_step
         j = os.path.join(str(resume_from or ""), "training_state.json")
         if os.path.isfile(j):
@@ -12908,6 +12942,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         _patch_anima_vae_fp32(kdir, logf)
         _patch_musubi_offload_device(kdir, logf)   # 块交换设备兼容（AMD ROCm 崩 Found no NVIDIA driver，issue #5）
         qwen3, vae = _ensure_anima_components(logf)
+        _anima_verify_qwen3_loader(qwen3, vpy, logf)
         cmd += [f"--qwen3={qwen3}", f"--vae={vae}",
                 "--qwen_image_vae_2d", "--vae_chunk_size=64"]
         # RDNA2：官方 --no_half_vae 让 VAE 全程 fp32（sd-scripts 的 cache_latents 阶段会用
@@ -14269,12 +14304,23 @@ def _qwen3_std_weight_here(dirpath):
     return False
 
 
+_QWEN3_STANDARD_SINGLE_MIN_BYTES = 1_000_000_000
+
+
 def _qwen3_weight_file_ok(path):
     """检查可供 Qwen3 加载的单个标准权重文件。"""
     if not path or not os.path.isfile(path):
         return False
     low = path.lower()
     if low.endswith(".safetensors"):
+        # The official Qwen3-0.6B single-file checkpoint is about 1.5 GB.
+        # A truncated download can otherwise be mistaken for a ready component.
+        if os.path.basename(low) == "model.safetensors":
+            try:
+                if os.path.getsize(path) < _QWEN3_STANDARD_SINGLE_MIN_BYTES:
+                    return False
+            except OSError:
+                return False
         return _safetensors_complete(path)
     if low.endswith(".bin"):
         try:
@@ -14282,6 +14328,40 @@ def _qwen3_weight_file_ok(path):
         except OSError:
             return False
     return False
+
+
+def _anima_verify_qwen3_loader(qwen3_path, vpy, logf=print):
+    """Use the training venv's safetensors loader before starting Anima training."""
+    if os.path.isfile(qwen3_path):
+        files = [qwen3_path] if qwen3_path.lower().endswith(".safetensors") else []
+    else:
+        try:
+            files = [os.path.join(qwen3_path, name) for name in os.listdir(qwen3_path)
+                     if name.lower() == "model.safetensors" or
+                     re.match(r"^model-\d+-of-\d+\.safetensors$", name.lower())]
+        except OSError:
+            files = []
+    if not files:
+        return
+    script = (
+        "import sys\n"
+        "from safetensors import safe_open\n"
+        "for path in sys.argv[1:]:\n"
+        "    with safe_open(path, framework='pt'):\n"
+        "        pass\n"
+    )
+    try:
+        result = subprocess.run([vpy, "-c", script, *sorted(files)],
+                                capture_output=True, text=True, errors="replace", timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"Anima 文本编码器预检失败：训练环境无法检查 Qwen3 权重：{exc}") from exc
+    if result.returncode != 0:
+        lines = (result.stderr or result.stdout or "").strip().splitlines()
+        detail = lines[-1] if lines else "未知错误"
+        raise RuntimeError(
+            "Anima 文本编码器 Qwen3 权重无法被训练环境读取：%s\n%s\n"
+            "请重新下载 Qwen3-0.6B 权重后再训练。" % (", ".join(files), detail))
+    logf("[Anima] ✓ Qwen3 权重已通过训练环境读取检查")
 
 
 def _qwen3_std_weights_ok(dirpath, recursive=False):
@@ -14425,7 +14505,7 @@ def _download_qwen3_from_modelscope(qwen3_dir, logf=print):
         ("tokenizer.json", 1000000),
         ("tokenizer_config.json", 500),
         ("vocab.json", 100000),
-        ("model.safetensors", 1_000_000_000),
+        ("model.safetensors", _QWEN3_STANDARD_SINGLE_MIN_BYTES),
     ]
 
     def _asset_ok(name, path):
@@ -14518,7 +14598,7 @@ def _ensure_anima_components(logf=print):
             except Exception as _e:
                 logf(f"[Anima] 检测到不完整的 Qwen3-0.6B（缺 config），但自动备份失败（{_e}），将尝试重新下载…")
         elif os.path.isdir(qwen3_dir):
-            logf("[Anima] 检测到 Qwen3-0.6B 已有 config/tokenizer，仅续传缺失权重（断点续传）…")
+            logf("[Anima] 检测到 Qwen3-0.6B 已有 config/tokenizer，将续传缺失或不完整的权重…")
         logf("[Anima] 首次使用需要下载 Qwen3-0.6B 文本编码器（约 1.2GB，魔搭国内直链优先）…")
         try:
             try:
