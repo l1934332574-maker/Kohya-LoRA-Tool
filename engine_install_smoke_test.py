@@ -666,10 +666,14 @@ def test_aux_scripts_drop_packed_dir(base: Path):
     root = Path(core.__file__).parent
     for name in ("preprocess.py", "model_downloader.py", "video_caption.py"):
         src = (root / name).read_text(encoding="utf-8-sig")
-        assert "_sys.path[:]" in src, name + " 缺 sys.path 清理（打包版会报 python3XX.dll 冲突）✗"
+        clear_token = "sys_path[:]" if name == "model_downloader.py" else "_sys.path[:]"
+        assert clear_token in src, name + " 缺 sys.path 清理（打包版会报 python3XX.dll 冲突）✗"
+        if name == "model_downloader.py":
+            assert 'getattr(_sys, "frozen", False)' in src, \
+                "model_downloader.py：打包主程序必须保留 PYZ 模块搜索路径 ✗"
         assert "python3*.dll" in src and "_socket.pyd" in src, \
             name + "：清理必须带条件（否则开发环境屏蔽掉 kohya_core）✗"
-        _i_clear = src.find("_sys.path[:]")
+        _i_clear = src.find(clear_token)
         # ⚠️ 必须用**行首（可缩进）的 import** 匹配 ✗ ——
         #   说明性注释里也写着 `import urllib.request`，用 find() 会误命中注释 ✓
         _re_imp = re.compile(r"^[ \t]*(?:import|from)\s+(?:urllib|numpy|PIL|onnx|torch|cv2)\b",
