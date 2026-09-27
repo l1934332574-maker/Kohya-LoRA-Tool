@@ -3,6 +3,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import type { ModeWorkspaceData, ProjectCard, ProjectConfig } from '../bridge'
 import UiIcon from './UiIcon.vue'
 import CropRatioField from './CropRatioField.vue'
+import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
 import { normalizeWd14Model } from '../modelDefaults'
 
@@ -271,6 +272,12 @@ defineExpose({ startTraining, guideAction })
     </header>
 
     <div class="kohya-status-line"><span v-if="desktop" class="status-sample">项目配置已加载</span><span v-else class="status-sample">工作区预览</span><span v-if="!desktop" class="status-sample">示例值 · 保存仅在当前预览会话</span></div>
+    <AmdCompatibilityBar
+      v-if="isAmdGpu && supports('amd_mode')"
+      :enabled="draft.amd_mode"
+      @toggle="draft.amd_mode = !draft.amd_mode; markParam('amd_mode')"
+      @inspect="requestAction('amd_env')"
+    />
 
     <div class="kohya-scroll-area">
       <div class="kohya-scroll-content">
@@ -324,7 +331,6 @@ defineExpose({ startTraining, guideAction })
                 <button class="kohya-button compact" type="button" :title="legacyTooltips.resetPreset" @click="resetPreset">恢复预设</button>
                 <button class="check-line" :title="legacyTooltips.unetOnly" :class="{ checked: draft.unet_only }" type="button" role="checkbox" :aria-checked="draft.unet_only" @click="draft.unet_only = !draft.unet_only; markRoot('unet_only')"><i></i><span>只训练 UNet / DiT，不训练文本编码器</span></button>
                 <button v-if="supports('compile')" class="check-line" :title="legacyTooltips.compile" :class="{ checked: draft.compile }" type="button" role="checkbox" :aria-checked="draft.compile" @click="draft.compile = !draft.compile; markParam('compile')"><i></i><span>启用 torch.compile</span></button>
-                <button v-if="isAmdGpu && supports('amd_mode')" class="check-line" :title="legacyTooltips.amdMode" :class="{ checked: draft.amd_mode }" type="button" role="checkbox" :aria-checked="draft.amd_mode" @click="draft.amd_mode = !draft.amd_mode; markParam('amd_mode')"><i></i><span>AMD 兼容模式（实验性）</span></button>
                 <label v-if="supports('global_pos')" class="kohya-field" :title="legacyTooltips.globalPos"><span>附加全局提示词（正向）</span><input v-model="draft.global_pos" class="kohya-input" @input="markRoot('global_pos')" /></label>
                 <label v-if="supports('global_neg')" class="kohya-field" :title="legacyTooltips.globalNeg"><span>附加全局提示词（负向）</span><input v-model="draft.global_neg" class="kohya-input" @input="markRoot('global_neg')" /></label>
                 <label v-if="isAmdGpu" class="kohya-field train-env-field" :title="legacyTooltips.trainEnv"><span>训练环境（venv，留空使用默认 Kohya 环境）</span><span class="reg-path-row"><input v-model="draft.train_env" class="kohya-input" placeholder="需包含 Scripts\\python.exe" @input="markRoot('train_env')" /><button class="kohya-button compact" type="button" @click="browseTrainEnv">选择环境…</button></span></label>
@@ -367,7 +373,6 @@ defineExpose({ startTraining, guideAction })
         <div class="utility-row">
           <button v-for="action in [{ label: '数据预处理', key: 'preprocess', tip: legacyTooltips.preprocess }, { label: '标签编辑器', key: 'label_editor', tip: legacyTooltips.labelEditor }, { label: '打开输出目录', key: 'output_dir', tip: legacyTooltips.openOutput }, { label: '导出配置', key: 'export_config', tip: '' }, { label: '使用说明', key: 'readme', tip: legacyTooltips.readme }]" :key="action.key" class="utility-button" type="button" :title="action.tip || undefined" @click="desktop ? requestAction(action.key) : previewOnly(action.label)">{{ action.label }}</button>
           <button v-if="draft.base_type === 'anima'" class="utility-button" type="button" :title="legacyTooltips.animaComponents" @click="requestAction('anima_components')">Anima 配套组件</button>
-          <button v-if="isAmdGpu && supports('amd_mode')" class="utility-button" type="button" @click="requestAction('amd_env')">AMD 环境检查 / 安装引导</button>
         </div>
         <p v-if="desktop" class="preview-note"><span></span>配置直接保存到项目；可在此预处理图集、检查标签，再按当前模式支持情况启动训练。</p>
         <p v-else class="preview-note"><span></span>工作区视觉预览 · 修改可暂存在当前浏览器会话；不会写入本机项目，也不会启动训练。</p>

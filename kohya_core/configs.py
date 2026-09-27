@@ -280,6 +280,16 @@ PARAM_SCOPE = {
     # 仅 Krea2 / FLUX.2 系（含 Fizgig）：量化与块交换是这两个引擎的参数
     "quant_mode": ("krea2", "krea2_fz", "flux2", "flux2_fz"),
     "blocks_to_swap": ("krea2", "krea2_fz", "flux2", "flux2_fz"),
+    # ★ 2026-09-27 新增（用户诉求：训练器能改 bs 与梯度检查点）✗
+    #   batch_size：留空 = 自动 1 ✓
+    #     · 第一引擎(kohya) 画风/人物/概念：`train()` 里本就 `params.get("batch_size", 1)` ✓
+    #     · 第二引擎(musubi) Krea2 / FLUX.2：写进 dataset_config.toml ✓
+    #       （musubi 的训练批大小只认该配置 ✗，命令行没有 --batch_size ✓）
+    "batch_size": ("style", "character", "concept", "krea2", "flux2"),
+    #   gc（梯度检查点）：自动 = 显存未知或 <16G 时开启；可手动「开启 / 关闭」✓
+    #     · 第一引擎(kohya) 与 第二引擎(musubi) 的 Krea2 / FLUX.2 都真读它 ✓
+    #     · Fizgig（第四引擎）走 yaml 且固定开启 ✗ → 本参数对它不生效 ✓
+    "gc": ("style", "character", "concept", "krea2", "flux2"),
     # 优化器：两个 Fizgig 引擎不读（用引擎自己的默认）
     "optimizer": ("style", "character", "concept", "krea2", "flux2",
                   "krea2_at", "video", "qwen_image", "zimage"),
@@ -499,29 +509,53 @@ PY_MAX = (3, 13, 0)
 #   风格预设「动漫」rank 32 互相打架。现在统一由 _apply_presets() 按模式+底模填。
 #   （FLUX.2 人物 的 base_type 是占位值：flux2 模式的底模控件本就隐藏，取哪档结果相同。）
 PROJECT_TEMPLATES = {
-    "画风 LoRA（SDXL）": {
-        "mode": "style",
-        "base_type": "sdxl",
-        "note": "训练「画风」用：分辨率 1024、rank 16、低学习率防过拟合（参数取「画风 × SDXL」预设）。",
-    },
-    "人物 LoRA（SDXL）": {
+    "自定义": {
         "mode": "character",
         "base_type": "sdxl",
-        "note": "训练「人物/角色」用：分辨率 1024、rank 32，配 trigger 触发词效果更好（参数取「人物 × SDXL」预设）。",
+        "note": "从人物 + SDXL 起步；进入训练页后可切换训练模式、底模和参数。",
     },
-    "画风 LoRA（SD1.5）": {
-        "mode": "style",
+    "SD1.5": {
+        "mode": "character",
         "base_type": "sd15",
-        "note": "轻量底模（512 分辨率），显存要求低，适合老显卡快速出效果（参数取「画风 × SD1.5」预设）。",
+        "note": "使用 SD1.5 底模，默认人物训练；进入训练页后可切换人物、画风或概念模式。",
+    },
+    "SDXL": {
+        "mode": "character",
+        "base_type": "sdxl",
+        "note": "使用 SDXL 底模，默认人物训练；进入训练页后可切换人物、画风或概念模式。",
+    },
+    "FLUX.1": {
+        "mode": "character",
+        "base_type": "flux",
+        "note": "使用第一引擎 FLUX.1 底模，默认人物训练；进入训练页后可切换人物、画风或概念模式。",
+    },
+    "Anima": {
+        "mode": "character",
+        "base_type": "anima",
+        "note": "使用 Anima 底模，默认人物训练；进入训练页后可切换人物、画风或概念模式。",
     },
     "FLUX.2 人物": {
         "mode": "flux2",
         "base_type": "sdxl",
         "note": "FLUX.2 klein 4B 人物/风格 LoRA：需第二引擎 + models/flux2/ 模型（约 16GB，国内镜像）。8G 显存可跑（自动开省显存），推荐 12G+。",
     },
-    "自定义": {
+    # 保留旧名称供历史项目和旧调用方识别；新版下拉由现代 UI 隐藏这些细分模板。
+    "画风 LoRA（SDXL）": {
+        "mode": "style",
+        "base_type": "sdxl",
+        "note": "旧版兼容模板：SDXL 画风训练。",
+        "visible": False,
+    },
+    "人物 LoRA（SDXL）": {
         "mode": "character",
         "base_type": "sdxl",
-        "note": "只按「人物 + SDXL」起手，模式/底模/参数都自己调。",
+        "note": "旧版兼容模板：SDXL 人物训练。",
+        "visible": False,
+    },
+    "画风 LoRA（SD1.5）": {
+        "mode": "style",
+        "base_type": "sd15",
+        "note": "旧版兼容模板：SD1.5 画风训练。",
+        "visible": False,
     },
 }

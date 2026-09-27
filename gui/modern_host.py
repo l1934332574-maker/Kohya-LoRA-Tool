@@ -20,7 +20,7 @@ except Exception:  # pragma: no cover - desktop package may omit the optional he
 
 
 _MODERN_PROJECT_TEMPLATES = {
-    "概念 LoRA（SDXL）": {"mode": "concept", "base_type": "sdxl", "note": "第一引擎概念训练；支持形态、服装、物品和身体部位。"},
+    "概念 LoRA（SDXL）": {"mode": "concept", "base_type": "sdxl", "note": "旧版兼容模板：SDXL 概念训练。", "visible": False},
     "Krea 2 图像 LoRA": {"mode": "krea2", "base_type": "sdxl", "note": "第二引擎 musubi；模型文件放在 models/krea2。"},
     "H3 视频 LoRA": {"mode": "video", "base_type": "sdxl", "note": "第三引擎 AI Toolkit；使用视频文件和同名字幕。"},
     "Krea2 图像 LoRA（AI Toolkit）": {"mode": "krea2_at", "base_type": "sdxl", "note": "第三引擎 AI Toolkit；Krea2 RAW 模型放在 models/krea2。"},
@@ -764,7 +764,7 @@ class ModernUIBridge:
         warnings = []
         if vendor == "amd":
             if not params["amd_mode"]:
-                return {"ok": False, "error": "检测到 AMD 显卡；请先在高级参数中开启 AMD 兼容模式，再开始训练。"}
+                return {"ok": False, "error": "检测到 AMD 显卡；请先在训练页顶部开启 AMD 兼容模式，再开始训练。"}
             try:
                 amd_ok, _backend, amd_detail = self.core.ai_toolkit_amd_status(_vpy)
             except Exception as exc:
@@ -1377,6 +1377,7 @@ class ModernUIBridge:
                 "note": template.get("note", ""),
             }
             for name, template in templates.items()
+            if template.get("visible", True)
         ]
         if not any(item["mode"] == "qwen_image" for item in public_templates):
             public_templates.append({
@@ -1387,7 +1388,7 @@ class ModernUIBridge:
             })
         existing_template_names = {item["name"] for item in public_templates}
         for name, template in _MODERN_PROJECT_TEMPLATES.items():
-            if name in existing_template_names:
+            if not template.get("visible", True) or name in existing_template_names:
                 continue
             mode = template["mode"]
             public_templates.append({
@@ -2202,7 +2203,7 @@ class ModernUIBridge:
         value = re.sub(r"[\U0001f000-\U0001faff\u2600-\u27bf\ufe0e\ufe0f\u200d]+", "", value)
         return value.replace("提示：提示：", "提示：").strip()
 
-    def create_project(self, name, template_name="自定义", config_json=""):
+    def create_project(self, name, template_name="自定义", config_json="", mode_override=None):
         name = str(name or "").strip()
         if not name:
             return {"ok": False, "error": "请填写项目名称。"}
@@ -2264,14 +2265,21 @@ class ModernUIBridge:
                 return {"ok": False, "error": "配置导入失败：%s" % exc}
 
         templates = getattr(self.core, "PROJECT_TEMPLATES", {})
+        mode_override = str(mode_override or "").strip()
         if template_name == "Qwen-Image":
             template = {"mode": "qwen_image", "base_type": "qwen_image"}
         elif template_name in _MODERN_PROJECT_TEMPLATES:
             template = _MODERN_PROJECT_TEMPLATES[template_name]
         else:
-            template = templates.get(template_name, {})
-        mode = template.get("mode", "style")
-        base_type = template.get("base_type", "sd15")
+            template = templates.get(template_name) or templates.get("自定义", {"mode": "character", "base_type": "sdxl"})
+        first_engine_modes = ("style", "character", "concept")
+        is_first_engine_template = (
+            template_name in templates or template_name in _MODERN_PROJECT_TEMPLATES
+        ) and template.get("mode") in first_engine_modes
+        if mode_override and not imported_config and is_first_engine_template and mode_override not in first_engine_modes:
+            return {"ok": False, "error": "第一引擎训练模式无效。"}
+        mode = mode_override if (mode_override and not imported_config and is_first_engine_template) else template.get("mode", "character")
+        base_type = template.get("base_type", "sdxl")
         data = {
             "name": name,
             "template": template_name if template_name in templates or template_name in _MODERN_PROJECT_TEMPLATES or template_name == "Qwen-Image" else "自定义",

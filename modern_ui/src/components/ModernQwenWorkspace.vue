@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import type { ModeWorkspaceData, ProjectCard, ProjectConfig, QwenModelChoice, QwenModelSaveResult, QwenModelSelection, QwenModelSetup } from '../bridge'
 import UiIcon from './UiIcon.vue'
 import CropRatioField from './CropRatioField.vue'
+import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
 import { normalizeWd14Model } from '../modelDefaults'
 
@@ -134,7 +135,8 @@ const isConcept = computed(() => trainingType.value === '概念')
 const draftIsConcept = computed(() => trainingDraft.at_sub_mode === 'concept')
 const draftIsStyle = computed(() => trainingDraft.at_sub_mode === 'style')
 const usesFastTier = computed(() => selectedChoice.value?.arch === 'qwen_image' || selectedChoice.value?.arch === 'zimage')
-const isAmdGpu = computed(() => String(props.modelSetup?.gpu_vendor || props.details?.gpu_vendor || '').toLowerCase() === 'amd')
+const isAmdGpu = computed(() => [props.modelSetup?.gpu_vendor, props.details?.gpu_vendor]
+  .some((vendor) => String(vendor || '').toLowerCase() === 'amd'))
 const canSetComponents = computed(() => draftChoice.value?.arch === 'qwen_image_2' && draftSource.value === 'local' && draftLocalPath.value.toLowerCase().endsWith('.safetensors'))
 const presetParamKeys = ['rank', 'alpha', 'unet_lr', 'resolution', 'video_steps', 'save_every', 'sample_interval'] as const
 function presetFor(): Record<string, unknown> {
@@ -394,6 +396,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       <span v-else class="status-chip sample">运行环境状态 · 示例</span>
       <span v-if="!desktop" class="status-chip gpu">GPU 信息 · 示例</span>
     </div>
+    <AmdCompatibilityBar
+      v-if="isAmdGpu"
+      :enabled="trainingDraft.amd_mode"
+      @toggle="trainingDraft.amd_mode = !trainingDraft.amd_mode; markParam('amd_mode')"
+      @inspect="requestAction('amd_env')"
+    />
 
     <div class="qwen-scroll-area">
       <div class="qwen-scroll-content">
@@ -458,7 +466,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                 <label class="qwen-field" :title="legacyTooltips.optimizer"><span class="field-caption">优化器</span><select v-model="trainingDraft.optimizer" class="qwen-select" @change="markParam('optimizer')"><option value="auto">自动</option><option value="adamw">AdamW</option><option value="adamw8bit">AdamW8bit</option><option value="lion">Lion</option></select></label>
                 <label class="qwen-field advanced-prompt" :title="legacyTooltips.samplePrompt"><span class="field-caption">采样预览提示词</span><input v-model="trainingDraft.sample_prompt" class="qwen-input" placeholder="留空自动生成；填写后整句生效" @input="markParam('sample_prompt')" /></label>
                 <button class="reset-preset" type="button" :title="legacyTooltips.resetPreset" @click="resetPreset">恢复预设</button>
-                <button v-if="isAmdGpu" class="check-toggle" :title="legacyTooltips.amdMode" :class="{ checked: trainingDraft.amd_mode }" type="button" role="checkbox" :aria-checked="trainingDraft.amd_mode" @click="trainingDraft.amd_mode = !trainingDraft.amd_mode; markParam('amd_mode')"><i></i><span>AMD 兼容模式（实验性）</span></button>
               </div></div>
             </Transition>
           </section>
@@ -469,7 +476,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             <button class="utility-button" type="button" :title="legacyTooltips.openOutput" @click="requestAction('output_dir')">打开输出目录</button>
             <button class="utility-button" type="button" @click="requestAction('export_config')">导出配置</button>
             <button class="utility-button" type="button" :title="legacyTooltips.readme" @click="requestAction('readme')">使用说明</button>
-            <button v-if="isAmdGpu" class="utility-button" type="button" @click="requestAction('amd_env')">AMD 环境检查 / 安装引导</button>
           </div>
 
         <p v-if="desktop" class="qwen-bottom-hint"><span class="hint-dot"></span>训练配置保存到当前项目；{{ workspaceLabel }} 按训练步数运行，不使用图片循环次数。预处理、训练、日志和停止均在此界面完成。</p>

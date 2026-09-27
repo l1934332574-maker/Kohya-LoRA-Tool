@@ -7,6 +7,25 @@
 模型：Qwen/Qwen2.5-VL-3B-Instruct（约 6~7GB，首次使用自动下载，走 hf-mirror 国内镜像）。
 已存在同名 .txt 的视频默认跳过（避免重复打标/覆盖手写描述），--overwrite 可强制重写。
 """
+# ★ 2026-09-27 关键修复：剔除「本脚本所在目录」在 sys.path 中的条目 ✗
+#   打包版把 python312.dll / _socket.pyd 等 3.12 的 C 扩展与本脚本平铺在同一目录 ✗
+#   而 Python 会把脚本目录放进 sys.path[0] → import 会命中那份 3.12 扩展 ✗
+#   → `ImportError: Module use of python312.dll conflicts with this version of Python`
+#   本脚本还会联网下载 Qwen2.5-VL 权重（走 urllib）✗ → 必踩 ✓
+#   （细节见 preprocess.py 同段注释 ✓）
+#   ⚠️ 必须是所有 import 之前的第一件事 ✓
+import glob as _glob2
+import os as _os
+import sys as _sys
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+# ⚠️ 必须**条件成立才剔除** ✗：仅当本目录确实含打包版 C 扩展时才动手 ✓
+#   （开发环境下本目录就是项目根，还放着 kohya_core 等本地包 ——
+#    无条件剔除会把它们也屏蔽掉，直接 import 失败 ✓）
+if any(_glob2.glob(_os.path.join(_HERE, _p))
+       for _p in ("python3*.dll", "_socket.pyd", "_ctypes.pyd")):
+    _sys.path[:] = [p for p in _sys.path
+                    if _os.path.normcase(_os.path.abspath(p or _os.getcwd())) != _os.path.normcase(_HERE)]
+
 import argparse
 import os
 import sys

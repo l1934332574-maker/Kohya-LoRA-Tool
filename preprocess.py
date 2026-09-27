@@ -26,7 +26,31 @@ Kohya-SS LoRA 数据集预处理脚本（Windows / 通用）
       --trigger "ohwx" --reg-dir "D:/reg" --repeats 15 --dedup
 """
 
-
+# ★ 2026-09-27 关键修复：剔除「本脚本所在目录」在 sys.path 中的条目 ✗
+#   打包版（PyInstaller onedir）把 python312.dll / _socket.pyd 等 **3.12 的 C 扩展**
+#   与这些辅助脚本**平铺在同一个目录**（F:\KohyaLoraTool\）✗
+#   而 Python 会把「脚本所在目录」放进 sys.path[0] ✗
+#   → 于是 `import urllib.request`（内部 import _socket）会命中那份 3.12 的 _socket.pyd ✗
+#   → 报 `ImportError: Module use of python312.dll conflicts with this version of Python`
+#     （venv 是 3.11，两边对不上 ✗；同类风险还有 _ctypes.pyd 等）
+#   用户实测（KohyaLoRA_运行日志_20260927_220239）：预处理跑完图片，走到
+#   「下载 WD14 打标模型」时整脚本崩溃，且换任何引擎都一样（预处理共用第一引擎 venv ✓）
+#
+#   为什么以前不报 ✗：`urllib` 是**惰性 import**（只在下模型时走到）✓
+#   而 2026-09-17 起 WD14 模型改为「首次使用时下载」✗ → 第一次走到 urllib → 才引爆 ✓
+#
+#   ⚠️ 本段必须是**所有 import 之前的第一件事**（只用 os/sys，纯标准库，安全 ✓）
+import glob as _glob2
+import os as _os
+import sys as _sys
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+# ⚠️ 必须**条件成立才剔除** ✗：仅当本目录确实含打包版 C 扩展时才动手 ✓
+#   （开发环境下本目录就是项目根，还放着 kohya_core 等本地包 ——
+#    无条件剔除会把它们也屏蔽掉，直接 import 失败 ✓）
+if any(_glob2.glob(_os.path.join(_HERE, _p))
+       for _p in ("python3*.dll", "_socket.pyd", "_ctypes.pyd")):
+    _sys.path[:] = [p for p in _sys.path
+                    if _os.path.normcase(_os.path.abspath(p or _os.getcwd())) != _os.path.normcase(_HERE)]
 
 import argparse
 import json
@@ -129,8 +153,22 @@ def _http_download(url, dst, logf=print):
 
     每 3 秒报一次进度 —— 445MB 的 onnx 约 2~3 分钟，没有进度用户会以为卡死。
     """
-    import urllib.request
     tmp = dst + ".part"
+    try:
+        import urllib.request
+    except ImportError as _e:
+        # ★ 2026-09-27：兜底 ✗ —— 打包版自带的 C 扩展（python312.dll / _socket.pyd 等）
+        #   与 venv 的 Python 版本不一致时，这一句 import 会以
+        #   `Module use of python312.dll conflicts with this version of Python` 抛出 ✗
+        #   脚本头已剔除 sys.path[0]（治本 ✓）；这里再兜一层：
+        #   让它**只跳过下载**，而不是把整个预处理脚本带崩 ✗
+        #   用户实测（KohyaLoRA_运行日志_20260927_220239）：图片处理全跑完了，
+        #   只因走到「下载 WD14 模型」而整脚本退出码 1 ✓ —— 非常冤 ✓
+        logf("[WD14]   无法加载网络模块：%s" % _e)
+        logf("[WD14]   原因：工具自带的组件与训练环境 Python 版本不一致（打包版 C 扩展混入）")
+        logf("[WD14]   处理：① 把这条日志发给作者 ② 或手动下载打标模型，"
+             "放进 models\\wd14_tagger_model\\ 后重跑（无需联网）")
+        return False
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "KohyaLoraTool"})
         with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "wb") as f:

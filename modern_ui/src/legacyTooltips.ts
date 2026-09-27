@@ -41,6 +41,8 @@ export const legacyTooltips = {
   optimizer: '自动=按环境预检选 AdamW8bit 或降级；若报 bitsandbytes 崩溃，改选 AdamW/Lion。Krea2/FLUX.2 的 Fizgig 引擎不支持此项，用引擎默认。',
   quantMode: '自动=int8；Krea2 的 fp8 明显更慢。',
   blocksToSwap: '自动=按显存档位；0=全部驻留显存；块越少越快但越吃显存。',
+  batchSize: '每步同时训练的图片数。留空 = 自动（1）。调大后每轮步数会相应减少（每轮步数 = repeats × 图片数 ÷ 批大小），显存占用上升；显存吃紧请保持 1。',
+  gradientCheckpointing: '自动 = 显存小于 16GB 时开启。开启省显存但每步更慢；关闭更快，但显存占用明显增加（块交换/分辨率高时容易爆显存）。',
   compile: '第一引擎编译 U-Net；第二引擎编译 28 个块。编译需额外显存，<10G 自动禁用；Windows 下可能编译失败，慎开。',
   noiseOffset: '噪声偏移：训练时给随机噪声做一点调整，可能影响暗部和整体明暗对比。当前 0.05 是推荐值；新手保持不变即可。',
   minSnrGamma: 'Min-SNR gamma：平衡模型在不同训练噪声阶段的学习权重。当前 5 是推荐值；新手保持不变即可，它不是清晰度或训练轮数设置。',

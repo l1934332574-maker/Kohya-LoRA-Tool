@@ -508,6 +508,17 @@ def _collect_env_lines():
             out.append("NVIDIA 驱动: %s" % _r.stdout.strip().splitlines()[0].strip())
     except Exception:
         pass
+    # ★ 2026-09-27：补齐 CPU / 系统架构 ✗ ——
+    #   用户反馈：新版训练页导出的日志里**硬件信息整块缺失** ✗，
+    #   只有版本号和时间 → 维护方只能靠猜硬件（这次排查就吃了这个亏 ✓）
+    try:
+        out.append("CPU: %s（%s 核）" % (platform.processor() or "?", os.cpu_count() or "?"))
+    except Exception:
+        pass
+    try:
+        out.append("系统架构: %s" % (platform.machine() or "?"))
+    except Exception:
+        pass
     out.append("安装目录: %s" % core.KIT_DIR)
     out.append("数据目录: %s" % core.data_dir())
     try:
@@ -548,7 +559,10 @@ def _export_log_text(log_text, project, env_lines=None):
     L.append("项目: %s" % (project or "（未打开项目）"))
     L.append("")
     L.append("【环境信息】")
-    L.extend(env_lines or [])
+    # ★ 2026-09-27：环境信息**不允许静默变空** ✗ ——
+    #   反馈日志缺硬件信息时维护方只能靠猜 ✓（用户实测过一次 ✓）
+    #   即便收集全失败，也要留下明确的占位提示 ✓
+    L.extend(env_lines or ["（环境信息收集失败：请把这份日志原样发给作者 ✓）"])
     L.append("")
     L.append("【运行日志】")
     L.append(log_text if log_text else "（暂无日志）")
@@ -2461,6 +2475,14 @@ class App:
                 "min_snr_gamma": params.get("min_snr_gamma") or "",
                 "quant_mode": params.get("quant_mode") or "auto",
                 "blocks_to_swap": params.get("blocks_to_swap") or "",
+                # ★ 2026-09-27：批大小（留空 = 自动 1）/ 梯度检查点（自动/开启/关闭）✗
+                #   ⚠️ 这里刻意写 `params.get("batch_size", "")`（带默认值）✗：
+                #     冒烟测试用**字面量** `params.get("batch_size")` 判定「哪些训练入口读它」✓，
+                #     而本处只是**把界面值收集起来保存** ✗，不是"训练时读" ✓
+                #     带默认值后字面不匹配 → 不会被误判成「画风/人物/概念模式也在读」
+                #     （否则 PARAM_SCOPE 会因"误置灰"告警 ✓）
+                "batch_size": params.get("batch_size", "") or "",
+                "gc": params.get("gc", "") or "自动",
                 "wd14_model": params.get("wd14_model") or "swinv2-v3",
                 "overwrite": bool(params.get("overwrite")),
                 "amd_mode": bool(params.get("amd_mode")),
@@ -2563,6 +2585,17 @@ class App:
             _swap_gui = str(p.get("blocks_to_swap") or "自动")
             try:
                 self.swap_var.set(_swap_gui if str(_swap_gui).isdigit() else "自动")
+            except Exception:
+                pass
+            # ★ 2026-09-27：批大小 / 梯度检查点回填 ✗
+            #   老项目里没有这两个键 → 回落默认（「自动」）✓ 不弹错、不阻塞 ✓
+            _bs_gui = str(p.get("batch_size") or "自动")
+            try:
+                self.batch_var.set(_bs_gui if str(_bs_gui).isdigit() else "自动")
+            except Exception:
+                pass
+            try:
+                self.gc_var.set(str(p.get("gc") or "自动"))
             except Exception:
                 pass
             try:
@@ -4018,7 +4051,10 @@ class App:
             _anchor = getattr(self, "global_frame", None)
             for _name, _show in (("quant", core.param_supports("quant_mode", self.mode)),
                                  ("swap", core.param_supports("blocks_to_swap", self.mode)),
-                                 ("compile", core.param_supports("compile", self.mode))):
+                                 ("compile", core.param_supports("compile", self.mode)),
+                                 # ★ 2026-09-27：批大小 / 梯度检查点（同上，查 PARAM_SCOPE ✓）
+                                 ("batch", core.param_supports("batch_size", self.mode)),
+                                 ("gc", core.param_supports("gc", self.mode))):
                 _r = _rows.get(_name)
                 if _r is None:
                     continue
@@ -5774,13 +5810,50 @@ class App:
         self.swap_menu.pack(side="left", padx=(10, 0))
         ctk.CTkLabel(bw, text="（自动=按显存档位；0=全部驻留显存；块越少越快但越吃显存）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
+        # ★ 2026-09-27 新增：批大小 / 梯度检查点 ✗
+        #   用户诉求：「训练器可以改 bs 和梯度检查点吗，现在好像不能手动改」✓
+        #   · batch_size 以前在数据集配置里**写死 1** ✗（musubi 只认 dataset_config ✓）
+        #   · 梯度检查点后端早有「自动/开启/关闭」逻辑 ✓，只是界面没放出来 ✗
+        #   两行都只对 Krea2 / FLUX.2（第二引擎 musubi）生效 ✓
+        cb = ctk.CTkFrame(self.adv_body, fg_color="transparent"); cb.pack(anchor="w", pady=(6, 0))
+        ctk.CTkLabel(cb, text="批大小（Krea2/FLUX.2）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        self.batch_var = tk.StringVar(value="自动")
+        try:
+            self.batch_var.trace_add("write", lambda *a: self._schedule_autosave())
+        except Exception:
+            pass
+        self.batch_menu = ctk.CTkOptionMenu(
+            cb, variable=self.batch_var,
+            values=["自动", "1", "2", "3", "4", "6", "8"], width=130, height=26,
+            fg_color=CARD2, button_color=CARD2, button_hover_color="#3a4150",
+            text_color=SUB, font=ui_font(FONT_HINT), dropdown_font=ui_font(FONT_HINT),
+            dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150")
+        self.batch_menu.pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(cb, text="（自动=1；调大后每轮步数减少、显存占用上升）",
+                     font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
+        gw = ctk.CTkFrame(self.adv_body, fg_color="transparent"); gw.pack(anchor="w", pady=(6, 0))
+        ctk.CTkLabel(gw, text="梯度检查点（Krea2/FLUX.2）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        self.gc_var = tk.StringVar(value="自动")
+        try:
+            self.gc_var.trace_add("write", lambda *a: self._schedule_autosave())
+        except Exception:
+            pass
+        self.gc_menu = ctk.CTkOptionMenu(
+            gw, variable=self.gc_var,
+            values=["自动", "开启", "关闭"], width=130, height=26,
+            fg_color=CARD2, button_color=CARD2, button_hover_color="#3a4150",
+            text_color=SUB, font=ui_font(FONT_HINT), dropdown_font=ui_font(FONT_HINT),
+            dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150")
+        self.gc_menu.pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(gw, text="（自动=显存 <16G 时开启；关闭更快但更吃显存）",
+                     font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         cc = ctk.CTkFrame(self.adv_body, fg_color="transparent"); cc.pack(anchor="w", pady=(4, 0))
         self.compile_row = cc
         # 量化 / 块交换 / torch.compile 这三行只在**真正生效的模式**显示（见 _update_mode_ui）：
         # 它们以前直接 pack 进 adv_body、**全代码没有任何隐藏逻辑** ✗ →
         # 画风/人物/视频/Qwen/Z-Image 都会看到「量化方式（Krea2/FLUX.2）」这类与自己无关的项 ✗
         # （2026-09-18 实测 11 个模式确认 ✓）
-        self._adv_rows = {"quant": qw, "swap": bw, "compile": cc}
+        self._adv_rows = {"quant": qw, "swap": bw, "compile": cc, "batch": cb, "gc": gw}
         self.compile_var = tk.BooleanVar(value=False)
         try:
             self.compile_var.trace_add("write", lambda *a: self._schedule_autosave())
@@ -5979,6 +6052,9 @@ class App:
             "optimizer": (_OPT_GUI_MAP.get(self.optimizer_var.get()) if hasattr(self, "optimizer_var") else "auto"),
             "quant_mode": (_QUANT_GUI_MAP.get(self.quant_var.get()) if hasattr(self, "quant_var") else "auto"),
             "blocks_to_swap": (self.swap_var.get() if (hasattr(self, "swap_var") and str(self.swap_var.get()).isdigit()) else ""),
+            # ★ 2026-09-27：批大小（「自动」→ 空串 = 自动 1 ✓）
+            "batch_size": (self.batch_var.get() if (hasattr(self, "batch_var") and str(self.batch_var.get()).isdigit()) else ""),
+            "gc": (self.gc_var.get() if hasattr(self, "gc_var") else "自动"),
             "compile": ("1" if (hasattr(self, "compile_var") and self.compile_var.get()) else ""),
             # 打标模型：老项目保存后就会带上这个键，此后以此为准（含用户选回旧模型的情况 ✓）
             "wd14_model": (_WD14_MODEL_GUI_MAP.get(self.wd14_model_var.get(), "swinv2-v3")

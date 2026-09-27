@@ -90,7 +90,7 @@ export interface DesktopApi {
   bootstrap(): Promise<BootstrapData>
   suggest_project_name(): Promise<{ ok: boolean; name?: string; error?: string }>
   list_projects(): Promise<ProjectCard[]>
-  create_project(name: string, templateName: string, configJson?: string): Promise<CreateProjectResult>
+  create_project(name: string, templateName: string, configJson?: string, modeOverride?: string): Promise<CreateProjectResult>
   rename_project(oldName: string, newName: string): Promise<{ ok: boolean; error?: string; log?: string }>
   delete_project(name: string): Promise<{ ok: boolean; error?: string; log?: string }>
   open_project(name: string): Promise<{ ok: boolean; error?: string }>
@@ -282,10 +282,11 @@ declare global {
 }
 
 const demoTemplates: ProjectTemplate[] = [
-  { name: '自定义', mode: 'character', mode_label: '人物 LoRA', base_type: 'sdxl', note: '从空白项目开始，之后可切换人物、画风或概念模式。' },
-  { name: '人物 LoRA（SDXL）', mode: 'character', mode_label: '人物 LoRA', base_type: 'sdxl', note: '训练人物、角色和主体特征。' },
-  { name: '画风 LoRA（SDXL）', mode: 'style', mode_label: '画风 LoRA', base_type: 'sdxl', note: '保留整体画风，自动弱化人物标签。' },
-  { name: '概念 LoRA（SDXL）', mode: 'concept', mode_label: '概念 LoRA', base_type: 'sdxl', note: '训练形态、服装、物品或身体部位等概念。' },
+  { name: '自定义', mode: 'character', mode_label: '人物 LoRA', base_type: 'sdxl', note: '从人物 + SDXL 起步，进入训练页后可切换训练模式、底模和参数。' },
+  { name: 'SD1.5', mode: 'character', mode_label: '人物 LoRA', base_type: 'sd15', note: '使用 SD1.5 底模，默认人物训练；进入训练页后可切换人物、画风或概念模式。' },
+  { name: 'SDXL', mode: 'character', mode_label: '人物 LoRA', base_type: 'sdxl', note: '使用 SDXL 底模，默认人物训练；进入训练页后可切换人物、画风或概念模式。' },
+  { name: 'FLUX.1', mode: 'character', mode_label: '人物 LoRA', base_type: 'flux', note: '使用第一引擎 FLUX.1 底模，默认人物训练；进入训练页后可切换人物、画风或概念模式。' },
+  { name: 'Anima', mode: 'character', mode_label: '人物 LoRA', base_type: 'anima', note: '使用 Anima 底模，默认人物训练；进入训练页后可切换人物、画风或概念模式。' },
   { name: 'Krea 2（musubi）', mode: 'krea2', mode_label: 'Krea 2', base_type: 'sdxl', note: '第二引擎图像训练；保存与采样间隔可分别按轮次或步数设置。' },
   { name: 'FLUX.2（musubi）', mode: 'flux2', mode_label: 'FLUX.2', base_type: 'sdxl', note: '第二引擎 FLUX.2 图像训练。' },
   { name: '视频 LoRA（H3）', mode: 'video', mode_label: '视频 H3', base_type: 'sdxl', note: '使用视频数据、训练步数与帧数设置。' },

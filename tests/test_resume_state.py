@@ -1,13 +1,50 @@
 import os
 import tempfile
+import textwrap
 import time
 import unittest
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 from tests.test_anima_component_integrity import legacy
 
 
 class ResumeStateTests(unittest.TestCase):
+    def test_musubi_resume_patch_starts_after_saved_epoch(self):
+        archive = Path(__file__).resolve().parents[1] / "installers" / "musubi-tuner" / "musubi-tuner-main.zip"
+        with zipfile.ZipFile(archive) as bundle:
+            trainer = bundle.read(
+                "musubi-tuner-main/src/musubi_tuner/training/trainer_base.py"
+            ).decode("utf-8")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "musubi-tuner" / "src" / "musubi_tuner" / "training" / "trainer_base.py"
+            target.parent.mkdir(parents=True)
+            target.write_text(trainer, encoding="utf-8")
+
+            self.assertTrue(legacy._patch_musubi_resume_epoch(str(root), lambda _: None))
+            patched = target.read_text(encoding="utf-8")
+            self.assertTrue(legacy._patch_musubi_resume_epoch(str(root), lambda _: None))
+            self.assertEqual(patched, target.read_text(encoding="utf-8"))
+            block = "        # KOHYA_TOOL_PATCH: musubi resume epoch" + patched.split(
+                "        # KOHYA_TOOL_PATCH: musubi resume epoch", 1
+            )[1].split("        noise_scheduler", 1)[0]
+            runtime = {
+                "args": SimpleNamespace(resume=str(root / "krea2_lora-000007-state"), max_train_steps=1664),
+                "num_train_epochs": 16,
+                "num_update_steps_per_epoch": 104,
+                "os": os,
+                "logger": SimpleNamespace(info=lambda *args: None),
+                "accelerator": SimpleNamespace(is_local_main_process=True),
+                "tqdm": lambda **kwargs: kwargs,
+            }
+            exec(textwrap.dedent(block), runtime)
+            self.assertEqual(runtime["epoch_to_start"], 7)
+            self.assertEqual(runtime["global_step"], 728)
+            self.assertEqual(runtime["progress_bar"]["initial"], 728)
+            self.assertIn("for epoch in range(epoch_to_start, num_train_epochs):", patched)
+
     def test_musubi_epoch_state_is_found_and_completed_run_is_ignored(self):
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp)

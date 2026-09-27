@@ -643,6 +643,240 @@ def test_fizgig_amd_preflight_blocks_early():
     assert not _w1.called and not _w2.called, "卷积都不通过时不必再做后续检查 ✓"
     print("FIZGIG_AMD_PREFLIGHT_BLOCKS_EARLY_OK")
 
+def test_aux_scripts_drop_packed_dir(base: Path):
+    """★ 2026-09-27（用户日志 KohyaLoRA_运行日志_20260927_220239）：
+    辅助脚本必须剔除「打包版 C 扩展目录」的模块搜索路径 ✓
+
+    事故完整链 ✗：
+      · 打包版（PyInstaller onedir）把 3.12 的 python312.dll / _socket.pyd 平铺在
+        F:\\KohyaLoraTool\\，而 preprocess.py 也放在同一目录 ✗
+      · Python 会把「脚本所在目录」放进 sys.path[0] ✗
+      · 于是 `import urllib.request`（内部 import _socket）命中了那份 **3.12** 的
+        _socket.pyd ✗ → venv(3.11) 报
+        `ImportError: Module use of python312.dll conflicts with this version of Python` ✗
+      · 用户看到的现象：图片处理全跑完，只因「下载 WD14 打标模型」整脚本崩 ✗；
+        换任何训练引擎都一样（预处理共用第一引擎 venv ✓）；重装 Pillow/numpy 无效 ✗
+
+    判据（三条都要满足 ✓）：
+      ① 三个脚本都有 sys.path 清理 ✓
+      ② 清理**必须带条件**（目录确实含打包版 C 扩展才剔）✗
+         —— 否则开发环境下会把同目录的 kohya_core 也屏蔽掉，直接 import 失败 ✗
+      ③ 清理必须排在所有重依赖 import **之前** ✓
+    """
+    root = Path(core.__file__).parent
+    for name in ("preprocess.py", "model_downloader.py", "video_caption.py"):
+        src = (root / name).read_text(encoding="utf-8-sig")
+        assert "_sys.path[:]" in src, name + " 缺 sys.path 清理（打包版会报 python3XX.dll 冲突）✗"
+        assert "python3*.dll" in src and "_socket.pyd" in src, \
+            name + "：清理必须带条件（否则开发环境屏蔽掉 kohya_core）✗"
+        _i_clear = src.find("_sys.path[:]")
+        # ⚠️ 必须用**行首（可缩进）的 import** 匹配 ✗ ——
+        #   说明性注释里也写着 `import urllib.request`，用 find() 会误命中注释 ✓
+        _re_imp = re.compile(r"^[ \t]*(?:import|from)\s+(?:urllib|numpy|PIL|onnx|torch|cv2)\b",
+                             re.M)
+        _cands = [m.start() for m in _re_imp.finditer(src)]
+        assert _cands, name + "：预期有重依赖 import（测试锚点失效）"
+        assert _i_clear < min(_cands), name + "：sys.path 清理必须排在重依赖 import 之前 ✗"
+    print("AUX_SCRIPTS_DROP_PACKED_DIR_OK")
+
+
+def test_diagnose_splits_by_output():
+    """★ 2026-09-27：子进程诊断必须**按报错内容分流** ✓
+
+    事故 ✗：用户那次预处理**明明打出了完整 traceback**（ImportError: python312.dll conflicts），
+      工具却照样印「若上方**没有明确报错** → 查内存/显存/杀软/驱动」✗
+      → 把用户往**完全错误的方向**带（去查内存、重装驱动）✗，白折腾一整晚 ✓
+    修复：能拿到输出时按类型分流 ✓；确实没输出才给「外部终止」那套 ✓
+    """
+    from kohya_core import utils as U
+    # ① python3XX.dll 冲突 → 给专门指引，且**不得**再提内存/显存/杀软
+    _out = ["Traceback (most recent call last):",
+            '  File "preprocess.py", line 1, in <module>',
+            "ImportError: Module use of python312.dll conflicts with this version of Python."]
+    _t = "\n".join(U.diagnose_child_exit(1, _out))
+    assert "dll" in _t.lower() and "冲突" in _t, "必须识别 dll 冲突签名：" + _t[:300]
+    assert "任务管理器" not in _t and "杀软" not in _t, \
+        "已识别为 dll 冲突，不该再让用户查内存/杀软 ✗：" + _t[:300]
+    # ② 一般 traceback → 明确指出按报错排查，不再说「没有明确报错」
+    _t2 = "\n".join(U.diagnose_child_exit(1, ["Traceback (most recent call last):", "ValueError: boom"]))
+    assert "没有明确报错" not in _t2, "有 traceback 时不该再说「没有明确报错」✗：" + _t2
+    # ③ 无输出（真·静默退出）→ 保留原「外部终止」排查方向 ✓
+    _t3 = "\n".join(U.diagnose_child_exit(1, None))
+    assert "内存" in _t3 and "显存" in _t3 and "杀软" in _t3, \
+        "静默退出时仍应给出内存/显存/杀软排查 ✓：" + _t3
+    # ④ 兼容：不传 output 时行为与旧版一致 ✓
+    assert U.diagnose_child_exit(1) == U.diagnose_child_exit(1, None)
+    print("DIAGNOSE_SPLITS_BY_OUTPUT_OK")
+
+
+def test_preprocess_selfcheck_covers_network_modules(base: Path):
+    """★ 2026-09-27：预处理前置自检必须覆盖 socket/urllib ✓
+
+    原来只测 `import ctypes` ✗ —— 而用户这次的崩点是 socket/urllib ✗
+    （ctypes 好、socket 坏 ✓）→ 只测 ctypes 等于没测到 ✓
+    同时必须带回 socket.__file__ 以便判断是否被工具目录顶替 ✓
+    """
+    src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    i = src.find("def _ctypes_ok()")
+    assert i != -1, "缺 _ctypes_ok"
+    seg = src[i:i + 3000]
+    assert "urllib.request" in seg and "socket" in seg and "ssl" in seg, \
+        "前置自检必须覆盖 ctypes + socket + urllib.request + ssl ✗"
+    assert "socket=_" not in seg, "实现细节变化（测试锚点失效）"
+    assert "socket.__file__" in seg or "socket=" in seg, "应带回 socket.__file__ 供归属核对 ✓"
+    print("PREPROCESS_SELFCHECK_COVERS_NETWORK_OK")
+
+
+def test_export_log_always_has_env_block(base: Path):
+    """★ 2026-09-27：导出日志必须**永远**带【环境信息】块，且含硬件信息 ✓
+
+    用户反馈：新版训练页导出的日志里**硬件信息整块缺失** ✗
+      （拿到的 txt 只有「版本 + 时间 + 【运行日志】」，连【环境信息】标题都没有 ✓）
+    → 维护方只能靠猜硬件 ✗（这次排查两位用户都吃了这个亏 ✓）
+
+    判据：
+      ① 常规导出必须含 操作系统 / 显卡 / 系统内存 / CPU 行 ✓
+      ② 环境收集**全失败**时也不许静默变空 ✗ —— 必须留占位提示 ✓
+    """
+    import kohya_gui as gui
+    t = gui._export_log_text("step 1/10 loss=0.5", "proj")
+    assert "【环境信息】" in t and "【运行日志】" in t, t[:400]
+    assert "显卡:" in t, "导出日志必须含显卡信息 ✗：" + t[:600]
+    assert "系统内存:" in t, "导出日志必须含内存信息 ✗：" + t[:600]
+    assert "操作系统:" in t, "应含操作系统行 ✗：" + t[:600]
+    assert "CPU:" in t, "应含 CPU 行 ✗：" + t[:600]
+    # ② 收集全失败 → 必须留占位，不能静默变空 ✗
+    t2 = gui._export_log_text("log", "p", env_lines=[])
+    assert "【环境信息】" in t2 and "收集失败" in t2, t2[:400]
+    print("EXPORT_LOG_ALWAYS_HAS_ENV_OK")
+
+
+def test_trainer_batch_size_and_gradient_checkpointing(base: Path):
+    """★ 2026-09-27 新增（用户诉求：「训练器可以改 bs 和梯度检查点吗，现在好像不能手动改」）✓
+
+    背景 ✗：
+      · `batch_size` 以前在数据集配置里**写死为 1** ✗
+        （musubi 的训练批大小**只认 dataset_config.toml** ✓，训练命令行没有 --batch_size ✓）
+      · 梯度检查点后端**早有**「自动 / 开启 / 关闭」逻辑 ✓（`decide_gradient_checkpointing`），
+        但两套界面**都没有放出来** ✗ → 用户看不到也改不了 ✓
+
+    本次：后端贯通 + 老(Tk)/新(Vue)两套界面都加控件 ✓
+    判据（缺一不可 ✓）：
+      ① 批大小解析：留空 = 1 ✓；1~8 生效 ✓；越界/非数字 → 提示并回落 1 ✓
+      ② 梯度检查点：手动「开启/关闭」必须**优先于**显存推断 ✗
+      ③ `batch_size` 必须真的写进 dataset_config.toml ✓
+      ④ **每轮步数 = repeats × 图片数 ÷ bs** ✗（否则进度条/ETA/断点续训步数全错 ✓）
+      ⑤ 两套界面都有控件（老 `_adv_rows` 注册 + 新 Vue `supported(...)`）✓
+      ⑥ 作用域只覆盖第二引擎 Krea2 / FLUX.2（Fizgig 走 yaml，固定开启 ✗）
+    """
+    # ① 批大小解析
+    _logs = []
+    assert core.resolve_batch_size({}, "T", _logs.append) == 1
+    assert core.resolve_batch_size({"batch_size": ""}, "T", _logs.append) == 1
+    assert core.resolve_batch_size({"batch_size": "1"}, "T", _logs.append) == 1
+    assert core.resolve_batch_size({"batch_size": "4"}, "T", _logs.append) == 4
+    assert core.resolve_batch_size({"batch_size": 3}, "T", _logs.append) == 3
+    assert core.resolve_batch_size({"batch_size": "8"}, "T", _logs.append) == 8
+    assert core.resolve_batch_size({"batch_size": "99"}, "T", _logs.append) == 1
+    assert core.resolve_batch_size({"batch_size": "abc"}, "T", _logs.append) == 1
+    assert core.resolve_batch_size({"batch_size": "0"}, "T", _logs.append) == 1
+    assert any("无效" in _x for _x in _logs), "非法批大小必须给出提示 ✗：" + str(_logs)
+    # ② 梯度检查点：手动值优先于显存推断 ✗
+    assert core.decide_gradient_checkpointing("开启", 48.0) is True, "大显存下手动「开启」也必须生效 ✗"
+    assert core.decide_gradient_checkpointing("关闭", 8.0) is False, "小显存下手动「关闭」也必须生效 ✗"
+    assert core.decide_gradient_checkpointing("自动", 8.0) is True
+    assert core.decide_gradient_checkpointing("自动", 48.0) is False
+    # ③ 落进 toml
+    with tempfile.TemporaryDirectory(prefix="bs4_") as td:
+        cfg = os.path.join(td, "d.toml")
+        _img = os.path.join(td, "img"); os.makedirs(_img, exist_ok=True)
+        core.write_musubi_dataset_config(_img, os.path.join(td, "c"), cfg,
+                                         resolution=1024, num_repeats=2, batch_size=4)
+        _t = open(cfg, encoding="utf-8").read()
+        assert "batch_size = 4" in _t, "批大小必须写进 dataset_config ✗：" + _t
+        core.write_musubi_dataset_config(_img, os.path.join(td, "c"), cfg,
+                                         resolution=1024, num_repeats=2)
+        assert "batch_size = 1" in open(cfg, encoding="utf-8").read(), "默认必须仍是 1 ✓"
+    # ④ 每轮步数折算 + 真实批大小记录
+    src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    assert src.count("* _flat_n) // bs)") == 2, \
+        "Krea2 与 FLUX.2 都必须按 bs 折算每轮步数 ✗（否则进度条/ETA/续训步数全错）"
+    assert src.count("batch_size=bs,") == 2, "两处都要记录真实批大小 ✗"
+    # ⑤ 两套界面都有控件（老界面在 kohya_gui.py，不在主程序里 ✗）
+    _gui = (Path(core.__file__).parent / "kohya_gui.py").read_text(encoding="utf-8-sig")
+    assert "self.batch_var = tk.StringVar" in _gui and "self.gc_var = tk.StringVar" in _gui, \
+        "老界面缺控件 ✗（注意：控件在 kohya_gui.py，不在主程序里）"
+    assert '"batch": cb, "gc": gw' in _gui, "老界面未注册 _adv_rows（不会显示/隐藏）✗"
+    assert '"batch_size": (self.batch_var.get()' in _gui, "老界面未保存批大小 ✗"
+    assert '"gc": (self.gc_var.get()' in _gui, "老界面未保存梯度检查点 ✗"
+    _vue = (Path(core.__file__).parent / "modern_ui/src/components/"
+            "ModernEngineWorkspace.vue").read_text(encoding="utf-8")
+    assert "supported('batch_size')" in _vue and "supported('gc')" in _vue, "新界面缺控件 ✗"
+    assert "'batch_size', 'gc'" in _vue, "新界面 key 列表未加（参数传不到后端）✗"
+    # ⑥ 作用域：第一引擎（画风/人物/概念）与第二引擎 Krea2 / FLUX.2 都真读它们 ✓
+    #    Fizgig / 视频 / AI 图像不读 → 不得显示（会误置灰 ✗）
+    from kohya_core import configs as C
+    for _m in ("style", "character", "concept", "krea2", "flux2"):
+        assert C.param_supports("batch_size", _m), "该模式应显示批大小 ✗：" + _m
+        assert C.param_supports("gc", _m), "该模式应显示梯度检查点 ✗：" + _m
+    for _m in ("krea2_fz", "flux2_fz", "video", "qwen_image", "zimage"):
+        assert not C.param_supports("batch_size", _m), "不该出现的模式显示了批大小 ✗：" + _m
+        assert not C.param_supports("gc", _m), "不该出现的模式显示了梯度检查点 ✗：" + _m
+    # 第一引擎原来用 int(...) 直接解析 ✗（填非数字会 ValueError）→ 必须已换统一解析 ✓
+    # （含函数定义自身，所以是 4 处；用 >= 更稳）
+    assert src.count("resolve_batch_size(params,") >= 3, \
+        "第一引擎 + Krea2 + FLUX.2 三处都应走统一解析 ✗"
+    assert 'batch_size = int(params.get("batch_size"' not in src, \
+        "第一引擎仍在用 int(...) 直接解析（填非数字会直接报错）✗"
+    print("TRAINER_BS_AND_GC_OK")
+
+
+def test_miopen_fast_mode_env(base: Path):
+    """★ 2026-09-27（AMD RX 9060 XT 实测，本工具迄今最大的单点提速）✓
+
+    事故 ✗：
+      · AMD RX 9060 XT 16G 跑 Anima 1024px 第一引擎 → **11.45 s/it**（2700 步 ≈ 8.6 小时）✗
+      · 而**更弱**的 RX 7800 XT 在 0.6 版实测仅 **0.43 s/it** ⇒ 慢 25 倍，明显不正常 ✓
+      · 用户只设 `MIOPEN_FIND_MODE=FAST` 后 → **2.58 s/it** ✓ **快 4.4 倍** ✓（用户确认 ✓）
+
+    根因：MIOpen 默认对**每个卷积形状做穷举 kernel 搜索** ✗ → 每步时间被搜索吃掉；
+          `FAST` = 启发式直接选 kernel ✓。
+          并且 kernel 缓存若不可写 → **每个进程都要重搜** ✗
+          ⇒ 必须同时把缓存目录固定到可写位置 ✓
+    （旁证：早期 0.6 版用户那台是**让本地 agent 手工修**的 ⇒ 很可能就手工设过这些变量 ✓
+       —— 这解释了"以前快、现在慢" ✓）
+
+    判据（缺一不可）：
+      ① `build_env()` 带 `MIOPEN_FIND_MODE=FAST` ✓
+      ② 缓存变量指向**已创建**的目录 ✓（不可写就等于没设 ✓）
+      ③ `build_direct_env()`（镜像直连路径）同样带上 ✓
+      ④ **不覆盖**用户显式设置的值（setdefault 语义 ✓）
+    """
+    from kohya_core import utils as U
+    e = U.build_env()
+    assert e.get("MIOPEN_FIND_MODE") == "FAST", \
+        "缺 MIOpen FAST 模式：AMD 上会慢数倍（实测 11.45 → 2.58 s/it）✗"
+    for _k in ("MIOPEN_USER_DB_PATH", "MIOPEN_CUSTOM_CACHE_DIR"):
+        _p = e.get(_k)
+        assert _p and os.path.isdir(_p), \
+            "%s 必须指向**已创建**的可写目录（否则每个进程重搜 kernel）✗：%s" % (_k, _p)
+    assert U.build_direct_env().get("MIOPEN_FIND_MODE") == "FAST", \
+        "镜像直连环境也必须带 MIOpen FAST ✗（它是 pip/下载与训练共用的）"
+    # 用户显式设置优先
+    _old = os.environ.get("MIOPEN_FIND_MODE")
+    try:
+        os.environ["MIOPEN_FIND_MODE"] = "NORMAL"
+        assert U.build_env().get("MIOPEN_FIND_MODE") == "NORMAL", \
+            "不该覆盖用户显式设置的值（必须 setdefault）✗"
+    finally:
+        if _old is None:
+            os.environ.pop("MIOPEN_FIND_MODE", None)
+        else:
+            os.environ["MIOPEN_FIND_MODE"] = _old
+    # 对 NVIDIA 无害（变量只在 AMD ROCm 栈读取）→ 因此无条件注入是安全的 ✓
+    print("MIOPEN_FAST_MODE_ENV_OK")
+
+
 def test_optimizer_resolution(base: Path):
     """resolve_optimizer / _probe_adamw8bit / _probe_lion / _optimizer_yaml_name 单元测试（mock 子进程，不真实运行 CUDA）。"""
     logs = []
@@ -770,7 +1004,9 @@ def test_preprocess_deps(base: Path):
         # 这里按真实调用返回 ctypes-ok，否则会在进入补装流程之前就被判 False（旧断言已过期）。
         code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
         if "import ctypes" in code:
-            return subprocess.CompletedProcess([], 0, "ctypes-ok\n", "")
+            # ★ 2026-09-27：前置自检已扩展（探针改为 base-ok）✓
+            return subprocess.CompletedProcess(
+                [], 0, "base-ok\nsocket=C:/venv/Lib/socket.py\n", "")
         return probe(0 if state["import_ok"] else 1)
     install_cmd = {"seen": []}
     def run_stream_install(cmd, cwd=None, env=None, logf=print, **kwargs):
@@ -792,7 +1028,12 @@ def test_preprocess_deps(base: Path):
     def subrun_ok_force(cmd, *args, **kwargs):
         code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
         if "import ctypes" in code:
-            return subprocess.CompletedProcess([], 0, "ctypes-ok\n", "")   # ctypes 前置校验先过
+            # ★ 2026-09-27：前置自检已扩展为 ctypes + socket + urllib.request + ssl ✗
+            #   探针字符串由 ctypes-ok 改为 base-ok，并带回 socket.__file__ ✓
+            #   （背景：打包版把 3.12 的 _socket.pyd 与辅助脚本放同目录，
+            #     venv import urllib 时被顶替 → python312.dll conflicts ✗）
+            return subprocess.CompletedProcess(
+                [], 0, "base-ok\nsocket=C:/venv/Lib/socket.py\n", "")
         return probe(0)  # 校验总是通过
     def run_stream_force(cmd, cwd=None, env=None, logf=print, **kwargs):
         force_install["n"] += 1
@@ -816,7 +1057,12 @@ def test_preprocess_deps(base: Path):
     def subrun_bad(cmd, *args, **kwargs):
         code = str(cmd[2]) if len(cmd) > 2 and str(cmd[1]) == "-c" else ""
         if "import ctypes" in code:
-            return subprocess.CompletedProcess([], 0, "ctypes-ok\n", "")   # ctypes 前置校验先过
+            # ★ 2026-09-27：前置自检已扩展为 ctypes + socket + urllib.request + ssl ✗
+            #   探针字符串由 ctypes-ok 改为 base-ok，并带回 socket.__file__ ✓
+            #   （背景：打包版把 3.12 的 _socket.pyd 与辅助脚本放同目录，
+            #     venv import urllib 时被顶替 → python312.dll conflicts ✗）
+            return subprocess.CompletedProcess(
+                [], 0, "base-ok\nsocket=C:/venv/Lib/socket.py\n", "")
         return probe(1)
     def run_stream_bad(cmd, cwd=None, env=None, logf=print, **kwargs):
         return 1
@@ -4484,6 +4730,11 @@ def main():
         test_amd_device_pkg_and_override_checks()
         test_amd_gpu_kernel_check_detects_broken_gpu()
         test_fizgig_amd_preflight_blocks_early()
+        # ★ 2026-09-27（AMD/Intel/NVIDIA 通用 事故）：辅助脚本目录里的打包版 C 扩展
+        #   被当成 venv 的模块加载 → `python312.dll conflicts` → 下载模型必崩 ✗
+        test_aux_scripts_drop_packed_dir(base)
+        test_diagnose_splits_by_output()
+        test_preprocess_selfcheck_covers_network_modules(base)
         test_fourth_engine(base)
         test_fourth_engine_train_pipeline(base)
         test_fizgig_deps_self_heal(base)
@@ -4582,6 +4833,13 @@ def main():
         test_krea2_modelscope_mirror(base)
         test_krea2_training_env_propagation(base)
         test_export_log(base)
+        # ★ 2026-09-27：导出日志必须永远带【环境信息】+硬件信息
+        #   （新版训练页导出的日志曾整块丢失硬件信息 ✗）
+        test_export_log_always_has_env_block(base)
+        # ★ 2026-09-27：训练器可手动改 batch size 与梯度检查点（老/新两套界面 ✓）
+        test_trainer_batch_size_and_gradient_checkpointing(base)
+        # ★ 2026-09-27：AMD 训练必须带 MIOpen FAST（实测提速 4.4 倍：11.45 → 2.58 s/it）
+        test_miopen_fast_mode_env(base)
         test_venv_hf_sitecustomize(base)
         test_torch_compile_safe_fallback(base)
         test_swap_zero_option(base)

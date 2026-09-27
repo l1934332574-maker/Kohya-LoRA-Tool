@@ -186,6 +186,28 @@ def build_env(extra_dirs=()):
     # 而上方日志是空的（2026-09-15 qionglora 用户实测：preprocess.py 两轮零输出）。
     # 强制无缓冲后，崩溃前已打印的内容一定先落进父进程日志，失败才可诊断。
     env["PYTHONUNBUFFERED"] = "1"
+    # ★★ 2026-09-27：AMD(ROCm) 必配 —— 关闭 MIOpen 的**穷举 kernel 搜索** ✗
+    #   实测（用户日志 KohyaLoRA_运行日志_20260927_232047，AMD RX 9060 XT 16G，
+    #        Anima 画风 LoRA，第一引擎，1024px，bf16，swap=8）：
+    #     · 未设任何变量 → **11.45 s/it**（2700 步 ≈ 8 小时 35 分）✗
+    #     · 仅设 MIOPEN_FIND_MODE=FAST → **2.58 s/it**（≈ 1 小时 55 分）✓
+    #       ⇒ **快 4.4 倍** ✓（用户实测确认，2026-09-27）
+    #   原因：MIOpen 默认会为每个卷积形状做**穷举 kernel 搜索** ✗，
+    #         每步新形状都要重搜 → 时间全被搜索吃掉；
+    #         FAST = 改用启发式直接选 kernel ✓
+    #   对照：早期 0.6 版用户（RX 7800 XT）在此处是**让本地 agent 手工修的** ✓
+    #         → 手工修法很可能就包含这些变量，所以那台快、现在的自动安装慢 ✓
+    #   另外把 kernel 缓存固定到**工具数据目录**（保证可写且持久 ✓）：
+    #     缓存不可写时每次进程都要重新搜索 ✗（默认位置在 Windows 上常不可写 ✓）
+    #   ⚠️ 对 NVIDIA 无害：这些变量只在 AMD ROCm 栈里被读取 ✓
+    env.setdefault("MIOPEN_FIND_MODE", "FAST")
+    try:
+        _miopen_cache = os.path.join(os.path.dirname(get_kohya_dir()), "miopen_cache")
+        os.makedirs(_miopen_cache, exist_ok=True)
+        env.setdefault("MIOPEN_USER_DB_PATH", _miopen_cache)
+        env.setdefault("MIOPEN_CUSTOM_CACHE_DIR", _miopen_cache)
+    except Exception:
+        pass
     # huggingface_hub 1.x 默认走 Xet 协议（直连 cas-server.xethub.hf.co），国内常报
     # 401/超时且绕过 hf-mirror 镜像（如第三引擎下载 12GB+ 模型失败）；全局禁用，
     # 回退经典 HTTP 下载（走 HF_ENDPOINT 镜像）。
@@ -369,12 +391,12 @@ def run_stream(cmd, cwd=None, env=None, logf=print, collect=None):
         raise StopRequested("任务已手动停止")
     _rc = proc.returncode
     if _rc not in (0, None) and logf:
-        for _ln in diagnose_child_exit(_rc):
+        for _ln in diagnose_child_exit(_rc, collect):
             logf(_ln)
     return _rc
 
 
-def diagnose_child_exit(rc):
+def diagnose_child_exit(rc, output=None):
     """子进程异常退出时，给**能照着查**的方向（返回要打印的行）。
 
     ★ 2026-09-22（本机日志 KohyaLoRA_Mhcc_20260922，RTX 4070 Laptop 8G）：
@@ -401,6 +423,35 @@ def diagnose_child_exit(rc):
     }
     if _u in _known:
         _lines.append("[诊断] " + _known[_u])
+    # ★ 2026-09-27：先看**子进程到底报了什么错** ✗ ——
+    #   用户日志 KohyaLoRA_运行日志_20260927_220239 里，预处理已经打出完整 traceback
+    #   （`ImportError: Module use of python312.dll conflicts with this version of Python`）✗
+    #   但这里仍然照旧印了「若上方**没有明确报错** → 查内存/显存/杀软」✗
+    #   → 把用户往**完全错误的方向**带（去查内存、装驱动）✗ 白折腾
+    #   现在：报错内容能拿到时按类型分流 ✓；确实没报错才给"外部终止"那套 ✓
+    _txt = ""
+    if output:
+        try:
+            _txt = "\n".join(str(_x) for _x in output)[-20000:]
+        except Exception:
+            _txt = ""
+    if _txt:
+        _low = _txt.lower()
+        if ("dll conflicts with this version of python" in _low
+                or "module use of python3" in _low):
+            _lines.append("[诊断] ★ 检出「python3XX.dll 冲突」：这与内存/显存/显卡驱动**无关** ✗")
+            _lines.append("[诊断]   含义：训练环境（venv）里的 C 扩展被工具自带的另一套版本顶替了。")
+            _lines.append("[诊断]   典型场景：工具目录与辅助脚本同级放着 python312.dll / _socket.pyd，")
+            _lines.append("[诊断]   而 venv 是 3.11 —— 加载时两边对不上（打包版特有）✗")
+            _lines.append("[诊断]   处理：① 升级到修复版本（已剔除脚本目录的模块搜索路径）"
+                          "② 仍然报 → 重建训练环境（【② 安装训练内核】）"
+                          "③ 完全绕开：手动下载所需模型放进对应 models 子目录后重跑")
+            return _lines
+        if "traceback (most recent call last)" in _low:
+            # 有明确 traceback ✗ → **不该**再让用户查内存/显存/杀软 ✗（会带偏 ✓）
+            _lines.append("[诊断] 上方已有明确报错（Traceback）→ 请按该报错的模块/路径排查 ✓；"
+                          "与内存、显存、杀毒软件无关 ✓")
+            return _lines
     _lines.append("[诊断] 若上方**没有明确报错**（只有进度条）→ 多为进程被外部终止，"
                   "按顺序查：① 系统内存是否被撑满（任务管理器→性能→内存）"
                   "② 显存是否爆 ③ 杀软把训练环境目录加白名单 ④ 显卡驱动是否重置")

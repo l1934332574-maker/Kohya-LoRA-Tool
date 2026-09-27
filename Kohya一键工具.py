@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.18.5"
+APP_VERSION = "0.18.6"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2190,7 +2190,8 @@ def flux2_fz_missing_models():
     return missing
 
 def write_musubi_dataset_config(image_dir, cache_dir, config_path, resolution=1024,
-                                num_repeats=1, keep_tokens=1, caption_extension=".txt"):
+                                num_repeats=1, keep_tokens=1, caption_extension=".txt",
+                                batch_size=1):
     """musubi-tuner 数据集配置（与 kohya 不同：image_directory / cache_directory）。
 
     注意：musubi 的 schema 只接受 resolution/caption_extension/batch_size/num_repeats/
@@ -2204,7 +2205,12 @@ def write_musubi_dataset_config(image_dir, cache_dir, config_path, resolution=10
         "[general]\n"
         f"resolution = [{int(resolution)}, {int(resolution)}]\n"
         f'caption_extension = "{caption_extension}"\n'
-        "batch_size = 1\n"
+        # ★ 2026-09-27：batch_size 由写死改为可调 ✗
+        #   用户诉求：「训练器可以改 bs 和梯度检查点吗，现在好像不能手动改」
+        #   musubi 的**训练批大小只认这个 dataset_config** ✓
+        #   （训练命令行没有 --batch_size；日志里那两处 --batch_size 1 是**缓存脚本**的 ✓）
+        #   → 所以这里就是唯一入口 ✓
+        f"batch_size = {max(1, int(batch_size))}\n"
         "enable_bucket = true\n"
         "bucket_no_upscale = false\n"
         "\n"
@@ -2734,6 +2740,56 @@ def _patch_musubi_int8_weight_dtype(kdir, logf=print):
     return True  # 已打过或结构变化（跳过）
 
 
+def _patch_musubi_resume_epoch(kdir, logf=print):
+    """让 musubi 的 epoch 快照续训从下一轮和原有总步数继续。
+
+    原版 load_state 只恢复模型、优化器等状态，训练循环仍将 epoch/global_step
+    置零，导致已经完成的轮次再次训练。仅针对工具生成的六位 epoch 快照。
+    """
+    fp = os.path.join(kdir, "musubi-tuner", "src", "musubi_tuner", "training", "trainer_base.py")
+    if not os.path.isfile(fp):
+        return False
+    try:
+        with open(fp, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        marker = "KOHYA_TOOL_PATCH: musubi resume epoch"
+        if marker in source:
+            return True
+        old = (
+            "        # TODO skip until initial step\n"
+            '        progress_bar = tqdm(range(args.max_train_steps), smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")\n'
+            "\n"
+            "        epoch_to_start = 0\n"
+            "        global_step = 0"
+        )
+        if old not in source:
+            logf("[musubi] 训练循环结构已变化，无法确认断点轮次；本次不会冒险从头续训。")
+            return False
+        new = (
+            "        # KOHYA_TOOL_PATCH: musubi resume epoch\n"
+            "        epoch_to_start = 0\n"
+            "        global_step = 0\n"
+            "        if args.resume:\n"
+            "            import re as _kohya_resume_re\n"
+            "            _resume_name = os.path.basename(os.path.normpath(args.resume))\n"
+            '            _resume_match = _kohya_resume_re.search(r"-(\\d{6})-state$", _resume_name)\n'
+            "            if _resume_match:\n"
+            "                epoch_to_start = min(int(_resume_match.group(1)), num_train_epochs)\n"
+            "                global_step = min(args.max_train_steps, epoch_to_start * num_update_steps_per_epoch)\n"
+            '                logger.info("resume at epoch %s, global step %s", epoch_to_start + 1, global_step)\n'
+            '        progress_bar = tqdm(total=args.max_train_steps, initial=global_step, smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")'
+        )
+        source = source.replace(old, new, 1)
+        compile(source, fp, "exec")
+        with open(fp, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(source)
+        logf("[musubi] 已修复 epoch 快照续训的轮次和总步数")
+        return True
+    except Exception as exc:
+        logf(f"[musubi] 断点轮次补丁失败：{exc}")
+        return False
+
+
 def _patch_musubi_offload_device(kdir, logf=print):
     """给 musubi custom_offloading_utils.py 打幂等补丁：块交换 move_blocks 不硬调 torch.cuda.current_device()。
 
@@ -2800,6 +2856,7 @@ def _ensure_krea2_tokenizer_ready(logf=print, mvpy=None):
         _patch_musubi_fp8_dequant_bf16(_kdir, logf)
         # INT8/NF4 量化底模补丁（幂等；Krea2/FLUX.2 共用；结构变化自动跳过，不影响原 fp8 流程）
         patch_musubi_quant_base(_kdir, logf)
+        _patch_musubi_resume_epoch(_kdir, logf)
         # AMD ROCm（RX 7000）块交换 fallback 硬调 torch.cuda.current_device() 崩 Found no NVIDIA driver（issue #5）
         _patch_musubi_offload_device(_kdir, logf)
         try:
@@ -3183,9 +3240,13 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     cache_dir = os.path.join(data_dir(), "dataset", proj, "krea2_cache")
     os.makedirs(cache_dir, exist_ok=True)
     resolution = int(params.get("resolution") or KREA2_RESOLUTION)
+    # ★ 2026-09-27：批大小可手动指定（留空 = 1）✗
+    bs = resolve_batch_size(params, "Krea2", logf)
     write_musubi_dataset_config(train_dir, cache_dir, cfg_path, resolution=resolution,
-                                num_repeats=int(params.get("repeats", 5)), keep_tokens=1)
-    logf(f"[Krea2] 数据集: {train_dir}（{resolution}px, repeats={params.get('repeats', 5)}）")
+                                num_repeats=int(params.get("repeats", 5)), keep_tokens=1,
+                                batch_size=bs)
+    logf(f"[Krea2] 数据集: {train_dir}（{resolution}px, repeats={params.get('repeats', 5)}"
+         f"{', batch_size=%d' % bs if bs != 1 else ''}）")
     # 预缓存 latents
     logf("[Krea2] 缓存 latents …")
     if run_stream([mvpy, os.path.join(mt_dir, "krea2_cache_latents.py"),
@@ -3236,7 +3297,10 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         h2d_only = swap > 0 and gc_on
         logf(f"[Krea2] 高级参数手动指定 blocks_to_swap={swap}")
     # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
-    per_epoch = int(params.get("repeats", 5)) * _flat_n
+    # ★ 2026-09-27：批大小会**减少**每轮步数 ✗ ——
+    #   sampler 每步消费 bs 张图 ✓，所以 每轮步数 = repeats × 图片数 ÷ bs ✓
+    #   进度条 / ETA / 断点续训步数全部由 per_epoch 派生 ✓ → 这里改一处即全线一致 ✓
+    per_epoch = max(1, (int(params.get("repeats", 5)) * _flat_n) // bs)
     _save_ep = _save_every_note(params, epochs, logf, "Krea2")   # 与中间保存快照对齐（采样预览同节奏）
     if per_epoch * epochs > KREA2_MAX_STEPS:
         new_epochs = max(1, int(KREA2_MAX_STEPS / max(1, per_epoch)))
@@ -3270,6 +3334,8 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         "--output_dir", out_dir, "--output_name", output_name,
     ]
     if resume_from:
+        if not _patch_musubi_resume_epoch(get_kohya_dir(), logf):
+            raise RuntimeError("当前 musubi 版本无法安全恢复训练轮次；请先更新第二引擎，原有断点不会删除。")
         cmd.append(f"--resume={resume_from}")
         logf(f"[Krea2] 断点续训：从 {resume_from} 继续")
         if progress is not None:
@@ -3355,7 +3421,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     model_path = os.path.join(out_dir, output_name + ".safetensors")
     logf(f"[Krea2] 完成！模型: {model_path}")
     _record_effective(engine="musubi-tuner", resolution=resolution, optimizer=opt_k,
-                      batch_size=1, save_every="每 %s 轮" % _save_ep,
+                      batch_size=bs, save_every="每 %s 轮" % _save_ep,
                       total_steps=per_epoch * epochs, epochs=epochs,
                       images=count_images(train_dir), gradient_checkpointing=gc_on)
     try:
@@ -3427,9 +3493,13 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     cache_dir = os.path.join(data_dir(), "dataset", proj, "flux2_cache")
     os.makedirs(cache_dir, exist_ok=True)
     resolution = int(params.get("resolution") or FLUX2_RESOLUTION)
+    # ★ 2026-09-27：批大小可手动指定（留空 = 1）✗
+    bs = resolve_batch_size(params, "FLUX.2", logf)
     write_musubi_dataset_config(train_dir, cache_dir, cfg_path, resolution=resolution,
-                                num_repeats=int(params.get("repeats", 2)), keep_tokens=1)
-    logf(f"[FLUX.2] 数据集: {train_dir}（{resolution}px, repeats={params.get('repeats', 2)}）")
+                                num_repeats=int(params.get("repeats", 2)), keep_tokens=1,
+                                batch_size=bs)
+    logf(f"[FLUX.2] 数据集: {train_dir}（{resolution}px, repeats={params.get('repeats', 2)}"
+         f"{', batch_size=%d' % bs if bs != 1 else ''}）")
     # 预缓存 latents
     logf("[FLUX.2] 缓存 latents …")
     if run_stream([mvpy, os.path.join(mt_dir, "flux_2_cache_latents.py"),
@@ -3472,7 +3542,8 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         h2d_only = swap > 0 and gc_on
         logf(f"[FLUX.2] 高级参数手动指定 blocks_to_swap={swap}")
     # 防过拟合：总步数 ≈ 图片数 × repeats × epochs
-    per_epoch = int(params.get("repeats", 2)) * _flat_n
+    # ★ 2026-09-27：同 Krea2 —— 每轮步数 = repeats × 图片数 ÷ bs ✓
+    per_epoch = max(1, (int(params.get("repeats", 2)) * _flat_n) // bs)
     _save_ep = _save_every_note(params, epochs, logf, "FLUX.2")   # 与中间保存快照对齐（采样预览同节奏）
     if per_epoch * epochs > FLUX2_MAX_STEPS:
         new_epochs = max(1, int(FLUX2_MAX_STEPS / max(1, per_epoch)))
@@ -3507,6 +3578,8 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         "--output_dir", out_dir, "--output_name", output_name,
     ]
     if resume_from:
+        if not _patch_musubi_resume_epoch(get_kohya_dir(), logf):
+            raise RuntimeError("当前 musubi 版本无法安全恢复训练轮次；请先更新第二引擎，原有断点不会删除。")
         cmd.append(f"--resume={resume_from}")
         logf(f"[FLUX.2] 断点续训：从 {resume_from} 继续")
         if progress is not None:
@@ -3579,7 +3652,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     model_path = os.path.join(out_dir, output_name + ".safetensors")
     logf(f"[FLUX.2] 完成！模型: {model_path}")
     _record_effective(engine="musubi-tuner", resolution=resolution, optimizer=opt_k,
-                      batch_size=1, save_every="每 %s 轮" % _save_ep,
+                      batch_size=bs, save_every="每 %s 轮" % _save_ep,
                       total_steps=per_epoch * epochs, epochs=epochs,
                       images=count_images(train_dir), gradient_checkpointing=gc_on)
     try:
@@ -8385,19 +8458,58 @@ def _ensure_preprocess_deps(vpy, kdir, logf=print, force=False):
     # 对不上，import numpy 时会先在 numpy -> ctypes 处崩）。此时重装 numpy/Pillow 永远
     # 修不好，直接给明确指引，别再空转两轮后误报"缺少 numpy"。2026-09-06 yanyan 用户实证。
     def _ctypes_ok():
+        # ★ 2026-09-27：原来只测 ctypes ✗ —— 而用户这次的崩点是 **socket / urllib** ✗
+        #   用户实测（KohyaLoRA_运行日志_20260927_220239，RTX 4080S）：
+        #     工具目录 F:\KohyaLoraTool\ 里同时放着打包版的 python312.dll / _socket.pyd（3.12），
+        #     而辅助脚本 preprocess.py 也在同一目录 ✗
+        #     → Python 把「脚本目录」放进 sys.path[0] ✗ → import urllib.request 时
+        #       命中了那份 3.12 的 _socket.pyd ✗ → venv(3.11) 报
+        #       `ImportError: Module use of python312.dll conflicts with this version of Python` ✗
+        #   ctypes 正常**不代表** socket/urllib 正常 ✗（这次就是 ctypes 好、socket 坏 ✓）
+        #   → 一并测 ✓，并把 socket.__file__ 带回来核对归属 ✓（最直接的证据 ✓）
         try:
-            r = subprocess.run([vpy, "-c", "import ctypes; print('ctypes-ok')"],
-                               capture_output=True, text=True, timeout=120, env=build_env())
-            return r.returncode == 0 and "ctypes-ok" in (r.stdout or "")
+            _code = ("import ctypes, socket, urllib.request, ssl\n"
+                     "print('base-ok')\n"
+                     "print('socket=' + str(getattr(socket, '__file__', '')))\n")
+            _r = subprocess.run([vpy, "-c", _code], capture_output=True, text=True,
+                                timeout=120, env=build_env())
+            _out = _r.stdout or ""
+            if _r.returncode != 0 or "base-ok" not in _out:
+                _err = ((_r.stderr or "") + _out).strip().splitlines()
+                _tail = _err[-1] if _err else "无输出"
+                logf("[预处理] ⚠ 训练环境标准库自检失败：%s" % _tail[:200])
+                if "dll conflicts" in _tail.lower() or "python3" in _tail.lower() and "conflict" in _tail.lower():
+                    logf("[预处理]   检出「python3XX.dll 冲突」：工具自带的 C 扩展顶替了训练环境的 ✗")
+                    logf("[预处理]   （升级到修复版本可解决：已剔除脚本目录的模块搜索路径 ✓）")
+                return False
+            _sf = ""
+            for _ln in _out.splitlines():
+                if _ln.startswith("socket="):
+                    _sf = _ln[len("socket="):].strip()
+            if _sf:
+                logf("[预处理] 标准库归属自检：socket → %s" % _sf)
+                _venv_root = os.path.dirname(os.path.dirname(os.path.abspath(vpy)))
+                try:
+                    if os.path.normcase(os.path.commonpath(
+                            [os.path.normcase(os.path.abspath(_sf)), os.path.normcase(_venv_root)]
+                    )) != os.path.normcase(_venv_root):
+                        # socket 模块不在 venv 内 ✗ → 极可能被工具目录里的同名扩展顶替 ✗
+                        logf("[预处理] ⚠ 注意：socket 模块不在训练环境内（上面那条路径）——"
+                             "若后续下载/联网报 python3XX.dll 冲突，即为该原因 ✗")
+                except Exception:
+                    pass
+            return True
         except Exception:
             return False
     if not _ctypes_ok():
-        logf("[预处理] ⚠ 训练 venv 的 Python 基础环境异常：标准库 ctypes 都无法导入"
-             f"（{os.path.basename(vpy)}）。常见原因：用 Anaconda 的 python 创建训练环境后，"
-             "脱离 conda 激活环境直接运行（_ctypes 运行库对不上），并非缺少 numpy。")
-        logf("[预处理] 补装 numpy/Pillow 无法解决。请安装官方独立 Python（非 Anaconda）后，"
-             "重跑【② 安装训练内核】自动重建训练环境；手动验证命令：")
-        logf(f'  {vpy} -c "import ctypes"')
+        logf("[预处理] ⚠ 训练环境的 Python 基础环境异常：标准库/网络模块自检未通过"
+             f"（{os.path.basename(vpy)}）。两种常见原因：")
+        logf("[预处理]   ① 用 Anaconda 的 python 建环境后脱离 conda 直接运行（_ctypes 对不上）；")
+        logf("[预处理]   ② 工具自带的组件与训练环境 Python 版本不一致（报 python3XX.dll 冲突）。")
+        logf("[预处理]   二者都**不是**缺少 numpy/Pillow ✗ —— 补装依赖无法解决 ✓")
+        logf("[预处理] 处理：安装官方独立 Python（非 Anaconda）后重跑【② 安装训练内核】"
+             "自动重建训练环境；手动验证命令：")
+        logf(f'  {vpy} -c "import ctypes, socket, urllib.request"')
         return False
     if force:
         # force 模式是「第一次跑失败之后」的兜底自愈，此时**并不知道**是不是依赖问题。
@@ -10726,6 +10838,33 @@ def amd_env_status(vpy=None):
     return False, None, "无法读取训练环境 torch 状态。"
 
 
+def resolve_batch_size(params, label="训练", logf=print):
+    """训练批大小：留空 = 自动（1）；支持 1~8；非法值提示并回落 1。
+
+    ★ 2026-09-27 新增 ✗ —— 用户诉求：「训练器可以改 bs 和梯度检查点吗，
+      现在好像不能手动改 AI」
+      以前 batch_size 在数据集配置里**写死为 1** ✗（musubi 的训练批大小只认
+      dataset_config ✓，命令行没有 --batch_size ✓）→ 用户完全无法调整 ✓
+      现在：留空（默认）走 1 ✓；填 1~8 生效 ✓；越界/非数字 → 提示后按 1 ✓
+
+    ⚠️ 连带影响（调用处都已一并处理 ✓）：
+      · **每轮步数 = repeats × 图片数 ÷ bs** ✗ → 进度条 / ETA / 断点续训步数随之变化 ✓
+      · 显存占用随 bs 近线性上升 ✗ → 显存吃紧的卡建议保持 1 ✓
+      · 调大 bs 通常等价于「每步看更多样本」→ 学习率与 epochs 需相应斟酌 ✓
+    """
+    _raw = str((params or {}).get("batch_size") or "").strip()
+    if not _raw:
+        return 1
+    if _raw.isdigit() and 1 <= int(_raw) <= 8:
+        _bs = int(_raw)
+        if _bs != 1:
+            logf("[%s] 已按手动指定的 batch_size=%s 训练"
+                 "（每轮步数 = repeats × 图片数 ÷ %s；显存占用会上升）" % (label, _bs, _bs))
+        return _bs
+    logf("[%s] ⚠ batch_size=%s 无效（支持 1~8 的整数），已按 1 处理 ✗" % (label, _raw))
+    return 1
+
+
 def decide_gradient_checkpointing(gc_choice, vram_gb):
     """梯度检查点开关：自动 = 显存未知或 <16GB 时开启；否则跟随手动选择。"""
     if gc_choice == "开启":
@@ -12806,7 +12945,10 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     epochs = params.get("max_epochs", 8)
     train_te = params.get("train_text_encoder", True)
     gc_on = decide_gradient_checkpointing(params.get("gc", "自动"), vram_gb)
-    batch_size = int(params.get("batch_size", 1))
+    # ★ 2026-09-27：改用统一解析 ✗ ——
+    #   原来 `int(params.get("batch_size", 1))` 在用户填了非数字时**直接 ValueError** ✗；
+    #   现在留空 = 1 ✓、1~8 生效 ✓、非法值提示后回落 1 ✓（与 Krea2/FLUX.2 完全一致 ✓）
+    batch_size = resolve_batch_size(params, "训练", logf)
     use_xformers = bool(params.get("use_xformers", False))
     # AdamW8bit 需要 bitsandbytes：缺失自动补装（失败仅降级不中断；AMD 兼容模式不用 bnb，跳过）
     if not amd_mode:

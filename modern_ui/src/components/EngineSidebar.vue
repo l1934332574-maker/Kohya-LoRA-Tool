@@ -23,7 +23,11 @@ defineProps<{
   guideSteps: GuideStep[]
 }>()
 const modeTips: Record<string, string> = {
-  _kohya: '第一引擎（kohya）：画风 / 人物 / 概念在新版训练页的「训练类型」里切换。',
+  _kohya: '第一引擎（kohya）：选择一种训练类型后进入对应的 LoRA 工作区。',
+  kohya_sd15: '第一引擎 · SD 1.5：512px 底模架构。选择后打开该架构项目，或按 SD1.5 模板新建。',
+  kohya_sdxl: '第一引擎 · SDXL 1.0：1024px 底模架构。选择后打开该架构项目，或按 SDXL 模板新建。',
+  kohya_flux: '第一引擎 · FLUX.1：1024px 底模架构。选择后打开该架构项目，或按 FLUX.1 模板新建。',
+  kohya_anima: '第一引擎 · Anima：1024px 底模架构。选择后打开该架构项目，或按 Anima 模板新建。',
   krea2: '第二引擎 musubi：Krea 2 图像 LoRA；需准备 models/krea2 中的 RAW、VAE 与文本编码器。',
   flux2: '第二引擎 musubi：FLUX.2 图像 LoRA；使用 models/flux2 中的模型组件。',
   video: '第三引擎 AI Toolkit：MiniMax H3 视频 LoRA；使用视频和同名字幕文件。',
@@ -51,6 +55,7 @@ const modeTips: Record<string, string> = {
             :key="mode.key"
             class="engine-button"
             :class="{ selected: selectedMode === mode.key }"
+            :aria-pressed="selectedMode === mode.key"
             type="button"
             :title="modeTips[mode.key] || mode.label"
             @click="emit('chooseMode', mode.key)"

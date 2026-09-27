@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from kohya_core.configs import PROJECT_TEMPLATES
 from gui.modern_host import ModernUIBridge, _ensure_web_asset_mimetypes
 
 
@@ -233,10 +234,10 @@ class AvifCountingCore(FakeCore):
 
 class ProjectCreationCore:
     PRESET_VERSION = 3
-    MODE_LABELS = {"style": "画风", "character": "人物"}
-    BASE_TYPE_LABELS = {"sdxl": "SDXL"}
-    MODE_KEYS = ("style", "character")
-    PROJECT_TEMPLATES = {"人物 LoRA（SDXL）": {"mode": "character", "base_type": "sdxl"}}
+    MODE_LABELS = {"style": "画风", "character": "人物", "concept": "概念"}
+    BASE_TYPE_LABELS = {"sdxl": "SDXL", "sd15": "SD1.5", "flux": "FLUX.1", "anima": "Anima"}
+    MODE_KEYS = ("style", "character", "concept")
+    PROJECT_TEMPLATES = PROJECT_TEMPLATES
 
     def __init__(self, imported_config=None):
         self.projects = {}
@@ -244,6 +245,10 @@ class ProjectCreationCore:
 
     def list_projects(self):
         return [{"name": name, **data} for name, data in self.projects.items()]
+
+    @staticmethod
+    def default_project_name():
+        return "新项目"
 
     def save_project(self, name, data):
         self.projects[name] = dict(data)
@@ -340,19 +345,82 @@ class ModernTrainingTests(unittest.TestCase):
 
     def test_new_modern_projects_store_current_preset_version(self):
         core = ProjectCreationCore()
-        result = ModernUIBridge(core).create_project("new-project", "人物 LoRA（SDXL）")
+        result = ModernUIBridge(core).create_project("new-project", "SDXL")
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(core.projects["new-project"]["preset_version"], core.PRESET_VERSION)
+        self.assertEqual(core.projects["new-project"]["mode"], "character")
+        self.assertEqual(core.projects["new-project"]["base_type"], "sdxl")
+
+    def test_new_project_architecture_templates_choose_the_matching_base_type(self):
+        for template_name, expected_base_type in (("SD1.5", "sd15"), ("SDXL", "sdxl"), ("FLUX.1", "flux"), ("Anima", "anima")):
+            with self.subTest(template=template_name):
+                core = ProjectCreationCore()
+                result = ModernUIBridge(core).create_project("new-project", template_name)
+
+                self.assertTrue(result["ok"], result)
+                project = core.projects["new-project"]
+                self.assertEqual(project["mode"], "character")
+                self.assertEqual(project["base_type"], expected_base_type)
+
+    def test_new_project_mode_override_changes_mode_but_keeps_architecture(self):
+        core = ProjectCreationCore()
+        result = ModernUIBridge(core).create_project("style-project", "SDXL", mode_override="style")
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(core.projects["style-project"]["mode"], "style")
+        self.assertEqual(core.projects["style-project"]["base_type"], "sdxl")
+
+    def test_mode_override_does_not_change_other_engine_template(self):
+        core = ProjectCreationCore()
+        result = ModernUIBridge(core).create_project(
+            "krea-project", "Krea 2 图像 LoRA", mode_override="style",
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(core.projects["krea-project"]["mode"], "krea2")
+
+    def test_legacy_first_engine_template_names_remain_creatable(self):
+        legacy_templates = {
+            "人物 LoRA（SDXL）": ("character", "sdxl"),
+            "画风 LoRA（SDXL）": ("style", "sdxl"),
+            "画风 LoRA（SD1.5）": ("style", "sd15"),
+            "概念 LoRA（SDXL）": ("concept", "sdxl"),
+        }
+        for index, (template_name, expected) in enumerate(legacy_templates.items()):
+            with self.subTest(template=template_name):
+                core = ProjectCreationCore()
+                result = ModernUIBridge(core).create_project("legacy-%d" % index, template_name)
+
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(
+                    (core.projects["legacy-%d" % index]["mode"], core.projects["legacy-%d" % index]["base_type"]),
+                    expected,
+                )
+
+    def test_bootstrap_shows_compact_first_engine_templates_and_keeps_other_engines(self):
+        core = ProjectCreationCore()
+        names = [item["name"] for item in ModernUIBridge(core).bootstrap()["templates"]]
+
+        self.assertEqual(names[:5], ["自定义", "SD1.5", "SDXL", "FLUX.1", "Anima"])
+        self.assertNotIn("人物 LoRA（SDXL）", names)
+        self.assertNotIn("画风 LoRA（SDXL）", names)
+        self.assertNotIn("画风 LoRA（SD1.5）", names)
+        self.assertNotIn("概念 LoRA（SDXL）", names)
+        self.assertIn("FLUX.2 人物", names)
+        self.assertIn("Krea 2 图像 LoRA", names)
+        self.assertIn("Qwen-Image", names)
 
     def test_imported_modern_projects_store_current_preset_version(self):
         core = ProjectCreationCore({"mode": "character", "base_type": "sdxl", "params": {"rank": 32}})
         result = ModernUIBridge(core).create_project(
-            "imported-project", "自定义", '{"params": {"rank": 32}}',
+            "imported-project", "SD1.5", '{"params": {"rank": 32}}', "invalid-override",
         )
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(core.projects["imported-project"]["preset_version"], core.PRESET_VERSION)
+        self.assertEqual(core.projects["imported-project"]["mode"], "character")
+        self.assertEqual(core.projects["imported-project"]["base_type"], "sdxl")
 
     def test_task_log_cursor_keeps_working_when_old_logs_are_trimmed(self):
         bridge = ModernUIBridge(object())

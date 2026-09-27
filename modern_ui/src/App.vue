@@ -33,7 +33,29 @@ const logs = ref<string[]>([])
 const loading = ref(true)
 const loadError = ref('')
 const preview = ref(false)
-const selectedMode = ref('_kohya')
+const firstEngineModes = ['character', 'style', 'concept'] as const
+type FirstEngineMode = typeof firstEngineModes[number]
+const firstEngineBaseTypes = ['sd15', 'sdxl', 'flux', 'anima'] as const
+type FirstEngineBaseType = typeof firstEngineBaseTypes[number]
+const firstEngineSidebarModes: Record<FirstEngineBaseType, string> = {
+  sd15: 'kohya_sd15',
+  sdxl: 'kohya_sdxl',
+  flux: 'kohya_flux',
+  anima: 'kohya_anima',
+}
+const firstEngineTemplates: Record<FirstEngineBaseType, string> = {
+  sd15: 'SD1.5',
+  sdxl: 'SDXL',
+  flux: 'FLUX.1',
+  anima: 'Anima',
+}
+const firstEngineBaseLabels: Record<FirstEngineBaseType, string> = {
+  sd15: 'SD 1.5（512px）',
+  sdxl: 'SDXL 1.0（1024px）',
+  flux: 'FLUX.1（1024px）',
+  anima: 'Anima（1024px）',
+}
+const selectedMode = ref(firstEngineSidebarModes.sdxl)
 const workspaceOpen = ref(false)
 const workspaceKind = ref<'qwen' | 'kohya' | 'engine'>('qwen')
 const workspaceProject = ref<ProjectCard | null>(null)
@@ -51,6 +73,7 @@ const dialogKind = ref<'create' | 'rename'>('create')
 const editingProject = ref<ProjectCard | null>(null)
 const projectName = ref('')
 const templateName = ref('自定义')
+const createModeOverride = ref('')
 const busy = ref(false)
 const formError = ref('')
 const toast = ref('')
@@ -112,6 +135,19 @@ function registerUiActivity() {
 
 const projects = computed(() => data.value?.projects ?? [])
 const templates = computed(() => data.value?.templates ?? [])
+const sidebarGroups = computed(() => (data.value?.engine_groups ?? []).map((group) => {
+  if (!group.modes.some((mode) => mode.key === '_kohya')) return group
+  const firstEngineEntries = [
+    { key: firstEngineSidebarModes.sd15, label: 'SD 1.5' },
+    { key: firstEngineSidebarModes.sdxl, label: 'SDXL 1.0' },
+    { key: firstEngineSidebarModes.flux, label: 'FLUX.1' },
+    { key: firstEngineSidebarModes.anima, label: 'Anima' },
+  ]
+  return {
+    ...group,
+    modes: group.modes.flatMap((mode) => mode.key === '_kohya' ? firstEngineEntries : [mode]),
+  }
+}))
 const topActions = [
   { key: 'tools', icon: 'toolbox', label: '小工具', tip: '打开查看显存、清理显存/内存和缓存等训练辅助工具。' },
   { key: 'check_update', icon: 'refresh', label: '检查更新', tip: '检查 Kohya-LoRA 软件更新；训练引擎更新在对应训练引擎界面中处理。' },
@@ -124,7 +160,10 @@ const guideSteps = computed(() => modeWorkspace.value?.guide_steps ?? [])
 const guideLabel = computed(() => workspaceProject.value?.mode_label || modeWorkspace.value?.label || '')
 const selectedGuideMode = computed(() => selectedMode.value === '_kohya'
   ? (projects.value.find(isKohyaProject)?.mode || 'character')
-  : selectedMode.value)
+  : firstEngineBaseTypeForSidebarMode(selectedMode.value)
+    ? (projects.value.find((project) => isKohyaProject(project)
+      && project.base_type === firstEngineBaseTypeForSidebarMode(selectedMode.value))?.mode || 'character')
+    : selectedMode.value)
 
 // Keep standalone browser previews representative of the real mode registry.
 // Desktop workspaces replace this demo payload with live values from modern_host.py.
@@ -154,6 +193,24 @@ function isKohyaProject(project: ProjectCard) {
   return (project.mode === 'character' || project.mode === 'style' || project.mode === 'concept') && project.base_type !== 'qwen_image'
 }
 
+function firstEngineBaseTypeForSidebarMode(mode: string): FirstEngineBaseType | undefined {
+  return firstEngineBaseTypes.find((baseType) => firstEngineSidebarModes[baseType] === mode)
+}
+
+function firstEngineSidebarModeForBaseType(baseType: string) {
+  return firstEngineBaseTypes.includes(baseType as FirstEngineBaseType)
+    ? firstEngineSidebarModes[baseType as FirstEngineBaseType]
+    : firstEngineSidebarModes.sdxl
+}
+
+function templateForBaseType(baseType: FirstEngineBaseType) {
+  const name = firstEngineTemplates[baseType]
+  return templates.value.find((item) => item.name === name && item.base_type === baseType)?.name
+    ?? templates.value.find((item) => item.base_type === baseType && firstEngineModes.includes(item.mode as FirstEngineMode))?.name
+    ?? templates.value.find((item) => item.name === name)?.name
+    ?? templates.value.find((item) => item.name === '自定义')?.name
+}
+
 function isQwenProject(project: ProjectCard) {
   return project.mode === 'qwen_image' || project.mode === 'zimage' || project.base_type === 'qwen_image'
 }
@@ -166,14 +223,23 @@ function templateForMode(mode: string) {
   return templates.value.find((item) => item.mode === mode)?.name
 }
 
+function modeOverrideForSelectedTemplate(): FirstEngineMode | undefined {
+  if (!firstEngineModes.includes(createModeOverride.value as FirstEngineMode)) return undefined
+  const selectedTemplate = templates.value.find((item) => item.name === templateName.value)
+  return selectedTemplate && firstEngineModes.includes(selectedTemplate.mode as FirstEngineMode)
+    ? createModeOverride.value as FirstEngineMode
+    : undefined
+}
+
 function previewProject(mode: string): ProjectCard {
   const template = templates.value.find((item) => item.mode === mode)
   const qwen = mode === 'qwen_image'
+  const modeLabel = ({ character: '人物 LoRA', style: '画风 LoRA', concept: '概念 LoRA' } as Record<string, string>)[mode]
   return {
-    name: `${template?.mode_label || mode} 新版训练页预览`, updated: '', mode,
-    mode_label: template?.mode_label || mode,
+    name: `${template?.mode_label || modeLabel || mode} 新版训练页预览`, updated: '', mode,
+    mode_label: template?.mode_label || modeLabel || mode,
     base_type: template?.base_type || (qwen ? 'qwen_image' : 'sdxl'),
-    base_type_label: qwen ? 'Qwen-Image' : template?.mode_label || mode,
+    base_type_label: qwen ? 'Qwen-Image' : modeLabel || template?.mode_label || mode,
     raw_dir: '', base_model: '',
   }
 }
@@ -192,6 +258,11 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
     crop_ratio: true, sample_prompt: true, noise_offset: false, min_snr_gamma: false,
     quant_mode: ['krea2', 'flux2', 'krea2_fz', 'flux2_fz'].includes(mode),
     blocks_to_swap: ['krea2', 'flux2', 'krea2_fz', 'flux2_fz'].includes(mode),
+    // ★ 2026-09-27 新增：批大小 / 梯度检查点（用户诉求「训练器能改 bs 和梯度检查点」）
+    //   第一引擎（画风/人物/概念）与第二引擎的 Krea2 / FLUX.2 都真读它们；
+    //   Fizgig（第四引擎）走 yaml 且固定开启，不显示
+    batch_size: ['style', 'character', 'concept', 'krea2', 'flux2'].includes(mode),
+    gc: ['style', 'character', 'concept', 'krea2', 'flux2'].includes(mode),
     wd14_model: mode !== 'video', overwrite: mode !== 'video',
     amd_mode: mode === 'krea2_at',
   }
@@ -309,9 +380,10 @@ function nextPreviewProjectName() {
   return candidate
 }
 
-function openCreate(preselectedTemplate?: string) {
+function openCreate(preselectedTemplate?: string, preselectedMode?: FirstEngineMode) {
   dialogKind.value = 'create'
   editingProject.value = null
+  createModeOverride.value = preselectedMode ?? ''
   const fallbackName = preview.value ? nextPreviewProjectName() : data.value?.default_project_name ?? ''
   projectName.value = fallbackName
   templateName.value = preselectedTemplate ?? templates.value.find((item) => item.name === '自定义')?.name ?? templates.value[0]?.name ?? '自定义'
@@ -367,19 +439,21 @@ async function saveDialog() {
         }
         const template = templates.value.find((item) => item.name === templateName.value)
         const imported = importedConfigPreview.value
-        const mode = String(imported?.mode ?? template?.mode ?? 'character')
+        const mode = String(imported?.mode ?? (modeOverrideForSelectedTemplate() || template?.mode || 'character'))
         const baseType = String(imported?.base_type ?? template?.base_type ?? (mode === 'qwen_image' ? 'qwen_image' : 'sdxl'))
         const matchingTemplate = templates.value.find((item) => item.mode === mode && (!item.base_type || item.base_type === baseType))
           ?? templates.value.find((item) => item.mode === mode)
           ?? template
         const qwenTemplate = mode === 'qwen_image' || mode === 'zimage' || baseType === 'qwen_image'
+        const firstEngineLabel = ({ character: '人物 LoRA', style: '画风 LoRA', concept: '概念 LoRA' } as Record<string, string>)[mode]
+        const baseTypeLabel = ({ sdxl: 'SDXL 1.0（1024px）', sd15: 'SD1.5（512px）', flux: 'FLUX.1（1024px）', anima: 'Anima（1024px）' } as Record<string, string>)[baseType]
         const project: ProjectCard = {
           name,
           updated: new Date().toISOString().replace('T', ' ').slice(0, 19),
           mode,
-          mode_label: matchingTemplate?.mode_label ?? mode,
+          mode_label: firstEngineLabel ?? matchingTemplate?.mode_label ?? mode,
           base_type: baseType,
-          base_type_label: qwenTemplate ? (mode === 'zimage' ? 'Z-Image' : 'Qwen-Image') : baseType === 'sdxl' ? 'SDXL 1.0（1024px）' : baseType,
+          base_type_label: qwenTemplate ? (mode === 'zimage' ? 'Z-Image' : 'Qwen-Image') : baseTypeLabel ?? baseType,
           raw_dir: '',
           base_model: String(imported?.base_model ?? ''),
         }
@@ -399,7 +473,12 @@ async function saveDialog() {
       data.value!.projects = await window.pywebview.api.list_projects()
       appendLog(result.log ?? `[项目] 已重命名为「${name}」`)
     } else {
-      const result = await window.pywebview.api.create_project(name, templateName.value, importedConfigJson.value || undefined)
+      const result = await window.pywebview.api.create_project(
+        name,
+        templateName.value,
+        importedConfigJson.value || undefined,
+        importedConfigJson.value ? undefined : modeOverrideForSelectedTemplate(),
+      )
       if (!result.ok) {
         formError.value = result.error ?? '项目创建失败。'
         return
@@ -435,7 +514,7 @@ async function openProject(project: ProjectCard) {
       appendLog(`[预览] 已打开「${project.name}」的 ${project.mode === 'zimage' ? 'Z-Image' : 'Qwen-Image'} 工作区预览；设置只保留在本次预览会话。`)
     } else if (isKohyaProject(project)) {
       workspaceKind.value = 'kohya'
-      selectedMode.value = '_kohya'
+      selectedMode.value = firstEngineSidebarModeForBaseType(project.base_type)
       modeWorkspace.value = demoModeWorkspace(project.mode)
       appendLog(`[预览] 已打开「${project.name}」的 Kohya LoRA 工作区视觉预览；设置只保留在本次预览会话。`)
     } else {
@@ -490,7 +569,7 @@ async function openProject(project: ProjectCard) {
     modeWorkspace.value = nextDetails
     qwenModelSetup.value = nextModelSetup
     workspaceKind.value = nextKind
-    selectedMode.value = nextKind === 'kohya' ? '_kohya' : project.mode
+    selectedMode.value = isKohyaProject(project) ? firstEngineSidebarModeForBaseType(project.base_type) : project.mode
     workspaceOpen.value = true
     appendLog(nextKind === 'qwen'
       ? `[项目] 已在新版训练页打开「${project.name}」的 ${project.mode === 'zimage' ? 'Z-Image' : 'Qwen-Image'} 设置。`
@@ -514,8 +593,21 @@ async function saveKohyaConfig(patch: ProjectConfig) {
     }
     previewConfigs.value = { ...previewConfigs.value, [name]: next }
     workspaceConfig.value = next
+    const updatedProject: ProjectCard = {
+      ...workspaceProject.value,
+      mode: String(next.mode || workspaceProject.value.mode),
+      base_type: String(next.base_type || workspaceProject.value.base_type),
+      updated: new Date().toISOString().replace('T', ' ').slice(0, 19),
+    }
+    const updatedModeLabel = ({ character: '人物 LoRA', style: '画风 LoRA', concept: '概念 LoRA' } as Record<string, string>)[updatedProject.mode]
+    if (updatedModeLabel) updatedProject.mode_label = updatedModeLabel
+    if (firstEngineBaseTypes.includes(updatedProject.base_type as FirstEngineBaseType)) {
+      updatedProject.base_type_label = firstEngineBaseLabels[updatedProject.base_type as FirstEngineBaseType]
+    }
+    workspaceProject.value = updatedProject
+    if (isKohyaProject(updatedProject)) selectedMode.value = firstEngineSidebarModeForBaseType(updatedProject.base_type)
     data.value!.projects = projects.value.map((project) => project.name === name
-      ? { ...project, updated: new Date().toISOString().replace('T', ' ').slice(0, 19) }
+      ? updatedProject
       : project)
     appendLog(`[预览] 已暂存「${name}」的设置；仅当前浏览器会话有效。`)
     showToast('预览设置已暂存；刷新页面后会清空')
@@ -606,7 +698,10 @@ async function refreshGuideState() {
     ])
     if (details.ok && (!workspaceOpen.value || workspaceProject.value?.mode === mode)) modeWorkspace.value = details
     data.value!.projects = latestProjects
-    if (workspaceProject.value) workspaceProject.value = latestProjects.find((item) => item.name === workspaceProject.value?.name) ?? workspaceProject.value
+    if (workspaceProject.value) {
+      workspaceProject.value = latestProjects.find((item) => item.name === workspaceProject.value?.name) ?? workspaceProject.value
+      if (isKohyaProject(workspaceProject.value)) selectedMode.value = firstEngineSidebarModeForBaseType(workspaceProject.value.base_type)
+    }
   } catch (error) {
     appendLog(`[引导] 刷新步骤状态失败：${error instanceof Error ? error.message : String(error)}`)
   }
@@ -644,14 +739,20 @@ async function onGuideAction(step: GuideStep) {
   }
   if (action === 'cmd_pick_raw' || action === 'cmd_pick_model_type') {
     if (!workspaceProject.value) {
-      const existing = projects.value.find((project) => project.mode === mode || (mode === 'character' && isKohyaProject(project)))
+      const selectedBaseType = firstEngineBaseTypeForSidebarMode(selectedMode.value)
+      const existing = selectedBaseType
+        ? projects.value.find((project) => isKohyaProject(project) && project.base_type === selectedBaseType)
+        : projects.value.find((project) => project.mode === mode || (mode === 'character' && isKohyaProject(project)))
       if (existing) {
         await openProject(existing)
         await nextTick()
         const patch = await activeWorkspaceRef.value?.guideAction?.(action)
         if (patch && Object.keys(patch).length) await saveKohyaConfig(patch)
       } else {
-        openCreate(mode === 'character' && selectedMode.value === '_kohya' ? undefined : templateForMode(mode))
+        openCreate(selectedBaseType
+          ? templateForBaseType(selectedBaseType)
+          : firstEngineModes.includes(mode as FirstEngineMode) ? undefined : templateForMode(mode),
+        selectedBaseType ? undefined : firstEngineModes.includes(mode as FirstEngineMode) ? mode as FirstEngineMode : undefined)
         showToast('先创建并打开项目，再设置底模或数据集文件夹。')
       }
       return
@@ -663,7 +764,7 @@ async function onGuideAction(step: GuideStep) {
   showToast(step.tip || '该引导步骤暂未接入新版训练页。')
 }
 
-function openHelp(kind: 'readme' | 'mode', mode = workspaceProject.value?.mode || selectedMode.value) {
+function openHelp(kind: 'readme' | 'mode', mode = workspaceProject.value?.mode || selectedGuideMode.value) {
   helpDialogKind.value = kind
   helpDialogMode.value = mode === '_kohya' ? (workspaceProject.value?.mode || 'character') : mode
   helpDialogOpen.value = true
@@ -699,11 +800,18 @@ async function runAction(action: string) {
       activeWorkspaceRef.value?.startTraining()
       return
     }
-    const project = selectedMode.value === '_kohya'
-      ? projects.value.find(isKohyaProject)
-      : projects.value.find((item) => item.mode === selectedMode.value)
+    const selectedBaseType = firstEngineBaseTypeForSidebarMode(selectedMode.value)
+    const project = selectedBaseType
+      ? projects.value.find((item) => isKohyaProject(item) && item.base_type === selectedBaseType)
+      : selectedMode.value === '_kohya'
+        ? projects.value.find(isKohyaProject)
+        : projects.value.find((item) => item.mode === selectedMode.value)
     if (project) void openProject(project)
-    else openCreate(selectedMode.value === '_kohya' ? templates.value.find((item) => item.name === '自定义')?.name : templateForMode(selectedMode.value))
+    else if (selectedBaseType) openCreate(templateForBaseType(selectedBaseType))
+    else openCreate(
+      selectedMode.value === '_kohya' ? templates.value.find((item) => item.name === '自定义')?.name : templateForMode(selectedMode.value),
+      firstEngineModes.includes(selectedMode.value as FirstEngineMode) ? selectedMode.value as FirstEngineMode : undefined,
+    )
     return
   }
   if (action === 'env_locations') {
@@ -915,51 +1023,57 @@ async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
 }
 
 function chooseMode(mode: string) {
+  const selectedBaseType = firstEngineBaseTypeForSidebarMode(mode)
+  if (selectedBaseType) {
+    selectedMode.value = mode
+    const project = projects.value.find((item) => isKohyaProject(item) && item.base_type === selectedBaseType)
+    if (project) {
+      void openProject(project)
+    } else if (preview.value || !window.pywebview?.api) {
+      const templateName = firstEngineTemplates[selectedBaseType]
+      const template = templates.value.find((item) => item.name === templateName)
+      const project = {
+        ...previewProject(template?.mode || 'character'),
+        name: `${templateName} 新版训练页预览`,
+        base_type: selectedBaseType,
+        base_type_label: firstEngineBaseLabels[selectedBaseType],
+      }
+      void openProject(project)
+    } else {
+      void refreshHomeGuide('character')
+      openCreate(templateForBaseType(selectedBaseType))
+    }
+    return
+  }
   selectedMode.value = mode
   if (preview.value || !window.pywebview?.api) {
     modeWorkspace.value = demoModeWorkspace(mode === '_kohya' ? selectedGuideMode.value : mode)
-    if (mode === '_kohya') {
-      workspaceProject.value = projects.value.find(isKohyaProject) ?? {
-        name: '人物 LoRA 新版训练页预览', updated: '', mode: 'character', mode_label: '人物 LoRA',
-        base_type: 'sdxl', base_type_label: 'SDXL 1.0（1024px）', raw_dir: '', base_model: '',
-      }
-      workspaceConfig.value = previewConfigs.value[workspaceProject.value.name] ?? null
-      qwenModelSetup.value = null
-      modeWorkspace.value = demoModeWorkspace(workspaceProject.value.mode)
-      workspaceKind.value = 'kohya'
-      workspaceOpen.value = true
-      return
-    }
-    const project = projects.value.find((item) => item.mode === mode) ?? previewProject(mode)
+    const targetMode = mode === '_kohya' ? selectedGuideMode.value : mode
+    const project = projects.value.find((item) => item.mode === targetMode) ?? previewProject(targetMode)
     workspaceProject.value = project
     workspaceConfig.value = previewConfigs.value[project.name] ?? null
     qwenModelSetup.value = null
-    if (mode === 'qwen_image' || mode === 'zimage') {
+    if (isKohyaProject(project)) {
+      workspaceKind.value = 'kohya'
+      modeWorkspace.value = demoModeWorkspace(project.mode)
+    } else if (targetMode === 'qwen_image' || targetMode === 'zimage') {
       workspaceKind.value = 'qwen'
-      modeWorkspace.value = demoModeWorkspace(mode)
+      modeWorkspace.value = demoModeWorkspace(targetMode)
     } else {
       workspaceKind.value = 'engine'
-      modeWorkspace.value = demoModeWorkspace(mode)
+      modeWorkspace.value = demoModeWorkspace(targetMode)
     }
     workspaceOpen.value = true
     return
   }
-  void refreshHomeGuide(mode === '_kohya' ? selectedGuideMode.value : mode)
-  if (mode === '_kohya') {
-    const project = projects.value.find(isKohyaProject)
-    if (project) void openProject(project)
-    else openCreate(templates.value.find((item) => item.name === '自定义')?.name)
-    return
-  }
-  if (mode === 'qwen_image' || mode === 'zimage') {
-    const project = projects.value.find((item) => item.mode === mode)
-    if (project) void openProject(project)
-    else openCreate(templateForMode(mode))
-    return
-  }
-  const project = projects.value.find((item) => item.mode === mode)
+  const targetMode = mode === '_kohya' ? selectedGuideMode.value : mode
+  void refreshHomeGuide(targetMode)
+  const preselectedFirstMode = firstEngineModes.includes(targetMode as FirstEngineMode)
+    ? targetMode as FirstEngineMode
+    : undefined
+  const project = projects.value.find((item) => item.mode === targetMode)
   if (project) void openProject(project)
-  else openCreate(templateForMode(mode))
+  else openCreate(preselectedFirstMode ? undefined : templateForMode(targetMode), preselectedFirstMode)
 }
 
 function returnHome() {
@@ -1002,11 +1116,15 @@ onMounted(async () => {
     const loaded = await loadBootstrap()
     data.value = loaded.data
     preview.value = loaded.preview
+    const firstEngineProject = projects.value.find(isKohyaProject)
+    selectedMode.value = firstEngineProject
+      ? firstEngineSidebarModeForBaseType(firstEngineProject.base_type)
+      : firstEngineSidebarModes.sdxl
     logs.value = [...loaded.data.logs]
     if (!loaded.preview) await loadAppearanceSettings()
     scheduleUiIdleFade()
     if (loaded.preview) modeWorkspace.value = demoModeWorkspace('character')
-    else await refreshHomeGuide(projects.value.find(isKohyaProject)?.mode || 'character')
+    else await refreshHomeGuide(firstEngineProject?.mode || 'character')
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : '无法连接桌面程序。'
   } finally {
@@ -1046,7 +1164,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
     :style="appShellStyle"
   >
     <EngineSidebar
-      :groups="data?.engine_groups ?? []"
+      :groups="sidebarGroups"
       :selected-mode="selectedMode"
       :train-label="trainActionLabel"
       :status-text="projects.length ? '✓ 选择项目后进入新版训练页' : '新建项目后开始配置训练'"
