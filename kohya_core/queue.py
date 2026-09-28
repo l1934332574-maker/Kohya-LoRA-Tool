@@ -42,7 +42,7 @@ def params_from_project(name):
     }
     for k in ("rank", "alpha", "unet_lr", "te_lr", "repeats", "max_epochs", "save_every",
               "crop_ratio", "sample_prompt", "sample_interval", "optimizer",
-              "resolution", "video_steps", "gc"):
+              "resolution", "video_steps", "video_frames", "fizgig_qwen_preset", "gc"):
         if sub.get(k) is not None:
             p[k] = sub[k]
     return p
@@ -58,33 +58,47 @@ def run_queue_item(name, logf=print):
     p = params_from_project(name)
     mode = p["mode"]
     if mode == "video":
-        return False, "视频(H3)模式暂不支持入队"
+        return False, "第三引擎视频(H3)模式暂不支持入队"
     K.reset_stop()
     if not p.get("raw_dir") or not os.path.isdir(p["raw_dir"]):
         return False, "项目缺少原始图片文件夹（raw_dir）"
     vram = K.detect_vram_gb()
     # 预处理分辨率：与 GUI 一键训练一致
-    try:
-        size = int(p.get("resolution") or (K.FLUX2FZ_RESOLUTION if mode == "flux2_fz" else (K.KREA2_RESOLUTION if mode in ("krea2", "krea2_fz", "krea2_at")
-                                           else K.RESOLUTIONS.get(p.get("base_type"), 512))))
-    except Exception:
-        size = 1024
-    pp_mode = K.preprocess_mode(mode, p.get("at_sub_mode"))
-    K.preprocess(logf, input_dir=p["raw_dir"], size=size, mode=pp_mode,
-                 trigger=p.get("trigger"), reg_dir=p.get("reg_dir"),
-                 repeats=int(p.get("repeats") or 5),
-                 dedup=True, wd14=True, square_crop=False,
-                 crop_ratio=p.get("crop_ratio") or "",
-                 min_size=256, blur_threshold=30.0, report=None, keep_tokens=None,
-                 project=name, style_caption=p.get("style_caption") or "",
-                 dataset_mode="character" if mode != "style" else None,
-                 strong_bind=p.get("strong_bind", True),
-                 concept_type=p.get("concept_type") or "",
-                 clean_concept=bool(p.get("clean_concept", True)),
-                 concept_mode=K.is_concept_mode(mode, p.get("at_sub_mode")),
-                 style_target=K.style_target_code(p.get("style_preset")))
-    logf("[队列] 预处理完成，开始训练…")
-    if mode in ("qwen_image", "zimage"):
+    if mode == "h3_fz":
+        # H3-Fizgig consumes one untouched mixed-media directory and validates
+        # captions/modalities in its trainer. Never invoke the image preprocessor.
+        p["train_data_dir"] = p["raw_dir"]
+        summary = K.scan_fizgig_h3_dataset(p["raw_dir"])
+        logf("[队列] H3 混合媒体扫描：图片 %(images)s，视频 %(videos)s，音频 %(audio)s，总计 %(total)s，缺字幕 %(missing_captions)s。" % summary)
+    else:
+        try:
+            fallback_size = (K.QWEN21_FZ_RESOLUTION if mode == "qwen21_fz" else
+                             K.FLUX2FZ_RESOLUTION if mode == "flux2_fz" else
+                             K.KREA2_RESOLUTION if mode in ("krea2", "krea2_fz", "krea2_at") else
+                             K.RESOLUTIONS.get(p.get("base_type"), 512))
+            size = int(p.get("resolution") or fallback_size)
+        except Exception:
+            size = 704 if mode == "qwen21_fz" else 1024
+        pp_mode = K.preprocess_mode(mode, p.get("at_sub_mode"))
+        K.preprocess(logf, input_dir=p["raw_dir"], size=size, mode=pp_mode,
+                     trigger=p.get("trigger"), reg_dir=p.get("reg_dir"),
+                     repeats=int(p.get("repeats") or 5),
+                     dedup=True, wd14=True, square_crop=False,
+                     crop_ratio=p.get("crop_ratio") or "",
+                     min_size=256, blur_threshold=30.0, report=None, keep_tokens=None,
+                     project=name, style_caption=p.get("style_caption") or "",
+                     dataset_mode="character" if mode != "style" else None,
+                     strong_bind=p.get("strong_bind", True),
+                     concept_type=p.get("concept_type") or "",
+                     clean_concept=bool(p.get("clean_concept", True)),
+                     concept_mode=K.is_concept_mode(mode, p.get("at_sub_mode")),
+                     style_target=K.style_target_code(p.get("style_preset")))
+        logf("[队列] 预处理完成，开始训练…")
+    if mode == "qwen21_fz":
+        K.train_qwen21_fizgig(logf, mode=mode, params=p, vram_gb=vram, resume_from=None, progress=None)
+    elif mode == "h3_fz":
+        K.train_h3_fizgig(logf, mode=mode, params=p, vram_gb=vram, resume_from=None, progress=None)
+    elif mode in ("qwen_image", "zimage"):
         K.train_at_image(logf, mode=mode, params=p, vram_gb=vram, resume_from=None, progress=None)
     elif mode == "krea2":
         K.train_krea2(logf, mode="krea2", params=p, vram_gb=vram, resume_from=None, progress=None)

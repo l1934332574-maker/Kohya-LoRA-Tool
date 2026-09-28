@@ -31,7 +31,7 @@ const draft = reactive({
   rank: '', alpha: '', unet_lr: '', te_lr: '', repeats: '', max_epochs: '', resolution: '',
   video_steps: '', video_frames: '', save_every: '', sample_interval: '', optimizer: 'auto',
   crop_ratio: '', sample_prompt: '', noise_offset: '', min_snr_gamma: '', quant_mode: 'auto',
-  blocks_to_swap: '', wd14_model: 'swinv2-v3', sample_preview_mode: 'auto', fast_tier: 'auto',
+  blocks_to_swap: '', wd14_model: 'swinv2-v3', sample_preview_mode: 'auto', fast_tier: 'auto', fizgig_qwen_preset: 'auto',
   // ★ 2026-09-27：批大小（留空 = 自动 1）/ 梯度检查点（auto / on / off）
   batch_size: '', gc: 'auto',
   strong_bind: true, clean_concept: true, compile: false, overwrite: false, amd_mode: false,
@@ -41,7 +41,9 @@ const supported = (key: string) => Boolean(props.details.supports?.[key])
 const defaults = computed(() => props.details.defaults ?? {})
 const isConcept = computed(() => draft.at_sub_mode === 'concept')
 const isStyle = computed(() => draft.at_sub_mode === 'style')
-const isVideo = computed(() => props.mode === 'video')
+const isVideo = computed(() => props.details.is_video)
+const isH3Fizgig = computed(() => props.mode === 'h3_fz')
+const engineUpdateAction = computed(() => String(props.details.engine_key || '').includes('fizgig') ? 'fizgig_engine_update' : 'at_engine_update')
 const assetReady = computed(() => props.details.missing_models.length === 0)
 const modelAction = computed(() => `open_models:${props.mode}`)
 const intervalUnit = (key: 'save_every' | 'sample_interval') => props.details.interval_units?.[key] === 'epochs' ? '轮' : '步'
@@ -89,7 +91,7 @@ function hydrate(config?: ProjectConfig | null) {
   configuredParams.clear()
   Object.keys(params).forEach((key) => configuredParams.add(key))
   const preset = presetFor()
-  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model'] as const) {
+  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model', 'fizgig_qwen_preset'] as const) {
     const defaultValue = preset[key] === undefined ? defaults.value[key] : preset[key]
     const styledDefault = key === 'unet_lr' || key === 'te_lr' ? styledPresetValue(key, draft.style_preset) : defaultValue
     const hydratedValue = value(params[key], styledDefault === undefined ? (key === 'optimizer' || key === 'quant_mode' || key === 'gc' ? 'auto' : '') : String(styledDefault))
@@ -127,6 +129,11 @@ function resetPreset() {
     configuredParams.delete(key)
     markParam(key)
   }
+  if (props.mode === 'qwen21_fz') {
+    draft.fizgig_qwen_preset = 'auto'
+    configuredParams.delete('fizgig_qwen_preset')
+    markParam('fizgig_qwen_preset')
+  }
   emit('notify', '当前模式的推荐预设已恢复。保存修改后生效。')
 }
 
@@ -136,7 +143,7 @@ function makePatch(): ProjectConfig {
     if (dirty.has(key)) patch[key] = draft[key]
   }
   const params: Record<string, unknown> = {}
-  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model'] as const) {
+  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model', 'fizgig_qwen_preset'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
   for (const key of ['strong_bind', 'clean_concept', 'compile', 'overwrite', 'amd_mode'] as const) {
@@ -188,7 +195,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
       <div class="engine-heading-copy"><h1>{{ details.label }}训练</h1><span>项目：{{ project.name }}</span></div>
       </div>
       <div class="engine-actions">
-        <button v-if="desktop && details.engine_update_available" class="engine-update-button" type="button" :title="legacyTooltips.engineUpdate" @click="requestAction('at_engine_update')"><span class="update-arrow">↗</span> 引擎更新可用</button>
+        <button v-if="desktop && details.engine_update_available" class="engine-update-button" type="button" :title="legacyTooltips.engineUpdate" @click="requestAction(engineUpdateAction)"><span class="update-arrow">↗</span> 引擎更新可用</button>
         <button v-if="desktop" class="engine-button" type="button" @click="save">保存修改</button>
         <button v-if="desktop" class="engine-button primary" type="button" @click="startTraining"><UiIcon name="play" /> 一键开始训练</button>
         <button v-else class="engine-button primary" type="button" @click="save">保存预览设置</button>
@@ -212,7 +219,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
       <div class="engine-scroll-content">
         <section class="engine-summary">
           <div class="summary-main">
-            <span class="summary-label">{{ isVideo ? '视频数据目录' : '训练图片目录' }}</span>
+            <span class="summary-label">{{ isH3Fizgig ? '混合媒体原始目录' : isVideo ? '视频数据目录' : '训练图片目录' }}</span>
             <strong :title="draft.raw_dir || undefined">{{ draft.raw_dir || (desktop ? '尚未选择数据目录' : '预览中：桌面模式会显示项目数据目录') }}</strong>
             <small v-if="currentDatasetHint" :title="currentDatasetHint">{{ currentDatasetHint }}</small>
           </div>
@@ -250,17 +257,20 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
           <section class="engine-card">
             <header class="engine-card-heading"><span>02</span><div><h2>常用训练参数</h2><small>空白项沿用当前引擎预设</small></div></header>
             <div class="engine-param-grid">
-              <label class="engine-field" :title="legacyTooltips.rank"><span>LoRA rank</span><input v-model="draft.rank" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('rank')" /></label>
-              <label class="engine-field" :title="legacyTooltips.alpha"><span>LoRA alpha</span><input v-model="draft.alpha" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('alpha')" /></label>
-              <label class="engine-field" :title="legacyTooltips.unet_lr"><span>学习率</span><input v-model="draft.unet_lr" class="engine-input" placeholder="按模式预设" @input="markParam('unet_lr')" /></label>
+              <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.rank"><span>LoRA rank</span><input v-model="draft.rank" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('rank')" /></label>
+              <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.alpha"><span>LoRA alpha</span><input v-model="draft.alpha" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('alpha')" /></label>
+              <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.unet_lr"><span>学习率</span><input v-model="draft.unet_lr" class="engine-input" placeholder="按模式预设" @input="markParam('unet_lr')" /></label>
               <label v-if="supported('te_lr')" class="engine-field" :title="legacyTooltips.te_lr"><span>文本编码器学习率</span><input v-model="draft.te_lr" class="engine-input" placeholder="按模式预设" @input="markParam('te_lr')" /></label>
               <label class="engine-field" :title="legacyTooltips.resolution"><span>训练分辨率</span><input v-model="draft.resolution" class="engine-input" type="number" min="64" step="64" placeholder="按模式预设" @input="markParam('resolution')" /></label>
-              <label v-if="supported('repeats')" class="engine-field" :title="legacyTooltips.repeats"><span>图片循环次数</span><input v-model="draft.repeats" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('repeats')" /></label>
+              <label v-if="supported('repeats')" class="engine-field" :title="legacyTooltips.repeats"><span>{{ isH3Fizgig ? '素材循环次数' : '图片循环次数' }}</span><input v-model="draft.repeats" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('repeats')" /></label>
               <label v-if="supported('max_epochs')" class="engine-field" :title="legacyTooltips.maxEpochs"><span>最大 epoch</span><input v-model="draft.max_epochs" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('max_epochs')" /></label>
               <label v-if="supported('video_steps')" class="engine-field" :title="legacyTooltips.videoSteps"><span>训练步数</span><input v-model="draft.video_steps" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('video_steps')" /></label>
-              <label v-if="supported('video_frames')" class="engine-field" :title="legacyTooltips.videoFrames"><span>帧数（17n+5）</span><input v-model="draft.video_frames" class="engine-input" type="number" min="5" step="17" placeholder="73" @input="markParam('video_frames')" /></label>
+              <label v-if="supported('video_frames')" class="engine-field" :title="legacyTooltips.videoFrames"><span>{{ isH3Fizgig ? '预览采样帧数' : '视频帧数（17n+5）' }}</span><input v-model="draft.video_frames" class="engine-input" type="number" :min="isH3Fizgig ? 1 : 5" :step="isH3Fizgig ? 1 : 17" :placeholder="isH3Fizgig ? '56' : '73'" @input="markParam('video_frames')" /></label>
             </div>
-            <p v-if="isVideo" class="engine-hint">H3 输入视频和同名 .txt 字幕；帧数需符合 17n+5 格式，具体视频准备工具仍由经典面板提供。</p>
+            <label v-if="mode === 'qwen21_fz'" class="engine-field spaced" :title="legacyTooltips.fizgigQwenPreset"><span>Fizgig 官方预设</span><select v-model="draft.fizgig_qwen_preset" class="engine-select" @change="markParam('fizgig_qwen_preset')"><option value="auto">自动（人物/概念 Fast，画风 Style）</option><option value="fast">Fast · rank 8 · 学习率自适应 2e-4~4e-4</option><option value="standard">Standard · rank 16 · 学习率 1e-4~2e-4</option><option value="style">Style · rank 16 · flat 1.5e-4</option></select></label>
+            <p v-if="mode === 'qwen21_fz'" class="engine-hint">该预设固定 rank、alpha 和学习率；训练轮数可以调整。默认分辨率 704px，按 0.5MP 分桶。</p>
+            <p v-if="isVideo && !isH3Fizgig" class="engine-hint">H3 AI Toolkit 输入视频和同名 .txt 字幕；视频帧数需符合 17n+5 格式。</p>
+            <p v-if="isH3Fizgig" class="engine-hint">图片、视频和音频可放在同一目录或子目录，每个媒体都需同名 .txt。MP4 必须为 24fps、帧数符合 17n+5、宽高为 32 的倍数；带音轨时必须为 32kHz 立体声。扫描仅检查媒体与字幕；Fizgig 缓存阶段才会校验格式。无 audio VAE 时视频音轨会忽略。56 帧只用于预览，不裁剪训练视频。AMD ROCm 为实验性路径，训练兼容性尚未验证。</p>
           </section>
         </div>
 
@@ -284,16 +294,16 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
         </section>
 
         <div class="engine-utility-row">
-          <button class="engine-utility" type="button" :title="legacyTooltips.preprocess" @click="requestAction('preprocess')">数据预处理</button>
-          <button class="engine-utility" type="button" :title="legacyTooltips.labelEditor" @click="requestAction('label_editor')">标签编辑器</button>
+          <button class="engine-utility" type="button" :title="legacyTooltips.preprocess" @click="requestAction('preprocess')">{{ isH3Fizgig ? '扫描媒体和字幕' : '数据预处理' }}</button>
+          <button v-if="!isVideo" class="engine-utility" type="button" :title="legacyTooltips.labelEditor" @click="requestAction('label_editor')">标签编辑器</button>
           <button class="engine-utility" type="button" :title="legacyTooltips.openOutput" @click="requestAction('output_dir')">打开输出目录</button>
           <button class="engine-utility" type="button" @click="requestAction('export_config')">导出配置</button>
           <button class="engine-utility" type="button" :title="legacyTooltips.readme" @click="requestAction('readme')">训练说明</button>
           <button v-if="mode === 'krea2' || mode === 'krea2_fz'" class="engine-utility" type="button" :title="legacyTooltips.krea2Guide" @click="requestAction('krea2_guide')">Krea2 使用引导</button>
           <button v-if="mode === 'flux2' || mode === 'flux2_fz'" class="engine-utility" type="button" :title="legacyTooltips.flux2Guide" @click="requestAction('flux2_guide')">FLUX.2 使用引导</button>
-          <button v-if="isVideo" class="engine-utility" type="button" :title="legacyTooltips.h3Guide" @click="requestAction('h3_guide')">H3 使用引导</button>
+          <button v-if="isVideo && !isH3Fizgig" class="engine-utility" type="button" :title="legacyTooltips.h3Guide" @click="requestAction('h3_guide')">H3 视频引导</button>
           <button class="engine-utility" type="button" title="打开当前训练模式的模型文件夹。" @click="requestAction('open_models:' + mode)">打开模型目录</button>
-          <template v-if="isVideo">
+          <template v-if="isVideo && !isH3Fizgig">
             <button class="engine-utility" type="button" title="为没有字幕的视频生成占位 txt（内容=触发词），避免训练缺字幕报错；建议之后手动改成具体描述。" @click="requestAction('video_caption_stub')">一键生成占位字幕</button>
             <button class="engine-utility" type="button" title="用 Qwen2.5-VL 自动给视频生成英文描述（首次下载模型约 6~7GB，已有 txt 的会跳过）。" @click="requestAction('video_caption')">AI 自动描述</button>
           </template>

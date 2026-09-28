@@ -138,6 +138,10 @@ def default_resolution(mode, base_type):
     """
     if mode == "video":
         return str(core.H3_RESOLUTION)
+    if mode == "qwen21_fz":
+        return str(getattr(core, "QWEN21_FZ_RESOLUTION", 704))
+    if mode == "h3_fz":
+        return str(getattr(core, "H3_FZ_RESOLUTION", 768))
     if mode == "flux2_fz":
         return str(core.FLUX2FZ_RESOLUTION)
     if mode in ("krea2", "krea2_fz", "krea2_at", "flux2"):
@@ -313,13 +317,14 @@ ENGINE_GROUPS = [
     ("第一引擎 · kohya", ("_kohya",)),
     ("第二引擎 · musubi", ("krea2", "flux2")),
     ("第三引擎 · ai-toolkit", ("video", "krea2_at", "qwen_image", "zimage")),
-    ("第四引擎 · fizgig", ("krea2_fz", "flux2_fz")),
+    ("第四引擎 · fizgig", ("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz")),
 ]
 KOHYA_SUB_MODES = ("style", "character", "concept")   # 第一引擎的三个子模式（右侧下拉切换）
 SHORT_MODE_LABELS = {
     "_kohya": "LoRA",
     "style": "画风", "character": "人物", "concept": "概念", "krea2": "Krea2", "flux2": "FLUX.2",
-    "krea2_fz": "Krea2F", "flux2_fz": "Klein9B", "video": "视频H3", "krea2_at": "Krea2AT", "qwen_image": "Qwen", "zimage": "Z-Image",
+    "krea2_fz": "Krea2F", "flux2_fz": "Klein9B", "qwen21_fz": "Qwen2.1F", "h3_fz": "H3F",
+    "video": "视频H3", "krea2_at": "Krea2AT", "qwen_image": "Qwen", "zimage": "Z-Image",
 }
 
 class Tooltip:
@@ -705,6 +710,7 @@ class App:
                 "readme": self.cmd_readme,
                 "at_model_help": self.cmd_at_model_help,
                 "at_engine_update": self.cmd_at_engine_update,
+                "fizgig_engine_update": self.cmd_fizgig_engine_update,
                 "anima_components": lambda: self._show_anima_components(),
                 "krea2_guide": self._show_krea2_guide,
                 "flux2_guide": self._show_flux2_guide,
@@ -916,6 +922,8 @@ class App:
                                          item[4] if len(item) > 4 else "skip")
             elif kind == "AT_ENGINE_UPDATE_DONE":
                 self._handle_at_engine_update_done(item[1], item[2])
+            elif kind == "FIZGIG_ENGINE_UPDATE_DONE":
+                self._handle_fizgig_engine_update_done(item[1], item[2])
 
     def _start_worker(self, fn, title):
         # 防重入：同一时间只允许一个后台任务（安装/预处理/训练），
@@ -951,6 +959,10 @@ class App:
         if not v:
             try:
                 self._refresh_at_engine_update_notice()
+            except Exception:
+                pass
+            try:
+                self._refresh_fizgig_engine_update_notice()
             except Exception:
                 pass
         # 其它操作按钮
@@ -1472,6 +1484,16 @@ class App:
         self._main_btns["at_engine_update"] = self.btn_at_engine_update
         self._tip(self.btn_at_engine_update,
                   "当前 AI Toolkit 还没有 Qwen-Image-2.1 架构。点击查看更新并一键升级引擎。")
+        self.btn_fizgig_engine_update = ctk.CTkButton(
+            row1, text="↑ Fizgig 引擎更新可用", width=174, height=28,
+            fg_color="#4b391c", hover_color="#604a25", border_width=1,
+            border_color="#d6a74a", text_color="#ffe0a0", corner_radius=7,
+            font=ui_font(FONT_BODY), command=self.cmd_fizgig_engine_update)
+        self.btn_fizgig_engine_update.pack(side="right", padx=(8, 0))
+        self.btn_fizgig_engine_update.pack_forget()
+        self._main_btns["fizgig_engine_update"] = self.btn_fizgig_engine_update
+        self._tip(self.btn_fizgig_engine_update,
+                  "第四引擎 Fizgig 有可用更新。点击查看版本并更新引擎环境。")
         st = ctk.CTkFrame(top, fg_color="transparent"); st.pack(fill="x", pady=(8, 0))
         self.badge_frame = st
 
@@ -1566,6 +1588,51 @@ class App:
                                        text_color="#ffffff", font=ui_font(FONT_BODY),
                                        command=self.cmd_dl_h3_models)
         self.btn_h3_dl.pack(side="left", padx=(4, 4))
+        # Fizgig Qwen-Image-2.1 模型状态（与 AI Toolkit Qwen 模型完全分开）
+        self.qwen21_fz_row = ctk.CTkFrame(top, fg_color="transparent")
+        self.qwen21_fz_model_var = tk.StringVar(value="")
+        ctk.CTkLabel(self.qwen21_fz_row, textvariable=self.qwen21_fz_model_var,
+                     font=ui_font(FONT_BODY), text_color=ACC).pack(side="left")
+        self.btn_qwen21_fz_models = ctk.CTkButton(
+            self.qwen21_fz_row, text="📂 打开 Qwen-Image-2.1 Fizgig 模型文件夹", width=230, height=30,
+            fg_color=CARD2, hover_color="#343a46", border_width=1, border_color=BORDER,
+            text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY), command=self.cmd_open_qwen21_fz_models)
+        self.btn_qwen21_fz_models.pack(side="left", padx=(10, 4))
+        self.btn_qwen21_fz_dl = ctk.CTkButton(
+            self.qwen21_fz_row, text="⬇ 下载 Qwen-Image-2.1 模型", width=190, height=30,
+            fg_color=ACC, hover_color=ACC_H, corner_radius=6, text_color="#ffffff",
+            font=ui_font(FONT_BODY), command=self.cmd_dl_qwen21_fz_models)
+        self.btn_qwen21_fz_dl.pack(side="left", padx=4)
+        self.btn_qwen21_fz_install = ctk.CTkButton(
+            self.qwen21_fz_row, text="⚙ 安装第四引擎", width=112, height=30,
+            fg_color="transparent", hover_color="#252a36", border_width=1, border_color=ACC,
+            text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY), command=self.cmd_install_fizgig)
+        self.btn_qwen21_fz_install.pack(side="left", padx=4)
+        # H3 Fizgig 独立行；第三引擎 video 模式仍使用上面的 H3/AI Toolkit 行。
+        self.h3_fz_row = ctk.CTkFrame(top, fg_color="transparent")
+        self.h3_fz_model_var = tk.StringVar(value="")
+        ctk.CTkLabel(self.h3_fz_row, textvariable=self.h3_fz_model_var,
+                     font=ui_font(FONT_BODY), text_color=ACC).pack(side="left")
+        self.btn_h3_fz_models = ctk.CTkButton(
+            self.h3_fz_row, text="📂 打开 H3 Fizgig 模型文件夹", width=190, height=30,
+            fg_color=CARD2, hover_color="#343a46", border_width=1, border_color=BORDER,
+            text_color=TXT, corner_radius=6, font=ui_font(FONT_BODY), command=self.cmd_open_h3_fz_models)
+        self.btn_h3_fz_models.pack(side="left", padx=(10, 4))
+        self.btn_h3_fz_dl = ctk.CTkButton(
+            self.h3_fz_row, text="⬇ 下载 H3 Fizgig 模型", width=164, height=30,
+            fg_color=ACC, hover_color=ACC_H, corner_radius=6, text_color="#ffffff",
+            font=ui_font(FONT_BODY), command=self.cmd_dl_h3_fz_models)
+        self.btn_h3_fz_dl.pack(side="left", padx=4)
+        self.btn_h3_fz_install = ctk.CTkButton(
+            self.h3_fz_row, text="⚙ 安装第四引擎", width=112, height=30,
+            fg_color="transparent", hover_color="#252a36", border_width=1, border_color=ACC,
+            text_color=ACC, corner_radius=6, font=ui_font(FONT_BODY), command=self.cmd_install_fizgig)
+        self.btn_h3_fz_install.pack(side="left", padx=4)
+        self.btn_h3_fz_help = ctk.CTkButton(
+            self.h3_fz_row, text="使用说明", width=78, height=30,
+            fg_color="transparent", hover_color="#252a36", border_width=1, border_color=BORDER,
+            text_color=TXT, corner_radius=6, font=ui_font(FONT_HINT), command=self.cmd_h3_fz_help)
+        self.btn_h3_fz_help.pack(side="left", padx=(8, 0))
         # 第二行：引擎/字幕操作（避免 8 个按钮挤一行被挤出窗口）
         self.h3_row2 = ctk.CTkFrame(top, fg_color="transparent")
         self.btn_at_install = ctk.CTkButton(self.h3_row2, text="⚙ 安装第三引擎", width=108, height=30,
@@ -1873,6 +1940,10 @@ class App:
                 return not core.flux2_missing_models()
             if check == "flux2_fz_models":
                 return not core.flux2_fz_missing_models()
+            if check == "qwen21_fz_models":
+                return not core.qwen21_fz_missing_models()
+            if check == "h3_fz_models":
+                return not core.h3_fz_missing_models()
             if check == "h3_models":
                 return not core.h3_missing_models()
             if check == "at_model":
@@ -2464,6 +2535,7 @@ class App:
                 # 重开项目会回落到预设默认（2000 步 / 73 帧）。
                 "video_steps": params.get("video_steps"),
                 "video_frames": params.get("video_frames"),
+                "fizgig_qwen_preset": params.get("fizgig_qwen_preset") or "auto",
                 "optimizer": params.get("optimizer") or "auto",
                 "strong_bind": bool(params.get("strong_bind", True)),
                 "clean_concept": bool(params.get("clean_concept", True)),
@@ -2706,7 +2778,8 @@ class App:
         self.card1_title = ctk.CTkLabel(card1, text="① 准备图片数据", font=ui_font(FONT_TITLE), text_color=TITLE_C)
         self.card1_title.pack(anchor="w", padx=22, pady=(14, 8))
         r1 = ctk.CTkFrame(card1, fg_color="transparent"); r1.pack(fill="x", padx=22, pady=(0, 4))
-        ctk.CTkLabel(r1, text="原始图片文件夹", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
+        self.raw_dir_label = ctk.CTkLabel(r1, text="原始图片文件夹", font=ui_font(FONT_BODY), text_color=SUB)
+        self.raw_dir_label.pack(side="left")
         self.raw_entry = ctk.CTkEntry(r1, width=400, height=30, textvariable=self.raw_dir_var,
                                       fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
         self.raw_entry.pack(side="left", padx=(12, 8))
@@ -3361,6 +3434,22 @@ class App:
                          f"学习率 {lr} · 训练分辨率 {pre.get('resolution')}px · "
                          f"训练步数 {_st}{_note} · "
                          f"帧数 {self._param_now('video_frames', core.H3_FRAMES)} · 视频 24fps{stag}")
+            elif self.mode == "qwen21_fz":
+                _qwen_preset_var = self.param_vars.get("fizgig_qwen_preset")
+                _qwen_preset = str(_qwen_preset_var.get() if _qwen_preset_var else "auto").lower()
+                if _qwen_preset == "auto":
+                    _qwen_preset = "style" if self._at_sub_label() == "style" else "fast"
+                _profile = {
+                    "fast": "Fast · rank 8 / alpha 8 · Adaptive 2e-4~4e-4",
+                    "standard": "Standard · rank 16 / alpha 16 · Adaptive 1e-4~2e-4",
+                    "style": "Style · rank 16 / alpha 16 · flat 1.5e-4",
+                }.get(_qwen_preset, "Fast · rank 8 / alpha 8 · Adaptive 2e-4~4e-4")
+                self.preset_summary.configure(
+                    text=f"Fizgig 官方预设：{_profile} · 最多 {self._param_now('max_epochs', 30)} 轮 · 704px / 0.5MP 分桶")
+            elif self.mode == "h3_fz":
+                self.preset_summary.configure(
+                    text=f"Fizgig H3 · rank 8 / alpha 8 · LR 2e-4 · 最多 {self._param_now('max_epochs', 50)} 轮 · "
+                         f"分辨率 {self._param_now('resolution', 768)}px · 预览 {self._param_now('video_frames', 56)} 帧")
             elif self.mode in ("qwen_image", "zimage"):
                 # Qwen / Z-Image 也是**按步**训练 ✓ 而摘要以前只列 repeats/最大epoch ✗ ——
                 # 可那两个选项在这两个模式里恰恰是**隐藏**的 ✗ → 用户根本看不到自己设的步数 ✗
@@ -3805,7 +3894,7 @@ class App:
         # 训练类型（画风/人物/概念）：第一引擎 与 Krea2/FLUX.2/Qwen/Z-Image 都显示
         try:
             _is_at = self.mode in ("style", "character", "concept",
-                                   "qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz")
+                                   "qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz", "qwen21_fz")
             if _is_at:
                 # 第一引擎的左侧入口不带子模式，下拉要反映当前子模式
                 if self.mode in KOHYA_SUB_MODES:
@@ -3855,12 +3944,12 @@ class App:
         try:
             if self.mode == "video":
                 _hint = core.TRIGGER_HINT_VIDEO
-            elif self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz"):
+            elif self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz", "qwen21_fz"):
                 if self._at_sub_label() == "concept":
                     _hint = core.TRIGGER_HINT_CONCEPT
                 if self._at_sub_label() == "style":
                     _hint = core.TRIGGER_HINT_STYLE
-                elif self.mode in ("qwen_image", "zimage"):
+                elif self.mode in ("qwen_image", "zimage", "qwen21_fz"):
                     _hint = core.TRIGGER_HINT_AT
                 elif self.mode in ("krea2", "krea2_fz"):
                     _hint = core.TRIGGER_HINT_KREA2
@@ -3883,7 +3972,7 @@ class App:
         try:
             _tef = getattr(self, "_adv_frames", {}).get("te_lr")
             if _tef is not None:
-                if self.mode in ("krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz", "video", "qwen_image", "zimage"):
+                if self.mode in ("krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz", "video", "qwen_image", "zimage", "qwen21_fz", "h3_fz"):
                     _tef.grid_remove()   # Krea2/FLUX.2/视频/AI图像：文本编码器不训练，该参数无效
                 else:
                     try:
@@ -3908,7 +3997,7 @@ class App:
         except Exception:
             pass
         try:
-            _hide_base = self.mode in ("krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz", "video", "qwen_image", "zimage")
+            _hide_base = self.mode in ("krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz", "video", "qwen_image", "zimage", "qwen21_fz", "h3_fz")
             for w in (self.base_label, self.base_combo, self.btn_pick_base, self.btn_refresh_base, self.btn_download_base):
                 try:
                     if _hide_base:
@@ -3982,6 +4071,22 @@ class App:
             except Exception:
                 pass
             try:
+                if self.mode == "qwen21_fz":
+                    self._refresh_qwen21_fz_status()
+                    self.qwen21_fz_row.pack(fill="x", pady=(8, 0))
+                else:
+                    self.qwen21_fz_row.pack_forget()
+            except Exception:
+                pass
+            try:
+                if self.mode == "h3_fz":
+                    self._refresh_h3_fz_status()
+                    self.h3_fz_row.pack(fill="x", pady=(8, 0))
+                else:
+                    self.h3_fz_row.pack_forget()
+            except Exception:
+                pass
+            try:
                 if self.mode in ("qwen_image", "zimage"):
                     self._refresh_at_status()
                     self.at_row.pack(fill="x", pady=(8, 0))
@@ -4026,13 +4131,27 @@ class App:
                 if _f is None:
                     continue
                 try:
-                    _show = _use_steps if _k == "video_steps" else (self.mode == "video")
+                    _show = _use_steps if _k == "video_steps" else (self.mode in ("video", "h3_fz"))
                     if _show:
                         _f.grid()
                     else:
                         _f.grid_remove()
                 except Exception:
                     pass
+            _qwen_fz = self.mode == "qwen21_fz"
+            for _k in ("rank", "alpha", "unet_lr"):
+                _f = _adv.get(_k)
+                if _f is not None:
+                    _f.grid_remove() if _qwen_fz else _f.grid()
+            _qf = getattr(self, "qwen_fz_preset_row", None)
+            if _qf is not None:
+                if _qwen_fz:
+                    _qf.pack(fill="x", padx=10, pady=(4, 8))
+                else:
+                    _qf.pack_forget()
+            _vl = getattr(self, "_video_frames_label", None)
+            if _vl is not None:
+                _vl.configure(text="预览采样帧数" if self.mode == "h3_fz" else "帧数（17n+5）")
         except Exception:
             pass
         # 量化 / 块交换 / torch.compile：按模式显隐（2026-09-18 新增）
@@ -4072,10 +4191,30 @@ class App:
             pass
         # 主卡片①/② 文案：视频模式切换提示
         try:
+            if self.mode == "h3_fz":
+                self.raw_dir_label.configure(text="混合媒体原始目录")
+                self._tip(self.raw_entry, "选择包含图片、视频、音频及其同名 .txt 的目录；扫描会递归检查子目录。")
+                self._tip(self.btn_pick_raw, "选择 H3 Fizgig 混合媒体根目录，可包含 repeats_* 等子目录。")
+            elif self.mode == "video":
+                self.raw_dir_label.configure(text="原始视频文件夹")
+                self._tip(self.raw_entry, "选择包含 MP4 视频及同名 .txt 字幕的数据集文件夹。")
+                self._tip(self.btn_pick_raw, "选择视频数据集文件夹（mp4 + 同名 txt 字幕）。")
+            else:
+                self.raw_dir_label.configure(text="原始图片文件夹")
+                self._tip(self.raw_entry, "选择原始图片文件夹（支持 jpg/png/webp/bmp/tif/gif）。")
+                self._tip(self.btn_pick_raw, "选择原始图片文件夹。")
             if self.mode == "video":
                 self.card1_title.configure(text="① 准备视频数据")
                 self.card1_hint.configure(text="3~10 段 3~10 秒的同角色/同风格 mp4，每段配同名 .txt 字幕；H3 训练需 24G 显存")
                 self.trig_card_title.configure(text="② 设置触发词（视频模式）")
+            elif self.mode == "h3_fz":
+                self.card1_title.configure(text="① 准备混合媒体数据")
+                self.card1_hint.configure(text="图片、视频和音频可放在同一目录或其子目录；每个媒体都需同名 .txt。MP4 必须 24fps、17n+5 帧、宽高为 32 的倍数；带音轨必须 32kHz 立体声。此模式只扫描，不整理、转码或生成字幕。")
+                self.trig_card_title.configure(text="② 设置触发词（H3 Fizgig）")
+            elif self.mode == "qwen21_fz":
+                self.card1_title.configure(text="① 准备图片数据")
+                self.card1_hint.configure(text="至少准备 5 张清晰图片；人物、画风或概念类型在训练类型中选择。使用 Fizgig 官方预设；默认 704px、0.5MP 分桶。")
+                self.trig_card_title.configure(text="② 设置触发词（Qwen-Image-2.1）")
             elif self.mode in ("qwen_image", "zimage"):
                 self.card1_title.configure(text="① 准备图片数据")
                 if self._at_sub_label() == "concept":
@@ -4137,6 +4276,7 @@ class App:
             pass
         self._apply_param_scope()
         self._refresh_at_engine_update_notice()
+        self._refresh_fizgig_engine_update_notice()
 
     def _refresh_at_engine_update_notice(self):
         """在 AI Toolkit 模式中提示缺少 Qwen-Image-2.1 支持的旧引擎。"""
@@ -4281,6 +4421,67 @@ class App:
             popup["close_btn"].configure(text="关闭", state="normal")
             popup["window"].protocol("WM_DELETE_WINDOW", popup["window"].destroy)
         self._at_update_popup = None
+
+    def _refresh_fizgig_engine_update_notice(self):
+        button = getattr(self, "btn_fizgig_engine_update", None)
+        if button is None:
+            return
+        modes = ("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz")
+        try:
+            status = core.fizgig_engine_update_status()
+            visible = self.mode in modes and bool(status.get("update_available"))
+        except Exception:
+            visible = False
+        if visible:
+            if button.winfo_manager() != "pack":
+                button.pack(side="right", padx=(8, 0))
+        elif button.winfo_manager():
+            button.pack_forget()
+
+    def cmd_fizgig_engine_update(self):
+        if self.busy:
+            messagebox.showinfo(core.APP_NAME, "当前有任务正在运行，请完成后再更新 Fizgig。")
+            return
+        try:
+            status = core.fizgig_engine_update_status()
+        except Exception as exc:
+            messagebox.showerror(core.APP_NAME, "读取 Fizgig 更新状态失败：%s" % exc)
+            return
+        if not status.get("installed"):
+            messagebox.showinfo(core.APP_NAME, "尚未安装第四引擎 Fizgig，请先点击本模式的「安装第四引擎」。")
+            return
+        if not status.get("update_available"):
+            messagebox.showinfo(core.APP_NAME, "Fizgig 已是当前版本，无需更新。")
+            self._refresh_fizgig_engine_update_notice()
+            return
+        if not messagebox.askyesno(
+                core.APP_NAME,
+                "发现 Fizgig 引擎更新。现在更新会升级隔离的第四引擎环境；已下载模型和项目数据会保留。\n\n是否开始更新？"):
+            return
+        self._start_worker(self._fizgig_engine_update_worker, "更新 Fizgig 引擎")
+
+    def _fizgig_engine_update_worker(self):
+        try:
+            result = core.update_fizgig_engine(self._log)
+            core.clear_status_cache()
+            self.q.put(("FIZGIG_ENGINE_UPDATE_DONE", True, result))
+        except Exception as exc:
+            self._log("[ERROR] Fizgig 引擎更新失败：%s" % exc)
+            traceback.print_exc()
+            self.q.put(("FIZGIG_ENGINE_UPDATE_DONE", False, str(exc)))
+        finally:
+            self.q.put("__DONE__")
+
+    def _handle_fizgig_engine_update_done(self, success, result):
+        self._refresh_fizgig_engine_update_notice()
+        if success:
+            detail = ""
+            if isinstance(result, dict):
+                detail = result.get("version") or result.get("message") or ""
+            self._log("[Fizgig] 引擎更新完成%s" % ("：" + str(detail) if detail else ""))
+            messagebox.showinfo(core.APP_NAME, "Fizgig 引擎更新完成。" + ("\n\n" + str(detail) if detail else ""))
+        else:
+            messagebox.showerror(core.APP_NAME, "Fizgig 引擎更新失败：\n\n%s" % result)
 
     def _scope_widgets(self):
         """（参数 key → 控件）映射：按当前模式置灰**不生效**的参数用。
@@ -4601,12 +4802,15 @@ class App:
         self._download_choice_dialog()
 
     def cmd_pick_raw(self):
-        _title = "选择视频数据集文件夹（mp4 + 同名txt字幕）" if self.mode == "video" else "选择原始图片文件夹"
+        _title = ("选择 H3 Fizgig 混合媒体根目录（图片 / 视频 / 音频及同名 .txt，可含子目录）" if self.mode == "h3_fz"
+                  else "选择视频数据集文件夹（mp4 + 同名txt字幕）" if self.mode == "video"
+                  else "选择原始图片文件夹")
         d = filedialog.askdirectory(title=_title)
         if d:
             self.raw_dir_var.set(d)
             self._refresh_guide()
-            self._log(f"[预处理] 已选{'视频' if self.mode == 'video' else '原始图片'}文件夹：{d}")
+            _kind = "H3 Fizgig 混合媒体" if self.mode == "h3_fz" else "视频" if self.mode == "video" else "原始图片"
+            self._log(f"[预处理] 已选{_kind}文件夹：{d}")
 
     def cmd_pick_reg(self):
         d = filedialog.askdirectory(title="选择正则数据集文件夹（人物模式）")
@@ -5677,6 +5881,7 @@ class App:
                 self._build_adv_body()
             self.adv_body.pack(fill="x", padx=22, pady=(0, 14))
             self.btn_toggle_adv.configure(text="收起 ▴")
+            self._apply_param_scope()
 
     def _build_adv_body(self):
         g = ctk.CTkFrame(self.adv_body, fg_color="transparent")
@@ -5688,7 +5893,8 @@ class App:
                  ("帧数（17n+5）", "video_frames")]
         for i, (label, key) in enumerate(items):
             f = ctk.CTkFrame(g, fg_color="transparent"); f.grid(row=0, column=i, padx=10, pady=8, sticky="w")
-            ctk.CTkLabel(f, text=label, font=ui_font(FONT_HINT), text_color=HINT).pack(anchor="w")
+            label_widget = ctk.CTkLabel(f, text=label, font=ui_font(FONT_HINT), text_color=HINT)
+            label_widget.pack(anchor="w")
             v = self.param_vars.setdefault(key, tk.StringVar())
             self._bind_param_edit(key, v)
             entry = ctk.CTkEntry(f, width=80, height=28, justify="center", textvariable=v,
@@ -5696,6 +5902,21 @@ class App:
             entry.pack(pady=(3, 0))
             self._adv_entries[key] = entry
             self._adv_frames[key] = f
+            if key == "video_frames":
+                self._video_frames_label = label_widget
+        qf = ctk.CTkFrame(self.adv_body, fg_color="transparent")
+        self.qwen_fz_preset_row = qf
+        ctk.CTkLabel(qf, text="Fizgig 官方预设", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        _qwen_preset = self.param_vars.setdefault("fizgig_qwen_preset", tk.StringVar(value="auto"))
+        self._bind_param_edit("fizgig_qwen_preset", _qwen_preset)
+        ctk.CTkOptionMenu(
+            qf, variable=_qwen_preset, values=["auto", "fast", "standard", "style"],
+            width=130, height=28, fg_color=CARD2, button_color=CARD2, button_hover_color="#3a4150",
+            text_color=SUB, font=ui_font(FONT_HINT), dropdown_font=ui_font(FONT_HINT),
+            dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150").pack(side="left", padx=(10, 12))
+        ctk.CTkLabel(qf,
+                     text="Auto 按训练类型选择；预设固定 rank / alpha / 学习率，Fast 自适应学习率区间 2e-4~4e-4。",
+                     font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
         # 模型保存间隔：画风/人物=每 N 步，Krea2/FLUX.2=每 N 轮（留空用默认）
         sf = ctk.CTkFrame(g, fg_color="transparent")
         sf.grid(row=1, column=0, columnspan=10, sticky="w", padx=10, pady=(0, 8))
@@ -6037,6 +6258,7 @@ class App:
             "resolution": int(float(_getv("resolution", default_resolution(self.mode, self.base_type)))),
             "video_steps": int(float(_getv("video_steps", "2000"))),
             "video_frames": int(float(_getv("video_frames", str(core.H3_FRAMES)))),
+            "fizgig_qwen_preset": _getv("fizgig_qwen_preset", "auto"),
             "save_every": (lambda _s: int(_s) if str(_s).isdigit() else None)(_getv("save_every", "")),
             "sample_interval": (lambda _s: int(_s) if str(_s).isdigit() and int(_s) > 0 else 0)(_getv("sample_interval", "")),
             "train_text_encoder": not self.unet_only_var.get(),
@@ -6327,17 +6549,34 @@ class App:
         except Exception as e:
             messagebox.showerror(core.APP_NAME, f"打开失败：{e}")
 
+    def cmd_open_qwen21_fz_models(self):
+        d = core.qwen21_fz_models_dir()
+        try:
+            os.makedirs(d, exist_ok=True)
+            os.startfile(d)
+        except Exception as e:
+            messagebox.showerror(core.APP_NAME, f"打开失败：{e}")
+
+    def cmd_open_h3_fz_models(self):
+        d = core.h3_fz_models_dir()
+        try:
+            os.makedirs(d, exist_ok=True)
+            os.startfile(d)
+        except Exception as e:
+            messagebox.showerror(core.APP_NAME, f"打开失败：{e}")
+
     def cmd_install_fizgig(self):
-        """安装第四训练引擎（Fizgig：Krea2 图像 LoRA，NVIDIA/AMD 双平台）。"""
+        """安装第四训练引擎（Fizgig：Krea2、Klein、Qwen-Image-2.1 与 H3）。"""
         if self.busy:
             messagebox.showinfo(core.APP_NAME, "有任务正在运行，请先等待当前任务完成。")
             return
         if not messagebox.askyesno(core.APP_NAME,
-                "安装第四训练引擎（Fizgig · Krea2 图像 LoRA）？\n\n"
+                "安装第四训练引擎（Fizgig · Krea2 / Klein 9B / Qwen-Image-2.1 / MiniMax H3）？\n\n"
                 "· 独立环境，完全不影响现有引擎\n"
                 "· NVIDIA 显卡走 CUDA 路径（torch cu128 约 2.9GB，国内镜像断点续传）\n"
                 "· AMD 显卡走 ROCm 路径（AMD nightly 钉死版本）\n"
-                "· Krea2 模型与第二/三引擎共用 models/krea2/\n\n是否开始安装？"):
+                "· 各模式模型分别放在 models/krea2、models/flux2、models/qwen_image21、models/minimax_h3/\n"
+                "· AMD ROCm 通道为实验性路径，新模式训练兼容性尚未验证\n\n是否开始安装？"):
             return
         self._start_worker(self._install_fizgig_worker, "安装第四引擎")
 
@@ -6889,6 +7128,75 @@ class App:
             return False
         return True
 
+    def _ensure_qwen21_fz_ready(self):
+        """Qwen-Image-2.1 Fizgig：检查引擎、必需模型和原始图片数量。"""
+        try:
+            ok, detail, _vpy, _backend = core.fizgig_engine_status()
+        except Exception as exc:
+            ok, detail = False, str(exc)
+        if not ok:
+            messagebox.showwarning(core.APP_NAME, "第四训练引擎 Fizgig 未就绪。请先安装第四引擎。\n\n" + str(detail))
+            return False
+        missing = core.qwen21_fz_missing_models()
+        if missing:
+            if messagebox.askyesno(core.APP_NAME, "Qwen-Image-2.1 Fizgig 还缺少必需模型：\n\n" + "\n".join(missing) + "\n\n现在打开模型下载页？"):
+                self.cmd_dl_qwen21_fz_models()
+            return False
+        params = self._collect_params()
+        raw_dir = params.get("raw_dir") or ""
+        if not raw_dir or not os.path.isdir(raw_dir):
+            messagebox.showwarning(core.APP_NAME, "请先选择有效的原始图片文件夹。")
+            return False
+        count = core.count_images(raw_dir)
+        if count < 5:
+            messagebox.showwarning(core.APP_NAME, "Qwen-Image-2.1 至少需要 5 张原始图片；当前目录扫描到 %d 张。" % count)
+            return False
+        return True
+
+    def _ensure_h3_fz_ready(self):
+        """H3 Fizgig：原始混合媒体目录只扫描，不依赖图片预处理缓存。"""
+        try:
+            ok, detail, _vpy, _backend = core.fizgig_engine_status()
+        except Exception as exc:
+            ok, detail = False, str(exc)
+        if not ok:
+            messagebox.showwarning(core.APP_NAME, "第四训练引擎 Fizgig 未就绪。请先安装第四引擎。\n\n" + str(detail))
+            return False
+        params = self._collect_params()
+        raw_dir = params.get("raw_dir") or ""
+        if not raw_dir or not os.path.isdir(raw_dir):
+            messagebox.showwarning(core.APP_NAME, "请先选择有效的混合媒体原始目录。")
+            return False
+        try:
+            summary = core.scan_fizgig_h3_dataset(raw_dir)
+        except Exception as exc:
+            messagebox.showwarning(core.APP_NAME, "H3 Fizgig 数据集扫描失败：\n\n%s" % exc)
+            return False
+        total = int(summary.get("total", 0) or 0)
+        missing_captions = summary.get("missing_captions", 0)
+        missing_count = len(missing_captions) if isinstance(missing_captions, (list, tuple, set)) else int(missing_captions or 0)
+        if total < 1:
+            messagebox.showwarning(core.APP_NAME, "目录中没有可训练的图片、视频或音频样本。")
+            return False
+        if missing_count:
+            messagebox.showwarning(core.APP_NAME, "有 %d 个媒体文件缺少同名 .txt 字幕。\n\n请补齐字幕后重新扫描；此模式不会自动生成字幕。" % missing_count)
+            return False
+        has_audio = int(summary.get("audio", 0) or 0) > 0
+        try:
+            missing = core.h3_fz_missing_models(require_audio=has_audio)
+        except TypeError:
+            missing = core.h3_fz_missing_models()
+        if missing:
+            if messagebox.askyesno(core.APP_NAME, "H3 Fizgig 还缺少当前数据集所需模型：\n\n" + "\n".join(missing) + "\n\n现在打开模型下载页？"):
+                self.cmd_dl_h3_fz_models()
+            return False
+        self._log("[预检] H3 Fizgig：图片 %d、视频 %d、音频 %d，字幕齐全。" % (
+            int(summary.get("images", 0) or 0), int(summary.get("videos", 0) or 0),
+            int(summary.get("audio", 0) or 0)))
+        if int(summary.get("videos", 0) or 0) and not core.h3_fz_model_files().get("audio_vae"):
+            self._log("[预检] 未准备 audio VAE；视频音轨会被忽略，只训练画面。")
+        return True
+
     def _refresh_h3_status(self):
         try:
             # 秒级 marker：勿在状态行跑权威 import（慢 10s+ 会卡主线程）
@@ -6909,6 +7217,42 @@ class App:
                 self.h3_model_var.set("H3 模型：齐全 ✓ 第三引擎：就绪")
         except Exception:
             pass
+
+    def _refresh_qwen21_fz_status(self):
+        try:
+            engine_ok, _detail, _vpy, _backend = core.fizgig_engine_status()
+            missing = list(core.qwen21_fz_missing_models())
+            if missing:
+                text = "Qwen 模型缺 %d 项（点下载查看）" % len(missing)
+            else:
+                text = "Qwen 模型齐全 ✓"
+            self.qwen21_fz_model_var.set(("Fizgig 引擎就绪 · " if engine_ok else "Fizgig 引擎未装 · ") + text)
+        except Exception:
+            pass
+
+    def _refresh_h3_fz_status(self):
+        try:
+            engine_ok, _detail, _vpy, _backend = core.fizgig_engine_status()
+            files = core.h3_fz_model_files()
+            missing = list(core.h3_fz_missing_models())
+            if missing:
+                text = "H3 必需模型缺 %d 项（点下载查看）" % len(missing)
+            else:
+                audio = "音频 VAE 已有" if files.get("audio_vae") else "音频 VAE 可选"
+                text = "H3 必需模型齐全 ✓ · " + audio
+            self.h3_fz_model_var.set(("Fizgig 引擎就绪 · " if engine_ok else "Fizgig 引擎未装 · ") + text)
+        except Exception:
+            pass
+
+    def cmd_h3_fz_help(self):
+        messagebox.showinfo(
+            "MiniMax H3 Fizgig 使用说明",
+            "图片、视频和音频可放在所选目录或其子目录；每个媒体文件都需要同名 .txt 描述。\n\n"
+            "点击“数据预处理”只扫描媒体与字幕，不会移动、转码或生成字幕。缺少字幕或没有样本时不能训练。\n\n"
+            "MP4 必须为 24 fps、帧数符合 17n+5、宽高为 32 的倍数；带音轨时必须为 32 kHz 立体声。扫描不会检查这些格式，Fizgig 缓存阶段会校验。\n\n"
+            "独立音频训练需要音频 VAE。视频没有音频 VAE 时会忽略声音，只训练画面。设置中的 56 帧只控制预览采样，不会裁剪训练视频。\n\n"
+            "AMD ROCm 为实验性路径，训练兼容性尚未验证。",
+        )
 
     def _show_h3_guide(self):
         """MiniMax H3 视频 LoRA 训练 · 详细逐步引导（小白版）。"""
@@ -6972,7 +7316,10 @@ class App:
     def cmd_preprocess(self):
         params = self._collect_params()
         if not params["raw_dir"]:
-            messagebox.showwarning(core.APP_NAME, "请先选择原始图片文件夹（步骤④）。")
+            messagebox.showwarning(core.APP_NAME, "请先选择原始图片/媒体文件夹（步骤④）。")
+            return
+        if params.get("mode") == "h3_fz":
+            self._start_worker(lambda: self._preprocess_worker(params), "扫描 H3 混合媒体与字幕")
             return
         self._start_worker(lambda: self._preprocess_worker(params), "数据预处理")
 
@@ -6988,6 +7335,21 @@ class App:
                 else:
                     self._log(f"[预处理] 视频数据已就绪：{len(videos)} 个视频，{no_cap} 个缺字幕。"
                               "视频无需图片预处理；字幕请用「AI 视频自动打标」或放同名 .txt，然后直接点【一键训练】。")
+                return
+            if params.get("mode") == "h3_fz":
+                summary = core.scan_fizgig_h3_dataset(params.get("raw_dir"))
+                total = int(summary.get("total", 0) or 0)
+                missing = summary.get("missing_captions", 0)
+                missing = len(missing) if isinstance(missing, (list, tuple, set)) else int(missing or 0)
+                self._log("[预处理] H3 Fizgig 混合媒体扫描：图片 %d，视频 %d，音频 %d，总计 %d，缺字幕 %d。" % (
+                    int(summary.get("images", 0) or 0), int(summary.get("videos", 0) or 0),
+                    int(summary.get("audio", 0) or 0), total, missing))
+                if total <= 0:
+                    self._log("[ERROR] 目录中没有可训练的图片、视频或音频样本。")
+                elif missing:
+                    self._log("[ERROR] 有媒体缺少同名 .txt 字幕；请补齐后重新扫描。")
+                else:
+                    self._log("[预处理] 扫描完成；未整理、移动或转码任何文件。")
                 return
             pp_mode = core.preprocess_mode(params.get("mode"), params.get("at_sub_mode"))
             _pp_log = self._begin_preprocess_progress()
@@ -7037,6 +7399,12 @@ class App:
                 return
         elif params.get("mode") == "flux2_fz":
             if not self._ensure_flux2_fz_ready():
+                return
+        elif params.get("mode") == "qwen21_fz":
+            if not self._ensure_qwen21_fz_ready():
+                return
+        elif params.get("mode") == "h3_fz":
+            if not self._ensure_h3_fz_ready():
                 return
         else:
             if not params["base_model"]:
@@ -7088,6 +7456,13 @@ class App:
             elif params.get("mode") == "flux2_fz":
                 core.train_flux2_fizgig(self._log, mode="flux2_fz", params=params,
                                        vram_gb=vram, resume_from=resume, progress=self._train_mon)
+            elif params.get("mode") == "qwen21_fz":
+                core.train_qwen21_fizgig(self._log, mode="qwen21_fz", params=params,
+                                         vram_gb=vram, resume_from=resume, progress=self._train_mon)
+            elif params.get("mode") == "h3_fz":
+                params["train_data_dir"] = params.get("raw_dir") or ""
+                core.train_h3_fizgig(self._log, mode="h3_fz", params=params,
+                                     vram_gb=vram, resume_from=resume, progress=self._train_mon)
             else:
                 core.train(self._log, base_model=params["base_model"], mode=params["mode"],
                            params=params, vram_gb=vram, resume_from=resume, progress=self._train_mon)
@@ -7160,6 +7535,12 @@ class App:
         elif params.get("mode") == "flux2_fz":
             if not self._ensure_flux2_fz_ready():
                 return
+        elif params.get("mode") == "qwen21_fz":
+            if not self._ensure_qwen21_fz_ready():
+                return
+        elif params.get("mode") == "h3_fz":
+            if not self._ensure_h3_fz_ready():
+                return
         elif params.get("mode") == "flux2":
             if not self._ensure_flux2_ready():
                 return
@@ -7172,7 +7553,7 @@ class App:
         if not self._anima_components_preflight(params):
             return
         _need_trigger = (self.mode == "character") or (self.mode == "concept") or \
-            (self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz") and self._at_sub_label() in ("character", "concept"))
+            (self.mode in ("qwen_image", "zimage", "krea2", "krea2_fz", "krea2_at", "flux2", "flux2_fz", "qwen21_fz") and self._at_sub_label() in ("character", "concept"))
         if _need_trigger and not params["trigger"]:
             messagebox.showwarning(core.APP_NAME, "人物模式建议填写 Trigger 触发词（步骤②）。")
             return
@@ -7187,6 +7568,18 @@ class App:
                     os.remove(report)
             except Exception:
                 pass
+            if params.get("mode") == "h3_fz":
+                summary = core.scan_fizgig_h3_dataset(params.get("raw_dir"))
+                total = int(summary.get("total", 0) or 0)
+                missing = summary.get("missing_captions", 0)
+                missing = len(missing) if isinstance(missing, (list, tuple, set)) else int(missing or 0)
+                self._log("[预检] H3 Fizgig 混合媒体：图片 %d、视频 %d、音频 %d，总计 %d、缺字幕 %d。" % (
+                    int(summary.get("images", 0) or 0), int(summary.get("videos", 0) or 0),
+                    int(summary.get("audio", 0) or 0), total, missing))
+                if total < 1 or missing:
+                    raise RuntimeError("H3 Fizgig 需要至少一个媒体样本，且每个媒体都有同名 .txt 字幕。")
+                self.q.put(("AUTO_CONFIRM", params, {"ok": total}, total))
+                return
             pp_mode = core.preprocess_mode(params.get("mode"), params.get("at_sub_mode"))
             # 一键训练里的自动预处理同样接进度：这段也是 WD14 全程跑完才轮到训练，
             # 不接的话「一键」反而比单独预处理更让人干等。
@@ -7275,7 +7668,7 @@ class App:
         return getattr(self, "mode", None) in ("qwen_image", "zimage", "krea2_at")
 
     def _uses_fizgig_amd_path(self):
-        return getattr(self, "mode", None) in ("krea2_fz", "flux2_fz")
+        return getattr(self, "mode", None) in ("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz")
 
     def _update_amd_panel_mode(self):
         """只显示当前引擎真正使用的 AMD 控件，避免无效环境路径和开关误导用户。"""
@@ -7300,7 +7693,8 @@ class App:
             return
         if self._uses_fizgig_amd_path():
             self.amd_panel_note_var.set(
-                "第四引擎 Fizgig 自带 AMD ROCm 环境管理，不需要全局兼容开关；请使用本模式内的「安装第四引擎」。")
+                "第四引擎 Fizgig 自带 AMD ROCm 环境管理，不需要全局兼容开关；请使用本模式内的「安装第四引擎」。"
+                + (" Qwen-Image-2.1 / H3 Fizgig AMD 路径为实验性，训练兼容性尚未验证。" if self.mode in ("qwen21_fz", "h3_fz") else ""))
             self.amd_panel_note.pack(fill="x", pady=(2, 0))
             return
         self.amd_panel_note_var.set(
@@ -8039,7 +8433,7 @@ class App:
             if (params or {}).get("mode") in ("video", "krea2_at", "qwen_image", "zimage"):
                 return None  # These AI Toolkit modes do not consume training-state resume snapshots.
             # 第四引擎（Fizgig）断点目录是 {name}-NNNNNN-state（按 epoch 命名），另有专门查找
-            if (params or {}).get("mode") in ("krea2_fz", "flux2_fz"):
+            if (params or {}).get("mode") in ("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz"):
                 return core.find_fizgig_state(_odir, _name)
             if (params or {}).get("mode") in ("krea2", "flux2"):
                 return core.find_musubi_state(_odir, _name)
@@ -8117,6 +8511,52 @@ class App:
                 f"最大 epoch  : {params['max_epochs']}\n"
                 f"分辨率      : {params.get('resolution', 768)}px\n"
                 f"Trigger     : {params['trigger'] or '（未填写）'}"
+            )
+        elif params.get("mode") == "qwen21_fz":
+            _files = core.qwen21_fz_model_files()
+            _submode = params.get("at_sub_mode") or "character"
+            _preset = str(params.get("fizgig_qwen_preset") or "auto").lower()
+            if _preset == "auto":
+                _preset = "style" if _submode == "style" else "fast"
+            _preset_label = {"fast": "Fast（rank 8，学习率自适应 2e-4~4e-4）",
+                             "standard": "Standard（rank 16，学习率自适应 1e-4~2e-4）",
+                             "style": "Style（rank 16，flat 1.5e-4）"}.get(_preset, _preset)
+            _submode_label = {"style": "画风", "concept": "概念", "character": "人物"}.get(_submode, _submode)
+            msg = (
+                "即将开始 Qwen-Image-2.1 Fizgig 训练，请确认以下参数：\n\n"
+                f"训练类型    : {_submode_label}\n"
+                f"Fizgig 预设 : {_preset_label}\n"
+                f"DiT         : {os.path.basename(_files.get('dit') or '？')}\n"
+                f"rank / alpha: 由官方预设控制\n"
+                f"最大 epoch  : {params.get('max_epochs', 30)}\n"
+                f"分辨率      : {params.get('resolution', 704)}px（0.5MP 分桶）\n"
+                f"Trigger     : {params.get('trigger') or '（未填写）'}"
+                + ("\nAMD ROCm：实验性路径，训练兼容性尚未验证。" if params.get("amd_mode") else "")
+            )
+        elif params.get("mode") == "h3_fz":
+            _files = core.h3_fz_model_files()
+            try:
+                _summary = core.scan_fizgig_h3_dataset(params.get("raw_dir") or "")
+                _counts = "图片 %s / 视频 %s / 音频 %s / 总计 %s" % (
+                    _summary.get("images", 0), _summary.get("videos", 0),
+                    _summary.get("audio", 0), _summary.get("total", 0))
+            except Exception:
+                _counts = "样本数将在训练预检中确认"
+            _audio_note = ("独立音频使用音频 VAE" if _files.get("audio_vae") else
+                           "视频声音将忽略；独立音频需先下载音频 VAE")
+            msg = (
+                "即将开始 MiniMax H3 Fizgig 图片 / 视频 / 音频混合训练，请确认：\n\n"
+                f"原始目录    : {params.get('raw_dir') or '（未选择）'}\n"
+                f"样本统计    : {_counts}\n"
+                f"DiT         : {os.path.basename(_files.get('dit') or '？')}\n"
+                f"rank / alpha: {params.get('rank', 8)} / {params.get('alpha', 8)}\n"
+                f"学习率      : {params.get('unet_lr', '2e-4')}\n"
+                f"最大 epoch  : {params.get('max_epochs', 50)}\n"
+                f"分辨率      : {params.get('resolution', 768)}px\n"
+                f"预览帧数    : {params.get('video_frames', 56)}（只用于采样，不裁剪训练视频）\n"
+                f"音频说明    : {_audio_note}\n"
+                "MP4 必须为 24fps、17n+5 帧、宽高为 32 的倍数；带音轨必须为 32kHz 立体声。"
+                + ("\nAMD ROCm：实验性路径，训练兼容性尚未验证。" if params.get("amd_mode") else "")
             )
         elif params.get("mode") == "video":
             _files = core.h3_model_files()
@@ -8641,6 +9081,14 @@ class App:
                 self._log(f"[H3] 下载完成：{dest}")
                 self._refresh_h3_status()
                 messagebox.showinfo(core.APP_NAME, f"H3 模型下载完成：\n{os.path.basename(dest)}\n\n已自动识别（状态已刷新）。")
+            elif kind == "qwen21_fz":
+                self._log(f"[Qwen-Image-2.1 Fizgig] 下载完成：{dest}")
+                self._refresh_qwen21_fz_status()
+                messagebox.showinfo(core.APP_NAME, f"Qwen-Image-2.1 Fizgig 模型下载完成：\n{os.path.basename(dest)}\n\n已自动识别（状态已刷新）。")
+            elif kind == "h3_fz":
+                self._log(f"[H3 Fizgig] 下载完成：{dest}")
+                self._refresh_h3_fz_status()
+                messagebox.showinfo(core.APP_NAME, f"H3 Fizgig 模型下载完成：\n{os.path.basename(dest)}\n\n已自动识别（状态已刷新）。")
             elif kind == "flux":
                 self._log(f"[FLUX] 下载完成：{dest}")
                 self._scan_base_models()
@@ -8664,7 +9112,7 @@ class App:
         else:
             self._log("[ERROR] 下载失败或已取消")
 
-    def _build_links_dialog(self, title, intro, links, files, open_label, open_cmd, rebuild_cmd, dl_fn, hint=""):
+    def _build_links_dialog(self, title, intro, links, files, open_label, open_cmd, rebuild_cmd, dl_fn, hint="", optional_keys=()):
         """通用模型文件下载对话框（H3 / FLUX / Krea2 共用）：每文件应用内下载或浏览器直链。"""
         dlg = ctk.CTkToplevel(self.root)
         dlg.title(title)
@@ -8676,7 +9124,8 @@ class App:
             row = ctk.CTkFrame(dlg, fg_color="transparent"); row.pack(fill="x", padx=20, pady=3)
             done = files.get(key) is not None
             mark = "✓" if done else "○"
-            ctk.CTkLabel(row, text=f"{mark} {fname}", font=ui_font(FONT_HINT),
+            optional = key in set(optional_keys)
+            ctk.CTkLabel(row, text=f"{mark} {fname}" + ("（可选）" if optional else ""), font=ui_font(FONT_HINT),
                          text_color=(OK_TX if done else TXT), width=370, anchor="w").pack(side="left")
             if done:
                 ctk.CTkLabel(row, text="已下载", font=ui_font(FONT_HINT), text_color=OK_TX).pack(side="left", padx=6)
@@ -8711,6 +9160,38 @@ class App:
             core.H3_MODEL_LINKS, core.h3_model_files(),
             "📂 打开 H3 模型文件夹", self.cmd_open_h3_models, self.cmd_dl_h3_models,
             self._start_h3_dl, "保存到 models/minimax_h3/，下完自动识别。")
+
+    def cmd_dl_qwen21_fz_models(self):
+        links = core.QWEN21_FZ_MODEL_LINKS
+        optional = ("speed_lora",)
+        self._build_links_dialog(
+            "下载 Fizgig Qwen-Image-2.1 模型",
+            "训练需要 DiT、VAE、文本编码器和 Fizgig 训练适配器；speed LoRA 仅用于预览，可选。支持应用内断点续传，下载源若不可达可用浏览器链接手动下载。",
+            links, core.qwen21_fz_model_files(),
+            "📂 打开 Qwen-Image-2.1 模型文件夹", self.cmd_open_qwen21_fz_models,
+            self.cmd_dl_qwen21_fz_models, self._start_qwen21_fz_dl,
+            "保存到 models/qwen_image21/。HF/ModelScope 直链可用性因网络环境而异。",
+            optional_keys=optional)
+
+    def cmd_dl_h3_fz_models(self):
+        links = core.H3_FZ_MODEL_LINKS
+        optional = ("audio_vae", "training_adapter", "turbo_lora")
+        self._build_links_dialog(
+            "下载 Fizgig MiniMax H3 模型",
+            "必需：官方 int8 DiT、文本编码器、视频 VAE。独立音频文件训练时必须有 audio VAE；视频没有 audio VAE 时忽略音轨。训练适配器与 Turbo LoRA 可选。支持应用内断点续传；源不可达时可浏览器打开直链。",
+            links, core.h3_fz_model_files(),
+            "📂 打开 H3 Fizgig 模型文件夹", self.cmd_open_h3_fz_models,
+            self.cmd_dl_h3_fz_models, self._start_h3_fz_dl,
+            "保存到 models/minimax_h3/。模型下载源需按本机网络情况重试或手动获取。",
+            optional_keys=optional)
+
+    def _start_qwen21_fz_dl(self, key):
+        self._start_model_file_dl(key, core.QWEN21_FZ_MODEL_LINKS,
+                                  core.qwen21_fz_models_dir(), "qwen21_fz", "Qwen-Image-2.1 Fizgig 模型")
+
+    def _start_h3_fz_dl(self, key):
+        self._start_model_file_dl(key, core.H3_FZ_MODEL_LINKS,
+                                  core.h3_fz_models_dir(), "h3_fz", "H3 Fizgig 模型")
 
     def cmd_dl_flux_models(self):
         """FLUX.1 模型下载对话框：4 个文件放进 models/base/，应用内下载（断点续传）。"""
@@ -8748,6 +9229,10 @@ class App:
             messagebox.showinfo(core.APP_NAME, f"{fname} 已存在，无需重复下载。")
             if kind == "h3":
                 self._refresh_h3_status()
+            elif kind == "qwen21_fz":
+                self._refresh_qwen21_fz_status()
+            elif kind == "h3_fz":
+                self._refresh_h3_fz_status()
             elif kind == "krea2":
                 self._refresh_krea2_status()
             elif kind == "flux":
@@ -9913,7 +10398,7 @@ def main(argv=None):
     classic_actions = (
         "tools", "check_update", "data_dir", "queue", "env_locations",
         "preprocess", "train", "label_editor", "export_config", "readme",
-        "at_model_help", "at_engine_update", "anima_components",
+        "at_model_help", "at_engine_update", "fizgig_engine_update", "anima_components",
         "krea2_guide", "flux2_guide", "h3_guide",
         "video_caption_stub", "video_caption", "amd_env",
     )

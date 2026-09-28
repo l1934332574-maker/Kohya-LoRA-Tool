@@ -9,7 +9,7 @@ export const legacyTooltips = {
   baseModel: '底模架构：SD1.5/SDXL 是经典架构；FLUX.1 画质新但非常吃显存（8G 不推荐）；Anima 是 2026 最新架构、显存友好。选择底模文件后会自动识别。',
   rawDir: '放原始图片的文件夹（支持 jpg/png/webp/bmp/tif/gif）。',
   chooseRawDir: '选择原始图片文件夹。',
-  preprocess: '缩放/去黑边/去水印/打标签。一键开始训练会自动做，老手可单独用。',
+  preprocess: '图像模式会整理并打标图片；第三引擎 H3 视频模式只检查字幕；H3 Fizgig 混合媒体模式只扫描，不移动或转码。',
   labelEditor: '打开标签编辑器：逐张看图改标签、批量删除/替换标签、置顶 trigger、标签频率统计、整理成 repeats_名称 子目录结构。训练前改好标签，模型学得更准。',
   openOutput: '打开训练产物目录：模型、使用模板、参数报告、中间快照。',
   readme: '打开新手教学 & 常见问题窗口。',
@@ -36,7 +36,8 @@ export const legacyTooltips = {
   maxEpochs: '最大训练轮数：轮数越多学得越久，够用就好。',
   resolution: '训练分辨率：512 最省显存最快，768 平衡，1024 画质最好。16G 显存跑 Krea2/SDXL 建议降到 768 或 512，防止爆显存。',
   videoSteps: '视频 LoRA 总训练步数：2000 左右较稳；步数过高会死记视频内容（过拟合）。上限 3000。',
-  videoFrames: 'H3 视频帧数需符合 17n+5 格式；例如 73 帧。',
+  videoFrames: '第三引擎 H3 视频帧数需符合 17n+5；H3 Fizgig 的帧数设置只影响预览采样，不会裁剪训练视频。',
+  fizgigQwenPreset: 'Fizgig 官方 Qwen-Image-2.1 预设固定 rank、alpha 和学习率；Fast 的学习率会在 2e-4~4e-4 内自适应。Auto 按画风/人物/概念类型选择预设。',
   fastTier: '自动=按显存自动启用；开=强制快跑（低分辨率/省显存/关采样）；关=完全按常规参数。',
   optimizer: '自动=按环境预检选 AdamW8bit 或降级；若报 bitsandbytes 崩溃，改选 AdamW/Lion。Krea2/FLUX.2 的 Fizgig 引擎不支持此项，用引擎默认。',
   quantMode: '自动=int8；Krea2 的 fp8 明显更慢。',
@@ -63,7 +64,7 @@ export const legacyTooltips = {
   flux2Guide: '打开 FLUX.2 图像 LoRA 的详细使用引导。',
   h3Guide: '打开 MiniMax H3 视频 LoRA 的详细引导（安装引擎、准备模型、视频与字幕、训练和出视频）。',
   oneClickTrain: '自动检查并过滤模糊或过小图片 → 去重 → 按裁切比例设置处理 → WD14 打标签 → 训练；点击后先处理数据，再确认训练参数。',
-  engineUpdate: '当前 AI Toolkit 还没有 Qwen-Image-2.1 架构。点击查看更新并一键升级引擎。',
+  engineUpdate: '当前训练引擎有可用更新。点击查看版本状态并启动引擎升级。',
 } as const
 
 export type LegacyTooltipKey = keyof typeof legacyTooltips

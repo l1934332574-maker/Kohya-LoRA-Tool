@@ -36,6 +36,8 @@ const modeTips: Record<string, string> = {
   zimage: '第三引擎 AI Toolkit：Z-Image LoRA；支持快跑档和按步训练。',
   krea2_fz: '第四引擎 Fizgig：Krea2 图像 LoRA，提供 NVIDIA / AMD 通道。',
   flux2_fz: '第四引擎 Fizgig：FLUX.2 Klein 9B 图像 LoRA，提供 NVIDIA / AMD 通道。',
+  qwen21_fz: '第四引擎 Fizgig：Qwen-Image-2.1 图像 LoRA，使用官方训练预设和 704px 分桶。',
+  h3_fz: '第四引擎 Fizgig：MiniMax H3 图片、视频、音频混合训练；媒体可放在同一目录或子目录，每个媒体需同名字幕。',
 }
 </script>
 

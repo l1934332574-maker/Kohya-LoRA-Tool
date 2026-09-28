@@ -174,6 +174,8 @@ const demoPresets: Record<string, Record<string, string>> = {
   krea2: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '16', resolution: '1024' },
   krea2_at: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '8', resolution: '1024' },
   krea2_fz: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '16', resolution: '512' },
+  qwen21_fz: { rank: '8', alpha: '8', unet_lr: '1e-4', te_lr: '1e-4', repeats: '1', max_epochs: '30', resolution: '704', fizgig_qwen_preset: 'auto' },
+  h3_fz: { rank: '8', alpha: '8', unet_lr: '2e-4', te_lr: '1e-4', repeats: '1', max_epochs: '50', resolution: '768', video_frames: '56', sample_interval: '5' },
   flux2: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '16', resolution: '1024' },
   flux2_fz: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '16', resolution: '768' },
   video: { rank: '32', alpha: '32', unet_lr: '2e-4', te_lr: '1e-4', repeats: '1', max_epochs: '20', resolution: '1280', video_steps: '2000', video_frames: '73' },
@@ -248,11 +250,11 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
   const template = templates.value.find((item) => item.mode === mode)
   const preset = demoPresets[mode] ?? {}
   const stepBased = ['video', 'qwen_image', 'zimage'].includes(mode)
-  const usesEpochs = ['krea2_fz', 'flux2_fz'].includes(mode)
+  const usesEpochs = ['krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz'].includes(mode)
   const supports: Record<string, boolean> = {
     rank: true, alpha: true, unet_lr: true, te_lr: false, repeats: !stepBased,
     max_epochs: !stepBased, resolution: true, save_every: true, sample_interval: true,
-    video_steps: stepBased, video_frames: mode === 'video', optimizer: !['krea2_fz', 'flux2_fz'].includes(mode),
+    video_steps: stepBased, video_frames: ['video', 'h3_fz'].includes(mode), optimizer: !['krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz'].includes(mode),
     strong_bind: true, clean_concept: true, sample_preview: true, compile: ['krea2', 'flux2', 'krea2_fz'].includes(mode),
     global_pos: ['style', 'character', 'concept'].includes(mode), global_neg: ['style', 'character', 'concept'].includes(mode),
     crop_ratio: true, sample_prompt: true, noise_offset: false, min_snr_gamma: false,
@@ -264,7 +266,7 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
     batch_size: ['style', 'character', 'concept', 'krea2', 'flux2'].includes(mode),
     gc: ['style', 'character', 'concept', 'krea2', 'flux2'].includes(mode),
     wd14_model: mode !== 'video', overwrite: mode !== 'video',
-    amd_mode: mode === 'krea2_at',
+    amd_mode: mode === 'krea2_at' || ['krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz'].includes(mode),
   }
   const demoGuideSpecs: Record<string, Array<[string, string, string, string, string]>> = {
     style: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次，全部项目通用）。'], ['kohya', '② 安装训练内核', '去安装', 'cmd_install', '安装 Kohya 训练内核（画风/人物模式需要，只需一次）。'], ['base', '③ 选择模型类型', '去设置', 'cmd_pick_model_type', '选择底模文件并确认模型类型；自动识别不准时可手动指定。'], ['raw', '④ 选择图片文件夹', '去选文件夹', 'cmd_pick_raw', '选择原始图片文件夹（jpg/png/webp 等）。']],
@@ -275,6 +277,8 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
     krea2_at: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['at', '② 安装第三引擎', '去安装', 'cmd_install_at', '安装第三引擎 AI Toolkit。'], ['krea2_at_models', '③ 下载 Krea2 模型', '去下载', 'cmd_dl_krea2_models', '设置 Krea 2 RAW；已有文本编码器和 VAE 可指定本地文件。'], ['raw', '④ 选择图片文件夹', '去选文件夹', 'cmd_pick_raw', '选择 15~30 张人物或风格图片。']],
     flux2: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['musubi', '② 安装第二引擎', '去安装', 'cmd_install_musubi', '安装第二引擎 musubi-tuner。'], ['flux2_models', '③ 下载 FLUX.2 模型', '去下载', 'cmd_dl_flux2_models', '检查 FLUX.2 的 DiT、文本编码器和 VAE。'], ['raw', '④ 选择图片文件夹', '去选文件夹', 'cmd_pick_raw', '选择 15~30 张人物或风格图片。']],
     flux2_fz: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['fizgig', '② 安装第四引擎', '去安装', 'cmd_install_fizgig', '安装第四引擎 Fizgig。'], ['flux2_fz_models', '③ 下载 Klein 9B 模型', '去下载', 'cmd_dl_flux2_models', '检查 Klein 9B DiT、文本编码器和 VAE。'], ['raw', '④ 选择图片文件夹', '去选文件夹', 'cmd_pick_raw', '选择 15~30 张人物或风格图片。']],
+    qwen21_fz: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['fizgig', '② 安装第四引擎', '去安装', 'cmd_install_fizgig', '安装第四引擎 Fizgig。'], ['qwen21_fz_models', '③ 下载 Qwen-Image-2.1 模型', '去下载', 'cmd_dl_qwen21_fz_models', 'DiT、VAE、文本编码器、训练适配器必需；speed LoRA 可选。'], ['raw', '④ 选择图片文件夹', '去选文件夹', 'cmd_pick_raw', '至少准备 5 张图片；可选人物、画风或概念训练类型。']],
+    h3_fz: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['fizgig', '② 安装第四引擎', '去安装', 'cmd_install_fizgig', '安装第四引擎 Fizgig。'], ['h3_fz_models', '③ 下载 H3 Fizgig 模型', '去下载', 'cmd_dl_h3_fz_models', '官方 int8 DiT、文本编码器、视频 VAE 必需；独立音频需音频 VAE，可选适配器和 Turbo LoRA。'], ['raw', '④ 选择混合媒体文件夹', '去选文件夹', 'cmd_pick_raw', '图片、视频和音频可放在同一目录或子目录；每个媒体都需要同名 .txt。']],
     video: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['at', '② 安装第三引擎', '去安装', 'cmd_install_at', '安装第三引擎 AI Toolkit。'], ['h3_models', '③ 下载 H3 模型', '去下载', 'cmd_dl_h3_models', '检查 H3 主模型、文本编码器和视频 VAE。'], ['raw', '④ 选择视频文件夹', '去选文件夹', 'cmd_pick_raw', '选择包含 mp4 视频和同名 txt 字幕的数据集文件夹。']],
     qwen_image: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['at', '② 安装第三引擎', '去安装', 'cmd_install_at', '安装第三引擎 AI Toolkit。'], ['at_model', '③ Qwen-Image 模型', '查看说明', 'cmd_at_model_help', '查看模型选择、显存和本地组件说明。'], ['raw', '④ 选择图片文件夹', '去选文件夹', 'cmd_pick_raw', '选择原始图片文件夹（15~30 张人物/风格图片）。']],
     zimage: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['at', '② 安装第三引擎', '去安装', 'cmd_install_at', '安装第三引擎 AI Toolkit。'], ['at_model', '③ Z-Image 模型', '查看说明', 'cmd_at_model_help', '查看模型选择、显存和本地组件说明。'], ['raw', '④ 选择图片文件夹', '去选文件夹', 'cmd_pick_raw', '选择原始图片文件夹（15~30 张人物/风格图片）。']],
@@ -288,8 +292,8 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
     trigger_hints: { style: '为画风设置独特的 trigger。', character: '为人物设置独特的 trigger。', concept: '为概念设置独特的 trigger。' },
     engine_ready: false, engine_update_available: false, engine_key: '', gpu: '预览', gpu_vendor: 'unknown', missing_models: ['桌面模式会在打开项目时读取真实模型状态。'],
     asset_dir: '', supports, interval_units: { save_every: usesEpochs || ['krea2', 'flux2'].includes(mode) ? 'epochs' : 'steps', sample_interval: usesEpochs ? 'epochs' : 'steps' },
-    defaults: preset, presets: { [mode]: { sdxl: preset } }, is_video: mode === 'video', is_step_based: stepBased,
-    has_training_submode: ['krea2', 'krea2_at', 'krea2_fz', 'flux2', 'flux2_fz'].includes(mode),
+    defaults: preset, presets: { [mode]: { sdxl: preset } }, is_video: ['video', 'h3_fz'].includes(mode), is_step_based: stepBased,
+    has_training_submode: ['krea2', 'krea2_at', 'krea2_fz', 'qwen21_fz', 'flux2', 'flux2_fz'].includes(mode),
     guide_steps,
   }
 }
@@ -309,7 +313,7 @@ function showToast(message: string) {
 function normalizeImportedConfig(raw: unknown): ProjectConfig {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('配置文件内容不是有效的 JSON 对象。')
   const source = raw as Record<string, unknown>
-  const modes = new Set(['style', 'character', 'concept', 'krea2', 'krea2_at', 'krea2_fz', 'flux2', 'flux2_fz', 'video', 'qwen_image', 'zimage'])
+  const modes = new Set(['style', 'character', 'concept', 'krea2', 'krea2_at', 'krea2_fz', 'qwen21_fz', 'h3_fz', 'flux2', 'flux2_fz', 'video', 'qwen_image', 'zimage'])
   const baseTypes = new Set(['sd15', 'sdxl', 'flux', 'anima'])
   const mode = typeof source.mode === 'string' && modes.has(source.mode) ? source.mode : 'character'
   const requestedBaseType = typeof source.base_type === 'string' ? source.base_type : ''
@@ -729,7 +733,7 @@ async function onGuideAction(step: GuideStep) {
     setupDialogOpen.value = true
     return
   }
-  if (action === 'cmd_dl_krea2_models' || action === 'cmd_dl_flux2_models' || action === 'cmd_dl_h3_models') {
+  if (action === 'cmd_dl_krea2_models' || action === 'cmd_dl_flux2_models' || action === 'cmd_dl_h3_models' || action === 'cmd_dl_qwen21_fz_models' || action === 'cmd_dl_h3_fz_models') {
     modelDialogOpen.value = true
     return
   }

@@ -12,13 +12,15 @@ MODE_LABELS = {
     "krea2": "🖼 Krea 2 图像LoRA",
     "krea2_at": "🖼 Krea2 图像LoRA（AI-Toolkit 引擎）",
     "krea2_fz": "🖼 Krea2 图像LoRA（Fizgig 引擎）",
+    "qwen21_fz": "🖼 Fizgig Qwen-Image-2.1",
+    "h3_fz": "🎬 MiniMax H3 全模态（Fizgig 引擎）",
     "flux2": "🖼 FLUX.2 图像LoRA",
     "flux2_fz": "🖼 FLUX.2 Klein 9B（Fizgig 引擎）",
     "video": "🎬 视频LoRA（MiniMax H3）",
     "qwen_image": "🖼 Qwen-Image LoRA",
     "zimage": "🖼 Z-Image LoRA",
 }
-MODE_KEYS = ["style", "character", "concept", "krea2", "krea2_at", "krea2_fz", "flux2", "flux2_fz", "video", "qwen_image", "zimage"]
+MODE_KEYS = ["style", "character", "concept", "krea2", "krea2_at", "krea2_fz", "qwen21_fz", "h3_fz", "flux2", "flux2_fz", "video", "qwen_image", "zimage"]
 
 # Qwen-Image / Z-Image 的画风/人物子模式（训练类型切换）
 AT_SUB_LABELS = {
@@ -154,6 +156,8 @@ _PRESET_BASE = {
     "concept": {"rank": "32", "alpha": "16", "unet_lr": "1e-4", "te_lr": "5e-5", "repeats": "3", "max_epochs": "8", "resolution": "512"},
     "krea2": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "1024"},
     "krea2_fz": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "512"},
+    "qwen21_fz": {"rank": "8", "alpha": "8", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "30", "resolution": "704", "fizgig_qwen_preset": "auto"},
+    "h3_fz": {"rank": "8", "alpha": "8", "unet_lr": "2e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "50", "resolution": "768", "video_frames": "56", "sample_interval": "5"},
     "krea2_at": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "8", "resolution": "1024"},
     "flux2": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "1024"},
     "flux2_fz": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "768"},
@@ -220,7 +224,7 @@ PRESETS = _build_presets()
 PRESET_VERSION = 3
 
 RESOLUTIONS = {k: v["resolution"] for k, v in ARCH_INFO.items()}
-MIN_IMAGES = {"style": 20, "character": 15, "concept": 15, "krea2": 15, "krea2_at": 15, "krea2_fz": 15, "flux2": 15, "flux2_fz": 15, "video": 3, "qwen_image": 15, "zimage": 15}   # 一键训练最少可用图片/视频数
+MIN_IMAGES = {"style": 20, "character": 15, "concept": 15, "krea2": 15, "krea2_at": 15, "krea2_fz": 15, "qwen21_fz": 5, "h3_fz": 1, "flux2": 15, "flux2_fz": 15, "video": 3, "qwen_image": 15, "zimage": 15}   # 一键训练最少可用图片/视频数
 MAX_AUTO_STEPS = 12000                          # 一键训练自动约束的最大总步数（防过拟合）
 
 PARAM_LABELS = {
@@ -232,6 +236,7 @@ PARAM_LABELS = {
     "max_epochs": "最大epoch",
     "resolution": "训练分辨率",
     "video_steps": "训练步数",
+    "fizgig_qwen_preset": "Fizgig Qwen 预设",
 }
 
 # 高级参数通俗中文提示（鼠标悬停显示）
@@ -244,6 +249,8 @@ PARAM_TIPS = {
     "max_epochs": "最大训练轮数：轮数越多学得越久，够用就好。",
     "resolution": "训练分辨率：512 最省显存最快，768 平衡，1024 画质最好。16G 显存跑 Krea2/SDXL 建议降到 768 或 512，防止爆显存。",
     "video_steps": "视频 LoRA 总训练步数：2000 左右较稳；步数过高会死记视频内容（过拟合）。上限 3000。",
+    "video_frames": "视频 H3 按 17n+5 取帧（如 73）；H3 Fizgig 将此值用于预览采样，不会裁剪训练视频长度。",
+    "fizgig_qwen_preset": "Fizgig 官方 Qwen-Image-2.1 训练预设；自动会按人物/画风/概念训练类型选择 Fast 或 Style。Fast 学习率由引擎在 2e-4~4e-4 内自适应。预设固定 rank、alpha 和学习率，轮数可调。",
 }
 
 # ---------- 参数适用范围（界面按当前模式置灰 + 提示 / 回归测试校验） ----------
@@ -268,7 +275,7 @@ PARAM_SCOPE = {
     "train_text_encoder": ("style", "character", "concept"),
     "global_pos": ("style", "character", "concept"),
     "global_neg": ("style", "character", "concept"),
-    "amd_mode": ("style", "character", "concept", "krea2_at", "qwen_image", "zimage"),
+    "amd_mode": ("style", "character", "concept", "krea2_at", "qwen_image", "zimage", "krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz"),
     "style_preset": ("style", "character", "concept"),
     "noise_offset": ("style", "character", "concept"),
     "min_snr_gamma": ("style", "character", "concept"),
@@ -276,7 +283,7 @@ PARAM_SCOPE = {
     "base_model": ("style", "character", "concept"),
     # 仅视频 / AI 图像（这两个引擎按「总步数」训练，不用 epoch）
     "video_steps": ("video", "qwen_image", "zimage"),
-    "video_frames": ("video",),
+    "video_frames": ("video", "h3_fz"),
     # 仅 Krea2 / FLUX.2 系（含 Fizgig）：量化与块交换是这两个引擎的参数
     "quant_mode": ("krea2", "krea2_fz", "flux2", "flux2_fz"),
     "blocks_to_swap": ("krea2", "krea2_fz", "flux2", "flux2_fz"),
@@ -292,14 +299,14 @@ PARAM_SCOPE = {
     "gc": ("style", "character", "concept", "krea2", "flux2"),
     # 优化器：两个 Fizgig 引擎不读（用引擎自己的默认）
     "optimizer": ("style", "character", "concept", "krea2", "flux2",
-                  "krea2_at", "video", "qwen_image", "zimage"),
+                  "krea2_at", "video", "qwen_image", "zimage", "krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz"),
     # compile：仅第一引擎 + Krea2 / FLUX.2 / Krea2(Fizgig)
     "compile": ("style", "character", "concept", "krea2", "flux2", "krea2_fz"),
     # repeats / max_epochs：视频与 AI 图像按步数训练，不用这两个
     "repeats": ("style", "character", "concept", "krea2", "krea2_at",
-                "krea2_fz", "flux2", "flux2_fz"),
+                "krea2_fz", "qwen21_fz", "h3_fz", "flux2", "flux2_fz"),
     "max_epochs": ("style", "character", "concept", "krea2", "krea2_at",
-                   "krea2_fz", "flux2", "flux2_fz"),
+                   "krea2_fz", "qwen21_fz", "h3_fz", "flux2", "flux2_fz"),
 }
 
 # 模式短名（用于生成「仅 … 生效」这类人话提示）
@@ -307,6 +314,7 @@ MODE_SHORT = {
     "style": "画风", "character": "人物", "concept": "概念",
     "krea2": "Krea 2", "krea2_at": "Krea2(AI-Toolkit)", "krea2_fz": "Krea2(Fizgig)",
     "flux2": "FLUX.2", "flux2_fz": "FLUX.2(Fizgig)", "video": "视频",
+    "qwen21_fz": "Qwen-Image-2.1(Fizgig)", "h3_fz": "H3(Fizgig)",
     "qwen_image": "Qwen-Image", "zimage": "Z-Image",
 }
 
@@ -367,6 +375,8 @@ DATASET_TIPS = {
     "krea2": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Krea 2 模型放进 models/krea2/（RAW+VAE+文本编码器）。推荐 12G+ 显存。",
     "krea2_at": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前把 Krea 2 RAW 底模放进 models/krea2/（26GB，bf16 原版），文本编码器/VAE 首次训练自动下载。推荐 16G+ 显存（16G 自动 768+int8+分层交换优化）。",
     "krea2_fz": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Krea 2 模型放进 models/krea2/（RAW+VAE+文本编码器）。NVIDIA/AMD 双平台，8G 显存自动 NF4、12G+ 用 fp8。",
+    "qwen21_fz": "📌 Fizgig Qwen-Image-2.1：准备至少 5 张清晰图片，放在原始图片文件夹；选择人物、画风或概念子模式。训练使用官方 Fizgig 预设，704px、0.5MP 分桶。",
+    "h3_fz": "📌 MiniMax H3 全模态：图片、视频、音频可放在同一目录或其子目录，每个文件配同名 .txt。准备至少 1 个样本；预处理只扫描，不会移动、转码或生成字幕。",
     "flux2": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 FLUX.2 模型放进 models/flux2/（DiT+Qwen3 文本编码器+VAE，约 16GB，国内镜像）。8G 显存可跑（自动开省显存），推荐 12G+。",
     "flux2_fz": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Klein 9B 模型放进 models/flux2/（fp8 DiT + Qwen3-8B 文本编码器 + VAE）。推荐 16G+ 显存（12G 自动 NF4）。",
     "video": "📌 视频数据集提示：准备 3~10 段 3~10 秒的同角色/同风格视频（mp4），每段配一个同名 .txt 字幕描述内容。H3 模型 40GB+，训练推荐 24G 显存（NVIDIA）。",
@@ -374,7 +384,7 @@ DATASET_TIPS = {
     "zimage": "📌 数据集提示：15~30 张同一人物/风格图片。Z-Image 是 8B 轻量模型：8G 可用（自动开快跑档）、12G 起步、16G 舒服；首次训练自动下载模型约 16GB（国内镜像）。",
 }
 
-OUTPUT_NAMES = {"style": "anime_style_lora", "character": "character_lora", "concept": "concept_lora", "krea2": "krea2_lora", "krea2_at": "krea2_at_lora", "krea2_fz": "krea2_fizgig_lora", "flux2": "flux2_lora", "flux2_fz": "flux2_fizgig_lora", "video": "h3_video_lora", "qwen_image": "qwen_image_lora", "zimage": "zimage_lora"}
+OUTPUT_NAMES = {"style": "anime_style_lora", "character": "character_lora", "concept": "concept_lora", "krea2": "krea2_lora", "krea2_at": "krea2_at_lora", "krea2_fz": "krea2_fizgig_lora", "qwen21_fz": "qwen21_fizgig_lora", "h3_fz": "h3_fizgig_lora", "flux2": "flux2_lora", "flux2_fz": "flux2_fizgig_lora", "video": "h3_video_lora", "qwen_image": "qwen_image_lora", "zimage": "zimage_lora"}
 # ---------- 新手引导步骤（数据驱动，按模式渲染） ----------
 # 每步：id(唯一) / label(显示文案) / btn(按钮文字) / check(完成判定类型) / act(GUI 动作方法名) / tip(悬停提示)
 # check 类型：
@@ -463,6 +473,26 @@ GUIDE_STEPS = {
         {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
          "tip": "选择图片文件夹（15~30 张同一人物/风格）。"},
     ],
+    "qwen21_fz": [
+        {"id": "env", "label": "① 环境准备", "btn": "去准备", "check": "env", "act": "cmd_env",
+         "tip": "安装 Git 和 Python（只需一次，全部项目通用）。"},
+        {"id": "fizgig", "label": "② 安装第四引擎", "btn": "去安装", "check": "fizgig", "act": "cmd_install_fizgig",
+         "tip": "安装第四引擎 Fizgig（Qwen-Image-2.1，支持 NVIDIA / AMD）。"},
+        {"id": "qwen21_fz_models", "label": "③ 下载 Qwen-Image-2.1 模型", "btn": "去下载", "check": "qwen21_fz_models", "act": "cmd_dl_qwen21_fz_models",
+         "tip": "下载 DiT、VAE、文本编码器和 Fizgig 训练适配器；speed LoRA 仅供预览，可选。"},
+        {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
+         "tip": "选择至少 5 张图片；使用人物、画风或概念训练类型。"},
+    ],
+    "h3_fz": [
+        {"id": "env", "label": "① 环境准备", "btn": "去准备", "check": "env", "act": "cmd_env",
+         "tip": "安装 Git 和 Python（只需一次，全部项目通用）。"},
+        {"id": "fizgig", "label": "② 安装第四引擎", "btn": "去安装", "check": "fizgig", "act": "cmd_install_fizgig",
+         "tip": "安装第四引擎 Fizgig（MiniMax H3 图像/视频/音频混合 LoRA）。"},
+        {"id": "h3_fz_models", "label": "③ 下载 H3 Fizgig 模型", "btn": "去下载", "check": "h3_fz_models", "act": "cmd_dl_h3_fz_models",
+         "tip": "下载官方 int8 DiT、文本编码器和视频 VAE；音频 VAE 按数据集需要，可选适配器和 Turbo LoRA。"},
+        {"id": "raw", "label": "④ 选择混合媒体文件夹", "btn": "去选文件夹", "check": "raw", "act": "cmd_pick_raw",
+         "tip": "图片、视频和音频可混放；每个媒体文件需配同名 .txt，预处理按钮只扫描。"},
+    ],
     "video": [
         {"id": "env", "label": "① 环境准备", "btn": "去准备", "check": "env", "act": "cmd_env",
          "tip": "安装 Git 和 Python（只需一次，全部项目通用）。"},
@@ -538,6 +568,16 @@ PROJECT_TEMPLATES = {
         "mode": "flux2",
         "base_type": "sdxl",
         "note": "FLUX.2 klein 4B 人物/风格 LoRA：需第二引擎 + models/flux2/ 模型（约 16GB，国内镜像）。8G 显存可跑（自动开省显存），推荐 12G+。",
+    },
+    "Qwen-Image-2.1（Fizgig）": {
+        "mode": "qwen21_fz",
+        "base_type": "sdxl",
+        "note": "第四引擎 Fizgig；使用 Qwen-Image-2.1 官方训练预设，模型放在 models/qwen_image21。",
+    },
+    "MiniMax H3 全模态（Fizgig）": {
+        "mode": "h3_fz",
+        "base_type": "sdxl",
+        "note": "第四引擎 Fizgig；图片、视频、音频混合训练，媒体与同名 .txt 可放在同一原始目录或其子目录。",
     },
     # 保留旧名称供历史项目和旧调用方识别；新版下拉由现代 UI 隐藏这些细分模板。
     "画风 LoRA（SDXL）": {

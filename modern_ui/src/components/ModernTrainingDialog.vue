@@ -39,10 +39,13 @@ const logEntries = computed(() => lines.value.map((text, index) => ({
   parts: logParts(text),
 })))
 const hasResume = computed(() => Boolean(props.plan?.resume_path))
+const isRawMediaMode = computed(() => ['video', 'h3_fz'].includes(props.plan?.mode || ''))
 const engineDescription = computed(() => props.plan?.training_engine === 'kohya'
   ? '开始后先按当前设置预处理图集；你可以检查和修改自动标签，确认后直接调用现有 Kohya / sd-scripts 训练入口。'
   : props.plan?.mode === 'video'
     ? '先检查视频和字幕；确认后直接调用现有 MiniMax H3 训练入口。'
+    : props.plan?.mode === 'h3_fz'
+      ? '扫描原始目录中的图片、视频、音频和同名字幕；不会移动或转码媒体，确认后调用 Fizgig H3 训练入口。'
     : `开始后先按当前设置预处理图集；你可以检查和修改自动标签，确认后直接调用现有 ${props.plan?.engine_label || '训练引擎'}入口。`)
 
 watch([() => props.open, () => props.plan?.resume_path], ([open, resumePath]) => {
@@ -189,7 +192,7 @@ onUnmounted(stopPolling)
           <p class="train-description">{{ engineDescription }}</p>
           <div class="train-summary">
             <div><span>训练模型</span><strong>{{ plan.model_label }}</strong><small>{{ plan.model_path }}</small></div>
-            <div><span>图集</span><strong>{{ plan.image_count }} 张（至少 {{ plan.min_images }} 张）</strong><small>{{ plan.raw_dir }}</small></div>
+            <div><span>{{ plan.data_label || '图集' }}</span><strong>{{ plan.data_count ?? plan.image_count }} {{ plan.data_unit || '张' }}（至少 {{ plan.min_images }}）</strong><small>{{ plan.raw_dir }}</small></div>
             <div><span>训练参数</span><strong>rank / alpha {{ plan.rank }} / {{ plan.alpha }} · 学习率 {{ plan.learning_rate }}</strong><small>{{ plan.resolution }} px · {{ plan.schedule_value || `${plan.steps} 步` }} · {{ plan.training_type === 'style' ? '画风' : plan.training_type === 'concept' ? '概念' : '人物' }}<template v-if="plan.training_target"> · {{ plan.training_target }}</template></small></div>
             <div><span>显卡</span><strong>{{ plan.gpu_vendor }}<template v-if="plan.vram_gb != null"> · {{ plan.vram_gb.toFixed(1) }} GB</template></strong><small>Trigger：{{ plan.trigger || '未填写' }}</small></div>
           </div>
@@ -214,8 +217,8 @@ onUnmounted(stopPolling)
           <div class="train-progress"><span :class="{ indeterminate: running && state?.progress == null }" :style="state?.progress != null ? { width: `${Math.floor(state.progress * 100)}%` } : undefined"></span></div>
           <p v-if="state?.detail" class="train-detail">{{ state.detail }}</p>
           <div v-if="awaitingReview" class="review-callout">
-            <strong>{{ plan?.mode === 'video' ? '训练尚未开始' : '训练尚未开始' }}</strong>
-            <span>{{ plan?.mode === 'video' ? '请确认视频字幕和训练数据后继续。' : '请检查预处理后的图片和标签；需要时打开标签编辑器修改，回来后确认继续训练。' }}</span>
+            <strong>训练尚未开始</strong>
+            <span>{{ plan?.mode === 'video' ? '请确认视频字幕和训练数据后继续。' : plan?.mode === 'h3_fz' ? '请确认混合媒体样本与同名字幕后继续；格式会在引擎缓存阶段校验。' : '请检查预处理后的图片和标签；需要时打开标签编辑器修改，回来后确认继续训练。' }}</span>
           </div>
           <div ref="logElement" class="train-log" role="log" aria-live="polite">
             <div v-if="!logEntries.length" class="train-log-line tone-muted">等待训练日志…</div>
@@ -225,9 +228,9 @@ onUnmounted(stopPolling)
           </div>
           <footer class="train-actions">
             <template v-if="awaitingReview">
-            <button v-if="plan?.mode !== 'video'" class="train-button" type="button" @click="openLabelEditor">打开标签编辑器</button>
+              <button v-if="!isRawMediaMode" class="train-button" type="button" @click="openLabelEditor">打开标签编辑器</button>
               <button class="train-button" type="button" @click="cancel">取消训练</button>
-              <button class="train-button primary" type="button" @click="continueAfterReview">确认标签并继续训练</button>
+              <button class="train-button primary" type="button" @click="continueAfterReview">{{ plan?.mode === 'h3_fz' ? '确认数据并继续训练' : isRawMediaMode ? '确认字幕并继续训练' : '确认标签并继续训练' }}</button>
             </template>
             <button v-else-if="running" class="train-button" type="button" @click="cancel">停止训练</button>
             <button class="train-button primary" type="button" :disabled="active" @click="close">{{ active ? (awaitingReview ? '等待标签确认…' : '训练运行中…') : '关闭' }}</button>

@@ -199,6 +199,10 @@ export interface TrainingPlan {
   model_size: string
   raw_dir: string
   image_count: number
+  data_count?: number
+  data_label?: string
+  data_unit?: string
+  media_summary?: Record<string, unknown> | null
   min_images: number
   training_type: string
   training_target?: string
@@ -272,6 +276,10 @@ export interface ModeWorkspaceData {
   is_video: boolean
   is_step_based: boolean
   has_training_submode: boolean
+  data_count?: number
+  data_label?: string
+  data_unit?: string
+  media_summary?: Record<string, unknown> | null
   guide_steps?: GuideStep[]
 }
 
@@ -295,13 +303,15 @@ const demoTemplates: ProjectTemplate[] = [
   { name: 'Z-Image', mode: 'zimage', mode_label: 'Z-Image', base_type: 'zimage', note: '第三引擎图像训练，按总训练步数运行。' },
   { name: 'Krea2（Fizgig）', mode: 'krea2_fz', mode_label: 'Krea2 Fizgig', base_type: 'sdxl', note: '第四引擎 Krea2 图像训练。' },
   { name: 'FLUX.2 Klein 9B（Fizgig）', mode: 'flux2_fz', mode_label: 'Klein 9B', base_type: 'sdxl', note: '第四引擎 Klein 9B 图像训练。' },
+  { name: 'Qwen-Image-2.1（Fizgig）', mode: 'qwen21_fz', mode_label: 'Qwen-Image-2.1 Fizgig', base_type: 'sdxl', note: '第四引擎 Qwen-Image-2.1；支持官方训练预设和 AMD 实验通道。' },
+  { name: 'MiniMax H3 全模态（Fizgig）', mode: 'h3_fz', mode_label: 'MiniMax H3 Fizgig', base_type: 'sdxl', note: '第四引擎 H3 图片、视频、音频混合训练；同一目录或子目录中的每个媒体文件都需同名字幕。' },
 ]
 
 const demoEngineGroups: EngineGroup[] = [
   { label: '第一引擎 · kohya', modes: [{ key: '_kohya', label: 'LoRA' }] },
   { label: '第二引擎 · musubi', modes: [{ key: 'krea2', label: 'Krea2' }, { key: 'flux2', label: 'FLUX.2' }] },
   { label: '第三引擎 · ai-toolkit', modes: [{ key: 'video', label: '视频H3' }, { key: 'krea2_at', label: 'Krea2AT' }, { key: 'qwen_image', label: 'Qwen' }, { key: 'zimage', label: 'Z-Image' }] },
-  { label: '第四引擎 · fizgig', modes: [{ key: 'krea2_fz', label: 'Krea2F' }, { key: 'flux2_fz', label: 'Klein9B' }] },
+  { label: '第四引擎 · fizgig', modes: [{ key: 'krea2_fz', label: 'Krea2F' }, { key: 'flux2_fz', label: 'Klein9B' }, { key: 'qwen21_fz', label: 'Qwen2.1F' }, { key: 'h3_fz', label: 'H3-F' }] },
 ]
 
 export async function waitForDesktopBridge(timeoutMs = 1800): Promise<boolean> {

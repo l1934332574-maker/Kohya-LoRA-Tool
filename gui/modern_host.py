@@ -27,13 +27,15 @@ _MODERN_PROJECT_TEMPLATES = {
     "Z-Image LoRA": {"mode": "zimage", "base_type": "sdxl", "note": "第三引擎 AI Toolkit；轻量图像模型，按步训练。"},
     "Krea2 图像 LoRA（Fizgig）": {"mode": "krea2_fz", "base_type": "sdxl", "note": "第四引擎 Fizgig；NVIDIA / AMD 通道，复用 models/krea2。"},
     "Klein 9B LoRA（Fizgig）": {"mode": "flux2_fz", "base_type": "sdxl", "note": "第四引擎 Fizgig；Klein 9B 图像 LoRA，模型放在 models/flux2。"},
+    "Qwen-Image-2.1 LoRA（Fizgig）": {"mode": "qwen21_fz", "base_type": "sdxl", "note": "第四引擎 Fizgig；Qwen-Image-2.1 官方训练预设，模型放在 models/qwen_image21。"},
+    "MiniMax H3 全模态 LoRA（Fizgig）": {"mode": "h3_fz", "base_type": "sdxl", "note": "第四引擎 Fizgig；图片、视频、音频与同名字幕可放在同一原始目录或其子目录。"},
 }
 
 _WORKSPACE_PARAM_KEYS = (
     "rank", "alpha", "unet_lr", "te_lr", "repeats", "max_epochs", "resolution",
     "save_every", "sample_interval", "video_steps", "video_frames", "optimizer",
     "strong_bind", "clean_concept", "sample_preview", "compile", "crop_ratio",
-    "sample_prompt", "noise_offset", "min_snr_gamma", "quant_mode", "blocks_to_swap",
+    "sample_prompt", "noise_offset", "min_snr_gamma", "quant_mode", "blocks_to_swap", "fizgig_qwen_preset",
     "wd14_model", "overwrite", "amd_mode", "global_pos", "global_neg",
 )
 
@@ -42,7 +44,7 @@ _WORKSPACE_PARAM_KEYS = (
 # modern project is created from a compatible JSON file.
 _MODERN_IMPORT_EXTRA_PARAMS = {
     "sample_interval", "video_frames", "noise_offset", "min_snr_gamma",
-    "wd14_model", "overwrite", "amd_mode",
+    "wd14_model", "overwrite", "amd_mode", "fizgig_qwen_preset",
 }
 
 _APPEARANCE_BACKGROUND_HISTORY_LIMIT = 8
@@ -246,6 +248,8 @@ class ModernUIBridge:
             "krea2_fz": ("Krea2 模型", "Krea2 Fizgig 训练文件", "KREA2_MODEL_LINKS", "krea2_models_dir", "krea2_model_files", {"raw", "vae", "te"}),
             "flux2": ("FLUX.2 模型", "FLUX.2 4B 训练文件", "FLUX2_MODEL_LINKS", "flux2_models_dir", "flux2_model_files", {"dit", "te", "vae"}),
             "flux2_fz": ("Klein 9B 模型", "FLUX.2 Klein 9B 训练文件", "FLUX2FZ_MODEL_LINKS", "flux2_models_dir", "flux2_fz_model_files", {"dit", "te", "vae"}),
+            "qwen21_fz": ("Qwen-Image-2.1 模型", "Qwen-Image-2.1 Fizgig 训练文件", "QWEN21_FZ_MODEL_LINKS", "qwen21_fz_models_dir", "qwen21_fz_model_files", {"dit", "vae", "te", "training_adapter"}),
+            "h3_fz": ("H3 Fizgig 模型", "MiniMax H3 图片 / 视频 / 音频混合训练文件", "H3_FZ_MODEL_LINKS", "h3_fz_models_dir", "h3_fz_model_files", {"dit", "te", "video_vae"}),
             "video": ("H3 模型", "MiniMax H3 视频训练文件", "H3_MODEL_LINKS", "h3_models_dir", "h3_model_files", {"te", "video_vae"}),
         }
         return specs.get(mode)
@@ -282,6 +286,10 @@ class ModernUIBridge:
             note = "AI Toolkit 的文本编码器会在首次训练时按需准备；RAW 底模和 VAE 可在此提前下载。"
         elif mode == "video":
             note = "主模型可选 int8 或 nvfp4 其中一个；文本编码器和视频 VAE 需要准备，音频 VAE 可选。"
+        elif mode == "qwen21_fz":
+            note = "DiT、VAE、文本编码器和训练适配器为训练必需；speed LoRA 仅供预览，可选。"
+        elif mode == "h3_fz":
+            note = "官方 int8 DiT、文本编码器和视频 VAE 为必需；音频 VAE 在训练音频或带声音视频时必需，训练适配器和 Turbo LoRA 可选。"
         else:
             note = "下载支持断点续传；取消或中断后再次点击同一文件即可接着下载。"
         params = {
@@ -391,7 +399,7 @@ class ModernUIBridge:
             has_videos = bool(self.core.scan_video_dataset(raw_dir)[0])
             if not has_videos:
                 return {"ok": False, "error": "当前文件夹没有找到可用的视频文件。"}
-        elif self._count_preprocessable_images(raw_dir) <= 0:
+        elif mode != "h3_fz" and self._count_preprocessable_images(raw_dir) <= 0:
             return {"ok": False, "error": "当前文件夹没有找到可处理的图片。"}
 
         stored = config.get("params") if isinstance(config.get("params"), dict) else {}
@@ -425,6 +433,20 @@ class ModernUIBridge:
                         len(videos), duration, no_caption
                     ))
                     message = "视频数据检查完成。"
+                elif mode == "h3_fz":
+                    summary = self.core.scan_fizgig_h3_dataset(raw_dir)
+                    total = int(summary.get("total", 0) or 0)
+                    missing = summary.get("missing_captions", 0)
+                    missing = len(missing) if isinstance(missing, (list, tuple, set)) else int(missing or 0)
+                    self._task_log(task_id, "[预处理] H3 混合媒体扫描：图片 %d，视频 %d，音频 %d，总计 %d，缺字幕 %d。" % (
+                        int(summary.get("images", 0) or 0), int(summary.get("videos", 0) or 0),
+                        int(summary.get("audio", 0) or 0), total, missing,
+                    ))
+                    if total <= 0:
+                        raise RuntimeError("目录中没有可训练的图片、视频或音频样本。")
+                    if missing:
+                        raise RuntimeError("有 %d 个媒体文件缺少同名 .txt 字幕；请补齐字幕后重新扫描。" % missing)
+                    message = "H3 混合媒体扫描完成；未移动或转码文件。"
                 else:
                     self._task_log(task_id, "[预处理] 正在检查、整理并打标当前图集…")
                     with self._task_lock:
@@ -597,7 +619,40 @@ class ModernUIBridge:
 
         warnings = []
         min_count = int(getattr(self.core, "MIN_IMAGES", {}).get(mode, 15))
-        if mode == "video":
+        media_summary = None
+        if mode == "h3_fz":
+            try:
+                media_summary = self.core.scan_fizgig_h3_dataset(raw_dir)
+            except Exception as exc:
+                return {"ok": False, "error": "H3 混合媒体数据集预检失败：%s" % exc}
+            image_count = int(media_summary.get("total", 0) or 0)
+            missing_captions = media_summary.get("missing_captions", 0)
+            missing_captions = len(missing_captions) if isinstance(missing_captions, (list, tuple, set)) else int(missing_captions or 0)
+            if image_count < min_count:
+                return {"ok": False, "error": "H3 混合媒体目录只有 %d 个样本；至少需要 %d 个。" % (image_count, min_count)}
+            if missing_captions:
+                return {"ok": False, "error": "有 %d 个 H3 媒体文件缺少同名 .txt 字幕；请补齐后再训练。" % missing_captions}
+            has_audio = int(media_summary.get("audio", 0) or 0) > 0
+            has_video = int(media_summary.get("videos", 0) or 0) > 0
+            if has_audio:
+                try:
+                    audio_missing = list(self.core.h3_fz_missing_models(require_audio=True))
+                except Exception as exc:
+                    return {"ok": False, "error": "无法检查 H3 音频模型：%s" % exc}
+                if audio_missing:
+                    return {"ok": False, "error": "当前数据集含音频，训练前还需准备音频 VAE：\n%s\n\n模型目录：%s" % (
+                        "\n".join(str(item) for item in audio_missing), details.get("asset_dir") or "未指定")}
+            elif has_video:
+                try:
+                    audio_vae_ready = bool(self.core.h3_fz_model_files().get("audio_vae"))
+                except Exception:
+                    audio_vae_ready = False
+                if not audio_vae_ready:
+                    warnings.append("视频含音轨但未准备音频 VAE；引擎会忽略声音，仅训练视频画面。")
+            model_label = "MiniMax H3（Fizgig，全模态）"
+            schedule_value = "%d 轮 · 预览 %d 帧" % (params.get("max_epochs") or 50, params.get("video_frames") or 56)
+            steps = 0
+        elif mode == "video":
             try:
                 videos, duration, no_caption = self.core.scan_video_dataset(raw_dir)
             except Exception as exc:
@@ -614,7 +669,7 @@ class ModernUIBridge:
             vram = self._safe_vram()
             if vram is not None and vram < 24:
                 warnings.append("当前显存约 %.1f GB，H3 推荐 24GB 以上；训练可能很慢或显存不足。" % vram)
-            model_label = "MiniMax H3"
+            model_label = "MiniMax H3（AI Toolkit 视频）"
             schedule_value = "%d 步 · %d 帧" % (params.get("video_steps") or 2000, params.get("video_frames") or 73)
             steps = int(params.get("video_steps") or 2000)
         else:
@@ -637,12 +692,28 @@ class ModernUIBridge:
         supports_amd = bool(getattr(self.core, "param_supports", lambda *_: False)("amd_mode", mode))
         if vendor == "amd" and supports_amd and not params.get("amd_mode"):
             return {"ok": False, "error": "检测到 AMD 显卡；请在新版训练页开启 AMD 兼容模式并保存，再开始训练。"}
+        if vendor == "amd" and mode in ("qwen21_fz", "h3_fz"):
+            warnings.append("Fizgig AMD ROCm 通道为实验性兼容路径；此模式的训练兼容性尚未验证。")
         if vendor != "amd":
             try:
                 if not self.core.detect_nvidia_gpu():
                     warnings.append("没有检测到 NVIDIA GPU；请确认训练环境支持当前显卡。")
             except Exception:
                 pass
+        plan_rank = params["rank"]
+        plan_alpha = params["alpha"]
+        plan_learning_rate = str(params["unet_lr"])
+        if mode == "qwen21_fz":
+            qwen_preset = str(params.get("fizgig_qwen_preset") or "auto").lower()
+            if qwen_preset == "auto":
+                qwen_preset = "style" if str(params.get("at_sub_mode") or "character") == "style" else "fast"
+            qwen_plan = {
+                "fast": (8, 8, "Adaptive 2e-4~4e-4"),
+                "standard": (16, 16, "Adaptive 1e-4~2e-4"),
+                "style": (16, 16, "Flat 1.5e-4"),
+            }
+            plan_rank, plan_alpha, plan_learning_rate = qwen_plan.get(qwen_preset, qwen_plan["fast"])
+            model_label = "Qwen-Image-2.1（Fizgig %s 预设）" % qwen_preset.title()
         resume_path = self._resume_path(project_name, mode, params)
         plan = {
             "project_name": project_name, "mode": mode,
@@ -653,11 +724,15 @@ class ModernUIBridge:
             "model_path": str(details.get("asset_dir") or "由引擎管理"),
             "model_download_required": False, "model_size": "",
             "raw_dir": raw_dir, "image_count": image_count, "min_images": min_count,
+            "data_count": image_count,
+            "data_label": "混合媒体样本" if mode == "h3_fz" else ("视频" if mode == "video" else "图片"),
+            "data_unit": "个" if mode == "h3_fz" else ("段" if mode == "video" else "张"),
+            "media_summary": media_summary,
             "training_type": params.get("at_sub_mode") or mode,
             "training_target": "按当前模式调用已有训练引擎入口",
             "schedule_label": "训练计划", "schedule_value": schedule_value,
-            "rank": params["rank"], "alpha": params["alpha"],
-            "learning_rate": str(params["unet_lr"]), "resolution": params["resolution"],
+            "rank": plan_rank, "alpha": plan_alpha,
+            "learning_rate": plan_learning_rate, "resolution": params["resolution"],
             "steps": steps, "trigger": params["trigger"],
             "gpu_vendor": vendor, "vram_gb": vram, "warnings": warnings,
             "resume_path": str(resume_path or ""),
@@ -674,12 +749,14 @@ class ModernUIBridge:
     def _engine_kind_for_mode(mode):
         return {"style": "kohya", "character": "kohya", "concept": "kohya",
                 "krea2": "musubi", "flux2": "musubi", "krea2_fz": "fizgig", "flux2_fz": "fizgig",
+                "qwen21_fz": "fizgig", "h3_fz": "fizgig",
                 "video": "ai_toolkit", "krea2_at": "ai_toolkit", "qwen_image": "ai_toolkit", "zimage": "ai_toolkit"}.get(mode, "unknown")
 
     @staticmethod
     def _engine_label_for_mode(mode):
         return {"style": "Kohya / sd-scripts", "character": "Kohya / sd-scripts", "concept": "Kohya / sd-scripts",
                 "krea2": "musubi-tuner", "flux2": "musubi-tuner", "krea2_fz": "Fizgig", "flux2_fz": "Fizgig",
+                "qwen21_fz": "Fizgig", "h3_fz": "Fizgig",
                 "video": "AI Toolkit", "krea2_at": "AI Toolkit", "qwen_image": "AI Toolkit", "zimage": "AI Toolkit"}.get(mode, "训练引擎")
 
     def _resume_path(self, project_name, mode, params):
@@ -688,7 +765,7 @@ class ModernUIBridge:
         try:
             output_dir = self.core.data_sub("output", project_name)
             output_name = self.core.output_name_for(mode, params.get("style_preset"))
-            if mode in ("krea2_fz", "flux2_fz"):
+            if mode in ("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz"):
                 return self.core.find_fizgig_state(output_dir, output_name)
             if mode in ("krea2", "flux2"):
                 return self.core.find_musubi_state(output_dir, output_name)
@@ -928,12 +1005,13 @@ class ModernUIBridge:
             "raw_dir": str(config.get("raw_dir") or "").strip(),
             "reg_dir": str(config.get("reg_dir") or "").strip() or None,
             "base_model": str(config.get("base_model") or "").strip() or None,
-            "rank": integer("rank", 32), "alpha": integer("alpha", 32),
+            "rank": integer("rank", 8 if mode in ("qwen21_fz", "h3_fz") else 32), "alpha": integer("alpha", 8 if mode in ("qwen21_fz", "h3_fz") else 32),
             "unet_lr": str(value("unet_lr", "1e-4")), "te_lr": str(value("te_lr", "1e-4")),
-            "repeats": integer("repeats", 1), "max_epochs": integer("max_epochs", 16),
+            "repeats": integer("repeats", 1), "max_epochs": integer("max_epochs", 50 if mode == "h3_fz" else 30 if mode == "qwen21_fz" else 16),
             "resolution": integer("resolution", 1024),
             "video_steps": integer("video_steps", 2000),
             "video_frames": integer("video_frames", getattr(self.core, "H3_FRAMES", 73)),
+            "fizgig_qwen_preset": str(value("fizgig_qwen_preset", "auto") or "auto"),
             "save_every": optional_integer("save_every"),
             "sample_interval": integer("sample_interval", 0),
             "sample_prompt": str(value("sample_prompt", "") or ""),
@@ -1147,6 +1225,17 @@ class ModernUIBridge:
                     processed_count = len(videos) - no_caption
                     self._task_log(task_id, "[预处理] 视频无需图片预处理；数据集 %d 段，约 %.1f 秒，%d 段缺少字幕。" % (
                         len(videos), duration, no_caption))
+                elif params["mode"] == "h3_fz":
+                    media_summary = self.core.scan_fizgig_h3_dataset(params["raw_dir"])
+                    processed_count = int(media_summary.get("total", 0) or 0)
+                    missing_captions = media_summary.get("missing_captions", 0)
+                    missing_captions = len(missing_captions) if isinstance(missing_captions, (list, tuple, set)) else int(missing_captions or 0)
+                    self._task_log(task_id, "[预处理] H3 混合媒体扫描：图片 %d，视频 %d，音频 %d，总计 %d，缺字幕 %d；不移动、不转码。" % (
+                        int(media_summary.get("images", 0) or 0), int(media_summary.get("videos", 0) or 0),
+                        int(media_summary.get("audio", 0) or 0), processed_count, missing_captions,
+                    ))
+                    if missing_captions:
+                        raise RuntimeError("有 %d 个媒体文件缺少同名 .txt 字幕；请补齐后再训练。" % missing_captions)
                 else:
                     is_kohya = params["mode"] in ("character", "style", "concept")
                     preprocess_mode = self.core.preprocess_mode(params["mode"], params["at_sub_mode"])
@@ -1178,18 +1267,19 @@ class ModernUIBridge:
                     if processed_count <= 0:
                         processed_count = int(self.core.count_images(self.core.dataset_train_dir(params["mode"], project_name)))
                 if processed_count < plan["min_images"]:
-                    label = "可用视频" if params["mode"] == "video" else "可用图片"
+                    label = "可用视频" if params["mode"] == "video" else "可用混合媒体样本" if params["mode"] == "h3_fz" else "可用图片"
                     raise RuntimeError("预处理后只有 %d 个%s；%s 至少需要 %d。" % (
                         processed_count, label, plan["mode_label"], plan["min_images"]))
                 engine_name = plan.get("engine_label") or self._engine_label_for_mode(params["mode"])
                 review_message = ("视频字幕检查完成；确认后启动 %s。" % engine_name if params["mode"] == "video"
+                                  else "混合媒体扫描完成；确认字幕与样本后启动 %s。" % engine_name if params["mode"] == "h3_fz"
                                   else "可以打开标签编辑器查看或修改标签；确认后才会启动 %s。" % engine_name)
                 self._task_log(task_id, "[预处理] 已完成，可用数据 %d 个。请检查数据后确认是否继续训练。" % processed_count)
                 with self._task_lock:
                     if self._task and self._task.get("id") == task_id:
                         self._task.update(
                             status="awaiting_review",
-                            message="预处理已完成，请检查图片和标签。",
+                            message="数据检查已完成，请确认后继续训练。" if params["mode"] in ("video", "h3_fz") else "预处理已完成，请检查图片和标签。",
                             progress=None,
                             detail=review_message,
                         )
@@ -1272,6 +1362,17 @@ class ModernUIBridge:
                     )
                 elif mode == "flux2_fz":
                     self.core.train_flux2_fizgig(
+                        lambda line: self._task_log(task_id, line), mode=mode, params=params,
+                        vram_gb=plan.get("vram_gb"), resume_from=resume_path, progress=monitor,
+                    )
+                elif mode == "qwen21_fz":
+                    self.core.train_qwen21_fizgig(
+                        lambda line: self._task_log(task_id, line), mode=mode, params=params,
+                        vram_gb=plan.get("vram_gb"), resume_from=resume_path, progress=monitor,
+                    )
+                elif mode == "h3_fz":
+                    params["train_data_dir"] = params.get("raw_dir") or ""
+                    self.core.train_h3_fizgig(
                         lambda line: self._task_log(task_id, line), mode=mode, params=params,
                         vram_gb=plan.get("vram_gb"), resume_from=resume_path, progress=monitor,
                     )
@@ -1463,7 +1564,7 @@ class ModernUIBridge:
             "save_every", "sample_interval", "video_steps", "video_frames", "optimizer",
             "strong_bind", "clean_concept", "sample_preview", "compile", "crop_ratio",
             "sample_prompt", "noise_offset", "min_snr_gamma", "quant_mode", "blocks_to_swap",
-            "wd14_model", "overwrite", "amd_mode",
+            "wd14_model", "overwrite", "amd_mode", "fizgig_qwen_preset",
         }
         allowed_root_fields = root_string_fields | root_bool_fields | {"params"}
         unknown_root_fields = set(patch) - allowed_root_fields
@@ -1502,6 +1603,8 @@ class ModernUIBridge:
             if key == "sample_preview" and value is None:
                 params.pop(key, None)
                 continue
+            if key == "fizgig_qwen_preset" and value not in ("auto", "fast", "standard", "style"):
+                return {"ok": False, "error": "Qwen-Image-2.1 训练预设无效。"}
             if key in {"strong_bind", "clean_concept", "sample_preview", "compile", "overwrite", "amd_mode"}:
                 if not isinstance(value, bool):
                     return {"ok": False, "error": "训练参数「%s」必须为开关值。" % key}
@@ -2061,12 +2164,18 @@ class ModernUIBridge:
             "krea2": "musubi_ok", "flux2": "musubi_ok",
             "video": "at_ok", "krea2_at": "at_ok", "qwen_image": "at_ok", "zimage": "at_ok",
             "krea2_fz": "fizgig_ok", "flux2_fz": "fizgig_ok",
+            "qwen21_fz": "fizgig_ok", "h3_fz": "fizgig_ok",
         }.get(mode)
         engine_ready = bool(status.get(engine_key)) if engine_key else False
         engine_update_available = False
         if mode in ("video", "krea2_at", "qwen_image", "zimage"):
             try:
                 engine_update_available = bool(core.ai_toolkit_engine_update_status().get("update_available"))
+            except Exception:
+                engine_update_available = False
+        elif mode in ("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz"):
+            try:
+                engine_update_available = bool(core.fizgig_engine_update_status().get("update_available"))
             except Exception:
                 engine_update_available = False
         missing = []
@@ -2084,6 +2193,12 @@ class ModernUIBridge:
             elif mode == "flux2_fz":
                 missing = list(core.flux2_fz_missing_models())
                 asset_dir = core.flux2_models_dir()
+            elif mode == "qwen21_fz":
+                missing = list(core.qwen21_fz_missing_models())
+                asset_dir = core.qwen21_fz_models_dir()
+            elif mode == "h3_fz":
+                missing = list(core.h3_fz_missing_models())
+                asset_dir = core.h3_fz_models_dir()
             elif mode == "video":
                 missing = list(core.h3_missing_models())
                 asset_dir = core.h3_models_dir()
@@ -2124,6 +2239,8 @@ class ModernUIBridge:
             "krea2": getattr(core, "TRIGGER_HINT_KREA2", ""),
             "krea2_at": getattr(core, "TRIGGER_HINT_KREA2_AT", ""),
             "krea2_fz": getattr(core, "TRIGGER_HINT_KREA2", ""),
+            "qwen21_fz": getattr(core, "TRIGGER_HINT_QWEN21_FZ", getattr(core, "TRIGGER_HINT_AT", "")),
+            "h3_fz": getattr(core, "TRIGGER_HINT_H3_FZ", getattr(core, "TRIGGER_HINT_VIDEO", "")),
             "flux2": getattr(core, "TRIGGER_HINT_FLUX2", ""),
             "flux2_fz": getattr(core, "TRIGGER_HINT_FLUX2_FZ", ""),
             "video": getattr(core, "TRIGGER_HINT_VIDEO", ""),
@@ -2143,7 +2260,7 @@ class ModernUIBridge:
             "raw": bool(project_config.get("raw_dir")),
         }
         model_checks = {
-            "krea2_models", "krea2_at_models", "flux2_models", "flux2_fz_models", "h3_models", "at_model",
+            "krea2_models", "krea2_at_models", "flux2_models", "flux2_fz_models", "h3_models", "qwen21_fz_models", "h3_fz_models", "at_model",
         }
         for step in getattr(core, "GUIDE_STEPS", {}).get(mode, ()):
             check = step.get("check")
@@ -2186,9 +2303,9 @@ class ModernUIBridge:
             "interval_units": interval_units,
             "defaults": preset,
             "presets": presets,
-            "is_video": mode == "video",
+            "is_video": mode in ("video", "h3_fz"),
             "is_step_based": mode in ("video", "qwen_image", "zimage"),
-            "has_training_submode": mode in ("krea2", "krea2_at", "krea2_fz", "flux2", "flux2_fz"),
+            "has_training_submode": mode in ("krea2", "krea2_at", "krea2_fz", "qwen21_fz", "flux2", "flux2_fz"),
             "guide_steps": guide_steps,
         }
 
@@ -2434,6 +2551,8 @@ class ModernUIBridge:
                 "krea2_fz": self.core.krea2_models_dir,
                 "flux2": self.core.flux2_models_dir,
                 "flux2_fz": self.core.flux2_models_dir,
+                "qwen21_fz": self.core.qwen21_fz_models_dir,
+                "h3_fz": self.core.h3_fz_models_dir,
                 "video": self.core.h3_models_dir,
             }
             get_dir = model_dirs.get(mode)
@@ -2491,7 +2610,7 @@ class ModernUIBridge:
 
         project_actions = {
             "label_editor", "export_config", "readme", "at_model_help",
-            "at_engine_update", "anima_components", "krea2_guide", "flux2_guide",
+            "at_engine_update", "fizgig_engine_update", "anima_components", "krea2_guide", "flux2_guide",
             "h3_guide", "video_caption_stub", "video_caption", "amd_env",
         }
         if action in project_actions:
@@ -2508,6 +2627,7 @@ class ModernUIBridge:
                 "readme": "使用说明",
                 "at_model_help": "模型说明",
                 "at_engine_update": "训练引擎更新",
+                "fizgig_engine_update": "Fizgig 引擎更新",
                 "anima_components": "Anima 组件",
                 "krea2_guide": "Krea 2 使用引导",
                 "flux2_guide": "FLUX.2 使用引导",

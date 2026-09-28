@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.18.7"
+APP_VERSION = "0.18.8"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2036,6 +2036,8 @@ def install_musubi_engine(logf=print):
 # ---------- Krea2 图像 LoRA 训练（第二引擎 musubi-tuner） ----------
 
 KREA2_RESOLUTION = 1024
+QWEN21_FZ_RESOLUTION = 704              # Fizgig Qwen 2.1 官方 0.5 MP 桶的方图边长
+H3_FZ_RESOLUTION = 768
 KREA2_MAX_STEPS = 6000          # Krea2 自动约束最大总步数（防过拟合）
 
 # Krea2 模型文件（放 models/krea2/，不内置；国内镜像直链）
@@ -3734,6 +3736,33 @@ H3_MODEL_LINKS = {
     "audio_vae": ("minimax_h3_audio_vae_fp32.safetensors", "音频 VAE（fp32，约 0.6GB，可选）",
                   "https://modelscope.cn/models/Comfy-Org/minimax-H3/resolve/master/vae/minimax_h3_audio_vae_fp32.safetensors"),
 }
+
+# Fizgig v6.5.0 uses the official int8 H3 base. The third engine's Abiray
+# NVFP4 checkpoint is intentionally excluded from this family.
+H3_FZ_MODEL_LINKS = {
+    **{key: H3_MODEL_LINKS[key] for key in ("dit", "te", "video_vae", "audio_vae")},
+    "training_adapter": (
+        "minimax_h3_image_training_adapter.safetensors", "H3 训练适配器（推荐）",
+        "https://modelscope.cn/models/circlestone-labs/MiniMax-H3-Image-Training-Adapter/resolve/master/minimax_h3_image_training_adapter.safetensors"),
+    "turbo_lora": (
+        "minimax_h3_turbo_v4_step600.safetensors", "H3 Turbo 预览 LoRA（可选）",
+        "https://modelscope.cn/models/larryvrh/MiniMax-H3-Turbo-Lora/resolve/master/minimax_h3_turbo_v4_step600.safetensors"),
+}
+
+QWEN21_FZ_MODEL_LINKS = {
+    "dit": ("qwen_image_2.1_bf16.safetensors", "Qwen-Image-2.1 bf16 主模型",
+            "https://modelscope.cn/models/Comfy-Org/Qwen-Image-2.1/resolve/master/diffusion_models/qwen_image_2.1_bf16.safetensors"),
+    "vae": ("qwen_image_2.1_vae_diffusers.safetensors", "Qwen-Image-2.1 专用 VAE",
+            "https://modelscope.cn/models/Qwen/Qwen-Image-2.1/resolve/master/vae/diffusion_pytorch_model.safetensors"),
+    "te": ("qwen3vl_8b_bf16.safetensors", "Qwen3-VL-8B 文本编码器",
+           "https://modelscope.cn/models/Comfy-Org/Qwen-Image-2.1/resolve/master/text_encoders/qwen3vl_8b_bf16.safetensors"),
+    "training_adapter": (
+        "fizgig_qwen_image_2.1_training_adapter.safetensors", "Qwen-Image-2.1 训练适配器（推荐）",
+        "https://huggingface.co/ShootTheSound/Fizgig-Qwen-Image-2.1-Training-Adapter/resolve/main/fizgig_qwen_image_2.1_training_adapter.safetensors"),
+    "speed_lora": (
+        "Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r128.safetensors", "Qwen-Image-2.1 Turbo 采样 LoRA（可选）",
+        "https://modelscope.cn/models/Viggle/Qwen-Image-2.1-viggle-turbo/resolve/master/Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r128.safetensors"),
+}
 FLUX_MODEL_LINKS = {
     # 全部走魔搭（ModelScope）国内直链（cdn-lfs-cn，支持断点续传），不再用 hf-mirror（偶发不稳/SSL）
     "dit": ("flux1-dev.safetensors", "FLUX.1-dev DiT 主模型（约 22.2GB，训练必需；非门禁镜像）",
@@ -3842,6 +3871,140 @@ def h3_missing_models(vram_gb=None):
             fname, desc, url = H3_MODEL_LINKS[key]
             missing.append(f"· {desc}\n  文件: {fname}\n  下载: {url}")
     return missing
+
+
+def qwen21_fz_models_dir():
+    return os.path.join(KIT_DIR, "models", "qwen_image21")
+
+
+def qwen21_fz_model_files():
+    """Return Fizgig model paths, reusing compatible third-engine files when found."""
+    folder = qwen21_fz_models_dir()
+    result = {}
+    for key, (name, _description, _url) in QWEN21_FZ_MODEL_LINKS.items():
+        path = os.path.join(folder, name)
+        result[key] = path if os.path.isfile(path) and _safetensors_complete(path) else None
+    # The third engine can use the same Comfy bf16 DiT and TE. Its Comfy VAE is
+    # a different format, so Fizgig still needs the official diffusers VAE.
+    try:
+        info = at_image_info("qwen_image")
+        if info and info.get("arch") == "qwen_image_2":
+            checkpoint = at_image_local_dir("qwen_image")
+            if (not result["dit"] and os.path.basename(checkpoint).lower() == "qwen_image_2.1_bf16.safetensors"
+                    and _at_image_qwen21_checkpoint_ready(checkpoint) and _safetensors_complete(checkpoint)):
+                result["dit"] = checkpoint
+            if not result["te"] and os.path.isfile(checkpoint):
+                components = at_image_qwen21_local_components(checkpoint)
+                text_encoder = components.get("text_encoder_path")
+                if text_encoder and os.path.basename(text_encoder).lower() == "qwen3vl_8b_bf16.safetensors" and _safetensors_complete(text_encoder):
+                    result["te"] = text_encoder
+    except Exception:
+        pass
+    return result
+
+
+def qwen21_fz_missing_models():
+    files = qwen21_fz_model_files()
+    return [f"· {description}\n  文件: {name}\n  下载: {url}"
+            for key, (name, description, url) in QWEN21_FZ_MODEL_LINKS.items()
+            if key in ("dit", "vae", "te", "training_adapter") and not files[key]]
+
+
+def h3_fz_models_dir():
+    return h3_models_dir()
+
+
+def h3_fz_model_files():
+    """Fourth-engine H3 requires the official int8 base; optional files are additive."""
+    existing = h3_model_files()
+    folder = h3_fz_models_dir()
+    result = {key: (existing.get(key) if _safetensors_complete(existing.get(key)) else None)
+              for key in ("dit", "te", "video_vae", "audio_vae")}
+    for key in ("training_adapter", "turbo_lora"):
+        path = os.path.join(folder, H3_FZ_MODEL_LINKS[key][0])
+        result[key] = path if os.path.isfile(path) and _safetensors_complete(path) else None
+    return result
+
+
+def h3_fz_missing_models(require_audio=False):
+    files = h3_fz_model_files()
+    required = ("dit", "te", "video_vae", "audio_vae") if require_audio else ("dit", "te", "video_vae")
+    return [f"· {description}\n  文件: {name}\n  下载: {url}"
+            for key, (name, description, url) in H3_FZ_MODEL_LINKS.items()
+            if key in required and not files[key]]
+
+
+FIZGIG_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".avif"}
+
+
+def _fizgig_caption_nonempty(path):
+    """Use the same encoding fallbacks as Fizgig v6.5.0's caption decoder."""
+    try:
+        with open(path, "rb") as stream:
+            raw = stream.read()
+    except OSError:
+        return False
+    encodings = ("utf-16",) if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else ()
+    for encoding in encodings + ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            return bool(raw.decode(encoding).strip())
+        except UnicodeError:
+            continue
+    return False
+
+
+def _scan_fizgig_h3_subsets(folder, fallback_repeats=1):
+    """Inspect H3 media recursively, grouping each physical folder for Fizgig TOML."""
+    audio_exts = {".wav", ".mp3", ".flac", ".m4a"}
+    result = {"images": 0, "videos": 0, "audio": 0, "missing_captions": [], "total": 0}
+    subsets = []
+    if not folder or not os.path.isdir(folder):
+        return result, subsets
+    for current, dirs, names in os.walk(folder):
+        dirs[:] = [name for name in dirs if not name.startswith(".")]
+        local_count = 0
+        for name in names:
+            path = os.path.join(current, name)
+            ext = os.path.splitext(name)[1].lower()
+            key = "images" if ext in FIZGIG_IMAGE_EXTS else "videos" if ext == ".mp4" else "audio" if ext in audio_exts else None
+            if key is None:
+                continue
+            result[key] += 1
+            result["total"] += 1
+            local_count += 1
+            caption = os.path.splitext(path)[0] + ".txt"
+            if not _fizgig_caption_nonempty(caption):
+                result["missing_captions"].append(os.path.relpath(path, folder))
+        if local_count:
+            match = re.match(r"^(\d+)[_-]", os.path.basename(current)) if current != folder else None
+            repeats = int(match.group(1)) if match else int(fallback_repeats)
+            subsets.append((current, max(1, repeats), local_count))
+    return result, subsets
+
+
+def scan_fizgig_h3_dataset(folder):
+    """Count H3 images, MP4s and audio; report missing same-name captions."""
+    result, _subsets = _scan_fizgig_h3_subsets(folder)
+    return result
+
+
+def _fizgig_qwen_image_subsets(folder, fallback_repeats=1):
+    """Count only files the Fizgig image loader will cache, with sidecar captions."""
+    subsets = []
+    missing_captions = []
+    for image_dir, repeats, _count in scan_dataset_subsets(folder, fallback_repeats):
+        count = 0
+        for name in os.listdir(image_dir):
+            path = os.path.join(image_dir, name)
+            if not os.path.isfile(path) or os.path.splitext(name)[1].lower() not in FIZGIG_IMAGE_EXTS:
+                continue
+            count += 1
+            caption = os.path.splitext(path)[0] + ".txt"
+            if not _fizgig_caption_nonempty(caption):
+                missing_captions.append(os.path.relpath(path, folder))
+        if count:
+            subsets.append((image_dir, repeats, count))
+    return subsets, missing_captions
 
 
 def flux_model_files():
@@ -4180,10 +4343,9 @@ ENGINE_SOURCE_URLS = {
         "https://gh-proxy.com/https://github.com/huggingface/diffusers/archive/c943837899b16cbae2f619b8dd4f7bb6f07dd81a.zip",
     ],
     "fizgig": [
-        "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/engine_sources/fizgig-v5.0.0.zip",
-        "https://ghfast.top/https://github.com/shootthesound/Fizgig/archive/refs/tags/v5.0.0.zip",
-        "https://gh-proxy.com/https://github.com/shootthesound/Fizgig/archive/refs/tags/v5.0.0.zip",
-        "https://github.com/shootthesound/Fizgig/archive/refs/tags/v5.0.0.zip",
+        "https://ghfast.top/https://github.com/shootthesound/Fizgig/archive/refs/tags/v6.5.0.zip",
+        "https://gh-proxy.com/https://github.com/shootthesound/Fizgig/archive/refs/tags/v6.5.0.zip",
+        "https://github.com/shootthesound/Fizgig/archive/refs/tags/v6.5.0.zip",
     ],
 }
 
@@ -4913,9 +5075,18 @@ def install_ai_toolkit_engine(logf=print):
 # NVIDIA 是主场（torch cu128）。做成双平台引擎：NVIDIA→CUDA 路径，AMD→ROCm 路径。
 # 模型 100% 复用 models/krea2/（raw / qwen_image_vae / qwen3vl_4b_bf16）。
 
-FIZGIG_VERSION = "v5.0.0"          # 钉死版本（Fizgig 更新节奏快，不追 master）
+FIZGIG_VERSION = "v6.5.0"          # 钉死版本（Fizgig 更新节奏快，不追 master）
 FIZGIG_SRC_MARKER = "src/fizgig/scripts/krea2_train.py"
-FIZGIG_SRC_REQUIRED = ("requirements.txt", FIZGIG_SRC_MARKER, "src/fizgig/scripts/train.py", "src/fizgig/scripts/cache_latents.py", "src/fizgig/scripts/cache_text.py")
+FIZGIG_SRC_REQUIRED = (
+    "requirements.txt", FIZGIG_SRC_MARKER,
+    "src/fizgig/scripts/train.py", "src/fizgig/scripts/cache_latents.py",
+    "src/fizgig/scripts/cache_text.py", "src/fizgig/scripts/minimax_train.py",
+    "src/fizgig/scripts/minimax_cache_latents.py",
+    "src/fizgig/scripts/minimax_cache_text.py",
+    "src/fizgig/families/train.py", "src/fizgig/families/cache.py",
+    "src/fizgig/qwen_image21/driver.py", "src/fizgig/qwen_image21/embedder.py",
+    "docs/RELEASE_NOTES_v6.5.0.md",
+)
 
 # NVIDIA 路径（Fizgig 主推平台）：torch 2.10.0+cu128，Blackwell 原生支持，驱动 555+
 FIZGIG_TORCH_VERSION = "2.10.0"
@@ -4953,9 +5124,10 @@ FIZGIG_SHARED_DEPS = (
     "transformers==4.57.6 tokenizers==0.22.2 sentencepiece==0.2.1 toml==0.10.2 "
     "voluptuous==0.15.2 pillow==12.3.0 numpy==2.1.3 opencv-python==4.10.0.84 "
     "imageio-ffmpeg>=0.5 tensorboard==2.20.0 tqdm==4.67.1 huggingface-hub==0.34.3 "
-    "hf_xet>=1.0 pyyaml==6.0.3 packaging==25.0 psutil>=5.9"
+    "hf_xet>=1.0 pyyaml==6.0.3 packaging==25.0 psutil>=5.9 "
+    "hqq==0.2.8.post1 comfy-kitchen==0.2.31"
 )
-FIZGIG_NVIDIA_EXTRA_DEPS = "bitsandbytes==0.48.2 triton-windows"
+FIZGIG_NVIDIA_EXTRA_DEPS = "bitsandbytes==0.48.2 triton-windows>=3.5.1,<3.7"
 
 
 def _fizgig_dirs():
@@ -4971,6 +5143,30 @@ def _fizgig_marker_ok():
     if not os.path.isfile(vpy):
         return False
     return os.path.isfile(os.path.join(fz_dir, *FIZGIG_SRC_MARKER.split("/")))
+
+
+def _fizgig_source_current(fz_dir):
+    """静态确认本机源码含 v6.5.0 的 H3 与 Qwen-Image-2.1 入口。"""
+    return all(os.path.isfile(os.path.join(fz_dir, *rel.split("/")))
+               for rel in FIZGIG_SRC_REQUIRED)
+
+
+def fizgig_engine_update_status():
+    """供界面显示第四引擎更新提示，不运行 GPU 或网络检查。"""
+    vpy, fz_dir = _fizgig_dirs()
+    installed = os.path.isfile(vpy) and os.path.isfile(
+        os.path.join(fz_dir, *FIZGIG_SRC_MARKER.split("/")))
+    h3_supported = os.path.isfile(os.path.join(fz_dir, "src", "fizgig", "scripts", "minimax_train.py"))
+    qwen21_supported = os.path.isfile(os.path.join(fz_dir, "src", "fizgig", "families", "train.py"))
+    current = bool(installed and _fizgig_source_current(fz_dir))
+    return {
+        "installed": bool(installed),
+        "h3_supported": bool(installed and h3_supported),
+        "qwen_image_2_supported": bool(installed and qwen21_supported),
+        "update_available": bool(installed and not current),
+        "engine_dir": fz_dir,
+        "target_version": FIZGIG_VERSION,
+    }
 
 def fizgig_engine_status():
     """第四训练引擎（Fizgig）状态：返回 (ok, detail, venv_python, backend)。
@@ -5005,7 +5201,7 @@ def fizgig_engine_status():
 
 def _download_fizgig_source(logf=print):
     """按国内优先顺序获取 Fizgig 源码 ZIP，缓存到用户数据目录。"""
-    name = "fizgig-v5.0.0.zip"
+    name = "fizgig-%s.zip" % FIZGIG_VERSION
     dest = os.path.join(_engine_source_cache_dir(), name)
     if _valid_zip(dest, FIZGIG_SRC_REQUIRED):
         logf(f"[第四引擎] 已复用源码缓存：{name}")
@@ -5037,23 +5233,137 @@ def _download_fizgig_source(logf=print):
             except Exception:
                 pass
         logf("[第四引擎] 当前源码来源不可用，自动切换备用来源…")
-    raise RuntimeError(f"{name} 国内来源均下载失败，无需开代理，请稍后重试。")
+    raise RuntimeError(f"{name} 所有源码来源均下载失败，请检查网络后重试。")
 
 
 def _deploy_fizgig_source(fz_dir, logf=print):
-    """将 Fizgig 源码 ZIP 解压到标准源码目录；不把源码写入安装包。"""
-    marker = os.path.join(fz_dir, *FIZGIG_SRC_MARKER.split("/"))
-    if os.path.isfile(marker):
+    """按需部署固定 tag；已有旧源码先备份，再原子替换。"""
+    if _fizgig_source_current(fz_dir):
         return
-    if os.path.isdir(fz_dir):
-        logf(f"[第四引擎] Fizgig 源码不完整，正在清理后重新部署：{fz_dir}")
-        shutil.rmtree(fz_dir, ignore_errors=True)
-    os.makedirs(fz_dir, exist_ok=True)
     zip_path = _download_fizgig_source(logf)
-    _extract_zip(zip_path, fz_dir)
-    if not os.path.isfile(marker):
-        raise RuntimeError(f"Fizgig 源码解压不完整，缺少 {FIZGIG_SRC_MARKER}：{fz_dir}")
-    logf(f"[第四引擎] Fizgig 源码已按需部署到：{fz_dir}")
+    parent = os.path.dirname(os.path.abspath(fz_dir))
+    stamp = time.strftime("%Y%m%d_%H%M%S") + "_%s" % os.getpid()
+    stage_dir = os.path.join(parent, ".fizgig.install_" + stamp)
+    backup_dir = os.path.join(parent, "fizgig_backup_" + stamp)
+    moved_old = False
+    try:
+        os.makedirs(stage_dir, exist_ok=False)
+        _extract_zip(zip_path, stage_dir)
+        if not _fizgig_source_current(stage_dir):
+            raise RuntimeError("Fizgig 源码包缺少 v6.5.0 的 H3/Qwen 训练入口。")
+        if os.path.isdir(fz_dir):
+            os.rename(fz_dir, backup_dir)
+            moved_old = True
+        try:
+            os.rename(stage_dir, fz_dir)
+        except Exception:
+            if moved_old and not os.path.exists(fz_dir):
+                os.rename(backup_dir, fz_dir)
+            raise
+        logf(f"[第四引擎] Fizgig {FIZGIG_VERSION} 源码已部署到：{fz_dir}")
+        if moved_old:
+            logf(f"[第四引擎] 旧源码备份：{backup_dir}")
+    finally:
+        if os.path.isdir(stage_dir):
+            shutil.rmtree(stage_dir, ignore_errors=True)
+
+
+def _fizgig_v65_cli_ready(vpy, fz_dir, backend="nvidia"):
+    """用官方 CLI 的 --help 验证三个模型家族的入口可导入。"""
+    env = _fizgig_rocm_env(fz_dir, vpy) if backend == "amd-rocm" else build_direct_env()
+    scripts = (
+        ("src/fizgig/scripts/krea2_train.py", ()),
+        ("src/fizgig/scripts/cache_latents.py", ()),
+        ("src/fizgig/scripts/cache_text.py", ()),
+        ("src/fizgig/scripts/train.py", ()),
+        ("src/fizgig/scripts/minimax_cache_latents.py", ()),
+        ("src/fizgig/scripts/minimax_cache_text.py", ()),
+        ("src/fizgig/scripts/minimax_train.py", ()),
+        ("src/fizgig/families/cache.py", ("--family", "qwen_image21")),
+        ("src/fizgig/families/train.py", ("--family", "qwen_image21")),
+    )
+    for rel, extra in scripts:
+        script = os.path.join(fz_dir, *rel.split("/"))
+        result = subprocess.run([vpy, script, *extra, "--help"], cwd=fz_dir, env=env,
+                                capture_output=True, text=True, timeout=180)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "未知错误").strip()[-800:]
+            raise RuntimeError("Fizgig v6.5.0 入口无法启动 %s：%s" % (rel, detail))
+        # Reject an upstream CLI change before replacing the working source.
+        required_flags = {
+            "src/fizgig/scripts/krea2_train.py": ("--dataset_config", "--dit", "--network_dim", "--resume", "--save_state"),
+            "src/fizgig/scripts/cache_latents.py": ("--dataset_config", "--vae", "--model_version"),
+            "src/fizgig/scripts/cache_text.py": ("--dataset_config", "--text_encoder", "--model_version"),
+            "src/fizgig/scripts/train.py": ("--dataset_config", "--dit", "--network_dim", "--resume", "--save_state"),
+            "src/fizgig/scripts/minimax_cache_latents.py": ("--dataset_config", "--vae", "--audio_vae", "--clip_still"),
+            "src/fizgig/scripts/minimax_cache_text.py": ("--dataset_config", "--text_encoder"),
+            "src/fizgig/scripts/minimax_train.py": ("--dataset_config", "--base_quant", "--audio_blocks", "--resume"),
+            "src/fizgig/families/cache.py": ("--family", "--stage", "--model"),
+            "src/fizgig/families/train.py": ("--family", "--training_adapter", "--adaptive_lr", "--resume"),
+        }
+        absent = [flag for flag in required_flags.get(rel, ()) if flag not in result.stdout]
+        if absent:
+            raise RuntimeError("Fizgig v6.5.0 CLI 缺少工具必需参数 %s：%s" % (rel, ", ".join(absent)))
+
+
+def _install_fizgig_v65_deps(vpy, fz_dir, backend, logf=print):
+    """升级旧 venv 所缺的 v6.5.0 依赖，保留已安装的 GPU torch。"""
+    packages = ["hqq==0.2.8.post1", "comfy-kitchen==0.2.31"]
+    if backend == "nvidia":
+        packages.append("triton-windows>=3.5.1,<3.7")
+    env = _domestic_pip_env()
+    # hqq 的 setup 会尝试构建可选 CUDA kernel；Fizgig 官方安装器禁用该构建。
+    env["DISABLE_CUDA"] = "1"
+    logf("[第四引擎] 补齐 v6.5.0 依赖（保留现有 PyTorch 与 ROCm/CUDA 环境）…")
+    rc = run_stream([vpy, "-m", "pip", "install", "--no-input", "--no-cache-dir",
+                     "--retries", "10", "--timeout", "120", "--index-url", PIP_INDEX_PRIMARY,
+                     "--extra-index-url", PIP_INDEX_SECONDARY, *packages],
+                    cwd=fz_dir, env=env, logf=logf)
+    if rc != 0:
+        raise RuntimeError("Fizgig v6.5.0 依赖安装失败；旧源码尚未替换，可检查网络后重试。")
+
+
+def update_fizgig_engine(logf=print):
+    """把已安装的 Fizgig 升到 v6.5.0；旧源码、venv 和模型均保留。"""
+    ok, detail, vpy, backend = fizgig_engine_status()
+    if not ok:
+        raise RuntimeError("第四引擎尚未就绪，请先修复或安装 Fizgig：" + detail)
+    fz_dir = _fizgig_dirs()[1]
+    if _fizgig_source_current(fz_dir):
+        return {"updated": False, "already_current": True, "backup_dir": ""}
+    kdir = get_kohya_dir()
+    lock_f = _acquire_kohya_install_lock(kdir, logf)
+    if lock_f is None:
+        raise RuntimeError("另一个引擎安装或更新任务正在运行，请等它完成后重试。")
+    stamp = time.strftime("%Y%m%d_%H%M%S") + "_%s" % os.getpid()
+    stage_dir = os.path.join(kdir, ".fizgig.update_" + stamp)
+    backup_dir = os.path.join(kdir, "fizgig_backup_" + stamp)
+    moved_old = False
+    moved_new = False
+    try:
+        zip_path = _download_fizgig_source(logf)
+        os.makedirs(stage_dir, exist_ok=False)
+        _extract_zip(zip_path, stage_dir)
+        if not _fizgig_source_current(stage_dir):
+            raise RuntimeError("下载的 Fizgig 源码缺少 v6.5.0 训练入口，已取消升级。")
+        _install_fizgig_v65_deps(vpy, stage_dir, backend, logf)
+        _fizgig_v65_cli_ready(vpy, stage_dir, backend)
+        logf("[第四引擎] v6.5.0 源码及 CLI 验证通过，正在替换旧源码…")
+        os.rename(fz_dir, backup_dir)
+        moved_old = True
+        os.rename(stage_dir, fz_dir)
+        moved_new = True
+        clear_status_cache()
+        logf("[第四引擎] 更新完成；旧源码备份：%s" % backup_dir)
+        return {"updated": True, "already_current": False, "backup_dir": backup_dir}
+    except Exception:
+        if moved_old and not moved_new and not os.path.exists(fz_dir):
+            os.rename(backup_dir, fz_dir)
+        raise
+    finally:
+        if os.path.isdir(stage_dir):
+            shutil.rmtree(stage_dir, ignore_errors=True)
+        _release_kohya_install_lock(lock_f)
 
 
 def _find_python312_exe():
@@ -5510,10 +5820,13 @@ def _fizgig_verify(vpy, fz_dir, logf=print, backend="nvidia"):
             _kok, _kdetail = _amd_gpu_kernel_check(vpy, _env, logf, "第四引擎")
             if not _kok:
                 raise RuntimeError(_kdetail)
-        r2 = subprocess.run([vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "krea2_train.py"), "--help"],
-                            capture_output=True, text=True, timeout=180, env=_env)
-        if r2.returncode != 0:
-            raise RuntimeError("Fizgig krea2_train 启动失败：" + ((r2.stderr or "")[-300:]))
+        if _fizgig_source_current(fz_dir):
+            _fizgig_v65_cli_ready(vpy, fz_dir, backend)
+        else:
+            r2 = subprocess.run([vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "krea2_train.py"), "--help"],
+                                capture_output=True, text=True, timeout=180, env=_env)
+            if r2.returncode != 0:
+                raise RuntimeError("Fizgig krea2_train 启动失败：" + ((r2.stderr or "")[-300:]))
         return True
     except Exception as e:
         logf(f"[第四引擎] 验证失败: {e}")
@@ -5603,6 +5916,14 @@ def install_fizgig_engine(logf=print):
     - AMD：AMD nightly 钉死 ROCm 栈（torch + rocm-sdk）+ 0xDELUXA bitsandbytes；
     - 已安装则跳过（幂等）。返回 fizgig_venv 的 python 路径。
     """
+    old_vpy, old_src = _fizgig_dirs()
+    if (os.path.isfile(old_vpy) and os.path.isfile(
+            os.path.join(old_src, *FIZGIG_SRC_MARKER.split("/")))
+            and not _fizgig_source_current(old_src)):
+        old_ok, _, _, _ = fizgig_engine_status()
+        if old_ok:
+            update_fizgig_engine(logf)
+            return old_vpy
     py312 = _fizgig_ensure_python312(logf)
     kdir = get_kohya_dir()
     logf(f"[第四引擎] 安装目录: {kdir}")
@@ -5696,6 +6017,7 @@ def install_fizgig_engine(logf=print):
         if not _upgrade_pip(vpy, kdir, logf, label="第四引擎"):
             raise RuntimeError("pip 升级失败：清华/阿里镜像均不可达，无需代理，请稍后重试")
         env = _domestic_pip_env()
+        env["DISABLE_CUDA"] = "1"  # hqq 的可选 CUDA kernel 不参与 Fizgig 安装
         if backend == "nvidia":
             logf("[第四引擎] NVIDIA 路径：安装 torch %s+%s（阿里云/上海交大双国内镜像断点续传）…"
                  % (FIZGIG_TORCH_VERSION, FIZGIG_TORCH_CU))
@@ -5748,6 +6070,22 @@ def write_fizgig_dataset_config(image_dir, cache_dir, config_path, resolution=51
         f.write("\n[[datasets]]\n")
         f.write('image_directory = "%s"\n' % str(image_dir).replace("\\", "/"))
         f.write('cache_directory = "%s"\n' % str(cache_dir).replace("\\", "/"))
+
+
+def _write_fizgig_subset_config(subsets, cache_root, config_path, resolution):
+    """Create one Fizgig dataset block per flat/repeats-prefixed image folder."""
+    with open(config_path, "w", encoding="utf-8") as stream:
+        stream.write("# Auto-generated Fizgig dataset subsets.\n[general]\n")
+        stream.write("resolution = [%d, %d]\n" % (int(resolution), int(resolution)))
+        stream.write('caption_extension = ".txt"\nbatch_size = 1\n')
+        stream.write("enable_bucket = true\nbucket_no_upscale = true\n")
+        for index, (image_dir, repeats, _count) in enumerate(subsets):
+            cache_dir = os.path.join(cache_root, "subset_%03d" % index)
+            os.makedirs(cache_dir, exist_ok=True)
+            stream.write("\n[[datasets]]\n")
+            stream.write('image_directory = "%s"\n' % str(image_dir).replace("\\", "/"))
+            stream.write('cache_directory = "%s"\n' % str(cache_dir).replace("\\", "/"))
+            stream.write("num_repeats = %d\n" % max(1, int(repeats)))
 
 
 def _fizgig_quant_swap(vram_gb, requested, backend=None):
@@ -5895,6 +6233,258 @@ def _fizgig_rocm_env(fz_dir, vpy):
 def _ai_toolkit_rocm_env(vpy):
     """AMD ROCm runtime env for the AI Toolkit venv."""
     return _windows_rocm_runtime_env(vpy, bnb_rocm_version="715")
+
+
+def _fizgig_v65_training_context(logf, label):
+    ok, detail, vpy, backend = fizgig_engine_status()
+    if not ok:
+        raise RuntimeError("第四训练引擎（Fizgig）未安装或环境异常，请先安装第四引擎。\n" + detail)
+    fz_dir = _fizgig_dirs()[1]
+    if not _fizgig_source_current(fz_dir):
+        raise RuntimeError("当前 Fizgig 源码尚未升级到 v6.5.0，请先点「更新第四引擎」。")
+    if not _ensure_fizgig_deps(vpy, fz_dir, logf):
+        raise RuntimeError("Fizgig 依赖检查失败，请重新安装或更新第四引擎。")
+    env = _fizgig_rocm_env(fz_dir, vpy) if backend == "amd-rocm" else None
+    if backend == "amd-rocm":
+        logf(f"[{label}] AMD ROCm 支持仍需实际训练验证；当前按 Fizgig 运行时配置启动。")
+    return vpy, fz_dir, env
+
+
+def _fizgig_v65_sample_file(params, output_name, prefix):
+    prompt = str(params.get("sample_prompt") or params.get("trigger") or "").strip()
+    if not prompt:
+        return None
+    folder = data_sub("cache", "sample_prompts")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f"{output_name}_{prefix}_prompts.txt")
+    with open(path, "w", encoding="utf-8") as stream:
+        stream.write(prompt + "\n")
+    return path
+
+
+def _fizgig_qwen21_local_processor(fz_dir, logf=print):
+    """Allow the pinned upstream embedder to use our verified ModelScope cache."""
+    embedder = os.path.join(fz_dir, "src", "fizgig", "qwen_image21", "embedder.py")
+    with open(embedder, "r", encoding="utf-8") as stream:
+        source = stream.read()
+    marker = 'tokenizer_dir = tokenizer_dir or os.environ.get("FIZGIG_QWEN21_PROCESSOR_DIR")'
+    if marker not in source:
+        anchor = "        self.tokenizer = (AutoTokenizer.from_pretrained(tokenizer_dir) if tokenizer_dir else\n"
+        if source.count(anchor) != 1:
+            raise RuntimeError("Fizgig v6.5.0 Qwen 分词器入口已变化，请更新适配代码。")
+        source = source.replace(anchor, "        " + marker + "\n" + anchor)
+        staged = embedder + ".tmp.%s" % os.getpid()
+        try:
+            with open(staged, "w", encoding="utf-8") as stream:
+                stream.write(source)
+            os.replace(staged, embedder)
+        finally:
+            if os.path.isfile(staged):
+                os.remove(staged)
+        logf("[Qwen-Image-2.1(Fizgig)] 已接入本地 processor 缓存路径")
+    root = _ensure_at_image_qwen21_assets(logf)
+    return os.path.join(root, "processor")
+
+
+def train_qwen21_fizgig(logf=print, mode="qwen21_fz", params=None, vram_gb=None, resume_from=None, progress=None):
+    """Cache and train Qwen-Image-2.1 LoRA with Fizgig v6.5.0's family driver."""
+    params = params or {}
+    logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
+    _warn_alloc_conf(logf)
+    vpy, fz_dir, env = _fizgig_v65_training_context(logf, "Qwen-Image-2.1(Fizgig)")
+    files = qwen21_fz_model_files()
+    missing = qwen21_fz_missing_models()
+    if missing:
+        raise RuntimeError("Qwen-Image-2.1 缺少模型文件，请下载到 models/qwen_image21/：\n\n" + "\n".join(missing))
+    train_dir = dataset_train_dir("character", params.get("project"))
+    subsets, missing_captions = _fizgig_qwen_image_subsets(train_dir, params.get("repeats", 1))
+    image_count = sum(count for _folder, _repeats, count in subsets)
+    if image_count < 5:
+        raise RuntimeError(f"Qwen-Image-2.1 需要至少 5 张 Fizgig 支持的已预处理图片（当前 {image_count} 张）：{train_dir}")
+    if missing_captions:
+        raise RuntimeError("Qwen-Image-2.1 图片缺少同名非空 .txt 描述文件：" + ", ".join(missing_captions[:12]))
+    processor_dir = _fizgig_qwen21_local_processor(fz_dir, logf)
+    env = dict(env or build_direct_env())
+    env["FIZGIG_QWEN21_PROCESSOR_DIR"] = processor_dir
+    proj = _sanitize_dirname(params.get("project")) or "qwen21_fz"
+    cfg_path = os.path.join(KIT_DIR, "configs", f"fizgig_qwen21_{proj}.toml")
+    cache_dir = os.path.join(data_dir(), "dataset", proj, "fizgig_qwen21_cache")
+    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+    os.makedirs(cache_dir, exist_ok=True)
+    resolution = int(params.get("resolution") or 704)
+    _write_fizgig_subset_config(subsets, cache_dir, cfg_path, resolution)
+    cache_script = os.path.join(fz_dir, "src", "fizgig", "families", "cache.py")
+    for stage, model_key in (("latents", "vae"), ("text", "te")):
+        logf(f"[Qwen-Image-2.1(Fizgig)] 缓存 {stage} …")
+        cmd = [vpy, cache_script, "--family", "qwen_image21", "--stage", stage,
+               "--dataset_config", cfg_path, "--model", files[model_key], "--skip_existing"]
+        if run_stream(cmd, cwd=fz_dir, env=env, logf=logf) != 0:
+            raise RuntimeError(f"Qwen-Image-2.1 {stage} 缓存失败，请查看日志。")
+    preset = str(params.get("fizgig_qwen_preset") or "auto").lower()
+    if preset == "auto":
+        preset = "style" if params.get("at_sub_mode") == "style" else "fast"
+    if preset not in ("fast", "standard", "style"):
+        raise ValueError(f"未知 Qwen-Image-2.1 训练预设：{preset}")
+    rank = 8 if preset == "fast" else 16
+    alpha = rank
+    epochs = int(params.get("max_epochs") or 30)
+    lr = 1.5e-4 if preset == "style" else 1e-4
+    out_dir = data_sub("output", proj)
+    os.makedirs(out_dir, exist_ok=True)
+    output_name = _sanitize_dirname(params.get("output_name")) or "qwen21_fizgig_lora"
+    cmd = [vpy, os.path.join(fz_dir, "src", "fizgig", "families", "train.py"),
+           "--family", "qwen_image21", "--dataset_config", cfg_path,
+           "--dit", files["dit"], "--output_dir", out_dir, "--output_name", output_name,
+           "--network_dim", str(rank), "--network_alpha", str(alpha),
+           "--learning_rate", str(lr), "--max_train_epochs", str(epochs),
+           "--save_every_n_epochs", str(_save_every_note(params, epochs, logf, "Qwen-Image-2.1(Fizgig)")),
+           "--seed", "42", "--optimizer_type", "adamw8bit",
+           "--precision", "auto", "--blocks_to_swap", "-1", "--ema_decay", "0.98",
+           "--training_adapter", files["training_adapter"], "--log_per_image_loss",
+           "--save_state", "--save_state_on_train_end", "--keep_last_n_states", "2",
+           "--vae", files["vae"], "--text_encoder", files["te"]]
+    if preset != "style":
+        lower, upper = (1e-4, 2e-4) if preset == "standard" else (2e-4, 4e-4)
+        cmd += ["--adaptive_lr", "--adaptive_lr_min", str(lower), "--adaptive_lr_max", str(upper)]
+    if resume_from:
+        cmd += ["--resume", resume_from]
+        if progress is not None:
+            try:
+                progress.set_step(resume_step_from(resume_from))
+            except Exception:
+                pass
+    if progress is not None:
+        try:
+            progress.set_total(sum(repeats * count for _folder, repeats, count in subsets) * epochs)
+        except Exception:
+            pass
+    if params.get("sample_preview"):
+        prompt_file = _fizgig_v65_sample_file(params, output_name, "qwen21")
+        if prompt_file:
+            cmd += ["--sample_prompts", prompt_file, "--sample_every_n_epochs",
+                    str(_fizgig_sample_epochs(params, image_count, epochs)),
+                    "--sample_width", "1024", "--sample_height", "1024", "--sample_seed", "1234"]
+            if files["speed_lora"]:
+                cmd += ["--speed_lora", files["speed_lora"]]
+    logf(f"[Qwen-Image-2.1(Fizgig)] 预设={preset}，素材={image_count} 张，分辨率={resolution}，LoRA rank={rank}，epochs={epochs}")
+    if run_stream(cmd, cwd=fz_dir, env=env, logf=logf) != 0:
+        raise RuntimeError("Qwen-Image-2.1(Fizgig) 训练失败，请查看日志。")
+    return out_dir
+
+
+def train_h3_fizgig(logf=print, mode="h3_fz", params=None, vram_gb=None, resume_from=None, progress=None):
+    """Train H3 on a shared photo, MP4 and/or audio folder with Fizgig v6.5.0."""
+    params = params or {}
+    logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 2e-4))
+    _warn_alloc_conf(logf)
+    vpy, fz_dir, env = _fizgig_v65_training_context(logf, "MiniMax H3(Fizgig)")
+    train_dir = params.get("train_data_dir") or params.get("data_dir") or params.get("image_dir")
+    dataset, subsets = _scan_fizgig_h3_subsets(train_dir, params.get("repeats", 1))
+    if not dataset["total"]:
+        raise RuntimeError("H3 素材目录没有受支持文件；请放入图片、MP4 视频或 WAV/MP3/FLAC/M4A 音频。")
+    if dataset["missing_captions"]:
+        names = ", ".join(dataset["missing_captions"][:12])
+        raise RuntimeError(f"H3 每个素材都需要同名非空 .txt 描述文件；缺失或为空：{names}")
+    # Voice-only rows require an audio VAE. Clips may train their picture without
+    # one; if it is present, their sound becomes a training target as well.
+    need_audio = dataset["audio"] > 0
+    files = h3_fz_model_files()
+    missing = h3_fz_missing_models(require_audio=need_audio)
+    if missing:
+        raise RuntimeError("MiniMax H3 缺少 Fizgig 所需模型，请下载到 models/minimax_h3/：\n\n" + "\n".join(missing))
+    if dataset["videos"] and not files["audio_vae"]:
+        logf("[MiniMax H3(Fizgig)] ⚠ 未安装音频 VAE：MP4 仍可训练画面，但片段声音会被忽略。")
+    proj = _sanitize_dirname(params.get("project")) or "h3_fz"
+    cfg_path = os.path.join(KIT_DIR, "configs", f"fizgig_h3_{proj}.toml")
+    cache_dir = os.path.join(data_dir(), "dataset", proj, "fizgig_h3_cache")
+    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+    os.makedirs(cache_dir, exist_ok=True)
+    resolution = int(params.get("resolution") or 768)
+    _write_fizgig_subset_config(subsets, cache_dir, cfg_path, resolution)
+    audio_marker = os.path.join(cache_dir, ".audio_vae_signature")
+    audio_signature = None
+    if dataset["videos"] or dataset["audio"]:
+        audio_signature = ("%s|%s|%s" % (files["audio_vae"], os.path.getsize(files["audio_vae"]),
+                                           os.path.getmtime(files["audio_vae"]))
+                           if files["audio_vae"] else "no-audio-vae")
+    try:
+        with open(audio_marker, "r", encoding="utf-8") as stream:
+            cached_audio_signature = stream.read().strip()
+    except OSError:
+        cached_audio_signature = None
+    refresh_for_audio = bool(audio_signature and cached_audio_signature != audio_signature)
+    cache_cmd = [vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "minimax_cache_latents.py"),
+                 "--dataset_config", cfg_path, "--vae", files["video_vae"]]
+    if refresh_for_audio:
+        logf("[MiniMax H3(Fizgig)] 音频 VAE 配置已变化；重新缓存媒体 latents 和声音目标。")
+    else:
+        cache_cmd += ["--skip_existing"]
+    if files["audio_vae"] and (dataset["videos"] or dataset["audio"]):
+        cache_cmd += ["--audio_vae", files["audio_vae"]]
+    if dataset["videos"]:
+        cache_cmd += ["--clip_still"]
+    logf(f"[MiniMax H3(Fizgig)] 缓存素材：图片 {dataset['images']}、视频 {dataset['videos']}、音频 {dataset['audio']}")
+    if run_stream(cache_cmd, cwd=fz_dir, env=env, logf=logf) != 0:
+        raise RuntimeError("MiniMax H3 latents 缓存失败，请检查视频帧率、尺寸和日志。")
+    if audio_signature:
+        with open(audio_marker, "w", encoding="utf-8") as stream:
+            stream.write(audio_signature)
+    text_cmd = [vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "minimax_cache_text.py"),
+                "--dataset_config", cfg_path, "--text_encoder", files["te"], "--skip_existing"]
+    if run_stream(text_cmd, cwd=fz_dir, env=env, logf=logf) != 0:
+        raise RuntimeError("MiniMax H3 文本缓存失败，请查看日志。")
+    rank = int(params.get("rank") or 8)
+    alpha = int(params.get("alpha") or rank)
+    lr = float(params.get("unet_lr") or 2e-4)
+    epochs = int(params.get("max_epochs") or 50)
+    out_dir = data_sub("output", proj)
+    os.makedirs(out_dir, exist_ok=True)
+    output_name = _sanitize_dirname(params.get("output_name")) or "h3_fizgig_lora"
+    cmd = [vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "minimax_train.py"),
+           "--dataset_config", cfg_path, "--dit", files["dit"],
+           "--output_dir", out_dir, "--output_name", output_name,
+           "--network_dim", str(rank), "--network_alpha", str(alpha),
+           "--learning_rate", str(lr), "--max_train_epochs", str(epochs),
+           "--save_every_n_epochs", str(_save_every_note(params, epochs, logf, "MiniMax H3(Fizgig)")),
+           "--seed", "42", "--optimizer_type", "adamw",
+           "--base_quant", "auto", "--blocks_to_swap", "auto", "--gradient_checkpointing", "auto",
+           "--shift", "0.666667", "--ema_decay", "0.98", "--caption_dropout", "0.05",
+           "--photo_blocks", "20-49", "--clip_blocks", "20-49", "--audio_blocks", "20-49",
+           "--no_train_adaln", "--tread_ratio", "0.5", "--tread_start", "2", "--tread_end", "47",
+           "--save_state", "--save_state_on_train_end", "--keep_last_n_states", "2",
+           "--text_encoder", files["te"], "--vae", files["video_vae"]]
+    if dataset["videos"]:
+        cmd += ["--clip_still_as_photo"]
+    if files["training_adapter"]:
+        cmd += ["--training_adapter_path", files["training_adapter"]]
+    if resume_from:
+        cmd += ["--resume", resume_from]
+        if progress is not None:
+            try:
+                progress.set_step(resume_step_from(resume_from))
+            except Exception:
+                pass
+    if progress is not None:
+        try:
+            progress.set_total(sum(repeats * count for _folder, repeats, count in subsets) * epochs)
+        except Exception:
+            pass
+    if params.get("sample_preview"):
+        prompt_file = _fizgig_v65_sample_file(params, output_name, "h3")
+        if prompt_file:
+            frames = int(params.get("sample_frames") or params.get("video_frames") or 56) if dataset["videos"] else 1
+            cmd += ["--sample_prompts", prompt_file, "--sample_every_n_epochs",
+                    str(_fizgig_sample_epochs(params, dataset["total"], epochs)),
+                    "--sample_width", str(resolution), "--sample_height", str(resolution),
+                    "--sample_frames", str(frames), "--sample_seed", "1234"]
+            if files["audio_vae"] and (dataset["videos"] or dataset["audio"]):
+                cmd += ["--sample_audio", "--audio_vae", files["audio_vae"]]
+            if files["turbo_lora"]:
+                cmd += ["--turbo_lora_path", files["turbo_lora"], "--turbo_lora_strength", "0.75", "--sample_steps", "6"]
+    logf(f"[MiniMax H3(Fizgig)] 素材={dataset['total']}，分辨率={resolution}，LoRA rank={rank}，epochs={epochs}")
+    if run_stream(cmd, cwd=fz_dir, env=env, logf=logf) != 0:
+        raise RuntimeError("MiniMax H3(Fizgig) 训练失败，请查看日志。")
+    return out_dir
 
 
 def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, resume_from=None, progress=None):
