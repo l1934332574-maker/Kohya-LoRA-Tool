@@ -9046,7 +9046,7 @@ class App:
                          justify="left", anchor="w", wraplength=440).pack(padx=16, pady=(14, 8), fill="x")
             self._sdl_prog = ctk.CTkProgressBar(w, height=12, fg_color=CARD2, progress_color=ACC)
             self._sdl_prog.pack(fill="x", padx=16, pady=(0, 6))
-            ctk.CTkLabel(w, text="后台正在下载…完成后自动关闭（支持断点续传）",
+            ctk.CTkLabel(w, text="后台正在下载…完成后自动关闭；若来源支持可断点续传",
                          font=ui_font(FONT_HINT), text_color=HINT).pack(padx=16, pady=(0, 12), anchor="w")
             self._sdl_win = w
         try:
@@ -9056,7 +9056,10 @@ class App:
                 self._sdl_status.set("%s  %s / %s MB（%.0f%%）" % (name, done / 1048576.0, total / 1048576.0, pct))
             else:
                 self._sdl_prog.set(0)
-                self._sdl_status.set("%s  已下载 %s MB…（大小未知）" % (name, done / 1048576.0))
+                if done > 0:
+                    self._sdl_status.set("%s  已下载 %s MB…（大小未知）" % (name, done / 1048576.0))
+                else:
+                    self._sdl_status.set("%s  正在连接下载源…（大小未知）" % name)
         except Exception:
             pass
 

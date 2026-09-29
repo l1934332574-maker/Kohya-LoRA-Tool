@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.18.8"
+APP_VERSION = "0.18.9"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -4343,9 +4343,10 @@ ENGINE_SOURCE_URLS = {
         "https://gh-proxy.com/https://github.com/huggingface/diffusers/archive/c943837899b16cbae2f619b8dd4f7bb6f07dd81a.zip",
     ],
     "fizgig": [
+        "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/engine_sources/fizgig-v6.5.0.zip",
         "https://ghfast.top/https://github.com/shootthesound/Fizgig/archive/refs/tags/v6.5.0.zip",
         "https://gh-proxy.com/https://github.com/shootthesound/Fizgig/archive/refs/tags/v6.5.0.zip",
-        "https://github.com/shootthesound/Fizgig/archive/refs/tags/v6.5.0.zip",
+        "https://codeload.github.com/shootthesound/Fizgig/zip/refs/tags/v6.5.0",
     ],
 }
 
@@ -5223,7 +5224,10 @@ def _download_fizgig_source(logf=print):
         else:
             label = "GitHub 直连"
         logf(f"[第四引擎] 下载 {name}（{label}，第{idx}/{len(urls)}个来源）…")
-        if _download_with_resume(url, dest, logf, direct=True) and _valid_zip(dest, FIZGIG_SRC_REQUIRED):
+        # Domestic mirrors bypass the proxy; the official fallback should honor
+        # the user's configured proxy when direct GitHub access is unavailable.
+        direct = not url.startswith(("https://github.com/", "https://codeload.github.com/"))
+        if _download_with_resume(url, dest, logf, direct=direct, quick_fail=True) and _valid_zip(dest, FIZGIG_SRC_REQUIRED):
             logf(f"[第四引擎] {name} 下载完成并校验通过。")
             return dest
         for old in (dest, dest + ".part"):
@@ -11004,7 +11008,7 @@ def current_download():
     except Exception:
         return {"name": "", "done": 0, "total": 0, "active": False}
 
-def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False):
+def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False, quick_fail=False):
     """用 curl 断点续传下载大文件（repo.radeon.com 网络不稳时关键，断了可续传）。
 
     返回 True=成功。优先 curl（Windows 自带，支持 -C - 续传 + 重试）；否则 urllib 分段下载。
@@ -11022,14 +11026,16 @@ def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False)
     """
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     curl = shutil.which("curl")
-    _st, _total, _resumable = _http_range_probe(url, direct=direct)
-    total = _total if _total else _http_total_size(url, direct=direct)
+    probe_timeout = 8 if quick_fail else 20
+    _st, _total, _resumable = _http_range_probe(url, timeout=probe_timeout, direct=direct)
+    total = _total if _total else _http_total_size(url, timeout=probe_timeout, direct=direct)
     have = os.path.getsize(dest) if os.path.isfile(dest) else 0
+    if _st in (404, 410) or (have > 0 and _st is not None and _st >= 400):
+        # A missing source should be skipped before curl's retry loop. For
+        # other errors, a fresh plain GET may still work when Range is blocked.
+        logf("[下载] 源不可用（HTTP %s），跳过该源: %s" % (_st, url))
+        return False
     if have > 0:
-        if _st is not None and _st >= 400:
-            # 探测已确认源不可用：不浪费 curl --retry 空等，直接换源（残片保留，交给下一源续传）
-            logf("[下载] 源不可用（HTTP %s），跳过该源: %s" % (_st, url))
-            return False
         if _total is not None and have >= _total:
             # 本地已达远端完整大小：不再重复下载、也不删缓存——是否损坏由调用方校验决定。
             # 损坏时调用方会删除并换源整包重下；这里若删会误伤“已完整可用”的缓存
@@ -11045,13 +11051,21 @@ def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False)
                 pass
             have = 0
     stop_mon = threading.Event()
-    _dl_name = os.path.basename(dest) or url
-    _dl_state_push(_dl_name, have or 0, total or 0, True)
+    from urllib.parse import urlsplit
+    _dl_name = "%s · %s" % (os.path.basename(dest) or "下载文件", urlsplit(url).hostname or "未知来源")
+    using_curl = bool(curl and os.path.isfile(curl))
+    # curl writes dest directly; the urllib fallback writes dest.part until the
+    # download is complete. Watch the file that is actually growing.
+    monitor_path = dest if using_curl else dest + ".part"
+    initial_done = (have if using_curl else
+                    (os.path.getsize(monitor_path) if os.path.isfile(monitor_path) else 0))
+    _dl_state_push(_dl_name, initial_done, total or 0, True)
     def _monitor():
         last = -1
         while not stop_mon.is_set():
             try:
-                size = os.path.getsize(dest) if os.path.isfile(dest) else 0
+                size = (os.path.getsize(monitor_path) if os.path.isfile(monitor_path)
+                        else os.path.getsize(dest) if os.path.isfile(dest) else 0)
             except Exception:
                 size = 0
             if size != last:
@@ -11065,13 +11079,19 @@ def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False)
             stop_mon.wait(1)
     threading.Thread(target=_monitor, daemon=True).start()
     try:
-        if curl and os.path.isfile(curl):
+        if using_curl:
             # Windows 自带 curl 版本差异：--retry-all-errors 需 curl 8.0+，老系统（7.x）不识别该参数，
             # 会直接 “option --retry-all-errors: is unknown” 拒绝执行，导致 torch 大轮子下载永远失败。
-            base = [curl, "-sS", "-L", "--fail", "--retry", "5", "--retry-delay", "5"]
+            base = [curl, "-sS", "-L", "--fail", "--retry", "1" if quick_fail else "5",
+                    "--retry-delay", "2" if quick_fail else "5"]
             if _curl_supports_retry_all_errors(curl):
                 base.append("--retry-all-errors")
-            base += ["--connect-timeout", "20", "--max-time", "10800", "--speed-limit", "20480", "--speed-time", "120"]
+            if quick_fail:
+                base += ["--connect-timeout", "10", "--max-time", "300",
+                         "--speed-limit", "4096", "--speed-time", "30"]
+            else:
+                base += ["--connect-timeout", "20", "--max-time", "10800",
+                         "--speed-limit", "20480", "--speed-time", "120"]
             # 仅真正续传时才带 -C -；整包重下省略，避免不支持 Range 的源触发 curl 33
             if have > 0:
                 base += ["-C", "-"]
@@ -11114,15 +11134,18 @@ def _download_with_resume(url, dest, logf=print, progress_cb=None, direct=False)
         try:
             req = urllib.request.Request(url, headers={"Range": "bytes=%d-" % exist} if exist else {})
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({})) if direct else urllib.request.build_opener()
-            with opener.open(req, timeout=120) as r, open(tmp, "ab") as f:
+            with opener.open(req, timeout=30 if quick_fail else 120) as r, open(tmp, "ab") as f:
+                started = time.monotonic()
                 while True:
+                    if quick_fail and time.monotonic() - started > 300:
+                        raise TimeoutError("源码下载超过 5 分钟，切换备用来源")
                     chunk = r.read(1 << 20)
                     if not chunk:
                         break
                     f.write(chunk)
                     if progress_cb is not None:
                         try:
-                            progress_cb(exist + os.path.getsize(tmp), total)
+                            progress_cb(os.path.getsize(tmp), total)
                         except Exception:
                             pass
             os.replace(tmp, dest)

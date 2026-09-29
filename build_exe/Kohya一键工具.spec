@@ -50,8 +50,6 @@ a = Analysis(
         ('..\\README_使用说明.md', '.'),
         ('..\\LICENSE', '.'),
         ('..\\THIRD_PARTY_NOTICES.md', '.'),
-        # WD14 打标模型内置：开箱即用，无需联网下载（约 311MB）
-        ('..\\wd14_tagger_model', 'wd14_tagger_model'),
     ] + ctk_datas + dd_datas + modern_ui_datas + webview_datas,
     hiddenimports=ctk_hidden + webview_hidden + [
         # 标签管理 v1：中英词典/翻译/补全（kohya_gui 内惰性 import，显式声明防漏收集）
