@@ -154,6 +154,8 @@ class ModernUIBridge:
             task = self._task
             if task and task.get("id") == task_id:
                 task["logs"].append(message)
+                if len(task["startup_logs"]) < 500:
+                    task["startup_logs"].append(message)
                 if len(task["logs"]) > 10000:
                     dropped = len(task["logs"]) - 8000
                     del task["logs"][:dropped]
@@ -193,7 +195,7 @@ class ModernUIBridge:
             self._task = {
                 "id": task_id, "title": str(title), "kind": kind, "mode": mode,
                 "key": key, "status": "running", "message": "正在启动…",
-                "progress": None, "eta_seconds": None, "detail": "", "logs": [], "log_offset": 0,
+                "progress": None, "eta_seconds": None, "detail": "", "logs": [], "startup_logs": [], "log_offset": 0,
                 "started": time.time(), "review_event": None,
             }
             self._task_downloader = None
@@ -553,7 +555,7 @@ class ModernUIBridge:
             "te_lr": str(value("te_lr", "1e-4")),
             "repeats": integer("repeats", 1),
             "max_epochs": integer("max_epochs", 20),
-            "resolution": integer("resolution", 1024),
+            "resolution": integer("resolution", 512),
             "video_steps": integer("video_steps", 2000),
             "save_every": value("save_every", None),
             "sample_interval": integer("sample_interval", 0),
@@ -936,7 +938,7 @@ class ModernUIBridge:
             "te_lr": str(value("te_lr", "1.5e-4")),
             "repeats": integer("repeats", 5),
             "max_epochs": integer("max_epochs", 8),
-            "resolution": integer("resolution", 1024),
+            "resolution": integer("resolution", 512),
             "video_steps": integer("video_steps", 2000),
             "save_every": optional_integer("save_every"),
             "sample_interval": integer("sample_interval", 0),
@@ -1008,7 +1010,7 @@ class ModernUIBridge:
             "rank": integer("rank", 8 if mode in ("qwen21_fz", "h3_fz") else 32), "alpha": integer("alpha", 8 if mode in ("qwen21_fz", "h3_fz") else 32),
             "unet_lr": str(value("unet_lr", "1e-4")), "te_lr": str(value("te_lr", "1e-4")),
             "repeats": integer("repeats", 1), "max_epochs": integer("max_epochs", 50 if mode == "h3_fz" else 30 if mode == "qwen21_fz" else 16),
-            "resolution": integer("resolution", 1024),
+            "resolution": integer("resolution", 512),
             "video_steps": integer("video_steps", 2000),
             "video_frames": integer("video_frames", getattr(self.core, "H3_FRAMES", 73)),
             "fizgig_qwen_preset": str(value("fizgig_qwen_preset", "auto") or "auto"),
@@ -1274,12 +1276,20 @@ class ModernUIBridge:
                 review_message = ("视频字幕检查完成；确认后启动 %s。" % engine_name if params["mode"] == "video"
                                   else "混合媒体扫描完成；确认字幕与样本后启动 %s。" % engine_name if params["mode"] == "h3_fz"
                                   else "可以打开标签编辑器查看或修改标签；确认后才会启动 %s。" % engine_name)
+                with self._task_lock:
+                    task = self._task
+                    tagger_incomplete = bool(task and task.get("id") == task_id and any(
+                        "[WARN] WD14 打标后仍有" in line for line in task.get("logs", ())))
+                if tagger_incomplete:
+                    review_message = "自动打标有缺失，部分图片使用了简短兜底标签。请打开标签编辑器核对并补齐，再决定是否继续训练。"
                 self._task_log(task_id, "[预处理] 已完成，可用数据 %d 个。请检查数据后确认是否继续训练。" % processed_count)
                 with self._task_lock:
                     if self._task and self._task.get("id") == task_id:
                         self._task.update(
                             status="awaiting_review",
-                            message="数据检查已完成，请确认后继续训练。" if params["mode"] in ("video", "h3_fz") else "预处理已完成，请检查图片和标签。",
+                            message=("自动打标有缺失，请核对标签。" if tagger_incomplete else
+                                     "数据检查已完成，请确认后继续训练。" if params["mode"] in ("video", "h3_fz") else
+                                     "预处理已完成，请检查图片和标签。"),
                             progress=None,
                             detail=review_message,
                         )
@@ -1600,6 +1610,8 @@ class ModernUIBridge:
         for key, value in incoming_params.items():
             if key not in param_fields:
                 return {"ok": False, "error": "新版训练页尚未接入训练参数「%s」。" % key}
+            if key == "quant_mode" and value not in getattr(self.core, "QUANT_MODE_OPTIONS", {}).get(next_mode, ()):
+                return {"ok": False, "error": "当前训练模式不支持量化精度「%s」。" % value}
             if key == "sample_preview" and value is None:
                 params.pop(key, None)
                 continue
@@ -2300,6 +2312,7 @@ class ModernUIBridge:
             "missing_models": [self._plain_ui_text(item) for item in missing],
             "asset_dir": str(asset_dir or ""),
             "supports": supports,
+            "quant_modes": list(getattr(core, "QUANT_MODE_OPTIONS", {}).get(mode, ())),
             "interval_units": interval_units,
             "defaults": preset,
             "presets": presets,
@@ -2584,13 +2597,27 @@ class ModernUIBridge:
             exported_at = datetime.datetime.now()
             filename = "KohyaLoRA_运行日志_%s.txt" % exported_at.strftime("%Y%m%d_%H%M%S")
             version = str(getattr(self.core, "APP_VERSION", "") or "").strip()
+            with self._task_lock:
+                task = self._task
+                task_logs = list(task.get("logs", [])) if task else []
+                startup_logs = list(task.get("startup_logs", [])) if task else []
+                task_title = str(task.get("title", "")) if task else ""
+                task_status = str(task.get("status", "")) if task else ""
+                task_log_offset = int(task.get("log_offset", 0) or 0) if task else 0
+            exported_logs = task_logs if task_logs else list(self.logs)
+            if task_log_offset and startup_logs:
+                early_only = startup_logs[:task_log_offset]
+                omitted = task_log_offset - len(early_only)
+                exported_logs = early_only + (["[日志] 中间 %d 行超过缓存上限，以下为最近输出。" % omitted]
+                                              if omitted else []) + task_logs
             content = "\n".join([
                 "Kohya-LoRA 一键训练工具 · 运行日志",
                 "软件版本: v%s" % version if version else "软件版本: 未知",
                 "导出时间: %s" % exported_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "最近任务: %s (%s)" % (task_title, task_status) if task_logs else "",
                 "",
                 "【运行日志】",
-                *self.logs,
+                *exported_logs,
                 "",
             ])
             desktop = self._desktop_directory()

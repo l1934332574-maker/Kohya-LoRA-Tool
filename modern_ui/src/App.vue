@@ -56,6 +56,7 @@ const firstEngineBaseLabels: Record<FirstEngineBaseType, string> = {
   anima: 'Anima（1024px）',
 }
 const selectedMode = ref(firstEngineSidebarModes.sdxl)
+const projectModeFilter = ref<string | null>(null)
 const workspaceOpen = ref(false)
 const workspaceKind = ref<'qwen' | 'kohya' | 'engine'>('qwen')
 const workspaceProject = ref<ProjectCard | null>(null)
@@ -134,6 +135,17 @@ function registerUiActivity() {
 }
 
 const projects = computed(() => data.value?.projects ?? [])
+function projectMatchesSidebarMode(project: ProjectCard, mode: string) {
+  const baseType = firstEngineBaseTypeForSidebarMode(mode)
+  if (baseType) return isKohyaProject(project) && project.base_type === baseType
+  return mode === '_kohya' ? isKohyaProject(project) : project.mode === mode
+}
+const visibleProjects = computed(() => projectModeFilter.value
+  ? projects.value.filter((project) => projectMatchesSidebarMode(project, projectModeFilter.value!))
+  : projects.value)
+const projectModeFilterLabel = computed(() => sidebarGroups.value
+  .flatMap((group) => group.modes)
+  .find((mode) => mode.key === projectModeFilter.value)?.label ?? '当前引擎')
 const templates = computed(() => data.value?.templates ?? [])
 const sidebarGroups = computed(() => (data.value?.engine_groups ?? []).map((group) => {
   if (!group.modes.some((mode) => mode.key === '_kohya')) return group
@@ -168,19 +180,29 @@ const selectedGuideMode = computed(() => selectedMode.value === '_kohya'
 // Keep standalone browser previews representative of the real mode registry.
 // Desktop workspaces replace this demo payload with live values from modern_host.py.
 const demoPresets: Record<string, Record<string, string>> = {
-  style: { rank: '16', alpha: '8', unet_lr: '1.5e-4', te_lr: '7.5e-5', repeats: '5', max_epochs: '8', resolution: '1024', noise_offset: '0.05', min_snr_gamma: '5' },
-  character: { rank: '32', alpha: '16', unet_lr: '7e-5', te_lr: '4e-5', repeats: '3', max_epochs: '6', resolution: '1024', noise_offset: '0.05', min_snr_gamma: '5' },
-  concept: { rank: '32', alpha: '16', unet_lr: '1e-4', te_lr: '5e-5', repeats: '3', max_epochs: '8', resolution: '1024', noise_offset: '0.05', min_snr_gamma: '5' },
-  krea2: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '16', resolution: '1024' },
-  krea2_at: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '8', resolution: '1024' },
+  style: { rank: '16', alpha: '8', unet_lr: '1.5e-4', te_lr: '7.5e-5', repeats: '5', max_epochs: '8', resolution: '512', noise_offset: '0.05', min_snr_gamma: '5' },
+  character: { rank: '32', alpha: '16', unet_lr: '7e-5', te_lr: '4e-5', repeats: '3', max_epochs: '6', resolution: '512', noise_offset: '0.05', min_snr_gamma: '5' },
+  concept: { rank: '32', alpha: '16', unet_lr: '1e-4', te_lr: '5e-5', repeats: '3', max_epochs: '8', resolution: '512', noise_offset: '0.05', min_snr_gamma: '5' },
+  krea2: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '16', resolution: '512' },
+  krea2_at: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '8', resolution: '512' },
   krea2_fz: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '16', resolution: '512' },
-  qwen21_fz: { rank: '8', alpha: '8', unet_lr: '1e-4', te_lr: '1e-4', repeats: '1', max_epochs: '30', resolution: '704', fizgig_qwen_preset: 'auto' },
-  h3_fz: { rank: '8', alpha: '8', unet_lr: '2e-4', te_lr: '1e-4', repeats: '1', max_epochs: '50', resolution: '768', video_frames: '56', sample_interval: '5' },
-  flux2: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '16', resolution: '1024' },
-  flux2_fz: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '16', resolution: '768' },
-  video: { rank: '32', alpha: '32', unet_lr: '2e-4', te_lr: '1e-4', repeats: '1', max_epochs: '20', resolution: '1280', video_steps: '2000', video_frames: '73' },
-  qwen_image: { rank: '16', alpha: '16', unet_lr: '1e-4', te_lr: '1e-4', repeats: '1', max_epochs: '20', resolution: '1024', video_steps: '2000' },
-  zimage: { rank: '16', alpha: '16', unet_lr: '1e-4', te_lr: '1e-4', repeats: '1', max_epochs: '20', resolution: '1024', video_steps: '2000' },
+  qwen21_fz: { rank: '8', alpha: '8', unet_lr: '1e-4', te_lr: '1e-4', repeats: '1', max_epochs: '30', resolution: '512', fizgig_qwen_preset: 'auto' },
+  h3_fz: { rank: '8', alpha: '8', unet_lr: '2e-4', te_lr: '1e-4', repeats: '1', max_epochs: '50', resolution: '512', video_frames: '56', sample_interval: '5' },
+  flux2: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '16', resolution: '512' },
+  flux2_fz: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '16', resolution: '512' },
+  video: { rank: '32', alpha: '32', unet_lr: '2e-4', te_lr: '1e-4', repeats: '1', max_epochs: '20', resolution: '512', video_steps: '2000', video_frames: '73' },
+  qwen_image: { rank: '16', alpha: '16', unet_lr: '1e-4', te_lr: '1e-4', repeats: '1', max_epochs: '20', resolution: '512', video_steps: '2000' },
+  zimage: { rank: '16', alpha: '16', unet_lr: '1e-4', te_lr: '1e-4', repeats: '1', max_epochs: '20', resolution: '512', video_steps: '2000' },
+}
+
+
+const demoQuantModes: Record<string, string[]> = {
+  krea2: ['auto', 'fp8', 'int8', 'nf4'],
+  flux2: ['auto', 'fp8', 'int8', 'nf4'],
+  krea2_fz: ['auto', 'fp8', 'int8', 'nf4', 'bf16'],
+  flux2_fz: ['auto', 'fp8', 'nf4', 'bf16'],
+  qwen21_fz: ['auto', 'bf16', 'int8', 'nf4'],
+  h3_fz: ['auto', 'int8', 'nf4', 'hqq'],
 }
 
 function setActiveWorkspace(instance: unknown) {
@@ -233,19 +255,6 @@ function modeOverrideForSelectedTemplate(): FirstEngineMode | undefined {
     : undefined
 }
 
-function previewProject(mode: string): ProjectCard {
-  const template = templates.value.find((item) => item.mode === mode)
-  const qwen = mode === 'qwen_image'
-  const modeLabel = ({ character: '人物 LoRA', style: '画风 LoRA', concept: '概念 LoRA' } as Record<string, string>)[mode]
-  return {
-    name: `${template?.mode_label || modeLabel || mode} 新版训练页预览`, updated: '', mode,
-    mode_label: template?.mode_label || modeLabel || mode,
-    base_type: template?.base_type || (qwen ? 'qwen_image' : 'sdxl'),
-    base_type_label: qwen ? 'Qwen-Image' : modeLabel || template?.mode_label || mode,
-    raw_dir: '', base_model: '',
-  }
-}
-
 function demoModeWorkspace(mode: string): ModeWorkspaceData {
   const template = templates.value.find((item) => item.mode === mode)
   const preset = demoPresets[mode] ?? {}
@@ -258,7 +267,7 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
     strong_bind: true, clean_concept: true, sample_preview: true, compile: ['krea2', 'flux2', 'krea2_fz'].includes(mode),
     global_pos: ['style', 'character', 'concept'].includes(mode), global_neg: ['style', 'character', 'concept'].includes(mode),
     crop_ratio: true, sample_prompt: true, noise_offset: false, min_snr_gamma: false,
-    quant_mode: ['krea2', 'flux2', 'krea2_fz', 'flux2_fz'].includes(mode),
+    quant_mode: ['krea2', 'flux2', 'krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz'].includes(mode),
     blocks_to_swap: ['krea2', 'flux2', 'krea2_fz', 'flux2_fz'].includes(mode),
     // ★ 2026-09-27 新增：批大小 / 梯度检查点（用户诉求「训练器能改 bs 和梯度检查点」）
     //   第一引擎（画风/人物/概念）与第二引擎的 Krea2 / FLUX.2 都真读它们；
@@ -266,7 +275,7 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
     batch_size: ['style', 'character', 'concept', 'krea2', 'flux2'].includes(mode),
     gc: ['style', 'character', 'concept', 'krea2', 'flux2'].includes(mode),
     wd14_model: mode !== 'video', overwrite: mode !== 'video',
-    amd_mode: mode === 'krea2_at' || ['krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz'].includes(mode),
+    amd_mode: mode === 'krea2_at',
   }
   const demoGuideSpecs: Record<string, Array<[string, string, string, string, string]>> = {
     style: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次，全部项目通用）。'], ['kohya', '② 安装训练内核', '去安装', 'cmd_install', '安装 Kohya 训练内核（画风/人物模式需要，只需一次）。'], ['base', '③ 选择模型类型', '去设置', 'cmd_pick_model_type', '选择底模文件并确认模型类型；自动识别不准时可手动指定。'], ['raw', '④ 选择图片文件夹', '去选文件夹', 'cmd_pick_raw', '选择原始图片文件夹（jpg/png/webp 等）。']],
@@ -291,7 +300,7 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
     dataset_hints: { style: '画风图集建议包含多个主体与姿态。', character: '人物图集使用同一主体的清晰图片。', concept: '概念图集保持概念一致，并混合其他主体属性。' },
     trigger_hints: { style: '为画风设置独特的 trigger。', character: '为人物设置独特的 trigger。', concept: '为概念设置独特的 trigger。' },
     engine_ready: false, engine_update_available: false, engine_key: '', gpu: '预览', gpu_vendor: 'unknown', missing_models: ['桌面模式会在打开项目时读取真实模型状态。'],
-    asset_dir: '', supports, interval_units: { save_every: usesEpochs || ['krea2', 'flux2'].includes(mode) ? 'epochs' : 'steps', sample_interval: usesEpochs ? 'epochs' : 'steps' },
+    asset_dir: '', supports, quant_modes: demoQuantModes[mode] ?? [], interval_units: { save_every: usesEpochs || ['krea2', 'flux2'].includes(mode) ? 'epochs' : 'steps', sample_interval: usesEpochs ? 'epochs' : 'steps' },
     defaults: preset, presets: { [mode]: { sdxl: preset } }, is_video: ['video', 'h3_fz'].includes(mode), is_step_based: stepBased,
     has_training_submode: ['krea2', 'krea2_at', 'krea2_fz', 'qwen21_fz', 'flux2', 'flux2_fz'].includes(mode),
     guide_steps,
@@ -408,6 +417,16 @@ function openCreate(preselectedTemplate?: string, preselectedMode?: FirstEngineM
   }
 }
 
+function openCreateForSelectedMode() {
+  if (!projectModeFilter.value) return openCreate()
+  const mode = projectModeFilter.value
+  const baseType = firstEngineBaseTypeForSidebarMode(mode)
+  if (baseType) return openCreate(templateForBaseType(baseType))
+  if (mode === '_kohya') return openCreate()
+  const firstMode = firstEngineModes.includes(mode as FirstEngineMode) ? mode as FirstEngineMode : undefined
+  openCreate(firstMode ? undefined : templateForMode(mode), firstMode)
+}
+
 function openRename(project: ProjectCard) {
   dialogKind.value = 'rename'
   editingProject.value = project
@@ -506,6 +525,7 @@ async function saveDialog() {
 
 async function openProject(project: ProjectCard) {
   if (preview.value || !window.pywebview?.api) {
+    projectModeFilter.value = null
     workspaceProject.value = project
     workspaceConfig.value = previewConfigs.value[project.name] ?? null
     qwenModelSetup.value = null
@@ -574,6 +594,7 @@ async function openProject(project: ProjectCard) {
     qwenModelSetup.value = nextModelSetup
     workspaceKind.value = nextKind
     selectedMode.value = isKohyaProject(project) ? firstEngineSidebarModeForBaseType(project.base_type) : project.mode
+    projectModeFilter.value = null
     workspaceOpen.value = true
     appendLog(nextKind === 'qwen'
       ? `[项目] 已在新版训练页打开「${project.name}」的 ${project.mode === 'zimage' ? 'Z-Image' : 'Qwen-Image'} 设置。`
@@ -744,14 +765,11 @@ async function onGuideAction(step: GuideStep) {
   if (action === 'cmd_pick_raw' || action === 'cmd_pick_model_type') {
     if (!workspaceProject.value) {
       const selectedBaseType = firstEngineBaseTypeForSidebarMode(selectedMode.value)
-      const existing = selectedBaseType
-        ? projects.value.find((project) => isKohyaProject(project) && project.base_type === selectedBaseType)
-        : projects.value.find((project) => project.mode === mode || (mode === 'character' && isKohyaProject(project)))
+      const targetMode = selectedBaseType ? selectedMode.value : mode
+      const existing = projects.value.some((project) => projectMatchesSidebarMode(project, targetMode))
       if (existing) {
-        await openProject(existing)
-        await nextTick()
-        const patch = await activeWorkspaceRef.value?.guideAction?.(action)
-        if (patch && Object.keys(patch).length) await saveKohyaConfig(patch)
+        projectModeFilter.value = targetMode
+        showToast('请先从项目列表明确选择要设置的项目。')
       } else {
         openCreate(selectedBaseType
           ? templateForBaseType(selectedBaseType)
@@ -804,18 +822,8 @@ async function runAction(action: string) {
       activeWorkspaceRef.value?.startTraining()
       return
     }
-    const selectedBaseType = firstEngineBaseTypeForSidebarMode(selectedMode.value)
-    const project = selectedBaseType
-      ? projects.value.find((item) => isKohyaProject(item) && item.base_type === selectedBaseType)
-      : selectedMode.value === '_kohya'
-        ? projects.value.find(isKohyaProject)
-        : projects.value.find((item) => item.mode === selectedMode.value)
-    if (project) void openProject(project)
-    else if (selectedBaseType) openCreate(templateForBaseType(selectedBaseType))
-    else openCreate(
-      selectedMode.value === '_kohya' ? templates.value.find((item) => item.name === '自定义')?.name : templateForMode(selectedMode.value),
-      firstEngineModes.includes(selectedMode.value as FirstEngineMode) ? selectedMode.value as FirstEngineMode : undefined,
-    )
+    if (visibleProjects.value.length) showToast('请先从项目列表明确选择要训练的项目。')
+    else openCreateForSelectedMode()
     return
   }
   if (action === 'env_locations') {
@@ -1027,60 +1035,23 @@ async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
 }
 
 function chooseMode(mode: string) {
-  const selectedBaseType = firstEngineBaseTypeForSidebarMode(mode)
-  if (selectedBaseType) {
-    selectedMode.value = mode
-    const project = projects.value.find((item) => isKohyaProject(item) && item.base_type === selectedBaseType)
-    if (project) {
-      void openProject(project)
-    } else if (preview.value || !window.pywebview?.api) {
-      const templateName = firstEngineTemplates[selectedBaseType]
-      const template = templates.value.find((item) => item.name === templateName)
-      const project = {
-        ...previewProject(template?.mode || 'character'),
-        name: `${templateName} 新版训练页预览`,
-        base_type: selectedBaseType,
-        base_type_label: firstEngineBaseLabels[selectedBaseType],
-      }
-      void openProject(project)
-    } else {
-      void refreshHomeGuide('character')
-      openCreate(templateForBaseType(selectedBaseType))
-    }
-    return
-  }
   selectedMode.value = mode
-  if (preview.value || !window.pywebview?.api) {
-    modeWorkspace.value = demoModeWorkspace(mode === '_kohya' ? selectedGuideMode.value : mode)
-    const targetMode = mode === '_kohya' ? selectedGuideMode.value : mode
-    const project = projects.value.find((item) => item.mode === targetMode) ?? previewProject(targetMode)
-    workspaceProject.value = project
-    workspaceConfig.value = previewConfigs.value[project.name] ?? null
-    qwenModelSetup.value = null
-    if (isKohyaProject(project)) {
-      workspaceKind.value = 'kohya'
-      modeWorkspace.value = demoModeWorkspace(project.mode)
-    } else if (targetMode === 'qwen_image' || targetMode === 'zimage') {
-      workspaceKind.value = 'qwen'
-      modeWorkspace.value = demoModeWorkspace(targetMode)
-    } else {
-      workspaceKind.value = 'engine'
-      modeWorkspace.value = demoModeWorkspace(targetMode)
-    }
-    workspaceOpen.value = true
-    return
-  }
+  if (workspaceOpen.value && workspaceProject.value
+      && projectMatchesSidebarMode(workspaceProject.value, mode)) return
+  workspaceOpen.value = false
+  workspaceProject.value = null
+  workspaceConfig.value = null
+  qwenModelSetup.value = null
+  modeWorkspace.value = null
+  projectModeFilter.value = mode
   const targetMode = mode === '_kohya' ? selectedGuideMode.value : mode
   void refreshHomeGuide(targetMode)
-  const preselectedFirstMode = firstEngineModes.includes(targetMode as FirstEngineMode)
-    ? targetMode as FirstEngineMode
-    : undefined
-  const project = projects.value.find((item) => item.mode === targetMode)
-  if (project) void openProject(project)
-  else openCreate(preselectedFirstMode ? undefined : templateForMode(targetMode), preselectedFirstMode)
+  if (visibleProjects.value.length) showToast('请选择要打开的项目；切换引擎不会自动切换项目。')
+  else openCreateForSelectedMode()
 }
 
 function returnHome() {
+  projectModeFilter.value = null
   workspaceOpen.value = false
   workspaceProject.value = null
   workspaceConfig.value = null
@@ -1247,14 +1218,17 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
               <UiIcon :name="action.icon" />{{ action.label }}
             </button>
             <button class="toolbar-button appearance-button" type="button" title="新版训练页外观设置" aria-label="新版训练页外观设置" @click="openAppearanceDialog"><UiIcon name="settings" /></button>
-            <button class="toolbar-button new-project" type="button" title="创建新的训练项目；可以从模式模板开始，也可以新建自定义项目。" @click="openCreate()"><UiIcon name="plus" /> 新建项目</button>
+            <button class="toolbar-button new-project" type="button" title="创建新的训练项目；可以从模式模板开始，也可以新建自定义项目。" @click="openCreateForSelectedMode()"><UiIcon name="plus" /> 新建项目</button>
           </div>
         </header>
-        <div class="project-hint">每个项目保存一套完整的训练配置（模式 / 底模 / 数据集 / 触发词 / 全部参数），下次直接打开续用。</div>
+        <div class="project-hint">
+          {{ projectModeFilter ? `请选择 ${projectModeFilterLabel} 的项目；切换引擎不会自动打开其他项目。` : '每个项目保存一套完整的训练配置（模式 / 底模 / 数据集 / 触发词 / 全部参数），下次直接打开续用。' }}
+          <button v-if="projectModeFilter" class="small-button" type="button" @click="projectModeFilter = null">显示全部项目</button>
+        </div>
         <section class="project-list" aria-label="项目列表">
-          <TransitionGroup v-if="projects.length" name="project-list">
+          <TransitionGroup v-if="visibleProjects.length" name="project-list">
             <ProjectRow
-              v-for="project in projects"
+              v-for="project in visibleProjects"
               :key="project.name"
               :project="project"
               @open="openProject"
@@ -1262,10 +1236,15 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
               @remove="removeProject"
             />
           </TransitionGroup>
+          <div v-else-if="projectModeFilter" class="empty-projects">
+            <strong>这个引擎还没有项目</strong>
+            <span>新建项目后再选择图片和标签。</span>
+            <button class="small-button primary" type="button" @click="openCreateForSelectedMode()">新建项目</button>
+          </div>
           <div v-else class="empty-projects">
             <strong>还没有项目</strong>
             <span>点右上角「新建项目」开始，训练配置会保存在本机。</span>
-            <button class="small-button primary" type="button" @click="openCreate()">新建项目</button>
+            <button class="small-button primary" type="button" @click="openCreateForSelectedMode()">新建项目</button>
           </div>
         </section>
       </div>

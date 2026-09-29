@@ -270,6 +270,7 @@ export interface ModeWorkspaceData {
   missing_models: string[]
   asset_dir: string
   supports: Record<string, boolean>
+  quant_modes?: string[]
   interval_units: Record<string, string>
   defaults: Record<string, string>
   presets?: Record<string, Record<string, Record<string, unknown>>>

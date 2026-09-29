@@ -90,7 +90,7 @@ def fast_tier_code(text):
             return _k
     return "auto"
 
-# 架构注册表（对标秋叶：SD1.5 / SDXL / FLUX.1 / Anima）
+# 架构注册表（标签中的 1024px 指架构规格；resolution 是新项目的训练默认值）
 # family: sd=U-Net 架构；flux=DiT；anima=DiT+Qwen3
 # tokenizers: [(model_id, kind)] kind='clip'=CLIPTokenizer, 'auto'=AutoTokenizer
 ARCH_INFO = {
@@ -102,7 +102,7 @@ ARCH_INFO = {
         "tokenizers": [("openai/clip-vit-large-patch14", "clip")],
     },
     "sdxl": {
-        "label": "SDXL 1.0（1024px）", "resolution": 1024, "script": "sdxl_train_network.py",
+        "label": "SDXL 1.0（1024px 架构）", "resolution": 512, "script": "sdxl_train_network.py",
         "network_module": "networks.lora", "mixed": "bf16", "save_precision": "bf16",
         "min_bucket": 512, "max_bucket": 2048, "family": "sd",
         "min_vram": 12, "recommend_vram": 16,
@@ -110,7 +110,7 @@ ARCH_INFO = {
         "tokenizers": [("openai/clip-vit-large-patch14", "clip"), ("laion/CLIP-ViT-bigG-14-laion2B-39B-b160k", "clip")],
     },
     "flux": {
-        "label": "FLUX.1（1024px）", "resolution": 1024, "script": "flux_train_network.py",
+        "label": "FLUX.1（1024px 架构）", "resolution": 512, "script": "flux_train_network.py",
         "network_module": "networks.lora_flux", "mixed": "fp16", "save_precision": "bf16",
         "min_bucket": 256, "max_bucket": 1024, "family": "flux",
         "min_vram": 12, "recommend_vram": 16,
@@ -118,7 +118,7 @@ ARCH_INFO = {
         "tokenizers": [("openai/clip-vit-large-patch14", "clip"), ("google/t5-v1_1-xxl", "auto")],
     },
     "anima": {
-        "label": "Anima（1024px）", "resolution": 1024, "script": "anima_train_network.py",
+        "label": "Anima（1024px 架构）", "resolution": 512, "script": "anima_train_network.py",
         "network_module": "networks.lora_anima", "mixed": "bf16", "save_precision": "bf16",
         "min_bucket": 512, "max_bucket": 2048, "family": "anima",
         "min_vram": 8, "recommend_vram": 12,
@@ -126,7 +126,7 @@ ARCH_INFO = {
         "tokenizers": [("Qwen/Qwen3-0.6B", "auto"), ("google/t5-v1_1-xxl", "auto")],
     },
     "flux2": {
-        "label": "FLUX.2 klein（1024px）", "resolution": 1024, "script": "flux_2_train_network.py",
+        "label": "FLUX.2 klein（1024px 架构）", "resolution": 512, "script": "flux_2_train_network.py",
         "network_module": "networks.lora_flux_2", "mixed": "bf16", "save_precision": "bf16",
         "min_bucket": 256, "max_bucket": 1024, "family": "flux2",
         "min_vram": 8, "recommend_vram": 12,
@@ -154,16 +154,16 @@ _PRESET_BASE = {
     "style": {"rank": "12", "alpha": "6", "unet_lr": "3e-4", "te_lr": "1.5e-4", "repeats": "5", "max_epochs": "8", "resolution": "512"},
     "character": {"rank": "24", "alpha": "12", "unet_lr": "1.5e-4", "te_lr": "8e-5", "repeats": "3", "max_epochs": "6", "resolution": "512"},
     "concept": {"rank": "32", "alpha": "16", "unet_lr": "1e-4", "te_lr": "5e-5", "repeats": "3", "max_epochs": "8", "resolution": "512"},
-    "krea2": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "1024"},
+    "krea2": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "512"},
     "krea2_fz": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "512"},
-    "qwen21_fz": {"rank": "8", "alpha": "8", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "30", "resolution": "704", "fizgig_qwen_preset": "auto"},
-    "h3_fz": {"rank": "8", "alpha": "8", "unet_lr": "2e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "50", "resolution": "768", "video_frames": "56", "sample_interval": "5"},
-    "krea2_at": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "8", "resolution": "1024"},
-    "flux2": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "1024"},
-    "flux2_fz": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "768"},
-    "video": {"rank": "32", "alpha": "32", "unet_lr": "2e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "20", "resolution": "1280", "video_steps": "2000", "video_frames": "73"},
-    "qwen_image": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
-    "zimage": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "20", "resolution": "1024", "video_steps": "2000"},
+    "qwen21_fz": {"rank": "8", "alpha": "8", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "30", "resolution": "512", "fizgig_qwen_preset": "auto"},
+    "h3_fz": {"rank": "8", "alpha": "8", "unet_lr": "2e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "50", "resolution": "512", "video_frames": "56", "sample_interval": "5"},
+    "krea2_at": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "8", "resolution": "512"},
+    "flux2": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "512"},
+    "flux2_fz": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "512"},
+    "video": {"rank": "32", "alpha": "32", "unet_lr": "2e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "20", "resolution": "512", "video_steps": "2000", "video_frames": "73"},
+    "qwen_image": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "20", "resolution": "512", "video_steps": "2000"},
+    "zimage": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "20", "resolution": "512", "video_steps": "2000"},
 }
 
 # SD1.5 / SDXL 专用的「训练质量」增强（2026-09-12 新增，v3）：
@@ -180,19 +180,14 @@ _PRESET_SD_MODES = ("style", "character", "concept")
 # 只在「该架构与基线不同」时才写；未列出的架构 = 直接用基线
 _PRESET_ARCH_DIFF = {
     "style": {
-        "sdxl": {"rank": "16", "alpha": "8", "unet_lr": "1.5e-4", "te_lr": "7.5e-5", "resolution": "1024"},
-        "flux": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4", "resolution": "1024"},
-        "anima": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4", "resolution": "1024"},
+        "sdxl": {"rank": "16", "alpha": "8", "unet_lr": "1.5e-4", "te_lr": "7.5e-5"},
+        "flux": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4"},
+        "anima": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "1e-4"},
     },
     "character": {
-        "sdxl": {"rank": "32", "alpha": "16", "unet_lr": "7e-5", "te_lr": "4e-5", "resolution": "1024"},
-        "flux": {"rank": "16", "alpha": "16", "unet_lr": "8e-5", "te_lr": "8e-5", "resolution": "1024"},
-        "anima": {"rank": "16", "alpha": "16", "unet_lr": "8e-5", "te_lr": "8e-5", "resolution": "1024"},
-    },
-    "concept": {
-        "sdxl": {"resolution": "1024"},
-        "flux": {"resolution": "1024"},
-        "anima": {"resolution": "1024"},
+        "sdxl": {"rank": "32", "alpha": "16", "unet_lr": "7e-5", "te_lr": "4e-5"},
+        "flux": {"rank": "16", "alpha": "16", "unet_lr": "8e-5", "te_lr": "8e-5"},
+        "anima": {"rank": "16", "alpha": "16", "unet_lr": "8e-5", "te_lr": "8e-5"},
     },
 }
 
@@ -221,9 +216,18 @@ PRESETS = _build_presets()
 #   v2 -> v3（2026-09-12）：SD1.5 / SDXL 新增 noise_offset 与 min_snr_gamma 两项质量增强。
 #                          这两项旧项目里根本不存在，所以打开旧项目时会单独提示一次，
 #                          选「否」就明确关掉它们，保证老项目训练口径一字不变。
-PRESET_VERSION = 3
+#   v3 -> v4（2026-09-29）：所有模式的新项目默认训练分辨率统一为 512。
+PRESET_VERSION = 4
 
 RESOLUTIONS = {k: v["resolution"] for k, v in ARCH_INFO.items()}
+QUANT_MODE_OPTIONS = {
+    "krea2": ("auto", "fp8", "int8", "nf4"),
+    "flux2": ("auto", "fp8", "int8", "nf4"),
+    "krea2_fz": ("auto", "fp8", "int8", "nf4", "bf16"),
+    "flux2_fz": ("auto", "fp8", "nf4", "bf16"),
+    "qwen21_fz": ("auto", "bf16", "int8", "nf4"),
+    "h3_fz": ("auto", "int8", "nf4", "hqq"),
+}
 MIN_IMAGES = {"style": 20, "character": 15, "concept": 15, "krea2": 15, "krea2_at": 15, "krea2_fz": 15, "qwen21_fz": 5, "h3_fz": 1, "flux2": 15, "flux2_fz": 15, "video": 3, "qwen_image": 15, "zimage": 15}   # 一键训练最少可用图片/视频数
 MAX_AUTO_STEPS = 12000                          # 一键训练自动约束的最大总步数（防过拟合）
 
@@ -275,7 +279,7 @@ PARAM_SCOPE = {
     "train_text_encoder": ("style", "character", "concept"),
     "global_pos": ("style", "character", "concept"),
     "global_neg": ("style", "character", "concept"),
-    "amd_mode": ("style", "character", "concept", "krea2_at", "qwen_image", "zimage", "krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz"),
+    "amd_mode": ("style", "character", "concept", "krea2_at", "qwen_image", "zimage"),
     "style_preset": ("style", "character", "concept"),
     "noise_offset": ("style", "character", "concept"),
     "min_snr_gamma": ("style", "character", "concept"),
@@ -284,8 +288,8 @@ PARAM_SCOPE = {
     # 仅视频 / AI 图像（这两个引擎按「总步数」训练，不用 epoch）
     "video_steps": ("video", "qwen_image", "zimage"),
     "video_frames": ("video", "h3_fz"),
-    # 仅 Krea2 / FLUX.2 系（含 Fizgig）：量化与块交换是这两个引擎的参数
-    "quant_mode": ("krea2", "krea2_fz", "flux2", "flux2_fz"),
+    # 量化适用于 Krea2 / FLUX.2 系及 Fizgig Qwen 2.1 / H3；块交换仅适用于前两系。
+    "quant_mode": ("krea2", "krea2_fz", "flux2", "flux2_fz", "qwen21_fz", "h3_fz"),
     "blocks_to_swap": ("krea2", "krea2_fz", "flux2", "flux2_fz"),
     # ★ 2026-09-27 新增（用户诉求：训练器能改 bs 与梯度检查点）✗
     #   batch_size：留空 = 自动 1 ✓
@@ -345,7 +349,7 @@ TRIGGER_HINT_KREA2 = ("💡提示：填一个网上很少见到的英文单词�
 TRIGGER_HINT_KREA2_AT = ("💡提示：填一个网上很少见到的英文单词（如 my_k2at_01）\n"
                        "训练后输入这个单词，就能召唤这个角色/风格。\n"
                        "\u26a0 Krea2（AI-Toolkit 引擎）需先安装第三引擎；底模用 bf16 RAW（models/krea2/raw.safetensors），\n"
-                       "文本编码器/VAE 首次训练自动下载（约 9GB，国内镜像）。16G 显存自动 768 + int8 + 分层交换优化。\n"
+                       "文本编码器/VAE 首次训练自动下载（约 9GB，国内镜像）。新项目默认 512px，16G 显存自动启用省显存优化。\n"
                        "不填也可以正常训练。")
 
 TRIGGER_HINT_FLUX2 = ("💡提示：填一个网上很少见到的英文单词（如 my_f2_01）\n"
@@ -355,7 +359,7 @@ TRIGGER_HINT_FLUX2_FZ = ("💡提示：填一个网上很少见到的英文单�
                         "训练后输入这个单词，就能召唤这个角色/风格。\n"
                         "\u26a0 Klein 9B（Fizgig 引擎）需先安装第四引擎，并把 Klein 9B 模型放进 models/flux2/\n"
                         "（fp8 DiT 约 9GB + Qwen3-8B 文本编码器约 15GB + VAE 320MB，国内镜像应用内下载）。\n"
-                        "16G 显存推荐 768px；12G 自动 NF4 + 块交换。NVIDIA/AMD 双平台。")
+                        "新项目默认 512px，可自行调高；12G 自动 NF4 + 块交换。NVIDIA/AMD 双平台。")
 TRIGGER_HINT_STYLE = ("💡提示：填一个网上很少见到的英文单词，比如 my_style01\n"
                       "不要用 sketch 这种普通单词！\n"
                       "⚠重要：你的训练图片不能全是同一个人，不然画风套不到别的东西上。\n"
@@ -373,9 +377,9 @@ DATASET_TIPS = {
     "character": "📌 数据集提示：建议 15~30 张同一人物，多角度、不同服装，推荐设置唯一 trigger 触发词；可配合正则数据集防过拟合。",
     "concept": "📌 数据集提示：15~40 张「同一个概念」的图——形态/种族、同款服装、同一物品、同一身体部位都算；刻意混不同画风/人脸/姿势/背景，只有这个概念保持一致；trigger 是唯一共同元素，描述只写每张的变体。",
     "krea2": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Krea 2 模型放进 models/krea2/（RAW+VAE+文本编码器）。推荐 12G+ 显存。",
-    "krea2_at": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前把 Krea 2 RAW 底模放进 models/krea2/（26GB，bf16 原版），文本编码器/VAE 首次训练自动下载。推荐 16G+ 显存（16G 自动 768+int8+分层交换优化）。",
+    "krea2_at": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前把 Krea 2 RAW 底模放进 models/krea2/（26GB，bf16 原版），文本编码器/VAE 首次训练自动下载。推荐 16G+ 显存；新项目默认 512px。",
     "krea2_fz": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Krea 2 模型放进 models/krea2/（RAW+VAE+文本编码器）。NVIDIA/AMD 双平台，8G 显存自动 NF4、12G+ 用 fp8。",
-    "qwen21_fz": "📌 Fizgig Qwen-Image-2.1：准备至少 5 张清晰图片，放在原始图片文件夹；选择人物、画风或概念子模式。训练使用官方 Fizgig 预设，704px、0.5MP 分桶。",
+    "qwen21_fz": "📌 Fizgig Qwen-Image-2.1：准备至少 5 张清晰图片，放在原始图片文件夹；选择人物、画风或概念子模式。使用官方 Fizgig 预设，默认 512px，可自行调高。",
     "h3_fz": "📌 MiniMax H3 全模态：图片、视频、音频可放在同一目录或其子目录，每个文件配同名 .txt。准备至少 1 个样本；预处理只扫描，不会移动、转码或生成字幕。",
     "flux2": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 FLUX.2 模型放进 models/flux2/（DiT+Qwen3 文本编码器+VAE，约 16GB，国内镜像）。8G 显存可跑（自动开省显存），推荐 12G+。",
     "flux2_fz": "📌 数据集提示：建议 15~30 张同一人物/风格，多角度多服装；训练前先把 Klein 9B 模型放进 models/flux2/（fp8 DiT + Qwen3-8B 文本编码器 + VAE）。推荐 16G+ 显存（12G 自动 NF4）。",

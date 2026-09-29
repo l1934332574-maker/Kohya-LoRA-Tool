@@ -1306,8 +1306,8 @@ def _run_wd14_onnx(output_dir, logf=print, threshold=0.35, model_key=None):
                 logf(f"[WD14] 内置打标进度：{done}/{total}（已写 {tagged} 张）")
         except Exception as e:
             logf(f"[WD14] 内置打标失败（{f}）：{e}")
-    logf(f"[WD14] 内置打标完成：为 {tagged} 张图片生成标签")
-    return True
+    logf(f"[WD14] 内置打标完成：为 {tagged}/{total} 张图片生成标签")
+    return tagged > 0
 
 
 def _classify_ort_probe(rc, out):
@@ -1400,14 +1400,13 @@ def _run_wd14_onnx_isolated(output_dir, logf=print, threshold=0.35, model_key=No
         logf(f"[WD14] ⚠ 内置打标子进程启动失败：{e}；改用兜底标签继续")
         return False
     if rc != 0:
-        logf(f"[WD14] ⚠ 内置打标子进程异常退出（退出码 {rc}）—— 内置打标第一步就是 "
-             "`import onnxruntime`，它发生 native 崩溃时零输出、无 traceback。"
-             "已跳过自动打标（**图片处理结果不受影响**），改用兜底 caption 继续。")
+        logf(f"[WD14] ⚠ 内置打标子进程未完成（退出码 {rc}）。"
+             "可能是依赖、模型、逐图推理失败或 native 崩溃；请查看上方 WD14 日志。"
+             "图片处理结果不受影响，缺少的标签将使用兜底 caption。")
         # 主动定位 + 给出可执行修复步骤。对着空白日志发呆正是「零门槛」的反面。
         _ok_ort, _why_ort = _probe_onnxruntime_import(sys.executable)
         if _ok_ort:
-            logf("[WD14] 定位：onnxruntime 本身可正常 import → 崩溃点在其后的模型加载/推理。")
-            logf("[WD14]   建议：重跑一次本流程；若反复崩溃，重跑【② 安装训练内核】重建训练环境。")
+            logf("[WD14] 定位：onnxruntime 可正常导入；请检查上方模型加载、逐图推理或写入错误。")
         else:
             logf(f"[WD14] 定位：onnxruntime 不可用 —— {_why_ort}")
             # ---- 自动修复一次并重试（2026-09-16 新增）----
@@ -1746,7 +1745,7 @@ def _prepare_wd14_env(logf=print):
     cands = []
     here = os.path.dirname(os.path.abspath(__file__))
     for base in (here, os.path.dirname(here)):
-        for sub in ("venv_amd", "musubi-venv", "ai_toolkit_venv", "venv"):
+        for sub in ("venv_amd", "musubi-venv", "ai_toolkit_venv", "fizgig_venv", "venv"):
             p = os.path.join(base, sub, "Scripts", "python.exe")
             if os.path.isfile(p) and os.path.abspath(p) != os.path.abspath(cur):
                 cands.append(p)
@@ -1754,7 +1753,8 @@ def _prepare_wd14_env(logf=print):
     if ap:
         for sub in (r"KohyaLoraTool\venv_amd",
                     r"KohyaLoraTool\kohya_ss\musubi-venv",
-                    r"KohyaLoraTool\kohya_ss\ai_toolkit_venv"):
+                    r"KohyaLoraTool\kohya_ss\ai_toolkit_venv",
+                    r"KohyaLoraTool\kohya_ss\fizgig_venv"):
             p = os.path.join(ap, sub, "Scripts", "python.exe")
             if os.path.isfile(p) and os.path.abspath(p) != os.path.abspath(cur):
                 cands.append(p)
@@ -1938,7 +1938,7 @@ def is_blurry(img, threshold):
         return False
 
 
-def write_dataset_config(output_dir, config_path, resolution=768, batch_size=1,
+def write_dataset_config(output_dir, config_path, resolution=512, batch_size=1,
                          num_repeats=1, reg_dir=None, keep_tokens=0,
                          subsets=None, reg_subsets=None):
     """为 kohya sd-scripts 生成数据集配置 TOML（绝对路径）。
@@ -2332,10 +2332,12 @@ def main():
                 if _purge_placeholder_captions(output_dir, DEFAULT_CHARACTER_CAPTION, trigger):
                     imgs_no_txt = _imgs_no_txt(output_dir)
             if imgs_no_txt:
-                wd14_ok = _run_wd14_auto(output_dir, model_key=getattr(args, "wd14_model", None))
-                if not wd14_ok:
+                _run_wd14_auto(output_dir, model_key=getattr(args, "wd14_model", None))
+                missing_after_wd14 = _imgs_no_txt(output_dir)
+                if missing_after_wd14:
                     _fill_missing_captions(output_dir, DEFAULT_CHARACTER_CAPTION)
-                    print("[WARN] WD14/内置打标都失败，缺标签图片使用兜底 caption（只有 1girl, solo 等极简词，训练效果会差；请查看上方日志排查后重试）")
+                    print(f"[WARN] WD14 打标后仍有 {len(missing_after_wd14)} 张图片缺标签，已使用兜底 caption"
+                          "（只有 1girl, solo 等极简词，训练效果会差；请查看上方日志排查后重试）")
             else:
                 print("[INFO] 图片标签已齐全，跳过 WD14 打标。")
         else:
@@ -2435,10 +2437,12 @@ def main():
                         output_dir, (DEFAULT_CAPTION, DEFAULT_CAPTION_REALISTIC), trigger):
                     imgs_no_txt = _imgs_no_txt(output_dir)
             if imgs_no_txt:
-                wd14_ok = _run_wd14_auto(output_dir, model_key=getattr(args, "wd14_model", None))
-                if not wd14_ok:
+                _run_wd14_auto(output_dir, model_key=getattr(args, "wd14_model", None))
+                missing_after_wd14 = _imgs_no_txt(output_dir)
+                if missing_after_wd14:
                     _fill_missing_captions(output_dir, style_fb)
-                    print("[WARN] WD14/内置打标都失败，缺标签图片使用兜底 caption（训练效果会差；请查看上方日志排查后重试）")
+                    print(f"[WARN] WD14 打标后仍有 {len(missing_after_wd14)} 张图片缺标签，已使用兜底 caption"
+                          "（训练效果会差；请查看上方日志排查后重试）")
             else:
                 print("[INFO] 图片标签已齐全，跳过 WD14 打标。")
         else:

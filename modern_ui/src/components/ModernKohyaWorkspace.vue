@@ -6,6 +6,7 @@ import CropRatioField from './CropRatioField.vue'
 import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
 import { normalizeWd14Model } from '../modelDefaults'
+import { fastRunNumber } from '../fastRunPreset'
 
 type BrowseKind = 'folder' | 'model'
 const props = defineProps<{
@@ -100,7 +101,7 @@ function hydrate(config?: ProjectConfig | null) {
   draft.global_pos = get(config?.global_pos)
   draft.global_neg = get(config?.global_neg)
   draft.train_env = get(config?.train_env)
-  const demoValues: Record<string, string> = { rank: '12', alpha: '6', unet_lr: '3e-4', te_lr: '1.5e-4', repeats: '5', max_epochs: '8', resolution: '1024' }
+  const demoValues: Record<string, string> = { rank: '12', alpha: '6', unet_lr: '3e-4', te_lr: '1.5e-4', repeats: '5', max_epochs: '8', resolution: '512' }
   configuredParams.clear()
   Object.keys(params).forEach((key) => configuredParams.add(key))
   const preset = presetFor(currentModeKey.value, draft.base_type)
@@ -157,6 +158,19 @@ function resetPreset() {
     markParam(key)
   }
   emit('notify', '当前模式和底模的推荐预设已恢复。保存修改后生效。')
+}
+
+function applyFastRun() {
+  draft.rank = fastRunNumber(draft.rank, 8); markParam('rank')
+  draft.alpha = draft.rank; markParam('alpha')
+  draft.repeats = '1'; markParam('repeats')
+  draft.max_epochs = fastRunNumber(draft.max_epochs, 8); markParam('max_epochs')
+  draft.save_every = '1000'; markParam('save_every')
+  draft.sample_preview_mode = 'off'; markParam('sample_preview')
+  draft.optimizer = 'auto'; markParam('optimizer')
+  draft.unet_only = true; markRoot('unet_only')
+  draft.compile = false; markParam('compile')
+  emit('notify', '已应用快跑档：小 rank、仅训练 UNet/DiT、缩短训练并关闭采样；分辨率保持原值。保存设置后生效。')
 }
 
 const conceptOptions = [
@@ -308,6 +322,7 @@ defineExpose({ startTraining, guideAction })
           <section class="kohya-card parameter-card">
             <header class="card-heading parameter-heading">
               <span class="step-number">03</span><div class="parameter-title"><h2>训练参数</h2><small>{{ desktop ? '项目覆盖值 · 空白沿用推荐值' : '常用参数 · 示例值' }}</small></div>
+              <button class="kohya-button compact" type="button" title="应用省显存的短程试训参数；保留当前训练分辨率" @click="applyFastRun">快跑档</button>
               <button class="kohya-button compact" type="button" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起高级参数' : '高级参数' }}<span class="chevron" :class="{ open: advancedOpen }">⌄</span></button>
             </header>
             <div class="parameter-grid">

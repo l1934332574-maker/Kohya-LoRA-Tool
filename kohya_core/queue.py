@@ -78,7 +78,7 @@ def run_queue_item(name, logf=print):
                              K.RESOLUTIONS.get(p.get("base_type"), 512))
             size = int(p.get("resolution") or fallback_size)
         except Exception:
-            size = 704 if mode == "qwen21_fz" else 1024
+            size = 512
         pp_mode = K.preprocess_mode(mode, p.get("at_sub_mode"))
         K.preprocess(logf, input_dir=p["raw_dir"], size=size, mode=pp_mode,
                      trigger=p.get("trigger"), reg_dir=p.get("reg_dir"),

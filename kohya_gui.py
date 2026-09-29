@@ -129,24 +129,8 @@ PARAM_ORDER = ("rank", "alpha", "unet_lr", "te_lr", "repeats", "max_epochs",
 
 
 def default_resolution(mode, base_type):
-    """GUI 分辨率控件留空时的分模式默认值。
-
-    视频（H3）= 1280、Klein9B = 768、Krea2/FLUX.2 系 = 1024，其余按架构表
-    （Anima/SDXL 1024、SD1.5 512）。
-    此前视频模式也会落到 base_type 的默认（Anima 就是 1024），与 H3 的 1280 不一致，
-    所以单独分支出来、并抽成函数便于测试。
-    """
-    if mode == "video":
-        return str(core.H3_RESOLUTION)
-    if mode == "qwen21_fz":
-        return str(getattr(core, "QWEN21_FZ_RESOLUTION", 704))
-    if mode == "h3_fz":
-        return str(getattr(core, "H3_FZ_RESOLUTION", 768))
-    if mode == "flux2_fz":
-        return str(core.FLUX2FZ_RESOLUTION)
-    if mode in ("krea2", "krea2_fz", "krea2_at", "flux2"):
-        return "1024"
-    return str(core.RESOLUTIONS.get(base_type, 512))
+    """GUI 分辨率留空时统一从 512px 起步，仍允许手动调高。"""
+    return "512"
 
 
 def _schedule_initial_project_action(root, open_project, action_callback,
@@ -275,8 +259,8 @@ _MAIN_BTN_TIPS = {
 
 # GUI 显示 → 训练参数 optimizer 映射（resolve_optimizer 接受小写）
 _OPT_GUI_MAP = {"自动": "auto", "AdamW": "adamw", "Lion": "lion", "AdamW8bit": "adamw8bit"}
-# GUI 显示 → Krea2/FLUX.2 底模量化方式（auto = int8，见 core._resolve_quant_mode）
-_QUANT_GUI_MAP = {"自动": "auto", "fp8": "fp8", "int8": "int8", "nf4": "nf4"}
+# GUI 显示 → 各引擎支持的底模量化精度（选项由 core.QUANT_MODE_OPTIONS 决定）
+_QUANT_GUI_MAP = {"自动": "auto", "fp8": "fp8", "int8": "int8", "nf4": "nf4", "bf16": "bf16", "hqq": "hqq"}
 # GUI 显示 → WD14 打标模型（2026-09-17：模型改为「首次使用时下载 + 可选」，
 # 默认 swinv2-v3（社区主流、标签库更新到 2024）；不满意可切回 moat-v2。
 # 取值规则见 core/preprocess 的 resolve_wd14_model —— **缺失/未知一律静默用默认**，
@@ -2901,9 +2885,9 @@ class App:
             font=ui_font(FONT_HINT), text_color=HINT)
         self.clean_concept_hint.pack(side="left", padx=(10, 0))
         self.clean_concept_row.pack_forget()
-        # ⚡ 快跑档手动开关（全模式通用：自动=按显存自动启用，开=强制快跑档，关=常规）
+        # AI 图像引擎的内部快跑加速开关，与各模式的短程试训预设分开。
         self.fast_tier_row = ctk.CTkFrame(card2, fg_color="transparent")
-        ctk.CTkLabel(self.fast_tier_row, text="⚡ 快跑档", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
+        ctk.CTkLabel(self.fast_tier_row, text="⚡ 引擎快跑加速", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
         self.fast_tier_var = tk.StringVar(value=core.FAST_TIER_LABELS["auto"])
         self.fast_tier_menu = ctk.CTkComboBox(
             self.fast_tier_row, values=list(core.FAST_TIER_LABELS.values()),
@@ -2914,7 +2898,7 @@ class App:
             font=ui_font(FONT_BODY), command=lambda _e: None)
         self.fast_tier_menu.pack(side="left", padx=(12, 0))
         self.fast_tier_hint = ctk.CTkLabel(self.fast_tier_row,
-            text="自动=按显存自动启用；开=强制快跑（低分辨率/省显存/关采样）；关=完全按常规参数",
+            text="自动=按显存自动启用；开=强制省显存并关闭采样，保留当前分辨率；关=常规参数",
             font=ui_font(FONT_HINT), text_color=HINT)
         self.fast_tier_hint.pack(side="left", padx=(12, 0))
         self.fast_tier_row.pack_forget()
@@ -3445,11 +3429,11 @@ class App:
                     "style": "Style · rank 16 / alpha 16 · flat 1.5e-4",
                 }.get(_qwen_preset, "Fast · rank 8 / alpha 8 · Adaptive 2e-4~4e-4")
                 self.preset_summary.configure(
-                    text=f"Fizgig 官方预设：{_profile} · 最多 {self._param_now('max_epochs', 30)} 轮 · 704px / 0.5MP 分桶")
+                    text=f"Fizgig 官方预设：{_profile} · 最多 {self._param_now('max_epochs', 30)} 轮 · 分辨率 {self._param_now('resolution', 512)}px")
             elif self.mode == "h3_fz":
                 self.preset_summary.configure(
                     text=f"Fizgig H3 · rank 8 / alpha 8 · LR 2e-4 · 最多 {self._param_now('max_epochs', 50)} 轮 · "
-                         f"分辨率 {self._param_now('resolution', 768)}px · 预览 {self._param_now('video_frames', 56)} 帧")
+                         f"分辨率 {self._param_now('resolution', 512)}px · 预览 {self._param_now('video_frames', 56)} 帧")
             elif self.mode in ("qwen_image", "zimage"):
                 # Qwen / Z-Image 也是**按步**训练 ✓ 而摘要以前只列 repeats/最大epoch ✗ ——
                 # 可那两个选项在这两个模式里恰恰是**隐藏**的 ✗ → 用户根本看不到自己设的步数 ✗
@@ -4154,7 +4138,13 @@ class App:
                 _vl.configure(text="预览采样帧数" if self.mode == "h3_fz" else "帧数（17n+5）")
         except Exception:
             pass
-        # 量化 / 块交换 / torch.compile：按模式显隐（2026-09-18 新增）
+        # 量化 / 块交换 / torch.compile：按模式显隐。
+        try:
+            _quant_options = core.QUANT_MODE_OPTIONS.get(self.mode, ())
+            if _quant_options and hasattr(self, "quant_menu"):
+                self.quant_menu.configure(values=["自动" if value == "auto" else value for value in _quant_options])
+        except Exception:
+            pass
         #   量化、块交换：只有真用它们的 **Krea2×3 / FLUX.2×2** 显示 ✓
         #   torch.compile：再加 **画风/人物/概念**（SD/SDXL ✓）；
         #     视频 / Qwen / Z-Image 的配置里根本没有这一项 ✗ 所以不显示 ✓
@@ -4213,7 +4203,7 @@ class App:
                 self.trig_card_title.configure(text="② 设置触发词（H3 Fizgig）")
             elif self.mode == "qwen21_fz":
                 self.card1_title.configure(text="① 准备图片数据")
-                self.card1_hint.configure(text="至少准备 5 张清晰图片；人物、画风或概念类型在训练类型中选择。使用 Fizgig 官方预设；默认 704px、0.5MP 分桶。")
+                self.card1_hint.configure(text="至少准备 5 张清晰图片；人物、画风或概念类型在训练类型中选择。使用 Fizgig 官方预设；默认 512px，可自行调高。")
                 self.trig_card_title.configure(text="② 设置触发词（Qwen-Image-2.1）")
             elif self.mode in ("qwen_image", "zimage"):
                 self.card1_title.configure(text="① 准备图片数据")
@@ -5981,6 +5971,12 @@ class App:
                                               text_color=HINT, corner_radius=6, font=ui_font(FONT_HINT),
                                               command=self.cmd_reset_presets)
         self.btn_reset_preset.pack(side="left", padx=(20, 0))
+        self.btn_fast_run = ctk.CTkButton(
+            cb, text="快跑档", width=80, height=26, fg_color=CARD2,
+            hover_color="#343a46", border_width=1, border_color=BORDER,
+            text_color=TXT, corner_radius=6, font=ui_font(FONT_HINT),
+            command=self.cmd_fast_run)
+        self.btn_fast_run.pack(side="left", padx=(8, 0))
         ow = ctk.CTkFrame(self.adv_body, fg_color="transparent"); ow.pack(anchor="w", pady=(6, 0))
         ctk.CTkLabel(ow, text="优化器", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
         self.optimizer_var = tk.StringVar(value="自动")
@@ -5999,7 +5995,7 @@ class App:
                               "⚠ Krea2/FLUX.2 的 Fizgig 引擎不支持此项，用引擎默认）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         qw = ctk.CTkFrame(self.adv_body, fg_color="transparent"); qw.pack(anchor="w", pady=(6, 0))
-        ctk.CTkLabel(qw, text="量化方式（Krea2/FLUX.2）", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
+        ctk.CTkLabel(qw, text="底模量化精度", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
         self.quant_var = tk.StringVar(value="自动")
         try:
             self.quant_var.trace_add("write", lambda *a: self._schedule_autosave())
@@ -6007,12 +6003,12 @@ class App:
             pass
         self.quant_menu = ctk.CTkOptionMenu(
             qw, variable=self.quant_var,
-            values=["自动", "fp8", "int8", "nf4"], width=130, height=26,
+            values=["自动", "fp8", "int8", "nf4", "bf16", "hqq"], width=130, height=26,
             fg_color=CARD2, button_color=CARD2, button_hover_color="#3a4150",
             text_color=SUB, font=ui_font(FONT_HINT), dropdown_font=ui_font(FONT_HINT),
             dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150")
         self.quant_menu.pack(side="left", padx=(10, 0))
-        ctk.CTkLabel(qw, text="（自动=int8；Krea2 的 fp8 明显更慢）",
+        ctk.CTkLabel(qw, text="（选项随引擎变化；bf16 更吃显存）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(10, 0))
         # 打标模型已挪到「① 准备图片数据」卡片（常显）—— 放这里用户找不到 ✗
         bw = ctk.CTkFrame(self.adv_body, fg_color="transparent"); bw.pack(anchor="w", pady=(6, 0))
@@ -6141,6 +6137,59 @@ class App:
             pass
         self._apply_presets()
         self._log("已恢复当前模式+底模的全部预设参数（风格预设已重置为「自定义」）")
+
+    def cmd_fast_run(self):
+        """应用短程、省显存试训参数；绝不覆盖用户选定的分辨率。"""
+        def set_number(key, value):
+            self._set_param_value(key, value)
+            self._manual_override.add(key)
+
+        def capped(key, limit):
+            try:
+                current = int(float(self.param_vars[key].get()))
+            except (KeyError, TypeError, ValueError):
+                current = limit
+            return max(1, min(current, limit))
+
+        if self.mode != "qwen21_fz":
+            rank = capped("rank", 8)
+            set_number("rank", rank)
+            set_number("alpha", rank)
+        if core.param_supports("repeats", self.mode):
+            set_number("repeats", 1)
+        if core.param_supports("max_epochs", self.mode):
+            cap = 6 if self.mode in ("qwen21_fz", "h3_fz") else 8
+            epochs = capped("max_epochs", cap)
+            set_number("max_epochs", epochs)
+            save_every = epochs if core.interval_unit_for(self.mode, "save_every") == "epochs" else 1000
+        else:
+            steps = capped("video_steps", 600)
+            set_number("video_steps", steps)
+            save_every = steps
+        set_number("save_every", save_every)
+        if self.mode == "qwen21_fz":
+            set_number("fizgig_qwen_preset", "fast")
+        self.sample_preview_var.set(False)
+        if self.mode in ("style", "character", "concept"):
+            self.unet_only_var.set(True)
+        if getattr(self, "batch_var", None) is not None:
+            self.batch_var.set("1")
+        if getattr(self, "gc_var", None) is not None:
+            self.gc_var.set("自动")
+        if getattr(self, "quant_var", None) is not None:
+            self.quant_var.set("自动")
+        if getattr(self, "optimizer_var", None) is not None:
+            self.optimizer_var.set("自动")
+        if getattr(self, "swap_var", None) is not None:
+            self.swap_var.set("自动")
+        if getattr(self, "compile_var", None) is not None:
+            self.compile_var.set(False)
+        if self.mode in ("qwen_image", "zimage") and getattr(self, "fast_tier_var", None) is not None:
+            self.fast_tier_var.set(core.FAST_TIER_LABELS["on"])
+        self._refresh_override_bar()
+        self._refresh_preset_summary()
+        self._schedule_autosave()
+        self._log("[快跑档] 已缩小 rank、减少训练量并关闭采样；当前分辨率保持不变。")
 
     # ============ 停止当前任务 ============
     def cmd_stop(self):
@@ -6316,7 +6365,8 @@ class App:
                 utility_only=self._utility_only,
                 expected_project=getattr(self, "_utility_project_name", None),
             )
-            if self._collect_params().get("mode") == "video":
+            params = self._collect_params()
+            if params.get("mode") == "video":
                 messagebox.showinfo(core.APP_NAME,
                                     "视频模式没有「标签编辑器」。\n\n"
                                     "视频的字幕是视频文件夹里的同名 .txt（如 myvideo.mp4 + myvideo.txt），\n"
@@ -6324,12 +6374,14 @@ class App:
                 return
             if self._label_editor is not None:
                 try:
-                    self._label_editor.win.lift()
-                    self._label_editor.win.focus_force()
-                    return
+                    if (self._label_editor.project == project
+                            and self._label_editor.mode == params.get("mode")):
+                        self._label_editor.win.lift()
+                        self._label_editor.win.focus_force()
+                        return
+                    self._label_editor._close()
                 except Exception:
                     self._label_editor = None
-            params = self._collect_params()
             params["project"] = project
             self._label_editor = LabelEditorWindow(self.root, self, params)
             if self._utility_only:
@@ -8495,7 +8547,7 @@ class App:
                 f"学习率      : {params['unet_lr']}\n"
                 f"repeats     : {params['repeats']}\n"
                 f"最大 epoch  : {params['max_epochs']}\n"
-                f"分辨率      : {params.get('resolution', 1024)}px\n"
+                f"分辨率      : {params.get('resolution', 512)}px\n"
                 f"Trigger     : {params['trigger'] or '（未填写）'}"
             )
         elif params.get("mode") == "flux2_fz":
@@ -8509,7 +8561,7 @@ class App:
                 f"学习率      : {params['unet_lr']}\n"
                 f"repeats     : {params['repeats']}\n"
                 f"最大 epoch  : {params['max_epochs']}\n"
-                f"分辨率      : {params.get('resolution', 768)}px\n"
+                f"分辨率      : {params.get('resolution', 512)}px\n"
                 f"Trigger     : {params['trigger'] or '（未填写）'}"
             )
         elif params.get("mode") == "qwen21_fz":
@@ -8529,7 +8581,7 @@ class App:
                 f"DiT         : {os.path.basename(_files.get('dit') or '？')}\n"
                 f"rank / alpha: 由官方预设控制\n"
                 f"最大 epoch  : {params.get('max_epochs', 30)}\n"
-                f"分辨率      : {params.get('resolution', 704)}px（0.5MP 分桶）\n"
+                f"分辨率      : {params.get('resolution', 512)}px\n"
                 f"Trigger     : {params.get('trigger') or '（未填写）'}"
                 + ("\nAMD ROCm：实验性路径，训练兼容性尚未验证。" if params.get("amd_mode") else "")
             )
@@ -8552,7 +8604,7 @@ class App:
                 f"rank / alpha: {params.get('rank', 8)} / {params.get('alpha', 8)}\n"
                 f"学习率      : {params.get('unet_lr', '2e-4')}\n"
                 f"最大 epoch  : {params.get('max_epochs', 50)}\n"
-                f"分辨率      : {params.get('resolution', 768)}px\n"
+                f"分辨率      : {params.get('resolution', 512)}px\n"
                 f"预览帧数    : {params.get('video_frames', 56)}（只用于采样，不裁剪训练视频）\n"
                 f"音频说明    : {_audio_note}\n"
                 "MP4 必须为 24fps、17n+5 帧、宽高为 32 的倍数；带音轨必须为 32kHz 立体声。"

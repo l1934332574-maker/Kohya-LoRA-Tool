@@ -161,7 +161,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.18.9"
+APP_VERSION = "0.18.10"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2035,9 +2035,9 @@ def install_musubi_engine(logf=print):
 
 # ---------- Krea2 图像 LoRA 训练（第二引擎 musubi-tuner） ----------
 
-KREA2_RESOLUTION = 1024
-QWEN21_FZ_RESOLUTION = 704              # Fizgig Qwen 2.1 官方 0.5 MP 桶的方图边长
-H3_FZ_RESOLUTION = 768
+KREA2_RESOLUTION = 512
+QWEN21_FZ_RESOLUTION = 512
+H3_FZ_RESOLUTION = 512
 KREA2_MAX_STEPS = 6000          # Krea2 自动约束最大总步数（防过拟合）
 
 # Krea2 模型文件（放 models/krea2/，不内置；国内镜像直链）
@@ -2092,7 +2092,7 @@ def krea2_missing_models():
 
 # ---------- FLUX.2 图像 LoRA 训练（第二引擎 musubi-tuner） ----------
 FLUX2_MODEL_VERSION = "klein-4b"     # musubi --model_version（klein-4b：4B 蒸馏/基础版）
-FLUX2_RESOLUTION = 1024
+FLUX2_RESOLUTION = 512
 FLUX2_MAX_STEPS = 6000               # FLUX.2 自动约束最大总步数（防过拟合）
 
 # FLUX.2 klein 4B 模型文件（放 models/flux2/，不内置；Comfy-Org 非门禁 repack，国内镜像直链）
@@ -2148,7 +2148,7 @@ def flux2_missing_models():
 #   te  = qwen_3_8b.safetensors（Qwen3-8B 文本编码器，约 15GB）
 #   vae = flux2-vae.safetensors（320MB，与 4B/Comfy repack 同一个 AE，共用）
 FLUX2FZ_MODEL_VERSION = "klein-base-9b"   # Fizgig train.py --model_version
-FLUX2FZ_RESOLUTION = 768                  # 默认训练分辨率（9B 更吃显存，768 平衡；16G 再降 512）
+FLUX2FZ_RESOLUTION = 512                  # 默认从 512 起步，用户可自行提高
 FLUX2FZ_MAX_STEPS = 9000                  # 自动约束最大总步数（防过拟合）
 FLUX2FZ_TRAIN_SCRIPT = "src/fizgig/scripts/train.py"
 FLUX2FZ_CACHE_LATENTS_SCRIPT = "src/fizgig/scripts/cache_latents.py"
@@ -2191,7 +2191,7 @@ def flux2_fz_missing_models():
             missing.append(f"\u00b7 {desc}\n  文件: {fname}\n  下载: {url}")
     return missing
 
-def write_musubi_dataset_config(image_dir, cache_dir, config_path, resolution=1024,
+def write_musubi_dataset_config(image_dir, cache_dir, config_path, resolution=512,
                                 num_repeats=1, keep_tokens=1, caption_extension=".txt",
                                 batch_size=1):
     """musubi-tuner 数据集配置（与 kohya 不同：image_directory / cache_directory）。
@@ -3389,7 +3389,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     if _sample_preview_enabled(params, vram_gb):
         # ≤16.5G 采样分辨率压到 512：按训练分辨率(768~1024)+块交换采样极易 OOM，
         # musubi 采样无容错会直接中断训练（2026-09-03 反馈：Krea2 输出文件夹里都没有预览图）
-        _sp_res = int(resolution or 1024)
+        _sp_res = int(resolution or 512)
         if vram_gb is not None and vram_gb <= 16.5:
             _sp_res = min(_sp_res, 512)
         _sp = _write_sample_prompts(output_name, params, mode, resolution=_sp_res, engine="musubi", train_dir=train_dir)
@@ -3689,7 +3689,7 @@ H3_FRAMES = 73                 # 默认抽帧数（17n+5=73，约 3 秒 @24fps�
 H3_FRAME_STEP = 17
 H3_FRAME_BASE = 5
 H3_ALIGN = 32
-H3_RESOLUTION = 1280           # 默认训练分辨率（预设表 video 档也是 1280）
+H3_RESOLUTION = 512            # 默认训练分辨率；用户可自行提高
 H3_USER_RESOLUTIONS = ("512", "640", "768", "896", "1024", "1152", "1280")   # 全部是 32 的倍数
 H3_USER_FRAMES = ("5", "22", "39", "56", "73", "90", "107")                   # 17n+5，含约 3 秒 @24fps 的 73
 
@@ -5409,7 +5409,7 @@ def _engine_ensure_python312(label, logf=print):
     return py312
 
 
-def _amd_gpu_arch(engine_dir, logf=print):
+def _amd_gpu_arch(engine_dir, vpy, logf=print):
     """检测 AMD GPU 架构（gfxXXXX）：优先用显卡名映射，其次 detect_gpu.py，结果交叉核对。
 
     ★★ 2026-09-23 修正（RX 7800 XT 用户装错包的根因）★★
@@ -5443,7 +5443,7 @@ def _amd_gpu_arch(engine_dir, logf=print):
             _env = build_direct_env()
             # ↓ 关键：屏蔽 override，别让"伪装架构"骗到安装程序 ✗
             _env.pop("HSA_OVERRIDE_GFX_VERSION", None)
-            r = subprocess.run([sys.executable, script], capture_output=True, text=True,
+            r = subprocess.run([vpy, script], capture_output=True, text=True,
                                timeout=120, env=_env)
             arch = (r.stdout or "").strip().splitlines()
             if arch and re.match(r"^gfx", arch[-1]):
@@ -5462,9 +5462,9 @@ def _amd_gpu_arch(engine_dir, logf=print):
     raise RuntimeError("无法识别 AMD GPU 架构（gfxXXXX）：%s。请更新显卡驱动后重试。" % (gname or "未知"))
 
 
-def _fizgig_amd_arch(fz_dir, logf=print):
+def _fizgig_amd_arch(fz_dir, vpy, logf=print):
     """向后兼容的 Fizgig AMD 架构探测入口。"""
-    return _amd_gpu_arch(fz_dir, logf)
+    return _amd_gpu_arch(fz_dir, vpy, logf)
 
 
 def _install_windows_amd_rocm_runtime(vpy, engine_dir, logf=print, label="训练引擎"):
@@ -5473,7 +5473,7 @@ def _install_windows_amd_rocm_runtime(vpy, engine_dir, logf=print, label="训练
     复用 Fizgig 已在 AMD 用户环境中采用的 ROCm 7.15 wheel 组：优先魔搭断点续传，
     失败后回退 AMD nightly。调用方负责在随后安装引擎依赖时锁定匹配的 torch 版本。
     """
-    arch = _amd_gpu_arch(engine_dir, logf)
+    arch = _amd_gpu_arch(engine_dir, vpy, logf)
     logf(f"[{label}] AMD ROCm 路径：检测到 GPU 架构 {arch}，安装 Windows ROCm 7.15 栈…")
     rocm_dir = os.path.join(_engine_source_cache_dir(), "rocm")
     os.makedirs(rocm_dir, exist_ok=True)
@@ -5788,7 +5788,7 @@ def _fizgig_amd_preflight(vpy, fz_dir, env, logf=print, label="Krea2(Fizgig)"):
     if not _ok:
         return False, _detail
     try:
-        _real = _fizgig_amd_arch(fz_dir, logf)
+        _real = _fizgig_amd_arch(fz_dir, vpy, logf)
     except Exception as _e:
         # ★ 2026-09-23：架构认不出来只影响"诊断详情" ✗ → **绝不能因此拦训练** ✓
         #   （教训同上：误拦比漏报代价大 ✓）
@@ -6103,6 +6103,8 @@ def _fizgig_quant_swap(vram_gb, requested, backend=None):
     返回 (quant_flags, swap, detail)。
     """
     q = str(requested or "auto").strip().lower()
+    if q not in QUANT_MODE_OPTIONS["krea2_fz"]:
+        raise ValueError("Krea2(Fizgig) 不支持量化精度：%s" % q)
     tier = round(vram_gb) if vram_gb is not None else None
 
     # 显存 → 块交换：**所有量化方式共用这一处** ✓（以前是散在三处的重复映射 ✗）
@@ -6121,8 +6123,7 @@ def _fizgig_quant_swap(vram_gb, requested, backend=None):
     if q in ("int8",):
         # 手动选 int8：**尊重选择** ✓，但块交换按显存给 ✓（不再写死 0 ✗）
         if tier is not None and tier < 10:
-            return (["--quantize_4bit"], 0,
-                    "NF4 4bit（你选了 int8，但显存 <10G 装不下它的 ~18G 常驻，已自动改用）")
+            raise ValueError("当前显存不足以手动使用 Krea2 int8；请选自动或 NF4。")
         return (["--quant_int8", "bf16"], swap_for_vram,
                 "INT8 W8A8 + blocks_to_swap=%d（你指定的 int8；块交换按显存自动配）"
                 % swap_for_vram)
@@ -6133,6 +6134,8 @@ def _fizgig_quant_swap(vram_gb, requested, backend=None):
         return ([], swap_for_vram,
                 "动态 fp8（你指定的）⚠ 实测 K2 上比 int8 慢 7~45 倍"
                 "（512px：16G 卡 50~100s/步 vs int8 2.2s/步），建议把「量化」改回「自动」")
+    if q == "bf16":
+        return (["--no_fp8"], swap_for_vram, "bf16 不量化 + blocks_to_swap=%d（手动指定）" % swap_for_vram)
     if backend == "amd-rocm" and tier is not None and tier >= 18:
         # 7900 XT（20G）实测：auto 默认的 fp8+块交换在 ROCm 上很慢；int8 常驻 + 关块交换最快
         # （≥18G 装得下 18G 常驻 ✓ 有实测依据，这里**保持 0** ✓ 不动）
@@ -6188,10 +6191,12 @@ def _fizgig_klein_quant_swap(vram_gb, requested, dit_prequant=True, backend=None
     若用户放的是 bf16 原版（~17GB），自动加 --fp8_base 在内存量化成 fp8。
     返回 (quant_flags, swap, detail)。"""
     q = str(requested or "auto").strip().lower()
+    if q not in QUANT_MODE_OPTIONS["flux2_fz"]:
+        raise ValueError("FLUX.2 Klein(Fizgig) 不支持量化精度：%s" % q)
+    if q == "bf16" and dit_prequant:
+        raise ValueError("当前 Klein 底模是预量化 fp8，不能选择 bf16；请换原版 bf16 底模或选择自动。")
     if q in ("nf4", "4bit", "4-bit", "4"):
         return (["--quant_4bit"], 0, "NF4 4bit（冻结底模 ~5.6GB，12G 以下推荐）")
-    if q not in ("auto", "fp8"):
-        q = "auto"
     tier = round(vram_gb) if vram_gb is not None else None
     if q == "auto" and tier is not None and tier < 12:
         return (["--quant_4bit"], 0, "NF4 4bit（<12G 自动切换，冻结底模 ~5.6GB）")
@@ -6199,6 +6204,8 @@ def _fizgig_klein_quant_swap(vram_gb, requested, dit_prequant=True, backend=None
         swap = 0 if (tier is None or tier >= 24) else 10
     else:
         swap = 16
+    if q == "bf16":
+        return ([], swap, "bf16 原版底模（手动指定）+ blocks_to_swap=%d" % swap)
     if not dit_prequant:
         return (["--fp8_base"], swap, "bf16 底模自动转 fp8（--fp8_base）+ blocks_to_swap=%d" % swap)
     return ([], swap, "fp8 预量化底模常驻（~9GB）+ blocks_to_swap=%d" % swap)
@@ -6293,7 +6300,11 @@ def _fizgig_qwen21_local_processor(fz_dir, logf=print):
 def train_qwen21_fizgig(logf=print, mode="qwen21_fz", params=None, vram_gb=None, resume_from=None, progress=None):
     """Cache and train Qwen-Image-2.1 LoRA with Fizgig v6.5.0's family driver."""
     params = params or {}
+    quant_mode = str(params.get("quant_mode") or "auto").strip().lower()
+    if quant_mode not in QUANT_MODE_OPTIONS["qwen21_fz"]:
+        raise ValueError("Qwen-Image-2.1(Fizgig) 不支持量化精度：%s" % quant_mode)
     logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
+    logf("[Qwen-Image-2.1(Fizgig)] 底模精度：%s" % quant_mode)
     _warn_alloc_conf(logf)
     vpy, fz_dir, env = _fizgig_v65_training_context(logf, "Qwen-Image-2.1(Fizgig)")
     files = qwen21_fz_model_files()
@@ -6315,7 +6326,7 @@ def train_qwen21_fizgig(logf=print, mode="qwen21_fz", params=None, vram_gb=None,
     cache_dir = os.path.join(data_dir(), "dataset", proj, "fizgig_qwen21_cache")
     os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
-    resolution = int(params.get("resolution") or 704)
+    resolution = int(params.get("resolution") or QWEN21_FZ_RESOLUTION)
     _write_fizgig_subset_config(subsets, cache_dir, cfg_path, resolution)
     cache_script = os.path.join(fz_dir, "src", "fizgig", "families", "cache.py")
     for stage, model_key in (("latents", "vae"), ("text", "te")):
@@ -6343,7 +6354,7 @@ def train_qwen21_fizgig(logf=print, mode="qwen21_fz", params=None, vram_gb=None,
            "--learning_rate", str(lr), "--max_train_epochs", str(epochs),
            "--save_every_n_epochs", str(_save_every_note(params, epochs, logf, "Qwen-Image-2.1(Fizgig)")),
            "--seed", "42", "--optimizer_type", "adamw8bit",
-           "--precision", "auto", "--blocks_to_swap", "-1", "--ema_decay", "0.98",
+           "--precision", quant_mode, "--blocks_to_swap", "-1", "--ema_decay", "0.98",
            "--training_adapter", files["training_adapter"], "--log_per_image_loss",
            "--save_state", "--save_state_on_train_end", "--keep_last_n_states", "2",
            "--vae", files["vae"], "--text_encoder", files["te"]]
@@ -6379,7 +6390,11 @@ def train_qwen21_fizgig(logf=print, mode="qwen21_fz", params=None, vram_gb=None,
 def train_h3_fizgig(logf=print, mode="h3_fz", params=None, vram_gb=None, resume_from=None, progress=None):
     """Train H3 on a shared photo, MP4 and/or audio folder with Fizgig v6.5.0."""
     params = params or {}
+    quant_mode = str(params.get("quant_mode") or "auto").strip().lower()
+    if quant_mode not in QUANT_MODE_OPTIONS["h3_fz"]:
+        raise ValueError("MiniMax H3(Fizgig) 不支持量化精度：%s" % quant_mode)
     logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 2e-4))
+    logf("[MiniMax H3(Fizgig)] 底模量化：%s" % quant_mode)
     _warn_alloc_conf(logf)
     vpy, fz_dir, env = _fizgig_v65_training_context(logf, "MiniMax H3(Fizgig)")
     train_dir = params.get("train_data_dir") or params.get("data_dir") or params.get("image_dir")
@@ -6403,7 +6418,7 @@ def train_h3_fizgig(logf=print, mode="h3_fz", params=None, vram_gb=None, resume_
     cache_dir = os.path.join(data_dir(), "dataset", proj, "fizgig_h3_cache")
     os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
-    resolution = int(params.get("resolution") or 768)
+    resolution = int(params.get("resolution") or H3_FZ_RESOLUTION)
     _write_fizgig_subset_config(subsets, cache_dir, cfg_path, resolution)
     audio_marker = os.path.join(cache_dir, ".audio_vae_signature")
     audio_signature = None
@@ -6451,7 +6466,7 @@ def train_h3_fizgig(logf=print, mode="h3_fz", params=None, vram_gb=None, resume_
            "--learning_rate", str(lr), "--max_train_epochs", str(epochs),
            "--save_every_n_epochs", str(_save_every_note(params, epochs, logf, "MiniMax H3(Fizgig)")),
            "--seed", "42", "--optimizer_type", "adamw",
-           "--base_quant", "auto", "--blocks_to_swap", "auto", "--gradient_checkpointing", "auto",
+           "--base_quant", quant_mode, "--blocks_to_swap", "auto", "--gradient_checkpointing", "auto",
            "--shift", "0.666667", "--ema_decay", "0.98", "--caption_dropout", "0.05",
            "--photo_blocks", "20-49", "--clip_blocks", "20-49", "--audio_blocks", "20-49",
            "--no_train_adaln", "--tread_ratio", "0.5", "--tread_start", "2", "--tread_end", "47",
@@ -6489,6 +6504,24 @@ def train_h3_fizgig(logf=print, mode="h3_fz", params=None, vram_gb=None, resume_
     if run_stream(cmd, cwd=fz_dir, env=env, logf=logf) != 0:
         raise RuntimeError("MiniMax H3(Fizgig) 训练失败，请查看日志。")
     return out_dir
+
+
+def _fizgig_warmup_log_filter(logf, keep_first=False):
+    """Keep the engine's first warm-up notice when needed, then hide its 30s repeats."""
+    seen = False
+
+    def _filtered(line):
+        nonlocal seen
+        _line = str(line).strip().lower()
+        is_warmup = ("warm-up phase — the first two epochs start slowly" in _line
+                     or "while the gpu plans kernels and fills its caches." in _line)
+        if is_warmup:
+            if seen or not keep_first:
+                return
+            seen = True
+        logf(line)
+
+    return _filtered
 
 
 def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, resume_from=None, progress=None):
@@ -6563,21 +6596,7 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     cache_dir = os.path.join(data_dir(), "dataset", proj, "fizgig_cache")
     os.makedirs(cache_dir, exist_ok=True)
     resolution = int(params.get("resolution") or KREA2_RESOLUTION or 512)
-    # ★ 2026-09-21：16G 档把分辨率降到 512 —— 防「int8 全驻留 → 溢出 → 越跑越慢」✗
-    #   用户实测（5060 Ti 16G + 768px + int8(auto 默认)，日志 v0.17.8）：
-    #     · 引擎原文：`[int8] W8A8 base is fully resident … block swap can't reduce its
-    #       footprint; forcing blocks_to_swap=0` ✗
-    #       → **工具按显存配的 swap 对 int8 完全无效** ✗（引擎会强制改 0 ✗）
-    #     · 于是要 ~18G 常驻，而 16G 卡（5060 Ti / 5070 Ti / 4080）装不下 ✗
-    #     · 后果：溢出到系统内存 / 硬盘页面文件 → 实测 **8~19 s/it**（2052 步 ≈ 11 小时 ✗），
-    #       且「删项目重来几次才变 3 小时」✗ —— 那只是删项目释放了磁盘、页面文件有地方写了 ✓
-    #   768px 的激活/梯度更大，进一步加剧 ✓ 所以 16G 档必须压到 512 ✓
-    #   同门 Krea2(AI-Toolkit) 早就有这个保护（train_krea2_at 的 `_is_low`）✓ 这里对齐 ✓
-    #   ⚠️ **明确打印**，不静默改用户的分辨率 ✗（这是我们反复踩到的教训 ✓）
-    # ★ 2026-09-22：量化档必须**先算出来** ✗ —— 分辨率钳制要知道**真实**量化方式才能判断 ✓
-    #   （原来钳制在 L5047、量化要到 L5077 才算 → 钳制拿不到量化方式 ✗
-    #    于是**连 NF4 用户也被降到 512** ✗ —— 而 NF4 底模只 ~5.6GB，768px 完全放得下 ✓
-    #    详见 _fizgig_clamp_resolution 的注释 ✓）
+    # 先确定实际量化档位，才能准确提示高分辨率下的显存风险。
     quant_flags, swap, quant_detail = _fizgig_quant_swap(
         vram_gb, params.get("quant_mode", "auto"), backend=backend)
     resolution = _fizgig_clamp_resolution(vram_gb, resolution, quant_flags, logf)
@@ -6610,8 +6629,7 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
             pass
     out_dir = data_sub("output", proj)
     output_name = str(params.get("output_name") or "krea2_fizgig_lora").strip() or "krea2_fizgig_lora"
-    # ⚠️ 量化档已在函数前段提前算好（配合 _fizgig_clamp_resolution 使用 ✓）——
-    #   分辨率钳制需要知道真实量化方式，所以不能等到这里才算 ✓
+    # 量化档已在缓存前确定，下面继续使用同一组参数。
     _manual_swap = str(params.get("blocks_to_swap") or "").strip()
     if _manual_swap.isdigit():
         swap = int(_manual_swap)
@@ -6721,7 +6739,8 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     logf(f"[Krea2(Fizgig)] 底模(RAW): {files['raw']}")
     logf(f"[Krea2(Fizgig)] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 1)}")
     logf(f"[Krea2(Fizgig)] 引擎后端: {backend} | 量化={quant_detail} | blocks_to_swap={swap} | torch.compile={'开' if _k2_compile else '关'}")
-    rc = run_stream(cmd, cwd=fz_dir, env=_fz_env, logf=logf, collect=_log_tail)
+    rc = run_stream(cmd, cwd=fz_dir, env=_fz_env,
+                    logf=_fizgig_warmup_log_filter(logf), collect=_log_tail)
     _warn_fizgig_sample_failure("\n".join(_log_tail), logf)
     # int8 底模全驻留（块交换失效）→ 溢出 → 越跑越慢：确凿信号，必须当场说清 ✓
     _warn_fizgig_int8_resident("\n".join(_log_tail), logf)
@@ -6781,7 +6800,9 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
                 "（safetensors 头部与数据不一致，常见于下载中断）\n\n"
                 "请删除该文件后重新下载（软件内「下载 FLUX.2 模型」，魔搭国内直连 + 断点续传）。")
     dit_prequant = _safetensors_is_prequantized(files.get("dit"))
-    logf(f"[FLUX.2(Fizgig)] DiT: {os.path.basename(files['dit'])}" + ("（fp8 预量化）" if dit_prequant else "（bf16 原版，自动 fp8）"))
+    quant_flags, swap, quant_detail = _fizgig_klein_quant_swap(
+        vram_gb, params.get("quant_mode", "auto"), dit_prequant=dit_prequant, backend=backend)
+    logf(f"[FLUX.2(Fizgig)] DiT: {os.path.basename(files['dit'])}" + ("（fp8 预量化）" if dit_prequant else "（bf16 原版）"))
     _sub_mode = params.get("at_sub_mode") or "character"
     train_dir = dataset_train_dir("character", params.get("project"))
     if count_images(train_dir) == 0:
@@ -6799,7 +6820,7 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
     cfg_path = os.path.join(KIT_DIR, "configs", "fizgig_flux2_dataset_config.toml")
     cache_dir = os.path.join(data_dir(), "dataset", proj, "fizgig_klein_cache")
     os.makedirs(cache_dir, exist_ok=True)
-    resolution = int(params.get("resolution") or FLUX2FZ_RESOLUTION or 768)
+    resolution = int(params.get("resolution") or FLUX2FZ_RESOLUTION)
     write_fizgig_dataset_config(train_dir, cache_dir, cfg_path, resolution=resolution,
                                 num_repeats=int(params.get("repeats", 1)))
     logf(f"[FLUX.2(Fizgig)] 数据集: {train_dir}（{resolution}px, repeats={params.get('repeats', 1)}）")
@@ -6834,7 +6855,6 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
             pass
     out_dir = data_sub("output", proj)
     output_name = str(params.get("output_name") or "flux2_fizgig_lora").strip() or "flux2_fizgig_lora"
-    quant_flags, swap, quant_detail = _fizgig_klein_quant_swap(vram_gb, params.get("quant_mode", "auto"), dit_prequant=dit_prequant, backend=backend)
     _manual_swap = str(params.get("blocks_to_swap") or "").strip()
     if _manual_swap.isdigit():
         swap = int(_manual_swap)
@@ -6896,7 +6916,8 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
     logf(f"[FLUX.2(Fizgig)] 底模(DiT): {files['dit']}")
     logf(f"[FLUX.2(Fizgig)] LoRA 参数: dim={rank}, alpha={alpha}, lr={lr}, epochs={epochs}, repeats={params.get('repeats', 1)}")
     logf(f"[FLUX.2(Fizgig)] 引擎后端: {backend} | 量化={quant_detail} | blocks_to_swap={swap}")
-    rc = run_stream(cmd, cwd=fz_dir, env=_fz_env, logf=logf, collect=_log_tail)
+    rc = run_stream(cmd, cwd=fz_dir, env=_fz_env,
+                    logf=_fizgig_warmup_log_filter(logf, keep_first=True), collect=_log_tail)
     _warn_fizgig_sample_failure("\n".join(_log_tail), logf)
     # 同上：int8 全驻留（块交换失效）→ 溢出 → 越跑越慢 ✓（9B 上同样适用 ✓）
     _warn_fizgig_int8_resident("\n".join(_log_tail), logf)
@@ -7931,8 +7952,8 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
         _sample_iv = 0
     _sample_every = _sample_iv if _sample_iv > 0 else 250
     trig = params.get("trigger") or ""
-    reso = int(params.get("resolution", 1024))
-    # ⚡ 8G 快跑档（Z-Image 第三引擎，2026-09-06）：分辨率钳到 512 + 关采样 + 量化 TE + 官方 weighted 时间步
+    reso = int(params.get("resolution") or 512)
+    # ⚡ 8G 快跑档（Z-Image 第三引擎）：保留用户分辨率 + 关采样 + 量化 TE + 官方 weighted 时间步
     # 8G 用户日志：512/qfloat8/low_vram 下模型可正常加载，卡在训练前 baseline 采样；
     # disable_sampling 是官方开关（BaseSDTrainProcess 里 step0 也算采样步），必须显式关闭才能让 8G 直接进入训练。
     _ft_switch = str(params.get("fast_tier") or "auto").lower()   # auto/on/off 手动开关（界面 ⚡快跑档）
@@ -7947,8 +7968,9 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
                         if (not _sample_on or _fast8_tier) else "")
     _at8g_model_yaml = ""
     if _fast8_tier:
-        reso = min(int(reso), 512 if info.get("arch") == "qwen_image"
-                    else (384 if (detect_ram_gb() or 0) < 32 else 512))
+        _fast_reso_limit = 512 if info.get("arch") == "qwen_image" else (384 if (detect_ram_gb() or 0) < 32 else 512)
+        if reso > _fast_reso_limit:
+            logf("[AI Toolkit] ⚠ 快跑档建议分辨率不超过 %dpx；保留你设置的 %dpx，显存不足时请调低。" % (_fast_reso_limit, reso))
         # 2026-09-06 实测：8G 纯 qfloat8+low_vram 时 fp8 DiT 全量驻留显存(~7.8G)，无激活余量，训练起不来；
         # 必须开官方 layer_offloading 层交换（引擎会自动把 qfloat8 降为 float8 逐层换入），512 才能跑通。
         _at8g_model_yaml = ("        \"quantize_te\": true\n"
@@ -8490,7 +8512,7 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     alpha = int(params.get("alpha", 16))
     lr = float(params.get("unet_lr", 1e-4))
     trig = params.get("trigger") or ""
-    reso = int(params.get("resolution", 1024))
+    reso = int(params.get("resolution") or 512)
     steps = _krea2_at_steps(params, train_dir)
     # 显存档位按「取整后的 GB」分档：16G 卡 DXGI 常报 15.6~15.9，也可能报 16.0x，
     # 直接用 vram_gb <= 16 会让 16.01 掉进「qfloat8 + 1024 + 无分层交换」的死区（必 OOM）。
@@ -8498,7 +8520,8 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     _tier = round(vram_gb) if vram_gb is not None else None
     _is_low = _tier is not None and _tier <= 19     # 16G 档 + 17~19G 中间档（含 16.0x 误报）
     if _is_low:
-        reso = min(reso, 512)   # 16G 快档默认 512（0.13 实测：512+qint8+采样关 ≈2s/it；768 易 OOM）
+        if reso > 512:
+            logf("[Krea2(AT)] ⚠ 当前显存建议 512px；保留你设置的 %dpx，若显存不足请调低。" % reso)
         # 16G 档：rank/alpha 仍为旧默认 16/16 时，自动升到社区激进档 32/32
         if rank == 16 and alpha == 16:
             rank, alpha = 32, 32
@@ -8508,8 +8531,7 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     raw_path = (krea2_model_files().get("raw") or "").replace("\\", "/")
     te_dir = krea2_at_te_dir().replace("\\", "/")
     vae_dir = os.path.join(krea2_at_vae_dir(), "vae").replace("\\", "/")
-    # 显存档位：低显存档（≤19G，含 16G 卡报成 16.0x）→ qint8 + 512；
-    # 20G 以上保持原行为（qfloat8 + 1024 + low_vram 关），避免影响本来能跑的机器。
+    # 显存档位影响量化与分层交换；训练分辨率始终遵从用户配置。
     qtype = "qint8" if _is_low else "qfloat8"
     _low_vram = not (vram_gb is not None and vram_gb >= 20)   # 与原实现完全一致（用原始值，不取整）
     # 分层交换（ai-toolkit offload_percent = 该比例的层按需流式、其余常驻显存）：
@@ -8539,7 +8561,7 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     else:
         _opt_k = "AdamW" if params.get("amd_mode") else "AdamW8bit"
     _opt_yaml = _optimizer_yaml_name(_opt_k)
-    # 记录实际生效值（参数报告 / 使用模板读取）：低显存档会把分辨率压到 512
+    # 记录实际生效值（参数报告 / 使用模板读取）。
     _record_effective(engine="AI Toolkit (ai-toolkit)", resolution=reso, optimizer=_opt_k,
                       note=("低显存档：%dpx + %s + 分层交换 %s" % (reso, qtype, _off_pct))
                            if _off_pct else None)
@@ -8550,7 +8572,7 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     # 采样预览开关：与其他引擎一致——≤16G 默认关（用户勾选才开），>16G 默认开。
     # 旧逻辑是 ≤16G 一律硬关、不理会勾选 → 16G 用户永远没有预览图（2026-09-03 反馈：Krea2 全都没预览）。
     sample_on = _sample_preview_enabled(params, vram_gb)
-    _sp_res = int(reso or 768)
+    _sp_res = int(reso or 512)
     if sample_on and vram_gb is not None and vram_gb <= 16:
         # 16G 档模型 ~13GB 已近占满：采样分辨率压到 512 防 OOM（ai-toolkit 采样失败可能中断训练）
         _sp_res = min(_sp_res, 512)
@@ -9309,14 +9331,14 @@ def _ensure_torchvision_deps(vpy, logf=print, label="Kohya", cwd=None, env=None)
 
 
 def _pick_preprocess_python():
-    """选择可用的预处理 Python：优先 Kohya venv，其次第二引擎（musubi）、第三引擎（ai_toolkit）。
+    """选择可用的预处理 Python：依次使用已安装的第一至第四引擎环境。
 
     预处理只需要 PIL/numpy（缺失会自动补装），任何引擎 venv 都可用；
-    Krea2/FLUX.2/Qwen-Image/Z-Image 用户只装第二/第三引擎也能正常一键训练，
+    Krea2/FLUX.2/Qwen-Image/Z-Image 用户只装对应引擎也能正常一键训练，
     不再因为没装第一引擎（Kohya）而误报「Kohya 尚未安装」。
     """
     kdir = get_kohya_dir()
-    for sub in ("venv", "musubi-venv", "ai_toolkit_venv"):
+    for sub in ("venv", "musubi-venv", "ai_toolkit_venv", "fizgig_venv"):
         c = os.path.join(kdir, sub, "Scripts", "python.exe")
         if os.path.isfile(c):
             return c
@@ -13086,50 +13108,15 @@ def _fizgig_sample_epochs(params, per_epoch, epochs):
 
 
 def _fizgig_clamp_resolution(vram_gb, resolution, quant_flags=(), logf=print):
-    """Krea2(Fizgig) 用 **int8** 时把训练分辨率压到 512 —— 防「全驻留 → 溢出 → 越跑越慢」✗
-
-    ★ 2026-09-21 用户实测（5060 Ti 16G / Krea2 Fizgig / 768px / int8，日志 v0.17.8）：
-      引擎原文：`[int8] W8A8 base is fully resident … block swap can't reduce its footprint;
-      forcing blocks_to_swap=0` ✗
-      → **工具按显存配的 blocks_to_swap 对 int8 完全无效**（引擎强制改 0 ✗）
-      → 需 ~18G 常驻，而 16G 卡（5060 Ti / 5070 Ti / 4080）装不下 ✗
-      → 溢出到系统内存 / 硬盘页面文件 → 实测 **8~19 s/it**（2052 步 ≈ 11 小时 ✗）
-      用户现象与之一一吻合：
-        ·「一样的设置时间越来越长」= 换页程度随内存/磁盘状态变 ✓
-        ·「删项目重来几次才 3 小时」= 删项目释放了磁盘，页面文件有地方写 ✓
-        ·「步数越跑越慢」= 换页随时间恶化 ✓
-      —— 全都与「新建项目」无关 ✓
-
-      768px 的激活/梯度更大，进一步加剧 ✓ 同门 Krea2(AI-Toolkit) 早有此保护
-      （train_krea2_at 的 `_is_low`）✓ 这里对齐 ✓
-      ⚠️ **明确打印**，不静默改用户的分辨率 ✗（这是反复踩到的教训 ✓）
-      ⚠️ 档位用 `round()` 取整（16G 卡 DXGI 常报 15.6~15.9，也可能报 16.0x）✓
-
-    ★ 2026-09-22 修 bug：**只有 int8 才需要这么干** ✗ ——
-      原来不看量化方式，凡是 ≤19G 就降 ✗ → **连 NF4 用户也被降到 512** ✗
-      可 NF4 底模只 ~5.6GB ✓（`_fizgig_quant_swap` 的注释和本函数原来的提示都写着 ✓）
-      → NF4 + 768px 在 16G 卡上**完全放得下** ✓，砍到 512 纯属白丢画质 ✗
-      → 现在按 `quant_flags` 判：**非 int8 一律原样返回** ✓
-      ⚠️ 为什么看 `quant_flags`、而不是用户填的 `quant_mode` ✗：用户常填「自动」✗，
-         而 auto 在 <10G 会解析成 NF4 ✓、12~19G 会解析成 int8 ✓
-         —— 只有 `quant_flags` 是**最终结果** ✓（且 `--quant_int8` 就是引擎的 int8 开关 ✓）
-    """
+    """保留用户分辨率；低显存且实际选中 int8 时提示可能换页或显存不足。"""
     _tier = round(vram_gb) if vram_gb is not None else None
     if _tier is None or _tier > 19 or resolution <= 512:
         return resolution
     if not any("quant_int8" in str(_f) for _f in (quant_flags or ())):
-        # NF4（~5.6G）等档位底模占用远低于 18G ✓ 不需要降分辨率 ✓
         return resolution
-    logf("[Krea2(Fizgig)] ⚠ 16G 档：训练分辨率 %d → **512**（自动下调）" % resolution)
-    logf("[Krea2(Fizgig)]   原因：int8 底模必须**全驻留显存** —— 块交换对它无效"
-         "（引擎会强制 blocks_to_swap=0），共需约 18G ✗")
-    logf("[Krea2(Fizgig)]   16G 卡在 %dpx 下装不下 → 溢出到内存/页面文件 → **越跑越慢** ✗"
-         "（实测 8~19 秒/步、2052 步要 11 小时）" % resolution)
-    logf("[Krea2(Fizgig)]   ⚠ 注意：**512px 只是缓解** ✗ —— 若显存仍不够，会换页到硬盘，"
-         "表现为**时快时慢**（3~11 秒/步）✗")
-    logf("[Krea2(Fizgig)]   若仍然慢：① 「量化方式」改 **NF4 4bit**（冻结底模 ~5.6GB）"
-         " ② 或试试同门的 Krea2（musubi 引擎）✓")
-    return 512
+    logf("[Krea2(Fizgig)] ⚠ 当前显存与 int8 底模建议使用 512px；保留你设置的 %dpx。" % resolution)
+    logf("[Krea2(Fizgig)]   若显存不足或训练越跑越慢，请降低分辨率或改用 NF4。")
+    return resolution
 
 
 def _fizgig_sample_note(params, per_epoch, epochs, s_ep):
@@ -13288,7 +13275,7 @@ def _write_sample_prompts(output_name, params, mode, resolution=None, engine="ko
             _parts += ["masterpiece", "best quality"]
             prompt = ", ".join(x for x in _parts if x)
     if engine == "musubi":
-        res = int(resolution or 1024)
+        res = int(resolution or 512)
         prompt += f" --w {res} --h {res} --s 20"
     elif resolution:
         # 第一引擎（kohya）：不写 --w/--h 时采样器按默认尺寸（512）出图 ——

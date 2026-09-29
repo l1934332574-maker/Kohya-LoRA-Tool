@@ -6,6 +6,7 @@ import CropRatioField from './CropRatioField.vue'
 import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
 import { normalizeWd14Model } from '../modelDefaults'
+import { fastRunNumber } from '../fastRunPreset'
 
 const props = defineProps<{
   project: ProjectCard
@@ -174,7 +175,7 @@ function hydrateConfig(config?: ProjectConfig | null) {
   configuredParams.clear()
   Object.keys(params).forEach((key) => configuredParams.add(key))
   const preset = presetFor()
-  const demoValues: Record<string, string> = { rank: '16', alpha: '16', unet_lr: '1e-4', resolution: '1024', video_steps: '2000', save_every: '200', sample_interval: '250' }
+  const demoValues: Record<string, string> = { rank: '16', alpha: '16', unet_lr: '1e-4', resolution: '512', video_steps: '2000', save_every: '200', sample_interval: '250' }
   for (const key of ['crop_ratio', 'rank', 'alpha', 'unet_lr', 'resolution', 'video_steps', 'save_every', 'sample_interval', 'optimizer', 'sample_prompt', 'wd14_model'] as const) {
     const defaultValue = preset[key] === undefined ? '' : key === 'unet_lr' ? styledPresetValue(key, trainingDraft.style_preset) : String(preset[key])
     const value = text(params[key]) || defaultValue || (demo ? demoValues[key] ?? (key === 'optimizer' ? 'auto' : '') : key === 'optimizer' ? 'auto' : '')
@@ -210,6 +211,17 @@ function resetPreset() {
     markParam(key)
   }
   emit('notify', '当前模式的推荐预设已恢复。保存设置后生效。')
+}
+
+function applyFastRun() {
+  trainingDraft.rank = fastRunNumber(trainingDraft.rank, 8); markParam('rank')
+  trainingDraft.alpha = trainingDraft.rank; markParam('alpha')
+  trainingDraft.video_steps = fastRunNumber(trainingDraft.video_steps, 600); markParam('video_steps')
+  trainingDraft.save_every = trainingDraft.video_steps; markParam('save_every')
+  trainingDraft.sample_preview_mode = 'off'; markParam('sample_preview')
+  trainingDraft.optimizer = 'auto'; markParam('optimizer')
+  if (usesFastTier.value) { trainingDraft.fast_tier = 'on'; markRoot('fast_tier') }
+  emit('notify', '已应用快跑档：小 rank、缩短训练、开启引擎快跑并关闭采样；分辨率保持原值。保存设置后生效。')
 }
 
 function makePatch(): ProjectConfig {
@@ -435,7 +447,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
               <label class="qwen-field" :title="legacyTooltips.atSubMode"><span class="field-caption">训练类型</span><select v-model="trainingDraft.at_sub_mode" class="qwen-select" @change="markRoot('at_sub_mode')"><option v-for="option in trainingTypeOptions" :key="option.key" :value="option.key">{{ option.label }}</option></select></label>
               <label class="qwen-field" :title="legacyTooltips.cropRatio"><span class="field-caption">预处理裁切比例</span><CropRatioField v-model="trainingDraft.crop_ratio" input-class="qwen-input" @update:model-value="markParam('crop_ratio')" /></label>
               <label class="qwen-field" :title="legacyTooltips.stylePreset"><span class="field-caption">出图风格</span><select v-model="trainingDraft.style_preset" class="qwen-select" @change="onStylePresetChange"><option>自定义</option><option>动漫</option><option>写实</option></select></label>
-              <label v-if="usesFastTier" class="qwen-field" :title="legacyTooltips.fastTier"><span class="field-caption">快跑档</span><select v-model="trainingDraft.fast_tier" class="qwen-select" @change="markRoot('fast_tier')"><option value="auto">自动（8G）</option><option value="on">开（强制）</option><option value="off">关</option></select></label>
+              <label v-if="usesFastTier" class="qwen-field" :title="legacyTooltips.fastTier"><span class="field-caption">引擎快跑加速</span><select v-model="trainingDraft.fast_tier" class="qwen-select" @change="markRoot('fast_tier')"><option value="auto">自动（8G）</option><option value="on">开（强制）</option><option value="off">关</option></select></label>
               <label class="qwen-field" :title="legacyTooltips.trigger"><span class="field-caption">Trigger 触发词</span><input v-model="trainingDraft.trigger" class="qwen-input" placeholder="输入触发词" @input="markRoot('trigger')" /></label>
               <label v-if="details?.supports?.reg_dir" class="qwen-field" :title="legacyTooltips.regDir"><span class="field-caption">正则数据集（可选）</span><span class="reg-path-row"><input v-model="trainingDraft.reg_dir" class="qwen-input" placeholder="可留空" @input="markRoot('reg_dir')" /><button class="qwen-button compact" type="button" :title="legacyTooltips.chooseRegDir" @click.stop="browseRegDirectory">选择文件夹…</button></span></label>
               <label v-if="draftIsStyle" class="qwen-field" :title="legacyTooltips.styleCaption"><span class="field-caption">画风描述词（可选）</span><input v-model="trainingDraft.style_caption" class="qwen-input" placeholder="留空使用自动打标" @input="markRoot('style_caption')" /></label>
@@ -450,12 +462,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           </section>
 
           <section class="qwen-card parameter-card">
-            <header class="qwen-card-header parameter-header"><div><span class="section-index">02</span><h2>训练参数</h2><span class="parameters-summary">空白沿用项目预设</span></div><button class="advanced-trigger" type="button" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起高级参数' : '高级参数' }}<span class="chevron" :class="{ open: advancedOpen }">⌄</span></button></header>
+            <header class="qwen-card-header parameter-header"><div><span class="section-index">02</span><h2>训练参数</h2><span class="parameters-summary">空白沿用项目预设</span></div><button class="reset-preset" type="button" title="应用省显存的短程试训参数；保留当前训练分辨率" @click="applyFastRun">快跑档</button><button class="advanced-trigger" type="button" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起高级参数' : '高级参数' }}<span class="chevron" :class="{ open: advancedOpen }">⌄</span></button></header>
             <div class="parameter-grid qwen-project-params">
               <label class="qwen-field parameter-field" :title="legacyTooltips.rank"><span class="field-caption">LoRA rank</span><input v-model="trainingDraft.rank" class="qwen-input" type="number" min="1" placeholder="16" @input="markParam('rank')" /></label>
               <label class="qwen-field parameter-field" :title="legacyTooltips.alpha"><span class="field-caption">LoRA alpha</span><input v-model="trainingDraft.alpha" class="qwen-input" type="number" min="1" placeholder="16" @input="markParam('alpha')" /></label>
               <label class="qwen-field parameter-field" :title="legacyTooltips.unet_lr"><span class="field-caption">学习率</span><input v-model="trainingDraft.unet_lr" class="qwen-input" placeholder="1e-4" @input="markParam('unet_lr')" /></label>
-              <label class="qwen-field parameter-field" :title="legacyTooltips.resolution"><span class="field-caption">训练分辨率</span><input v-model="trainingDraft.resolution" class="qwen-input" type="number" min="64" step="64" placeholder="1024" @input="markParam('resolution')" /></label>
+              <label class="qwen-field parameter-field" :title="legacyTooltips.resolution"><span class="field-caption">训练分辨率</span><input v-model="trainingDraft.resolution" class="qwen-input" type="number" min="64" step="64" placeholder="512" @input="markParam('resolution')" /></label>
               <label class="qwen-field parameter-field" :title="legacyTooltips.videoSteps"><span class="field-caption">训练步数</span><input v-model="trainingDraft.video_steps" class="qwen-input" type="number" min="1" placeholder="2000" @input="markParam('video_steps')" /></label>
               <div class="fixed-setting" title="Qwen-Image 按总训练步数运行，不使用图片循环次数。"><span class="field-caption">图片循环次数</span><strong>此模式按总训练步数运行</strong><small>经典界面也不启用 repeats。</small></div>
             </div>

@@ -6,6 +6,7 @@ import CropRatioField from './CropRatioField.vue'
 import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
 import { normalizeWd14Model } from '../modelDefaults'
+import { fastRunEpochs, fastRunNumber } from '../fastRunPreset'
 
 type BrowseKind = 'folder' | 'model'
 const props = defineProps<{
@@ -38,6 +39,7 @@ const draft = reactive({
 })
 
 const supported = (key: string) => Boolean(props.details.supports?.[key])
+const quantModes = computed(() => props.details.quant_modes?.length ? props.details.quant_modes : ['auto', 'fp8', 'int8', 'nf4'])
 const defaults = computed(() => props.details.defaults ?? {})
 const isConcept = computed(() => draft.at_sub_mode === 'concept')
 const isStyle = computed(() => draft.at_sub_mode === 'style')
@@ -135,6 +137,38 @@ function resetPreset() {
     markParam('fizgig_qwen_preset')
   }
   emit('notify', '当前模式的推荐预设已恢复。保存修改后生效。')
+}
+
+function applyFastRun() {
+  const set = (key: 'rank' | 'alpha' | 'repeats' | 'max_epochs' | 'video_steps' | 'save_every' | 'batch_size' | 'quant_mode' | 'gc' | 'optimizer' | 'blocks_to_swap' | 'fizgig_qwen_preset', value: string) => {
+    draft[key] = value
+    markParam(key)
+  }
+  if (props.mode !== 'qwen21_fz') {
+    const rank = fastRunNumber(draft.rank, 8)
+    set('rank', rank)
+    set('alpha', rank)
+  }
+  if (supported('repeats')) set('repeats', '1')
+  if (supported('max_epochs')) {
+    const epochs = fastRunNumber(draft.max_epochs, fastRunEpochs(props.mode))
+    set('max_epochs', epochs)
+    set('save_every', intervalUnit('save_every') === '轮' ? epochs : '1000')
+  } else if (supported('video_steps')) {
+    const steps = fastRunNumber(draft.video_steps, 600)
+    set('video_steps', steps)
+    set('save_every', steps)
+  }
+  if (supported('batch_size')) set('batch_size', '1')
+  if (supported('quant_mode')) set('quant_mode', 'auto')
+  if (supported('gc')) set('gc', 'auto')
+  if (supported('optimizer')) set('optimizer', 'auto')
+  if (supported('blocks_to_swap')) set('blocks_to_swap', '')
+  if (props.mode === 'qwen21_fz') set('fizgig_qwen_preset', 'fast')
+  draft.sample_preview_mode = 'off'
+  markParam('sample_preview')
+  if (supported('compile')) { draft.compile = false; markParam('compile') }
+  emit('notify', '已应用快跑档：小 rank、单批次、缩短训练并关闭采样；分辨率保持原值。保存设置后生效。')
 }
 
 function makePatch(): ProjectConfig {
@@ -255,20 +289,21 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
           </section>
 
           <section class="engine-card">
-            <header class="engine-card-heading"><span>02</span><div><h2>常用训练参数</h2><small>空白项沿用当前引擎预设</small></div></header>
+            <header class="engine-card-heading"><span>02</span><div><h2>常用训练参数</h2><small>空白项沿用当前引擎预设</small></div><button class="engine-utility" type="button" title="应用省显存的短程试训参数；保留当前训练分辨率" @click="applyFastRun">快跑档</button></header>
             <div class="engine-param-grid">
               <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.rank"><span>LoRA rank</span><input v-model="draft.rank" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('rank')" /></label>
               <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.alpha"><span>LoRA alpha</span><input v-model="draft.alpha" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('alpha')" /></label>
               <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.unet_lr"><span>学习率</span><input v-model="draft.unet_lr" class="engine-input" placeholder="按模式预设" @input="markParam('unet_lr')" /></label>
               <label v-if="supported('te_lr')" class="engine-field" :title="legacyTooltips.te_lr"><span>文本编码器学习率</span><input v-model="draft.te_lr" class="engine-input" placeholder="按模式预设" @input="markParam('te_lr')" /></label>
               <label class="engine-field" :title="legacyTooltips.resolution"><span>训练分辨率</span><input v-model="draft.resolution" class="engine-input" type="number" min="64" step="64" placeholder="按模式预设" @input="markParam('resolution')" /></label>
+              <label v-if="supported('quant_mode')" class="engine-field" :title="legacyTooltips.quantMode"><span>底模量化精度（可手动选 NF4）</span><select v-model="draft.quant_mode" class="engine-select" @change="markParam('quant_mode')"><option v-for="modeOption in quantModes" :key="modeOption" :value="modeOption">{{ modeOption === 'auto' ? '自动（由引擎选择）' : modeOption.toUpperCase() }}</option></select></label>
               <label v-if="supported('repeats')" class="engine-field" :title="legacyTooltips.repeats"><span>{{ isH3Fizgig ? '素材循环次数' : '图片循环次数' }}</span><input v-model="draft.repeats" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('repeats')" /></label>
               <label v-if="supported('max_epochs')" class="engine-field" :title="legacyTooltips.maxEpochs"><span>最大 epoch</span><input v-model="draft.max_epochs" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('max_epochs')" /></label>
               <label v-if="supported('video_steps')" class="engine-field" :title="legacyTooltips.videoSteps"><span>训练步数</span><input v-model="draft.video_steps" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('video_steps')" /></label>
               <label v-if="supported('video_frames')" class="engine-field" :title="legacyTooltips.videoFrames"><span>{{ isH3Fizgig ? '预览采样帧数' : '视频帧数（17n+5）' }}</span><input v-model="draft.video_frames" class="engine-input" type="number" :min="isH3Fizgig ? 1 : 5" :step="isH3Fizgig ? 1 : 17" :placeholder="isH3Fizgig ? '56' : '73'" @input="markParam('video_frames')" /></label>
             </div>
             <label v-if="mode === 'qwen21_fz'" class="engine-field spaced" :title="legacyTooltips.fizgigQwenPreset"><span>Fizgig 官方预设</span><select v-model="draft.fizgig_qwen_preset" class="engine-select" @change="markParam('fizgig_qwen_preset')"><option value="auto">自动（人物/概念 Fast，画风 Style）</option><option value="fast">Fast · rank 8 · 学习率自适应 2e-4~4e-4</option><option value="standard">Standard · rank 16 · 学习率 1e-4~2e-4</option><option value="style">Style · rank 16 · flat 1.5e-4</option></select></label>
-            <p v-if="mode === 'qwen21_fz'" class="engine-hint">该预设固定 rank、alpha 和学习率；训练轮数可以调整。默认分辨率 704px，按 0.5MP 分桶。</p>
+            <p v-if="mode === 'qwen21_fz'" class="engine-hint">Fizgig 官方预设控制 rank、alpha 和学习率；底模量化精度可独立选择。默认分辨率 512px，可自行调高。</p>
             <p v-if="isVideo && !isH3Fizgig" class="engine-hint">H3 AI Toolkit 输入视频和同名 .txt 字幕；视频帧数需符合 17n+5 格式。</p>
             <p v-if="isH3Fizgig" class="engine-hint">图片、视频和音频可放在同一目录或子目录，每个媒体都需同名 .txt。MP4 必须为 24fps、帧数符合 17n+5、宽高为 32 的倍数；带音轨时必须为 32kHz 立体声。扫描仅检查媒体与字幕；Fizgig 缓存阶段才会校验格式。无 audio VAE 时视频音轨会忽略。56 帧只用于预览，不裁剪训练视频。AMD ROCm 为实验性路径，训练兼容性尚未验证。</p>
           </section>
@@ -283,7 +318,6 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
             <label v-if="supported('optimizer')" class="engine-field" :title="legacyTooltips.optimizer"><span>优化器</span><select v-model="draft.optimizer" class="engine-select" @change="markParam('optimizer')"><option value="auto">自动</option><option value="adamw">AdamW</option><option value="adamw8bit">AdamW8bit</option><option value="lion">Lion</option></select></label>
             <label v-if="supported('batch_size')" class="engine-field" :title="legacyTooltips.batchSize"><span>批大小（留空 = 自动）</span><input v-model="draft.batch_size" class="engine-input" type="number" min="1" max="8" placeholder="自动（1）" @input="markParam('batch_size')" /></label>
             <label v-if="supported('gc')" class="engine-field" :title="legacyTooltips.gradientCheckpointing"><span>梯度检查点</span><select v-model="draft.gc" class="engine-select" @change="markParam('gc')"><option value="auto">自动（按显存）</option><option value="开启">开启（省显存，较慢）</option><option value="关闭">关闭（更快，更吃显存）</option></select></label>
-            <label v-if="supported('quant_mode')" class="engine-field" :title="legacyTooltips.quantMode"><span>量化方式（Krea2/FLUX.2）</span><select v-model="draft.quant_mode" class="engine-select" @change="markParam('quant_mode')"><option value="auto">自动</option><option value="fp8">fp8</option><option value="int8">int8</option><option value="nf4">nf4</option></select></label>
             <label v-if="supported('blocks_to_swap')" class="engine-field" :title="legacyTooltips.blocksToSwap"><span>块交换数（Krea2/FLUX.2）</span><select v-model="draft.blocks_to_swap" class="engine-select" @change="markParam('blocks_to_swap')"><option value="">自动</option><option v-for="count in [0, 2, 4, 6, 8, 10, 12]" :key="count" :value="String(count)">{{ count }}</option></select></label>
             <label v-if="supported('sample_prompt')" class="engine-field wide-field" :title="legacyTooltips.samplePrompt"><span>采样预览提示词</span><input v-model="draft.sample_prompt" class="engine-input" placeholder="留空自动生成；填写后整句生效" @input="markParam('sample_prompt')" /></label>
             <label v-if="supported('noise_offset')" class="engine-field" :title="legacyTooltips.noiseOffset"><span>Noise offset</span><input v-model="draft.noise_offset" class="engine-input" @input="markParam('noise_offset')" /></label>
