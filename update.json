@@ -1,7 +1,7 @@
 {
-  "version": "v0.18.8",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.18.8/Setup.exe",
+  "version": "v0.18.9",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.18.9/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "setup_sha256": "269a7bf8843eb25c61494ccfea03b755cfdad863b459cc7fea1e9b20e03b4cef",
-  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.18.8 更新（2026-09-28）\n\n· 第四引擎升级至 Fizgig v6.5.0，已安装用户可在工具中更新引擎。\n· 新增 Qwen-Image-2.1 LoRA 训练、模型下载和官方预设。\n· 新增 MiniMax H3 Fizgig LoRA，支持图片、视频、音频混合数据集。\n· 直接覆盖安装到原位置即可，项目和训练环境会保留。"
+  "setup_sha256": "a30f556e1daad87a32a1c32d0f7c3f2f8968cb06afcdf82d1772fedc454b1861",
+  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.18.9 更新（2026-09-29）\n\n· Fizgig v6.5.0 源码改用魔搭镜像优先，修复部分用户下载卡在 0 MB 的问题。\n· 下载失败时更快切换备用源，并修正无 curl 时的进度显示。\n· 直接覆盖安装到原位置即可，项目和训练环境会保留。"
 }
