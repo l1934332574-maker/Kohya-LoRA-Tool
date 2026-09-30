@@ -6227,6 +6227,15 @@ def _windows_rocm_runtime_env(vpy, bnb_rocm_version="715", engine_backend=None):
         env[engine_backend] = "rocm"
     if bnb_rocm_version:
         env["BNB_ROCM_VERSION"] = str(bnb_rocm_version)
+    # Windows ROCm 会把核显一起枚举成 HIP 设备，而训练端一律用裸 "cuda"（device 0），
+    # 枚举顺序一变就会静默跑到核显的共享内存上（实测 0=RX 7900 XT / 1=Radeon(TM)
+    # Graphics 23.7GB 共享内存）。把可见设备钉到独显：本平台 HIP_VISIBLE_DEVICES
+    # 优先级高于 CUDA_VISIBLE_DEVICES，所以两个都写。已显式设置时尊重用户。
+    if not env.get("HIP_VISIBLE_DEVICES") and not env.get("CUDA_VISIBLE_DEVICES"):
+        _dgpu_idx = rocm_discrete_device_index(vpy)
+        if _dgpu_idx is not None:
+            env["HIP_VISIBLE_DEVICES"] = str(_dgpu_idx)
+            env["CUDA_VISIBLE_DEVICES"] = str(_dgpu_idx)
     path = []
     for _p in (os.path.join(rocm_core, "bin"), os.path.join(sp, "_rocm_sdk_devel", "bin"),
                os.path.join(venv, "Scripts")):
