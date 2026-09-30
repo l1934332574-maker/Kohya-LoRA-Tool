@@ -10,6 +10,9 @@ __all__ = [
     "detect_torch_backend", "detect_ram_gb", "safe_nvidia_smi", "nvidia_smi_broken",
     # Windows ROCm 会把核显也枚举成 HIP 设备，训练前需要锁定独显索引
     "rocm_discrete_device_index",
+    # AMD 环境判定 + NVIDIA 专属模块的禁用片段
+    "rocm_torch_backend", "AMD_BLOCKED_MODULES", "AMD_BLOCKLIST_MARKER",
+    "amd_blocklist_snippet",
     # ⚠️ 2026-09-17 补：Kohya一键工具.py 的 gpu_status_text() 里直接用了 `_is_igpu_name` ✗，
     # 但它原来**不在 __all__ 里** ✗ → `from kohya_core.gpu import *` 取不到 → NameError ✗ →
     # 又被那里的 `except Exception: pass` 吞掉 → AMD/未知平台上「总显存(约) X GB」这行
@@ -235,6 +238,113 @@ def rocm_discrete_device_index(vpy, timeout=120, logf=None):
             except Exception:
                 pass
         return None
+
+
+def rocm_torch_backend(vpy, timeout=120):
+    """该 venv 里的 torch 是否为 ROCm/HIP 构建。True / False / None（未知）。
+
+    与 detect_torch_backend() 的区别：那个查的是工具自己的解释器，这个查**训练 venv**
+    的解释器——决定要不要动 venv 里的包（xformers / onnxruntime 变体）只能以后者为准。
+    子进程里问，避免在本进程建立 HIP context。
+    """
+    if not vpy or not os.path.exists(vpy):
+        return None
+    code = (
+        "import torch\n"
+        "print(1 if getattr(torch.version, 'hip', None) else 0)\n"
+    )
+    try:
+        r = subprocess.run([vpy, "-c", code], capture_output=True, text=True,
+                           timeout=timeout,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        out = (r.stdout or "").strip().splitlines()
+        if not out:
+            return None
+        return out[-1].strip() == "1"
+    except Exception:
+        return None
+
+
+# 默认禁用名单：只有 NVIDIA 构建可用、在 ROCm torch 下 import 即崩的包。
+# 实测（RX 7900 XT / torch 2.9.0+rocmsdk）：xformers 是 cu128+Py3.9 的轮子，
+# `diffusers` 一 import 它就在 `from ...flash_attn_3 import _C` 抛
+# "DLL load failed while importing _C"，而 diffusers 的可用性检查不捕异常，
+# 整条 import 链（library.dataset → diffusers）直接崩 → WD14 打标全挂。
+# ROCm 上 xformers 本来就不提供任何加速，禁用后走 PyTorch 原生 SDPA。
+AMD_BLOCKED_MODULES = ("xformers",)
+
+# 需要一并生成空壳子模块的映射（否则 `import xformers.ops` 会 ModuleNotFoundError，
+# 同样会把 diffusers 打崩）。
+AMD_BLOCKED_SUBMODULES = {"xformers": ("ops",)}
+
+AMD_BLOCKLIST_MARKER = "# --- KohyaLoRA AMD module blocklist (auto-managed) ---"
+AMD_STUB_DIRNAME = "kohya_amd_module_stubs"
+
+# 放行开关：KOHYA_AMD_ALLOW_BLOCKED_MODULES=xformers   → 该模块恢复真实加载
+# 追加名单：KOHYA_AMD_BLOCK_MODULES=flash_attn,xxx      → 临时扩名单（不写死在代码里）
+
+
+def amd_blocklist_snippet(modules=None):
+    """生成追加到训练 venv `sitecustomize.py` 的禁用片段（幂等，带 marker）。
+
+    机制：预置 `sys.modules[名字] = 空壳模块`（__path__ 指向一个含空 __init__.py
+    的临时目录）。效果：
+      * `import xformers` / `import xformers.ops` 正常成功（空壳，什么都不做）
+      * diffusers 的 `importlib.util.find_spec('xformers')` 返回非 None →
+        `_xformers_available=True` → 走到 `import xformers.ops` 也不会崩
+      * 真正的 xformers 包原样留在磁盘上，什么都不删；想恢复真实加载，
+        设 KOHYA_AMD_ALLOW_BLOCKED_MODULES=xformers 或删掉带 marker 的段落即可
+    """
+    mods = tuple(modules or AMD_BLOCKED_MODULES)
+    return (
+        AMD_BLOCKLIST_MARKER + "\n"
+        "def _kohya_amd_block_modules():\n"
+        "    import importlib.util as _ilu\n"
+        "    import os as _os\n"
+        "    import sys as _sys\n"
+        "    import tempfile as _tempfile\n"
+        "    import types as _types\n"
+        "    _allow = {m.strip().lower() for m in (_os.environ.get('KOHYA_AMD_ALLOW_BLOCKED_MODULES', '') or '').split(',') if m.strip()}\n"
+        "    _extra = {m.strip().lower() for m in (_os.environ.get('KOHYA_AMD_BLOCK_MODULES', '') or '').split(',') if m.strip()}\n"
+        "    _blocked = {m.lower() for m in " + repr(mods) + "}\n"
+        "    _blocked |= _extra\n"
+        "    _blocked -= _allow\n"
+        "    if not _blocked:\n"
+        "        return\n"
+        "    _root_dir = _os.path.join(_tempfile.gettempdir(), '" + AMD_STUB_DIRNAME + "')\n"
+        "    _subs = " + repr(dict(AMD_BLOCKED_SUBMODULES)) + "\n"
+        "    class _StubLoader:\n"
+        "        def __init__(self, root, pkg_dir):\n"
+        "            self._root, self._pkg_dir = root, pkg_dir\n"
+        "        def create_module(self, spec):\n"
+        "            m = _types.ModuleType(spec.name)\n"
+        "            m.__path__ = [self._pkg_dir]\n"
+        "            return m\n"
+        "        def exec_module(self, module):\n"
+        "            pass\n"
+        "    for _root in sorted(_blocked):\n"
+        "        if _root in _sys.modules:\n"
+        "            continue\n"
+        "        _pkg_dir = _os.path.join(_root_dir, _root)\n"
+        "        _os.makedirs(_pkg_dir, exist_ok=True)\n"
+        "        _init = _os.path.join(_pkg_dir, '__init__.py')\n"
+        "        if not _os.path.exists(_init):\n"
+        "            with open(_init, 'w', encoding='utf-8') as _fh:\n"
+        "                _fh.write('# KohyaLoRA AMD: inert stub (NVIDIA-only package disabled on ROCm)\\n')\n"
+        "        for _sub in _subs.get(_root, ()):\n"
+        "            _sp = _os.path.join(_pkg_dir, *_sub.split('.'))\n"
+        "            _os.makedirs(_sp, exist_ok=True)\n"
+        "            _si = _os.path.join(_sp, '__init__.py')\n"
+        "            if not _os.path.exists(_si):\n"
+        "                with open(_si, 'w', encoding='utf-8') as _fh:\n"
+        "                    _fh.write('# inert stub\\n')\n"
+        "        _spec = _ilu.spec_from_loader(_root, _StubLoader(_root, _pkg_dir))\n"
+        "        _mod = _ilu.module_from_spec(_spec)\n"
+        "        _mod.__path__ = [_pkg_dir]\n"
+        "        _sys.modules[_root] = _mod\n"
+        "_kohya_amd_block_modules()\n"
+        "del _kohya_amd_block_modules\n"
+    )
 
 
 def detect_vram_gb():
