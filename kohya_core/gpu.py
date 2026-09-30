@@ -8,6 +8,8 @@ __all__ = [
     "detect_nvidia_gpu", "nvidia_driver_version", "_dxgi_adapters", "detect_vram_gb",
     "_registry_vram_gb", "detect_gpu_vendor", "detect_gpu_name", "detect_gpu_info",
     "detect_torch_backend", "detect_ram_gb", "safe_nvidia_smi", "nvidia_smi_broken",
+    # Windows ROCm 会把核显也枚举成 HIP 设备，训练前需要锁定独显索引
+    "rocm_discrete_device_index",
     # ⚠️ 2026-09-17 补：Kohya一键工具.py 的 gpu_status_text() 里直接用了 `_is_igpu_name` ✗，
     # 但它原来**不在 __all__ 里** ✗ → `from kohya_core.gpu import *` 取不到 → NameError ✗ →
     # 又被那里的 `except Exception: pass` 吞掉 → AMD/未知平台上「总显存(约) X GB」这行
@@ -184,6 +186,55 @@ def _is_igpu_name(name):
             return True
         return False
     return False
+
+
+def rocm_discrete_device_index(vpy, timeout=120, logf=None):
+    """Windows ROCm(HIP) 下第一块**非核显**设备的索引；未知返回 None。
+
+    Windows 的 ROCm 会把驱动认识到的每一块 AMD 适配器都枚举成 HIP 设备，
+    所以一台带 Radeon 核显的锐龙机器上，核显会和 RX 独显一起出现
+    （实测：0=RX 7900 XT 20GB，1=AMD Radeon(TM) Graphics 23.7GB——后者是
+    WDDM 共享内存，不是真显存）。训练端一律用裸 "cuda"（即 device 0），
+    HIP 的枚举顺序一变，整个训练就会静默跑到核显上：慢一个量级，还必然换页。
+
+    解决办法是把可见设备钉到独显：HIP_VISIBLE_DEVICES 在本平台优先级**高于**
+    CUDA_VISIBLE_DEVICES（实测），所以两个都写。
+
+    注意：只能在**子进程**里问 torch。本进程一旦 import torch 就会建立 HIP
+    context、把可见设备集钉死，正好毁掉这个索引要喂给的那套过滤机制。
+    """
+    if not vpy or not os.path.exists(vpy):
+        return None
+    code = (
+        "import torch\n"
+        "print(torch.cuda.device_count())\n"
+        "for i in range(torch.cuda.device_count()):\n"
+        "    print(torch.cuda.get_device_name(i))\n"
+    )
+    try:
+        env = dict(os.environ)
+        # 探测必须看到**真实**列表，所以先摘掉继承来的过滤（避免二次过滤错位）
+        env.pop("HIP_VISIBLE_DEVICES", None)
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+        r = subprocess.run(
+            [vpy, "-c", code], capture_output=True, text=True, timeout=timeout, env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+        if not lines:
+            return None
+        names = lines[1:]          # 首行是设备数
+        for i, name in enumerate(names):
+            if not _is_igpu_name(name):
+                return i
+        return 0                   # 全是核显（纯 APU）→ 交给系统默认
+    except Exception as exc:
+        if callable(logf):
+            try:
+                logf("HIP 设备探测失败（沿用系统默认）：%s" % exc)
+            except Exception:
+                pass
+        return None
 
 
 def detect_vram_gb():
