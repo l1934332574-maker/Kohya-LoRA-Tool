@@ -10748,6 +10748,80 @@ def _wheel_valid(path):
         return False
 
 
+# ---------- AMD：禁用 NVIDIA 专属模块 + 打标改走 DirectML ----------
+
+def _venv_installed_packages(vpy, timeout=180):
+    """训练 venv 里已安装的包名集合（小写）。探测失败返回空集合（当没装处理）。"""
+    try:
+        r = subprocess.run([vpy, "-m", "pip", "list", "--format=json"],
+                           capture_output=True, text=True, timeout=timeout)
+        import json as _json
+        return {str(d.get("name", "")).lower() for d in _json.loads(r.stdout or "[]")}
+    except Exception:
+        return set()
+
+
+def _ensure_amd_module_blocklist(vpy, logf=print):
+    """AMD ROCm：把 xformers 等 NVIDIA 专属模块"禁用"掉（不卸载，随时可恢复）。
+
+    只在训练 venv 的 torch 是 ROCm/HIP 构建时生效：向 venv 的 sitecustomize.py
+    追加一段带 marker 的拦截代码，让这些模块 import 得到的是**空壳**而不是
+    CUDA 构建的 DLL —— diffusers 的可用性检查照常通过，导入链不再崩。
+    放行：环境变量 KOHYA_AMD_ALLOW_BLOCKED_MODULES=xformers。
+    """
+    if rocm_torch_backend(vpy) is not True:
+        return False
+    venv = os.path.dirname(os.path.dirname(vpy))
+    sp = os.path.join(venv, "Lib", "site-packages")
+    sc = os.path.join(sp, "sitecustomize.py")
+    try:
+        old = ""
+        if os.path.exists(sc):
+            with open(sc, "r", encoding="utf-8") as fh:
+                old = fh.read()
+        if AMD_BLOCKLIST_MARKER in old:
+            return False
+        logf("[AMD] 禁用 NVIDIA 专属模块（%s）：ROCm 下导入即崩，禁用后自动降级 PyTorch 原生实现；包本体不卸载，可用 KOHYA_AMD_ALLOW_BLOCKED_MODULES 放行"
+             % ", ".join(AMD_BLOCKED_MODULES))
+        os.makedirs(sp, exist_ok=True)
+        with open(sc, "a", encoding="utf-8") as fh:
+            if old and not old.endswith("\n"):
+                fh.write("\n")
+            fh.write(amd_blocklist_snippet())
+        return True
+    except Exception as exc:
+        logf("[AMD] 模块禁用写入失败（忽略，不影响继续）：%s" % exc)
+        return False
+
+
+def _ensure_amd_onnxruntime_directml(vpy, logf=print):
+    """AMD：打标用的 onnxruntime 换成 DirectML 版（CUDA 版 onnxruntime-gpu 用不了）。
+
+    三个变体（onnxruntime / -gpu / -directml）共用同一个 `onnxruntime` 模块
+    目录，必须先卸 CUDA 版才能装 DirectML 版；DirectML 依赖系统 DirectX，
+    AMD/NVIDIA/Intel 都能吃 GPU 加速。
+    """
+    if rocm_torch_backend(vpy) is not True:
+        return False
+    installed = _venv_installed_packages(vpy)
+    if "onnxruntime-directml" in installed:
+        return False
+    if "onnxruntime-gpu" in installed:
+        logf("[AMD] 卸载 onnxruntime-gpu（CUDA 构建，AMD 上加载即崩）…")
+        subprocess.run([vpy, "-m", "pip", "uninstall", "-y", "onnxruntime-gpu"],
+                       capture_output=True, text=True, timeout=600)
+    logf("[AMD] 安装 onnxruntime-directml（打标/预处理走 DirectML）…")
+    env = build_direct_env()
+    env["PIP_INDEX_URL"] = PIP_INDEX_PRIMARY
+    rc = subprocess.run([vpy, "-m", "pip", "install", "--no-input", "onnxruntime-directml"],
+                        capture_output=True, text=True, timeout=900, env=env)
+    if rc.returncode != 0:
+        logf("[AMD] onnxruntime-directml 安装失败（打标会退回 CPU 执行，可忽略）")
+        return False
+    logf("[OK] onnxruntime-directml 安装完成")
+    return True
+
+
 def _ensure_kohya_deps(vpy, kdir, logf=print):
     """确保训练环境具备工具运行时需要的依赖，缺失自动补装（内置 wheel + 国内镜像 + 重试）。
 
@@ -10763,6 +10837,13 @@ def _ensure_kohya_deps(vpy, kdir, logf=print):
             "训练环境已损坏（%s）。\n"
             "常见原因：数据目录迁移到新盘/更换系统用户后，venv 指向的 Python 已不存在。\n"
             "请重跑【② 安装训练内核】自动重建环境（旧 venv 会保留并重新安装依赖）。" % _vdetail)
+    # AMD ROCm：先做环境净化（禁用 NVIDIA 专属模块 / 换 DirectML 打标），再做依赖检查 ——
+    # 否则 xformers 的 DLL 错误会把后面每一步都打断（WD14 打标 import library.dataset 即崩）。
+    try:
+        _ensure_amd_module_blocklist(vpy, logf)
+        _ensure_amd_onnxruntime_directml(vpy, logf)
+    except Exception:
+        pass
     # 用 find_spec 只查包是否存在（不 import，秒级；import transformers 太重会拖慢每次训练启动）
     # sd-scripts 训练需要的依赖（不含 NVIDIA 专属的 bitsandbytes/tensorflow/onnxruntime-gpu）
     # 只检查「模块加载时必需」的核心依赖；lion-pytorch/schedulefree/prodigy 等可选优化器
