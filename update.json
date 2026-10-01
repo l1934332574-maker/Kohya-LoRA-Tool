@@ -1,7 +1,7 @@
 {
-  "version": "v0.18.12",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.18.12/Setup.exe",
+  "version": "v0.18.13",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.18.13/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "setup_sha256": "dd86dd0f96bd8a43a7be100bafb561c45b37edf901e740c328040da2779a0c05",
-  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.18.12 更新（2026-10-01）\n\n· 修复★：AMD 显卡（RX 7000/9000 系，ROCm 通道）开始训练后第一步即崩溃，\n  提示 miopenStatusUnknownError 的问题。\n  ⚠ 升级后请先删除数据目录下的 miopen_cache 文件夹（里面可能已有损坏文件），\n     再重新开始训练。\n· 修复★：显存不足时的排查提示更准确。以前即使日志里已写明 out of memory，\n  也会提示“与显存无关”；现在会直接按显存不足给出处理建议\n  （换更小底模 / 降低分辨率 / 关闭训练中采样预览）。\n· 直接覆盖安装到原位置即可，项目和训练环境会保留。"
+  "setup_sha256": "a8135d41dae2d9ed4df357e882c32fa9bc50cdf36297dd07da1ccb04b8cc3972",
+  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.18.13 更新（2026-10-01）\n\n· 修复★：AMD 显卡用户在「训练环境安装引导」里点「自动安装全部依赖」时\n  会立即报错、无法继续安装的问题（变量作用域写错，与显卡型号无关）。\n· 上一版的两个修复继续有效：AMD 训练第一步崩溃（miopenStatusUnknownError，\n  升级后建议先删除数据目录下的 miopen_cache 再训练）、以及显存不足时的\n  排查提示方向。\n· 直接覆盖安装到原位置即可，项目和训练环境会保留。"
 }

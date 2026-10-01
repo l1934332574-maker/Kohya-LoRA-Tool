@@ -2078,6 +2078,21 @@ def main():
                         help="概念模式关闭「自动清洗概念标签」（默认开：删掉描述概念本身的标签，让 trigger 独占）")
     parser.add_argument("--dedup", action="store_true", help="按 MD5 跳过重复图片")
     parser.add_argument("--no-wd14", action="store_true", help="人物模式不自动调用 WD14 打标")
+    # ★★ 2026-10-02（用户反馈：已手动打标好的用户没有可用入口）★★
+    #   「原始图片文件夹」里图片自带同名 .txt 时，用户只想**原样用他自己的标签**训练，
+    #   却会被后续环节改掉 ✗（全部模式 / 全部引擎，视频除外 ✓）：
+    #     · 画风模式：填了描述词 ⇒ 整批图都写成那一句，自带 .txt 完全不生效 ✗
+    #     · 缺标签的图 ⇒ 被写进 1girl, solo 之类兜底 caption ✗
+    #     · 概念模式 ⇒ 清洗会删掉他手写的 horns / wings 等词 ✗
+    #   本开关 = 「一个开关，全模式全引擎都不动用户的标签」：
+    #     · 不跑 WD14 打标（等效 --no-wd14 ✓）
+    #     · 不写兜底 caption（缺标签就缺着，让训练前校验去提示 ✓）
+    #     · 不清洗概念标签 ✓
+    #     · 画风模式优先用自带 .txt（描述词只作缺标签时的兜底 ✓）
+    #   ⚠️ 图片仍**照常缩放/裁切** ✓，trigger 仍**照常插到标签开头** ✓
+    #      （2026-10-02 用户明确要求保留这两项行为 ✓）
+    parser.add_argument("--keep-user-captions", action="store_true",
+                        help="保留原图自带的 .txt 标签：不自动打标、不写兜底、不清洗概念标签")
     # 打标模型选项。★ 刻意**不用 choices**：未知/空值要走「静默回退默认」而不是 argparse 报错退出
     # （老用户升级后设置里没有这个键，传过来的可能是空串 ✓）
     parser.add_argument("--wd14-model", default="",
@@ -2092,6 +2107,10 @@ def main():
     parser.add_argument("--report", default=None,
                         help="JSON 报告输出路径（含 ok/重复/模糊/过小/损坏 计数）")
     args = parser.parse_args()
+
+    # ★ 2026-10-02：勾了「保留我已有的标签」⇒ 全程不碰用户自带的 .txt ✓
+    #   （不跑 WD14 / 不写兜底 / 不清洗概念标签 / 画风模式优先用自带 ✓）
+    _keep_user_caps = bool(getattr(args, "keep_user_captions", False))
 
     def _print_import_pollution_hint(mod):
         # 常见根因：工具目录被残留的 numpy.py / numpy / PIL.py / PIL 文件夹污染。
@@ -2282,7 +2301,16 @@ def main():
                 if mode == "style":
                     # 画风模式：优先画风描述词（用户提供）；否则记录原图自带 txt，
                     # 稍后统一 WD14 打标 + 过滤人物标签（不再默认写死动漫 caption）
-                    if style_caption.strip():
+                    # ★ 2026-10-02：勾了「保留我已有的标签」时**顺序反过来** ✗ ——
+                    #   自带 .txt 优先 ✓，描述词只当缺标签时的兜底 ✓
+                    #   （原来描述词非空就整批覆盖，用户手写的标签一个字都用不上 ✗）
+                    if _keep_user_caps and os.path.isfile(raw_txt):
+                        try:
+                            with open(raw_txt, "r", encoding="utf-8") as f:
+                                user_captions[stem] = f.read()
+                        except Exception:
+                            user_captions[stem] = ""
+                    elif style_caption.strip():
                         with open(out_txt, "w", encoding="utf-8") as f:
                             f.write(style_caption)
                     elif os.path.isfile(raw_txt):
@@ -2326,7 +2354,9 @@ def main():
     # ---- 人物模式：WD14 / 内置打标 / 兜底 / 还原自带标签 / 插入 trigger ----
     if mode == "character" and not args.no_caption and (ok + skipped):
         imgs_no_txt = _imgs_no_txt(output_dir)
-        if not args.no_wd14:
+        # ★ 2026-10-02：勾了「保留我已有的标签」⇒ 连 WD14 都不跑 ✓
+        #   （--no-wd14 只关打标，仍会去清兜底/写兜底；本开关要的是"完全不碰用户标签" ✓）
+        if not args.no_wd14 and not _keep_user_caps:
             if not imgs_no_txt:
                 # 自愈：上次打标失败留下的兜底标签（1girl, solo 等）清掉重新自动打标
                 if _purge_placeholder_captions(output_dir, DEFAULT_CHARACTER_CAPTION, trigger):
@@ -2341,8 +2371,17 @@ def main():
             else:
                 print("[INFO] 图片标签已齐全，跳过 WD14 打标。")
         else:
-            _fill_missing_captions(output_dir, DEFAULT_CHARACTER_CAPTION)
-            print("[INFO] 已跳过 WD14 自动打标（按设置），缺标签图片使用兜底 caption")
+            # ★ 2026-10-02：勾了「保留我已有的标签」时**不写兜底 caption** ✗ ——
+            #   缺标签就让它缺着，由训练前的数据集校验去提示用户补全 ✓
+            #   （以前会被静默写成 1girl, solo 之类的占位词，用户的手写标注被覆盖 ✗）
+            if not _keep_user_caps:
+                _fill_missing_captions(output_dir, DEFAULT_CHARACTER_CAPTION)
+                print("[INFO] 已跳过 WD14 自动打标（按设置），缺标签图片使用兜底 caption")
+            else:
+                _n_missing = len(_imgs_no_txt(output_dir))
+                if _n_missing:
+                    print(f"[INFO] 已按「保留我已有的标签」处理：{_n_missing} 张图片没有自带 .txt，"
+                          f"未写兜底标签（请补全后训练）")
         # 还原原图自带的 .txt（完整保留用户标签）
         for stem, cap in user_captions.items():
             if cap.strip():
@@ -2357,7 +2396,12 @@ def main():
         _concept_on = getattr(args, "concept_mode", None)
         if _concept_on is None:
             _concept_on = bool(getattr(args, "concept_type", ""))
-        if _concept_on and getattr(args, "concept_type", "") and not getattr(args, "no_clean_concept", False):
+        # ★ 2026-10-02：勾了「保留我已有的标签」⇒ 不清洗 ✗ ——
+        #   概念清洗会删掉用户手写标签里的 horns / wings / 服饰词等 ✗，
+        #   与「原样用我自己的标签」直接冲突 ✓
+        if (_concept_on and getattr(args, "concept_type", "")
+                and not getattr(args, "no_clean_concept", False)
+                and not _keep_user_caps):
             _ct = args.concept_type
             _extra = set()
             if _ct in ("object", "bodypart"):
@@ -2430,7 +2474,8 @@ def main():
     # ---- 画风模式：无画风描述词时，用 WD14 / 内置打标 + 过滤人物标签 ----
     if mode == "style" and not args.no_caption and (ok + skipped) and not style_caption.strip():
         imgs_no_txt = _imgs_no_txt(output_dir)
-        if not args.no_wd14:
+        # ★ 2026-10-02：勾了「保留我已有的标签」⇒ 画风模式同样不跑 WD14 ✓
+        if not args.no_wd14 and not _keep_user_caps:
             if not imgs_no_txt:
                 # 两版兜底都认（用户切过出图风格时，上一版留下的兜底标签也要能被自愈清掉）
                 if _purge_placeholder_captions(
@@ -2446,28 +2491,38 @@ def main():
             else:
                 print("[INFO] 图片标签已齐全，跳过 WD14 打标。")
         else:
-            _fill_missing_captions(output_dir, style_fb)
-            print("[INFO] 已跳过 WD14 自动打标（按设置），缺标签图片使用兜底 caption")
-        # 还原原图自带 txt（过滤人物标签）
-        for stem, cap in user_captions.items():
-            if cap.strip():
-                with open(os.path.join(output_dir, stem + ".txt"), "w", encoding="utf-8") as f:
-                    f.write(filter_character_tags(cap))
-        # 对全部 txt 过滤人物/五官标签（WD14 打的也过滤，保留画风/内容标签）
-        n_f = 0
-        for f in sorted(os.listdir(output_dir)):
-            if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
-                continue
-            t = os.path.join(output_dir, os.path.splitext(f)[0] + ".txt")
-            if os.path.isfile(t):
-                with open(t, "r", encoding="utf-8") as fh:
-                    cur = fh.read()
-                ncur = filter_character_tags(cur)
-                if ncur != cur:
-                    with open(t, "w", encoding="utf-8") as fh:
-                        fh.write(ncur)
-                    n_f += 1
-        print(f"[INFO] 画风模式：已用 WD14 打标并过滤人物/五官标签 {n_f} 张（保留画风/内容标签）")
+            if not _keep_user_caps:
+                _fill_missing_captions(output_dir, style_fb)
+                print("[INFO] 已跳过 WD14 自动打标（按设置），缺标签图片使用兜底 caption")
+        # ★★ 2026-10-02：勾了「保留我已有的标签」⇒ 下面两个环节**整个跳过** ✓
+        #   ① 还原自带 txt 时会走 filter_character_tags（过滤人物/五官词）✗
+        #   ② 还会对训练目录里**全部** txt 再过滤一遍（连手写的也改 ✗）
+        #   用户要求「原样用我自己标好的」，所以这两个都不做 ✓
+        #   （未勾选时完全照旧 ✓，不影响老用户 ✓）
+        if not _keep_user_caps:
+            # 还原原图自带 txt（过滤人物标签）
+            for stem, cap in user_captions.items():
+                if cap.strip():
+                    with open(os.path.join(output_dir, stem + ".txt"), "w", encoding="utf-8") as f:
+                        f.write(filter_character_tags(cap))
+            # 对全部 txt 过滤人物/五官标签（WD14 打的也过滤，保留画风/内容标签）
+            n_f = 0
+            for f in sorted(os.listdir(output_dir)):
+                if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
+                    continue
+                t = os.path.join(output_dir, os.path.splitext(f)[0] + ".txt")
+                if os.path.isfile(t):
+                    with open(t, "r", encoding="utf-8") as fh:
+                        cur = fh.read()
+                    ncur = filter_character_tags(cur)
+                    if ncur != cur:
+                        with open(t, "w", encoding="utf-8") as fh:
+                            fh.write(ncur)
+                        n_f += 1
+            print(f"[INFO] 画风模式：已用 WD14 打标并过滤人物/五官标签 {n_f} 张（保留画风/内容标签）")
+        else:
+            print("[INFO] 已按「保留我已有的标签」处理：画风模式跳过打标与人物标签过滤，"
+                  "标签原样保留 ✓")
 
     # ---- 画风模式：同样支持画风专属触发词（插入每张 txt 第一行，不动 WD14 打标逻辑） ----
     if mode == "style" and not args.no_caption and (ok + skipped) and trigger:

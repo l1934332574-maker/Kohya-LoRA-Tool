@@ -91,6 +91,10 @@ const modeTips: Record<string, string> = {
     <button class="sidebar-action secondary" type="button" title="Python / Git 不想装在系统盘？这里可以自己选文件夹，工具会识别并校验；放在别的盘或整合包文件夹里，重装系统后也能继续用。" @click="emit('action', 'env_locations')">
       <UiIcon name="settings" /> 环境位置（自带 Python / Git）
     </button>
+    <!-- ★ 2026-10-02：侧栏这个是「一键开始训练」的**唯一入口** ✓ ——
+         训练页右上角原来还有一个同名按钮，但两者走的是**同一个动作**
+         （App.vue 里都是 `activeWorkspaceRef.value?.startTraining()`）✗，
+         属重复 ⇒ 已按用户要求**移除训练页里那个**，保留本按钮 ✓。 -->
     <button class="sidebar-action primary" type="button" :title="legacyTooltips.oneClickTrain" @click="emit('action', 'train')">
       <UiIcon name="play" /> {{ trainLabel }}
     </button>

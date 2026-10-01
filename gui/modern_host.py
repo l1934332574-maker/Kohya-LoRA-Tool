@@ -2672,6 +2672,26 @@ class ModernUIBridge:
             self._log("[工具] " + message)
             return {"ok": True, "message": message, "log": "[工具] " + message}
 
+        # ★ 2026-10-02（用户反馈：点了「下载底模」没看到窗口）：
+        #   底模下载对话框要看 **当前项目的 base_type** 才知道该列哪批模型 ✗ ——
+        #   `_download_choice_dialog` 第一行就是 `bt = bt or self.base_type` ✓
+        #   若不带 --project，经典侧 base_type 是空的 ⇒
+        #     get_download_models("") 返回空 ⇒ 走「架构下载帮助」分支直接 return ✗
+        #   表现就是：日志说"已打开「底模下载」"，但**一个窗口都不弹** ✗（实测确认 ✓）
+        #   ⇒ 必须带上项目 ✓；同时**不要求**项目必须存在（下载底模本身是全局操作 ✓）
+        if action == "download_base":
+            project_name = str(project_name or "").strip()
+            args = []
+            if project_name and self.core.load_project(project_name):
+                args += ["--project", project_name]
+            try:
+                self._spawn_classic(*args, "--action", action, "--utility-only")
+            except Exception as exc:
+                return {"ok": False, "error": "无法打开底模下载窗口：%s" % exc}
+            message = "已打开「底模下载」窗口；选择要下载的底模即可（新版训练页保持打开）。"
+            self._log("[工具] " + message)
+            return {"ok": True, "message": message, "log": "[工具] " + message}
+
         utility_actions = {"tools", "check_update", "data_dir", "queue", "env_locations"}
         if action in utility_actions:
             try:

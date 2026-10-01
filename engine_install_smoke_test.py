@@ -979,6 +979,336 @@ def test_accelerate_cpu_config_and_fp8_gate(base: Path):
     print("ACCELERATE_CPU_CONFIG_AND_FP8_GATE_OK")
 
 
+def test_modern_download_base_entry(base: Path):
+    """★ 2026-10-02（用户反馈：新版界面没有模型，下载模型的按钮好像没了）：
+
+    老版 kohya_gui 的底模那一排是 `[浏览][刷新][没有模型？点这里下载]` ✓，
+    新版训练页只做了「选择底模」✗ ⇒ SD1.5 / SDXL 用户在新版里**只能选、不能下** ✗
+    （Krea2 / FLUX.2 / H3 / Qwen21 都有「③ 下载模型」引导步骤，只有第一引擎漏了 ✗）
+
+    修复是四段链路，**缺任何一段按钮就是死的** ✗：
+      ModernKohyaWorkspace.vue「下载底模」按钮 → emit classicAction
+        → App.vue runWorkspaceAction → pywebview.api.run_action('download_base')
+        → gui/modern_host.py run_action（放在 utility_actions：**不要求先有项目** ✓）
+        → _spawn_classic(--action download_base) → kohya_gui._action_map → cmd_download_base
+    """
+    vue = (ROOT / "modern_ui" / "src" / "components" / "ModernKohyaWorkspace.vue"
+           ).read_text(encoding="utf-8")
+    assert "requestAction('download_base')" in vue, "工作区缺「下载底模」按钮 ✗"
+    assert "下载底模" in vue, "按钮文案应为「下载底模」✗"
+    # 按钮必须挂在底模那一排（与「选择底模」相邻 ✓），而不是别处
+    i_sel = vue.find(">选择底模</button>")
+    i_dl = vue.find("requestAction('download_base')")
+    assert i_sel != -1 and i_dl != -1 and 0 < i_dl - i_sel < 900, \
+        "「下载底模」应紧挨「选择底模」（老用户习惯的位置）✗"
+
+    host = (ROOT / "gui" / "modern_host.py").read_text(encoding="utf-8")
+    assert '"download_base"' in host, "modern_host.run_action 未支持 download_base ✗"
+    # ★ 必须带 --project（实测踩过：不带就直接不弹窗 ✗）
+    #   `_download_choice_dialog` 首行是 `bt = bt or self.base_type`，
+    #   经典侧没项目 ⇒ base_type 为空 ⇒ get_download_models("") 返回空
+    #   ⇒ 直接走「架构下载帮助」分支 return，日志却说"已打开「底模下载」" ✗
+    i_dl = host.find('if action == "download_base":')
+    assert i_dl != -1, "缺 download_base 专用分支 ✗"
+    _seg = host[i_dl:i_dl + 1000]
+    assert '"--project", project_name' in _seg, \
+        "download_base 必须带上项目（否则底模列表为空、一个窗口都不弹）✗"
+    # 但**不能**像 project_actions 那样"项目不存在就拒绝"：下载底模是全局操作 ✓
+    assert "if project_name and self.core.load_project(project_name)" in _seg, \
+        "无项目时应仍可下载（不能直接 return 报错拦住新用户）✗"
+
+    gui = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    m = re.search(r'_action_map\s*=\s*\{(.*?)\n            \}', gui, re.S)
+    assert m, "找不到 _action_map"
+    assert '"download_base": self.cmd_download_base' in m.group(1), \
+        "经典侧 _action_map 未映射 download_base → cmd_download_base ✗"
+    assert re.search(r"\n    def cmd_download_base\(self\):", gui), "cmd_download_base 不存在 ✗"
+
+    # ★★★ 实测踩过的坑 ✗：`--action` 在 main() 里还有一份**独立白名单** `classic_actions`，
+    #   只有 `_action_map` 加是不够的 —— argparse 会直接 `invalid choice` 拒掉，
+    #   子进程秒退、一个窗口都不弹，而父进程日志照打「已打开「底模下载」」✗
+    #   ⇒ 锁定：凡 _action_map 支持的 action，必须在 classic_actions 白名单里 ✓
+    _c = re.search(r"classic_actions = \((.*?)\n    \)", gui, re.S)
+    assert _c, "找不到 classic_actions 白名单"
+    _choices = set(re.findall(r'"([a-z0-9_]+)"', _c.group(1)))
+    _mapped = set(re.findall(r'"([a-z0-9_]+)":', m.group(1)))
+    _missing = sorted(_mapped - _choices)
+    assert not _missing, \
+        "这些 action 在 _action_map 里有、但不在 classic_actions 白名单里（会被 argparse 拒掉）✗：%s" % _missing
+    assert "download_base" in _choices, "download_base 不在 --action 白名单里 ✗"
+
+    # 构建产物必须已同步（前端是 dist，改 src 不 build = 用户看不到按钮 ✗）
+    dist = ROOT / "modern_ui" / "dist" / "assets"
+    if dist.is_dir():
+        js = "".join(p.read_text(encoding="utf-8", errors="ignore") for p in dist.glob("*.js"))
+        assert "download_base" in js, \
+            "dist 产物未同步：改了 .vue 后必须 npm run build，否则用户看不到按钮 ✗"
+    print("MODERN_DOWNLOAD_BASE_ENTRY_OK")
+
+
+def test_keep_user_captions(base: Path):
+    """★ 2026-10-02（用户反馈：已手动打标好的用户没有可用入口）：
+
+    用户把「图 + 同名 .txt」放在**同一个「原始图片文件夹」** ✓，要求
+    **全部模式**（人物 / 画风 / 概念）与**全部引擎**（Kohya / musubi /
+    AI Toolkit / Fizgig，视频除外）都能**原样**使用他自己的标签，
+    不被自动打标 / 兜底 caption / 概念清洗 / 人物标签过滤改动 ✓
+
+    之前的行为（每一处都会改他的标签 ✗）：
+      · 重跑 WD14 覆盖标签 ✗
+      · 缺标签的图被写成 1girl, solo 之类兜底 ✗
+      · 概念模式清洗掉他写的 horns / wings ✗
+      · 画风模式 filter_character_tags 连手写的也过滤 ✗
+
+    本轮修复：一个开关（--keep-user-captions）+ 界面自动识别 ✓
+    ⚠️ 用户明确要求**保留**：图片照常缩放/裁切 ✓、trigger 照常插到标签开头 ✓
+    """
+    # ---- ① scan_user_captions：只认非空 .txt，递归统计 ✓ ----
+    ds = base / "capsets"
+    (ds / "sub").mkdir(parents=True, exist_ok=True)
+    for n in ("a", "b"):
+        (ds / (n + ".png")).write_bytes(b"x")
+        (ds / (n + ".txt")).write_text("1girl, solo", encoding="utf-8")
+    (ds / "c.png").write_bytes(b"x")                     # 没有标签
+    (ds / "d.png").write_bytes(b"x")
+    (ds / "d.txt").write_text("", encoding="utf-8")      # 空标签 == 没标签 ✓
+    (ds / "sub" / "e.jpg").write_bytes(b"x")
+    (ds / "sub" / "e.txt").write_text("cat", encoding="utf-8")
+    total, tagged = core.scan_user_captions(str(ds))
+    assert total == 5, "总图片数应为 5，实际 %s" % total
+    assert tagged == 3, "空 .txt 不应算作有标签（会误导用户）✗，实际 %s" % tagged
+
+    # ---- ② preprocess.py：开关存在，且四个环节都被关掉 ✓ ----
+    psrc = (ROOT / "preprocess.py").read_text(encoding="utf-8")
+    assert "--keep-user-captions" in psrc, "缺 --keep-user-captions ✗"
+    assert "_keep_user_caps = bool(getattr(args, \"keep_user_captions\", False))" in psrc, \
+        "开关未生效到局部变量 ✗"
+    assert psrc.count("if not args.no_wd14 and not _keep_user_caps:") == 2, \
+        "人物 / 画风两处 WD14 都要受开关约束 ✗"
+    assert "and not _keep_user_caps):" in psrc, "概念清洗未受开关约束 ✗"
+    assert "if not _keep_user_caps:" in psrc, "画风兜底/过滤未受开关约束 ✗"
+    # 画风模式：开关打开时自带 .txt 优先于描述词 ✓
+    assert "_keep_user_caps and os.path.isfile(raw_txt)" in psrc, \
+        "画风模式未让自带标签优先于描述词 ✗"
+
+    # ---- ③ 用户要求保留的行为不能被顺手改掉 ✓ ----
+    assert "insert_trigger" in psrc, "trigger 插入行为不应被移除（用户要求保留 ✓）"
+    assert "--size" in psrc, "图片缩放不应被移除（用户要求保留 ✓）"
+
+    # ---- ④ 工具侧：函数签名 + 两处调用点都要传 ✓ ----
+    ksrc = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8")
+    assert "def scan_user_captions(" in ksrc, "缺 scan_user_captions ✗"
+    assert "keep_user_captions=False):" in ksrc, "preprocess() 缺 keep_user_captions 参数 ✗"
+    assert ksrc.count("--keep-user-captions") >= 1, "未把开关传给子进程 ✗"
+
+    gsrc = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    assert gsrc.count("keep_user_captions=bool(params.get(\"keep_user_captions\"))") == 2, \
+        "「数据预处理」与「一键训练」两个调用点都要传 ✗"
+    assert "\"keep_user_captions\": bool(getattr(self, \"keep_caps_var\", None)" in gsrc, \
+        "参数收集缺新开关 ✗"
+    assert "chk_keep_caps" in gsrc and "_auto_detect_user_captions" in gsrc, \
+        "界面缺勾选框或自动检测 ✗"
+    assert "_auto_detect_user_captions(d)" in gsrc, "选中文件夹后未触发自动检测 ✗"
+    # 自动检测只在图片模式生效（视频 / H3 混合媒体走字幕 ✓）
+    i = gsrc.find("def _auto_detect_user_captions(")
+    seg = gsrc[i:i + 1600]
+    assert 'in ("video", "h3_fz")' in seg, "视频/H3 模式不应参与图片标签自动勾选 ✗"
+    print("KEEP_USER_CAPTIONS_OK")
+
+
+def test_fizgig_cli_none_stdout_guard(base: Path):
+    """★ 2026-10-02（用户反馈：最新版的引擎更新还是无法正常使用）：
+
+    弹窗原文：`Fizgig 引擎更新失败：argument of type 'NoneType' is not iterable` ✗
+
+    根因：`_fizgig_v65_cli_ready()` 里**直接**对 `result.stdout` 做 `in` 判断 ✗
+      `absent = [flag for flag in ... if flag not in result.stdout]`
+    一旦 `stdout` 是 None ⇒ `TypeError: argument of type 'NoneType' is not iterable` ✓
+    （本文件其它 12 处同类判断都写了 `(r.stdout or "")` ✓，只有这一处漏了 ✗）
+
+    判据：该函数内不得再出现裸用 `result.stdout` 的 `in` 判断，
+          且必须出现 None 兜底 ✓
+    """
+    src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8")
+    i = src.find("def _fizgig_v65_cli_ready(")
+    assert i != -1, "缺 _fizgig_v65_cli_ready"
+    seg = src[i:i + 3200]
+    assert "flag not in result.stdout]" not in seg, \
+        "仍在对 stdout 直接做 in 判断 ✗（stdout 为 None 时会 TypeError）"
+    assert "result.stdout or" in seg, "必须对 stdout 做 None 兜底 ✓"
+    assert "absent" in seg, "参数校验逻辑不应被删掉 ✓"
+    print("FIZGIG_CLI_NONE_STDOUT_GUARD_OK")
+
+
+def test_mode_guide_text_per_mode(base: Path):
+    """★ 2026-10-02（用户要求）：「训练说明」必须按模式显示**专项**内容 ✗
+
+    旧版每个模式都有各自的使用说明 ✓，但界面重写（5caa25a）后
+    `_show_help_window()` 只剩一份通用文本 ✗ ⇒ 已补回 `_mode_guide_text()` ✓
+
+    判据：
+      ① 第一引擎要按**底模架构**区分（SD1.5 / SDXL / FLUX / Anima 四份各不相同）✓
+      ② 其余引擎模式（krea2 / krea2_at / krea2_fz / flux2 / flux2_fz /
+         qwen21_fz / h3_fz / video / qwen_image / zimage）都有专属说明 ✓
+      ③ 未覆盖的模式返回 ""，且不抛异常 ✓
+      ④ 「训练说明」窗口必须把它显示在最前 ✓
+    """
+    import importlib
+    from types import SimpleNamespace
+    gui = importlib.import_module("kohya_gui")
+    fn = gui.App._mode_guide_text
+
+    _texts = {}
+    for _b in ("sd15", "sdxl", "flux", "anima"):
+        _t = fn(SimpleNamespace(mode="character", base_type=_b))
+        assert _t and "当前模式" in _t, "架构 %s 缺专项说明 ✗" % _b
+        _texts[_b] = _t
+    assert len(set(_texts.values())) == 4, "四种底模架构的说明必须各不相同 ✗"
+    assert "SD1.5" in _texts["sd15"] and "512" in _texts["sd15"]
+    assert "SDXL" in _texts["sdxl"]
+    assert "FLUX" in _texts["flux"]
+    assert "Anima" in _texts["anima"] and "Qwen3" in _texts["anima"]
+
+    for _m in ("krea2", "krea2_at", "krea2_fz", "flux2", "flux2_fz",
+               "qwen21_fz", "h3_fz", "video", "qwen_image", "zimage"):
+        _t = fn(SimpleNamespace(mode=_m, base_type="sd15"))
+        assert _t and "当前模式" in _t, "模式 %s 缺专项说明 ✗" % _m
+
+    assert fn(SimpleNamespace(mode="不存在的模式", base_type="sd15")) == "", \
+        "未覆盖的模式应返回空串（不能抛异常）✓"
+
+    src = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    i = src.find("def _show_help_window(self):")
+    assert i != -1, "缺 _show_help_window"
+    seg = src[i:i + 1400]
+    assert "_mode_guide_text()" in seg, "「训练说明」窗口未接入按模式说明 ✗"
+    print("MODE_GUIDE_TEXT_PER_MODE_OK")
+
+
+def test_workspace_train_button_removed(base: Path):
+    """★ 2026-10-02（用户要求）：去掉训练页右上角的「一键开始训练」，只保留左侧栏那个大的 ✓
+
+    背景：两个按钮走的是**同一个动作**（App.vue 里都是
+    `activeWorkspaceRef.value?.startTraining()`）✗ ⇒ 属重复入口 ✓
+    用户明确要求：**保留左侧栏那个，移除训练页右上角那个** ✓
+
+    判据：
+      ① 三个训练页里都不得再有绑定 `@click="startTraining"` 的按钮 ✗
+      ② 但 `function startTraining(` 与 `defineExpose({ … startTraining … })`
+         **必须保留** ✓ —— 侧栏正是靠它触发训练 ✓（删函数会让侧栏按钮失效 ✗）
+      ③ 侧栏 `EngineSidebar` 的训练入口必须在 ✓（它现在是唯一入口 ✓）
+    """
+    root = ROOT / "modern_ui" / "src" / "components"
+    for fn in ("ModernKohyaWorkspace.vue", "ModernEngineWorkspace.vue", "ModernQwenWorkspace.vue"):
+        s = (root / fn).read_text(encoding="utf-8")
+        assert '@click="startTraining"' not in s, \
+            "%s 里仍有直接绑定 startTraining 的按钮 ✗（右上角那个应已移除）" % fn
+        assert "function startTraining(" in s, \
+            "%s 缺 startTraining 函数 ✗（侧栏靠它触发训练）" % fn
+        _tail = s.split("defineExpose({", 1)
+        assert len(_tail) == 2 and "startTraining" in _tail[1][:120], \
+            "%s 必须把 startTraining 暴露给侧栏（defineExpose）✓" % fn
+    sb = (root / "EngineSidebar.vue").read_text(encoding="utf-8")
+    assert "trainLabel" in sb and "emit('action', 'train')" in sb, \
+        "侧栏的训练入口被误删 ✗（它是现在唯一的入口）"
+    print("WORKSPACE_TRAIN_BUTTON_DEDUP_OK")
+
+
+def test_anima_adapt_nonstandard_te(base: Path):
+    """★ 2026-10-02（用户反馈）：非标准文件名的 Anima 文本编码器应**自动适配**，不逼用户改名 ✗
+
+    背景：ComfyUI 等处下载的文本编码器叫 `qwen_3_06b_base.safetensors` 这类名字 ✗，
+      而 sd-scripts 只认 model.safetensors / pytorch_model.bin / 分片名 ✗，
+      以前直接弹「请把文件改名为 model.safetensors 再选」✗（体验差、易改错 ✓）
+
+    判据：
+      ① 存在适配函数 `_adapt_anima_qwen3_file` ✓
+      ② 它会把权重链成标准名、并复用随包内置的 configs/qwen3_06b 补齐 config/tokenizer ✓
+      ③ 保存入口 `anima_set_component()` 必须接入它（校验失败且是 qwen3 单文件时）✓
+      ④ 内置配置文件名要与随包 sd-scripts zip 里的**一一对应** ✓（否则适配出来仍加载不了）
+    """
+    src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    i = src.find("def _adapt_anima_qwen3_file(")
+    assert i != -1, "缺 _adapt_anima_qwen3_file"
+    seg = src[i:i + 7000]
+    assert "model.safetensors" in seg and "os.link" in seg, \
+        "适配时应把权重硬链接成标准名 model.safetensors ✓"
+    assert "os.link(src_file, dst_w)" in seg, "硬链接失败要退回复制 ✓"
+    assert "qwen3_06b" in seg, "应复用随包内置的 configs/qwen3_06b ✓"
+    # 清单常量定义在函数**之前**，单独取（不能只在函数段里找 ✗）
+    _m = re.search(r"_ANIMA_QWEN3_STD_CFG_FILES = \(([^)]*)\)", src, re.S)
+    assert _m, "缺 _ANIMA_QWEN3_STD_CFG_FILES"
+    _listed = re.findall(r'"([^"]+)"', _m.group(1))
+    for _n in ("config.json", "tokenizer.json", "tokenizer_config.json",
+               "vocab.json", "merges.txt"):
+        assert _n in _listed, "内置清单缺 %s ✗" % _n
+    j = src.find("def anima_set_component(")
+    assert j != -1, "缺 anima_set_component"
+    seg2 = src[j:j + 1600]
+    assert "_adapt_anima_qwen3_file(" in seg2, \
+        "anima_set_component 未接入自动适配 ✗（用户仍会被要求手动改名）"
+    # ④ 内置清单与随包 zip 对齐
+    z = ROOT / "installers" / "kohya_ss" / "sd-scripts-main.zip"
+    if z.is_file():
+        import zipfile
+        with zipfile.ZipFile(str(z)) as zf:
+            names = zf.namelist()
+        for _n in _listed:
+            assert any(x.endswith("/configs/qwen3_06b/" + _n) for x in names), \
+                "内置清单里的 %s 在随包 sd-scripts 里不存在 ✗" % _n
+    print("ANIMA_ADAPT_NONSTANDARD_TE_OK")
+
+
+def test_preset_refresh_no_dialog(base: Path):
+    """★ 2026-10-02（用户截图反馈）：打开旧项目时**不再弹窗** ✗
+
+    以前 `_offer_preset_refresh()` 会弹「这个项目保存时用的是旧版预设表（v1，当前 v4）…」
+    的是/否对话框，每次打开旧项目都打断用户 ✗ → 已改为**静默保留项目原值** ✓。
+
+    判据（缺一不可）：
+      ① 该函数内**不得**再出现 messagebox.askyesno ✗
+      ② 仍必须保留「关掉新版新增项」的处理 ✓
+         —— 原来「选否」分支不只是"什么都不做" ✗：它会主动关掉
+            noise_offset / min_snr_gamma，否则旧项目会被悄悄带上新参数、训练口径变了 ✗
+      ③ 日志里要说明已保留原值、并提示「↺ 恢复预设」可重算 ✓
+    """
+    src = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    i = src.find("def _offer_preset_refresh(")
+    assert i != -1, "缺 _offer_preset_refresh"
+    seg = src[i:i + 2800]
+    assert "askyesno" not in seg, "仍在弹窗询问 ✗（用户要求关掉）"
+    assert "new_sd" in seg and '_set_param_value(k, "")' in seg, \
+        "必须保留「关掉新版新增项」的处理 ✓（否则旧项目会被悄悄带上新参数）"
+    assert "恢复预设" in seg, "日志里应提示可点「↺ 恢复预设」按新版重算 ✓"
+    print("PRESET_REFRESH_NO_DIALOG_OK")
+
+
+def test_amd_install_all_uses_visible_var(base: Path):
+    """★ 2026-10-01（用户截图：点「🚀 自动安装全部依赖」立即弹窗报
+    `AMD 依赖已安装，但环境验证失败：name 'pyv' is not defined`）：
+
+    `_auto_install_all()` 里必须用**该作用域可见**的 `py_ver` ✗ ——
+    原来用的是 `pv` ✗，而 `pv` 只是 `_auto_venv()` 内部的局部别名（`pv = py_ver`）✗，
+    在 `_auto_install_all()` 里根本不存在 ⇒ 必然 NameError（客户那份里拼作 pyv ✓）。
+
+    判据：① `_auto_install_all` 段内不得出现 `create_python_venv(pv` ✗
+          ② 必须出现 `create_python_venv(py_ver` ✓
+          ③ `py_ver` 确实定义在外层 `_open_amd_guide()` 内（闭包可见）✓
+    """
+    src = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    i = src.find("def _auto_install_all():")
+    assert i != -1, "缺 _auto_install_all"
+    seg = src[i:i + 2400]
+    assert "create_python_venv(pv" not in seg, \
+        "仍在使用只在 _auto_venv 内定义的 pv ✗（点「自动安装全部依赖」会 NameError）"
+    assert "create_python_venv(py_ver" in seg, \
+        "应改用外层可见的 py_ver ✓"
+    _g = src.find("def _open_amd_guide(self):")
+    _p = src.find('py_ver = ("3.12" if "3.12" in sys_vers')
+    assert -1 < _g < _p < i, "py_ver 必须定义在 _open_amd_guide() 内且在 _auto_install_all 之前 ✓"
+    print("AMD_INSTALL_ALL_USES_VISIBLE_VAR_OK")
+
+
 def test_single_gpu_isolation():
     """★ 2026-09-29（用户日志 KohyaLoRA_运行日志_20260929_031129，RTX 4080S **双卡**）：
     多卡机器上必须只暴露一张卡 ✓
@@ -4951,6 +5281,22 @@ def main():
         test_single_gpu_isolation()
         test_accel_probe_matches_training(base)
         test_diagnose_multigpu_process_group()
+        # ★ 2026-10-01：AMD 引导「自动安装全部依赖」用了作用域外不存在的变量 → 点即崩 ✗
+        test_amd_install_all_uses_visible_var(base)
+        # ★ 2026-10-02：打开旧项目不再弹「旧版预设表」对话框（改为静默保留原值）✓
+        test_preset_refresh_no_dialog(base)
+        # ★ 2026-10-02：Anima 文本编码器不再要求用户手动改名（工具自动适配）✓
+        test_anima_adapt_nonstandard_te(base)
+        # ★ 2026-10-02：去掉训练页右上角重复的「一键开始训练」（只留侧栏那个）✓
+        test_workspace_train_button_removed(base)
+        # ★ 2026-10-02：每个模式的「训练说明」要有专项内容（旧版有、新版丢了）✓
+        test_mode_guide_text_per_mode(base)
+        # ★ 2026-10-02：Fizgig 引擎更新报 NoneType is not iterable（对 stdout 裸做 in 判断）✗
+        test_fizgig_cli_none_stdout_guard(base)
+        # ★ 2026-10-02：已手动打标好的用户没有可用入口（自带 .txt 被自动打标/兜底/清洗改掉）✗
+        test_keep_user_captions(base)
+        # ★ 2026-10-02：新版界面「下载模型的按钮没了」（第一引擎漏了底模下载入口）✗
+        test_modern_download_base_entry(base)
         test_fourth_engine(base)
         test_fourth_engine_train_pipeline(base)
         test_fizgig_deps_self_heal(base)

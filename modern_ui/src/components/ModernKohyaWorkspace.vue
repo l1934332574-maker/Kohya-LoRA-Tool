@@ -280,8 +280,11 @@ defineExpose({ startTraining, guideAction })
       </div>
       <div class="kohya-toolbar-actions">
         <button class="kohya-button" type="button" :title="legacyTooltips.readme" @click="emit('classicAction', 'readme')">训练说明</button>
-        <button v-if="desktop" class="kohya-button primary" type="button" @click="startTraining"><UiIcon name="play" /> 一键开始训练</button>
-        <button v-else class="kohya-button primary" type="button" @click="previewOnly('开始训练')"><UiIcon name="play" /> 一键开始训练</button>
+        <!-- ★★ 2026-10-02：训练页右上角的「一键开始训练」已移除 ✗ ——
+             它与左侧栏那个走的是**同一个动作**（App.vue 里都是
+             `activeWorkspaceRef.value?.startTraining()`）✗，
+             属重复入口 ⇒ 按用户要求只保留左侧栏那个大的 ✓。
+             `startTraining()` 仍然保留并被 defineExpose 暴露给侧栏调用 ✓。 -->
       </div>
     </header>
 
@@ -299,6 +302,15 @@ defineExpose({ startTraining, guideAction })
           <span class="base-mark"><UiIcon name="model" /></span>
           <div class="base-copy"><span>当前底模架构</span><select v-model="draft.base_type" class="kohya-select base-type-select" :title="legacyTooltips.baseModel" @change="onBaseTypeChange"><option v-for="item in baseTypeOptions" :key="item.key" :value="item.key">{{ item.label }}</option></select><small :title="draft.base_model || undefined">{{ draft.base_model || '未指定模型文件' }}</small></div>
           <button class="kohya-button compact" type="button" :title="legacyTooltips.baseModel" @click="browse('base_model')">选择底模</button>
+          <!-- ★ 2026-10-02（用户反馈：新版界面「下载模型的按钮没了」）：
+               老版这一排是 [浏览][刷新][没有模型？点这里下载] ✗，新版只做了「选择底模」✗，
+               SD1.5 / SDXL 用户在新版里**只能选已有底模、无法下载** ✗
+               （Krea2 / FLUX.2 / H3 / Qwen21 都有「③ 下载模型」引导步骤，只有第一引擎漏了）
+               这里补一个常驻按钮 ✓：老手一眼可见、零新增步骤 ✓
+               requestAction → App.vue runWorkspaceAction → python run_action('download_base') ✓ -->
+          <button class="kohya-button compact" type="button"
+                  title="没有底模？点这里下载「应用内下载」SD1.5 / SDXL 常用底模（国内镜像、断点续传、下完自动识别）。"
+                  @click="requestAction('download_base')">下载底模</button>
         <button class="kohya-button compact save-button" type="button" @click="save">{{ desktop ? '保存修改' : '保存预览设置' }}</button>
         </section>
 

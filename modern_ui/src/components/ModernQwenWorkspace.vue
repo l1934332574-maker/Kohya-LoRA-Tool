@@ -399,7 +399,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         <button class="qwen-button" type="button" :title="legacyTooltips.modelPath" @click="openModelDialog">{{ desktop ? '模型设置' : '选择训练模型' }}</button>
         <button v-if="desktop" class="qwen-button" type="button" @click="saveConfig">保存设置</button>
         <button v-else class="qwen-button" type="button" @click="saveConfig">保存预览设置</button>
-        <button v-if="desktop" class="qwen-button primary" type="button" @click="startTraining"><UiIcon name="play" /> 一键开始训练</button>
+        <!-- ★ 2026-10-02：与左侧栏重复的「一键开始训练」已移除 ✗（同一动作，只保留侧栏那个）-->
       </div>
     </header>
 

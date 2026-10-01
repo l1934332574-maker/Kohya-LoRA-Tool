@@ -231,7 +231,8 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
       <div class="engine-actions">
         <button v-if="desktop && details.engine_update_available" class="engine-update-button" type="button" :title="legacyTooltips.engineUpdate" @click="requestAction(engineUpdateAction)"><span class="update-arrow">↗</span> 引擎更新可用</button>
         <button v-if="desktop" class="engine-button" type="button" @click="save">保存修改</button>
-        <button v-if="desktop" class="engine-button primary" type="button" @click="startTraining"><UiIcon name="play" /> 一键开始训练</button>
+        <!-- ★ 2026-10-02：与左侧栏重复的「一键开始训练」已移除 ✗（同一动作，只保留侧栏那个）-->
+
         <button v-else class="engine-button primary" type="button" @click="save">保存预览设置</button>
       </div>
     </header>

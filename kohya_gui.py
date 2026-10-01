@@ -608,6 +608,11 @@ class App:
                 "label_editor": self.cmd_label_editor,
                 "export_config": self.cmd_export_config,
                 "readme": self.cmd_readme,
+                # ★ 2026-10-02（用户反馈：新版界面「下载模型的按钮没了」）：
+                #   新版训练页的「下载底模」按钮最终由这里承接 ✓ ——
+                #   新版 UI → modern_host.run_action → _spawn_classic(--action download_base)
+                #   → 本映射 → cmd_download_base（老版就有的完整实现：应用内下载/本地选择/浏览目录 ✓）
+                "download_base": self.cmd_download_base,
                 "at_model_help": self.cmd_at_model_help,
                 "at_engine_update": self.cmd_at_engine_update,
                 "fizgig_engine_update": self.cmd_fizgig_engine_update,
@@ -2463,6 +2468,8 @@ class App:
                 "gc": params.get("gc", "") or "自动",
                 "wd14_model": params.get("wd14_model") or "swinv2-v3",
                 "overwrite": bool(params.get("overwrite")),
+        # ★ 2026-10-02：用户自带标签（图 + 同名 .txt 同目录）⇒ 原样保留 ✓
+        "keep_user_captions": bool(params.get("keep_user_captions")),
                 "amd_mode": bool(params.get("amd_mode")),
             },
         }
@@ -2581,6 +2588,12 @@ class App:
             except Exception:
                 pass
             try:
+                # ★ 2026-10-02：用户自带标签 ⇒ 保留原样
+                #   （老项目里没有这个键 ⇒ False ✓，保持原有行为，不影响老用户 ✓）
+                self.keep_caps_var.set(bool(p.get("keep_user_captions", False)))
+            except Exception:
+                pass
+            try:
                 self.amd_var.set(bool(p.get("amd_mode", False)))
             except Exception:
                 pass
@@ -2694,8 +2707,37 @@ class App:
                                           font=ui_font(FONT_BODY), command=self.cmd_pick_raw)
         self.btn_pick_raw.pack(side="left")
         self.card1_hint = ctk.CTkLabel(card1, text="人物模式建议 15~30 张同一人物；画风模式建议 20~60 张不同人物。图片越清晰越好",
-                                        font=ui_font(FONT_HINT), text_color=HINT)
+                                       font=ui_font(FONT_HINT), text_color=HINT)
         self.card1_hint.pack(anchor="w", padx=22, pady=(2, 6))
+        # ★★ 2026-10-02（用户反馈：已手动打标好的用户没有可用入口）★★
+        #   场景：用户用别的工具/手工把每张图都写好 .txt，**和图片放在同一个文件夹**，
+        #   只想原样拿去训练 ✓（人物 / 画风 / 概念，全部引擎，视频除外 ✓）。
+        #   但原来只能点「数据预处理」，而那会：重跑 WD14（覆盖 ✗）、
+        #   给缺标签的图写兜底 caption（凭空多出 1girl, solo ✗）、
+        #   概念模式清洗标签（删掉他写的 horns / wings ✗）、
+        #   画风模式过滤人物标签（连手写的也过滤 ✗）—— 用户完全不敢点 ✓
+        #   勾上本项 = 全程不动他的标签 ✓；选中文件夹时会自动扫描并默认勾上 ✓
+        #   ⚠️ 图片仍照常缩放/裁切、触发词仍照常插到标签开头（用户明确要求保留 ✓）
+        self.keep_caps_row = ctk.CTkFrame(card1, fg_color="transparent")
+        self.keep_caps_row.pack(fill="x", padx=22, pady=(0, 4))
+        self.keep_caps_var = tk.BooleanVar(value=False)
+        try:
+            self.keep_caps_var.trace_add("write", lambda *a: self._schedule_autosave())
+        except Exception:
+            pass
+        self.chk_keep_caps = ctk.CTkCheckBox(
+            self.keep_caps_row, text="保留我已有的标签（不自动打标）",
+            variable=self.keep_caps_var, fg_color=ACC, hover_color=ACC_H,
+            text_color=TXT, font=ui_font(FONT_BODY))
+        self.chk_keep_caps.pack(side="left")
+        self._tip(self.chk_keep_caps,
+                  "图片文件夹里**每张图都自带同名 .txt** 时勾上（会自动识别并默认勾选）✓\n"
+                  "· 不自动打标、不写兜底、不清洗标签，你的标签原样进训练 ✓\n"
+                  "· 图片仍会正常缩放/裁切，触发词仍会插到标签开头 ✓\n"
+                  "· 缺标签的图不会被补词，训练前会提示你补全 ✓")
+        self.keep_caps_hint = ctk.CTkLabel(self.keep_caps_row, text="",
+                                           font=ui_font(FONT_HINT), text_color=HINT)
+        self.keep_caps_hint.pack(side="left", padx=(10, 0))
         # 打标模型（2026-09-17 新增）——⚠️ 一开始放在「高级参数」折叠区里，
         # 结果用户**根本找不到**（折叠区默认收起 ✗）。它其实是常规选择，不是老手参数，
         # 所以挪到「① 准备图片数据」里：常显、且在流程第一步就能看到 ✓
@@ -3528,7 +3570,17 @@ class App:
         return out
 
     def _offer_preset_refresh(self, stored_ver, data):
-        """打开旧项目：预设表版本不一致 -> 列出差异问一次是否按新版重算（不强制）。"""
+        """打开旧项目：预设表版本不一致时的处理。
+
+        ★★ 2026-10-02：**不再弹窗询问** ✗ ——
+          用户反馈（截图）：每次打开旧项目都被这个对话框打断 ✗，要求关掉 ✓。
+          现在**静默保留项目原值**（等价于原来选「否」✓），
+          只在运行日志里留一行差异说明 ✓（不打扰、但可追溯 ✓）；
+          想按新版预设重算，随时点界面的「↺ 恢复预设」即可 ✓（能力没有任何损失 ✓）。
+        ⚠️ 注意：原来「选否」分支不只是"什么都不做" ✗ ——
+          它还会**主动关掉**新版新增的 noise_offset / min_snr_gamma ✗，
+          否则旧项目会被悄悄带上新参数、训练口径与保存时不一致 ✗ ⇒ 必须保留这段 ✓
+        """
         name = data.get("name") or self.current_project or ""
         if name in getattr(self, "_preset_asked", set()):
             return
@@ -3547,33 +3599,17 @@ class App:
         if len(diff) > 8:
             _parts.append("等共 %d 项" % len(diff))
         _parts += [f"新增 {PARAM_LABELS.get(k, k)} = {_pre[k]}" for k in new_sd]
-        try:
-            yes = messagebox.askyesno(
-                core.APP_NAME,
-                "这个项目保存时用的是旧版预设表（v%s，当前 v%s）。\n\n"
-                "以下参数与新版预设不同：\n  %s\n\n"
-                "选「是」：按新版预设重算（上面这些会被覆盖 / 开启）。\n"
-                "选「否」：保留项目原值 —— 想复现旧结果就选这个，之后随时可点「↺ 恢复预设」重算。"
-                % (stored_ver or 1, core.PRESET_VERSION, "、".join(_parts)))
-        except Exception:
-            yes = False
-        if yes:
-            for k, _o, _n in diff:
-                self._manual_override.discard(k)
-            self._apply_presets()
-            self._log("[预设] 已按新版预设（v%s）重算 %d 项参数%s"
-                      % (core.PRESET_VERSION, len(diff),
-                         ("，并开启 %s" % "、".join(PARAM_LABELS.get(k, k) for k in new_sd)) if new_sd else ""))
-        else:
-            if new_sd:
-                # 明确关掉 v3 新增项（空值会被写进项目 json），保证该项目训练口径与保存时一字不差
-                for k in new_sd:
-                    self._set_param_value(k, "")
-                self._manual_override.update(new_sd)
-                self._log("[预设] 已按你的选择关闭 %s —— 该项目的训练口径与保存时保持一致"
-                          % "、".join(PARAM_LABELS.get(k, k) for k in new_sd))
-            self._log("[预设] 保留项目原值；预设表已升级到 v%s，需要时点「↺ 恢复预设」可按新版重算"
-                      % core.PRESET_VERSION)
+        # ★★ 2026-10-02：不再弹窗 ✗（用户要求关掉 ✓）—— 静默保留项目原值 ✓
+        if new_sd:
+            # 明确关掉新版新增项（空值会被写进项目 json），保证该项目训练口径与保存时一字不差 ✓
+            for k in new_sd:
+                self._set_param_value(k, "")
+            self._manual_override.update(new_sd)
+            self._log("[预设] 已保持本项目训练口径：不启用 %s"
+                      % "、".join(PARAM_LABELS.get(k, k) for k in new_sd))
+        self._log("[预设] 本项目保存时用的是旧版预设表（v%s，当前 v%s），已保留项目原值 ✓；"
+                  "需要按新版重算请点「↺ 恢复预设」。差异：%s"
+                  % (stored_ver or 1, core.PRESET_VERSION, "、".join(_parts)))
 
     def _refresh_override_bar(self):
         """刷新「已手动设定」提示条：只列会被预设管理的键（可逐项回退）。"""
@@ -4718,6 +4754,52 @@ class App:
     def cmd_download_base(self):
         self._download_choice_dialog()
 
+    def _auto_detect_user_captions(self, folder, log=True):
+        """扫描「原始图片文件夹」，按自带标签比例自动勾选「保留我已有的标签」✓
+
+        ★ 2026-10-02（用户反馈：已手动打标好的用户没有可用入口 ✓）：
+          用户把「图 + 同名 .txt」放**同一个文件夹** ✓，工具应当**主动认出来**并默认保留 ✓，
+          而不是让他去猜要不要点「数据预处理」（点了就可能改写他的标签 ✗）。
+
+        规则（保守，避免误勾 ✗）：
+          · 带标签 ≥2 张且占比 ≥60% ⇒ **自动勾上** ✓，并显示「检测到 N 张自带标签」
+          · 一张都没有 ⇒ 取消勾选、清空提示 ✓（保持原行为，不影响普通用户 ✓）
+          · 视频 / H3 混合媒体模式不走图片标签，直接跳过 ✓
+
+        ⚠️ 每次选文件夹都会重新判定 ✗ —— 用户换了数据集就该重新认一次 ✓；
+           想改回来手动取消即可（保存时会记住用户的选择 ✓）
+        """
+        if getattr(self, "mode", "") in ("video", "h3_fz"):
+            self._set_keep_caps_hint("")
+            return
+        try:
+            total, tagged = core.scan_user_captions(folder)
+        except Exception:
+            return
+        try:
+            if tagged >= 2 and total > 0 and tagged / float(total) >= 0.6:
+                self.keep_caps_var.set(True)
+                self._set_keep_caps_hint("检测到 %d/%d 张图片自带标签，已默认保留 ✓" % (tagged, total))
+                if log:
+                    self._log("[预处理] 检测到 %d/%d 张图片自带同名 .txt 标签，"
+                              "已自动勾选「保留我已有的标签」（不会自动打标/覆盖你的标签）✓"
+                              % (tagged, total))
+            elif tagged == 0:
+                self.keep_caps_var.set(False)
+                self._set_keep_caps_hint("")
+            else:
+                self._set_keep_caps_hint("仅 %d/%d 张图片自带标签，建议先补齐或交给自动打标"
+                                         % (tagged, total))
+        except Exception:
+            pass
+
+    def _set_keep_caps_hint(self, text):
+        try:
+            if getattr(self, "keep_caps_hint", None) is not None:
+                self.keep_caps_hint.configure(text=text or "")
+        except Exception:
+            pass
+
     def cmd_pick_raw(self):
         _title = ("选择 H3 Fizgig 混合媒体根目录（图片 / 视频 / 音频及同名 .txt，可含子目录）" if self.mode == "h3_fz"
                   else "选择视频数据集文件夹（mp4 + 同名txt字幕）" if self.mode == "video"
@@ -4728,6 +4810,8 @@ class App:
             self._refresh_guide()
             _kind = "H3 Fizgig 混合媒体" if self.mode == "h3_fz" else "视频" if self.mode == "video" else "原始图片"
             self._log(f"[预处理] 已选{_kind}文件夹：{d}")
+            # ★ 2026-10-02：选完文件夹立刻看有没有自带标签，有就默认勾上 ✓
+            self._auto_detect_user_captions(d)
 
     def cmd_pick_reg(self):
         d = filedialog.askdirectory(title="选择正则数据集文件夹（人物模式）")
@@ -6289,6 +6373,9 @@ class App:
             "wd14_model": (_WD14_MODEL_GUI_MAP.get(self.wd14_model_var.get(), "swinv2-v3")
                            if hasattr(self, "wd14_model_var") else "swinv2-v3"),
             "overwrite": bool(getattr(self, "overwrite_var", None) and self.overwrite_var.get()),
+            # ★ 2026-10-02：用户自带标签（图 + 同名 .txt 同目录）⇒ 原样保留 ✓
+            #   全部模式 / 全部引擎（视频除外）都走这个开关 ✓
+            "keep_user_captions": bool(getattr(self, "keep_caps_var", None) and self.keep_caps_var.get()),
         }
 
     def _maybe_migrate_legacy_dataset(self, name):
@@ -7383,7 +7470,9 @@ class App:
                 clean_concept=bool(params.get("clean_concept", True)),
                 concept_mode=core.is_concept_mode(params.get("mode"), params.get("at_sub_mode")),
                 style_target=core.style_target_code(params.get("style_preset")),
-                overwrite=bool(params.get("overwrite")))
+                overwrite=bool(params.get("overwrite")),
+                # ★ 2026-10-02：用户自带标签（图 + 同名 .txt 同目录）⇒ 原样保留 ✓
+                keep_user_captions=bool(params.get("keep_user_captions")))
             self._log("[OK] 预处理完成")
         except core.StopRequested:
             self._log("[停止] 预处理已手动停止")
@@ -7616,7 +7705,9 @@ class App:
                 clean_concept=bool(params.get("clean_concept", True)),
                 concept_mode=core.is_concept_mode(params.get("mode"), params.get("at_sub_mode")),
                 style_target=core.style_target_code(params.get("style_preset")),
-                overwrite=bool(params.get("overwrite")))
+                overwrite=bool(params.get("overwrite")),
+                # ★ 2026-10-02：一键训练里的自动预处理同样尊重「保留我已有的标签」✓
+                keep_user_captions=bool(params.get("keep_user_captions")))
             stats = {}
             if os.path.isfile(report):
                 try:
@@ -8054,7 +8145,14 @@ class App:
 
             def work():
                 try:
-                    ok_env, env_msg = core.create_python_venv(pv, venv, self._log)
+                    # ★★ 2026-10-01 修正：这里原来用的是 `pv` ✗ ——
+                    #   而 `pv` 只是 `_auto_venv()` 内部的局部别名（`pv = py_ver`）✗，
+                    #   `_auto_install_all()` 这个作用域里**根本没有它** ✗
+                    #   ⇒ 点「🚀 自动安装全部依赖」必然 NameError ✗：
+                    #     用户截图：`AMD 依赖已安装，但环境验证失败：name 'pyv' is not defined`
+                    #     （客户那份里拼写是 `pyv`，同属这一处 ✓）
+                    #   ⇒ 改用外层 `_open_amd_guide()` 里定义的 `py_ver` ✓（闭包可见 ✓）
+                    ok_env, env_msg = core.create_python_venv(py_ver, venv, self._log)
                     if not ok_env:
                         raise RuntimeError("AMD 训练环境预检/重建失败：%s" % env_msg)
                     core.install_amd_rocm(venv, self._log, _amd_download_progress, _amd_install_status)
@@ -9345,6 +9443,122 @@ class App:
         except Exception:
             pass
 
+    def _mode_guide_text(self):
+        """按当前模式（第一引擎再看底模架构）返回**专项**使用说明；无专项返回 ""。
+
+        ★★ 2026-10-02（用户要求）：旧版每个模式都有各自的使用说明 ✗，
+          但 5caa25a 那次界面重写后，「训练说明」（`_show_help_window`）
+          只剩下一份**通用**文本 ✗ ⇒ 这里按模式补回专项部分 ✓，
+          通用 FAQ 仍保留在下方（两者拼接显示 ✓）。
+        口径与各模式窗口里的说明保持一致（`_show_flux2_guide` / Krea2 引导 /
+        `cmd_at_model_help` 等 ✓），只是搬到「训练说明」里一起看 ✓。
+        """
+        mode = (self.mode or "").strip()
+        base = (self.base_type or "sd15").strip()
+        label = core.MODE_LABELS.get(mode, mode)
+        head = "▍当前模式：%s\n" % label
+
+        # —— 第一引擎（SD 系 / FLUX.1 / Anima）：差异主要由底模架构决定 ——
+        if mode in ("style", "character", "concept"):
+            _sub = {"character": "人物角色", "style": "画风", "concept": "概念"}.get(mode, mode)
+            _base_txt = {
+                "sd15": (
+                    "· 架构：SD1.5（512px），显存占用最低，8G 及以下显存首选 ✓\n"
+                    "· 出图时请用 **SD1.5 底模** + 本 LoRA（架构必须一致 ✗）\n"
+                    "· 分辨率保持 512；调到 768/1024 收益有限但会明显变慢 ✓\n"
+                ),
+                "sdxl": (
+                    "· 架构：SDXL（1024px），效果更好，推荐 16G 显存\n"
+                    "· 8G 显存可跑，但请在高级参数勾选「只训练 UNet」，并保持 512px ✓\n"
+                    "· 出图请用 **SDXL 底模** + 本 LoRA（与 SD1.5 的 LoRA 不能混用 ✗）\n"
+                ),
+                "flux": (
+                    "· 架构：FLUX.1（12B，1024px），推荐 16G 显存\n"
+                    "· 需要与底模**同目录**放好配套文件（VAE / CLIP），否则会报缺文件 ✗\n"
+                    "· 出图请用 **FLUX.1 底模** + 本 LoRA\n"
+                ),
+                "anima": (
+                    "· 架构：Anima（2026 新架构，2B DiT + Qwen3 文本编码器）\n"
+                    "· 8G 显存能跑，但 1024px 会很慢（约 100 秒/步）；建议 512/768 ✓\n"
+                    "· 文本编码器可选整个模型文件夹，或**单个权重文件**"
+                    "（非标准文件名工具会自动适配 ✓）；VAE 选文件\n"
+                    "· 出图请用 **Anima 底模** + 本 LoRA（与 SD/SDXL/FLUX 的 LoRA 不通用 ✗）\n"
+                ),
+            }.get(base, "")
+            return (head +
+                    "· 训练类型：%s\n" % _sub +
+                    _base_txt +
+                    "· 数据量（过滤后）：人物 ≥15 张、画风 ≥20 张；建议多角度、不同服装/背景\n"
+                    "· 触发词：人物/概念模式填一个网上少见的英文词（如 my_oc01），出图时写在最前面\n"
+                    "· 点左侧「一键开始训练」会自动完成 过滤→裁切→去重→打标→训练 ✓\n"
+                    "· LoRA 产物在 output 文件夹；先用小权重（0.6~0.9）试，再按效果调整 ✓\n\n")
+
+        # —— 其余引擎/模式 ——
+        _other = {
+            "krea2": (
+                "· 引擎：musubi-tuner（第二引擎）\n"
+                "· 底模很大（约 26GB），推荐 16G+ 显存；8G 会大量块交换、极慢\n"
+                "· 分辨率 1024 时单步可达 100 秒（一个 epoch 近 3 小时）"
+                "⇒ 建议 512/768 ✓\n"
+                "· 点「一键开始训练」会自动 过滤→裁切→去重→WD14 打标→训练 ✓\n"
+                "· 产物：output\\<项目名>\\krea2_lora.safetensors；正向提示词以触发词开头 ✓\n"
+            ),
+            "krea2_at": (
+                "· 引擎：AI-Toolkit（第三引擎，独立 ROCm 环境）\n"
+                "· 先点「选择训练模型」确认 Qwen-Image-2.1 / Krea2 模型是否在本机\n"
+                "· 首次使用会按需下载（约 40GB），走 ModelScope 国内直链、支持续传 ✓\n"
+                "· 点「一键开始训练」→ 自动预处理 → 正式训练前会让你确认参数 ✓\n"
+            ),
+            "krea2_fz": (
+                "· 引擎：Fizgig（第四引擎）\n"
+                "· 需先点「⚙ 安装第四引擎」；AMD 用户由 Fizgig 自管独立 ROCm 环境 ✓\n"
+                "· 点「一键开始训练」→ 自动缓存 latents → 缓存文本编码器 → 训练 ✓\n"
+            ),
+            "flux2": (
+                "· 架构：FLUX.2（klein 底模，约 12B），推荐 16G+ 显存\n"
+                "· 需要底模 + 配套文件齐全（顶部状态显示「齐全 ✓」即可）\n"
+                "· 点「一键开始训练」→ 自动缓存 latents → 缓存文本编码器 → 训练 ✓\n"
+                "· 出图：FLUX.2 klein 底模 + 本 LoRA，权重建议 0.6~0.9 ✓\n"
+            ),
+            "flux2_fz": (
+                "· 引擎：Fizgig（第四引擎，Klein 9B / fp8 底模）\n"
+                "· 需先点「⚙ 安装第四引擎」；显存建议 16G\n"
+                "· 训练前会自动缓存 latents / 文本编码器 ✓\n"
+            ),
+            "qwen21_fz": (
+                "· 引擎：Fizgig Qwen-Image-2.1\n"
+                "· 需先点「⚙ 安装第四引擎」；模型 40GB+，训练一次要数小时 ✓\n"
+                "· 有「快跑 / 标准 / 风格」预设；16G 以下建议 512px ✓\n"
+            ),
+            "h3_fz": (
+                "· 引擎：Fizgig MiniMax H3（全模态视频/音频）\n"
+                "· 推荐 24G 显存；显存不足容易 OOM 或极慢 ✗\n"
+                "· 素材按「视频 / 音频 / 图片」目录组织；分辨率与帧数会吸附到引擎网格 ✓\n"
+            ),
+            "video": (
+                "· 架构：MiniMax H3 视频（33.1B），推荐 24G 显存 ✗\n"
+                "· 点「一键开始训练」；首次要加载 30GB+ 模型，请耐心等待 ✓\n"
+                "· 建议生成 480~720p、3~10 秒；显存不足时降低分辨率或缩短时长 ✓\n"
+            ),
+            "qwen_image": (
+                "· 引擎：AI-Toolkit（第三引擎）\n"
+                "· 点「选择训练模型」：Qwen-Image-2512（默认）或 Qwen-Image-2.1；两个版本分别缓存、各约 40GB ✓\n"
+                "· 也可选本机已有的完整 Diffusers 模型目录（含 model_index.json 与各 config.json）✓\n"
+                "· 点「一键开始训练」→ 自动去重/过滤/裁切 → WD14 打标 → 弹窗确认参数 → 训练 ✓\n"
+                "· WD14 标签可在训练前用「标签编辑器」检查修改 ✓\n"
+            ),
+            "zimage": (
+                "· 引擎：AI-Toolkit（第三引擎）\n"
+                "· 点「选择训练模型」确认模型；若已在本机可选完整 diffusers 文件夹 ✓\n"
+                "· 点「一键开始训练」→ 自动预处理 → 正式训练前会让你确认参数 ✓\n"
+                "· 模型首次使用时按需下载到本机数据目录 ✓\n"
+            ),
+        }
+        body = _other.get(mode, "")
+        if not body:
+            return ""
+        return head + body + "\n"
+
     def _show_help_window(self):
         w = ctk.CTkToplevel(self.root)
         w.title("新手教学 & 常见问题")
@@ -9354,9 +9568,17 @@ class App:
         txt = ctk.CTkTextbox(w, fg_color="#16181e", text_color="#c6ccd8", corner_radius=8,
                              border_width=1, border_color=BORDER, font=ui_font(FONT_BODY), wrap="word")
         txt.pack(fill="both", expand=True, padx=18, pady=18)
+        # ★ 2026-10-02：先显示**当前模式的专项说明** ✓（旧版有、界面重写后丢了 ✗），
+        #   通用 FAQ 仍保留在下方 ✓；两者拼接，专项在上、通用在下 ✓
+        _guide = ""
+        try:
+            _guide = self._mode_guide_text()
+        except Exception:
+            _guide = ""
         help_text = (
-            "📖 新手教学 & 常见问题\n\n"
-            "▍第一步：准备图片\n"
+            "📖 新手教学 & 常见问题\n"
+            + ("\n" + _guide if _guide else "\n")
+            + "▍第一步：准备图片\n"
             "· 人物模式：15~30 张同一个人的图，多角度、不同服装\n"
             "· 画风模式：20~60 张不同人物的图\n"
             "· 图片越清晰越好（别用太小太糊的缩略图）\n\n"
@@ -10419,6 +10641,13 @@ def main(argv=None):
         "tools", "check_update", "data_dir", "queue", "env_locations",
         "preprocess", "train", "label_editor", "export_config", "readme",
         "at_model_help", "at_engine_update", "fizgig_engine_update", "anima_components",
+        # ★★ 2026-10-02（用户反馈：点「下载底模」没有任何窗口）★★
+        #   ⚠️ 这个白名单和 App.__init__ 里的 `_action_map` 是**两个地方** ✗：
+        #      只加 _action_map ⇒ argparse 先拦掉（invalid choice: 'download_base'）
+        #      ⇒ 子进程启动即退出 ⇒ **一个窗口都不弹**，而父进程日志照打「已打开「底模下载」」✗
+        #      实测现象就是这个（新版界面点按钮毫无反应 ✓）。
+        #      两处必须同步 —— 已有回归测试 test_modern_download_base_entry 锁住 ✓
+        "download_base",
         "krea2_guide", "flux2_guide", "h3_guide",
         "video_caption_stub", "video_caption", "amd_env",
     )

@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.18.12"
+APP_VERSION = "0.18.13"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -5422,7 +5422,14 @@ def _fizgig_v65_cli_ready(vpy, fz_dir, backend="nvidia"):
             "src/fizgig/families/cache.py": ("--family", "--stage", "--model"),
             "src/fizgig/families/train.py": ("--family", "--training_adapter", "--adaptive_lr", "--resume"),
         }
-        absent = [flag for flag in required_flags.get(rel, ()) if flag not in result.stdout]
+        # ★★ 2026-10-02 修正（用户反馈「最新版的引擎更新还是无法正常使用」）：
+        #   这里原来直接对 `result.stdout` 做 `in` 判断 ✗ ——
+        #   `stdout` 一旦是 None 就抛
+        #     TypeError: argument of type 'NoneType' is not iterable
+        #   用户看到的弹窗正是「Fizgig 引擎更新失败：argument of type 'NoneType' is not iterable」✗
+        #   ⚠️ 本文件其它 12 处同类判断都写了 `(r.stdout or "")` 兜底 ✓，只有这里漏了 ✗
+        _out = result.stdout or ""
+        absent = [flag for flag in required_flags.get(rel, ()) if flag not in _out]
         if absent:
             raise RuntimeError("Fizgig v6.5.0 CLI 缺少工具必需参数 %s：%s" % (rel, ", ".join(absent)))
 
@@ -10083,12 +10090,54 @@ def normalize_crop_ratio(s):
     return "%d:%d" % (w, h)
 
 
+def scan_user_captions(folder):
+    """扫描图片文件夹，统计有多少张图自带同名 .txt 标签。返回 (总图片数, 带标签数)。
+
+    ★ 2026-10-02（用户反馈：已手动打标好的用户没有可用入口）：
+      典型用法是「图 + 同名 .txt 放同一个文件夹」，工具应当**主动认出来**并默认保留 ✓，
+      而不是让用户自己去猜该不该点「数据预处理」（点了就可能改写他的标签 ✗）。
+      这里只读不写 ✓；递归统计 ✓，与训练侧 count_images / musubi 的口径保持一致 ✓。
+
+    ⚠️ 只统计**非空**的 .txt ✓ —— 空文件等同没有标签（训练会过滤掉 ✓），
+       若把它算作"有标签"，用户会得到一个"看起来勾上了、实际训练 0 批次"的错觉 ✗
+    """
+    total = tagged = 0
+    try:
+        if not folder or not os.path.isdir(folder):
+            return 0, 0
+        for root, dirs, files in os.walk(folder):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for fn in files:
+                if not fn.lower().endswith(IMAGE_EXTS):
+                    continue
+                total += 1
+                txt = os.path.join(root, os.path.splitext(fn)[0] + ".txt")
+                try:
+                    if os.path.isfile(txt) and os.path.getsize(txt) > 0:
+                        tagged += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return total, tagged
+
+
 def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
                reg_dir=None, repeats=5, dedup=False, wd14=True, wd14_model=None,
                square_crop=False, crop_ratio=None, min_size=0, blur_threshold=0.0, report=None,
                keep_tokens=None, project=None, style_caption="", dataset_mode=None,
                strong_bind=True, concept_type="", clean_concept=True, concept_mode=False,
-               style_target="anime", overwrite=False):
+               style_target="anime", overwrite=False, keep_user_captions=False):
+    """keep_user_captions：图片自带同名 .txt 时，原样保留、全程不改写 ✓
+
+    ★ 2026-10-02（用户反馈：已手动打标好的用户没有可用入口 ✓）：
+      用户在「原始图片文件夹」里放的是**自己打好标**的图片（图 + 同名 .txt 同目录 ✓），
+      要求所有模式（人物 / 画风 / 概念）与所有引擎（Kohya / musubi / AI Toolkit / Fizgig，
+      视频除外）都能原样使用，不被自动打标/兜底/清洗改动 ✓。
+      勾选后：不跑 WD14 ✓、不写兜底 ✓、不清洗概念标签 ✓、画风模式优先用自带标签
+      且不做人物标签过滤 ✓。
+      ⚠️ 图片仍**照常缩放/裁切** ✓、trigger 仍**照常插到标签开头** ✓（用户明确要求保留 ✓）。
+    """
     """strong_bind：人物模式自动强绑定（trigger + 100% 一致特征 → 固定前缀，keep_tokens 覆盖整组）。"""
     # 旧调用方不传 strong_bind -> 人物模式默认开启（增量功能，不破坏旧流程）
     if strong_bind is None:
@@ -10159,6 +10208,15 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
     if overwrite:
         cmd += ["--overwrite"]
         logf("[预处理] 已勾选「重新处理已存在的图片」：覆盖输出目录里的旧结果与旧标签")
+    if keep_user_captions:
+        # ★ 2026-10-02：用户自带标签（图 + 同名 .txt 同目录）⇒ 全程不碰他的标签 ✓
+        #   与「重新处理已存在的图片」互斥：那个是覆盖，这个是原样保留 ✗
+        cmd.append("--keep-user-captions")
+        if overwrite:
+            logf("[预处理] ⚠ 同时勾了「重新处理已存在的图片」与「保留我已有的标签」："
+                 "前者会覆盖旧结果与旧标签，标签保留可能不生效，请只保留一个 ✓")
+        logf("[预处理] 已勾选「保留我已有的标签」：不自动打标、不写兜底、不清洗标签 ✓"
+             "（图片仍会正常缩放/裁切，触发词仍会插入标签开头 ✓）")
     if mode == "character":
         if keep_tokens is None:
             keep_tokens = max(1, len(split_triggers(trigger)))
@@ -14951,6 +15009,90 @@ def _anima_component_ok(kind, path):
                    "直接指定它的 model.safetensors ✓")
 
 
+_ANIMA_QWEN3_STD_CFG_FILES = ("config.json", "tokenizer.json",
+                              "tokenizer_config.json", "vocab.json", "merges.txt")
+
+
+def _adapt_anima_qwen3_file(src_file, logf=print):
+    """把「非标准文件名」的 Qwen3 权重适配成 sd-scripts 认识的模型目录。
+
+    ★ 2026-10-02（用户反馈，截图）：
+      ComfyUI 等处下载的文本编码器常叫 `qwen_3_06b_base.safetensors`、
+      `qwen_2.5_vl_7b_fp8_scaled.safetensors` 这类名字 ✗，
+      而 sd-scripts 只认 `model.safetensors` / `pytorch_model.bin` / 分片名 ✗
+      ⇒ 用户被迫手动改名（容易改错、也不知道为什么要改 ✓）
+
+    做法：在数据目录下建一个适配目录 ✓（不碰用户的原文件 ✓）：
+      · 把该权重**硬链接**成 `model.safetensors` ✓（同盘不额外占空间 ✓；失败则退回复制 ✓）
+      · 复制随包 sd-scripts 自带的 `configs/qwen3_06b/` 资源
+        （config.json / tokenizer.* ✓）
+      ⇒ 得到一个**完整可加载的 HuggingFace 模型目录** ✓ → 直接交给 `--qwen3=` ✓
+
+    返回适配后的目录路径；无法适配时返回 ""（调用方保持原有提示 ✓）。
+    """
+    import hashlib
+    if not src_file or not os.path.isfile(src_file):
+        return ""
+    if os.path.getsize(src_file) <= 0:
+        return ""
+    # ---- 找随包自带的 qwen3_06b 配置目录（优先已解压的 engine_dir）----
+    cands = []
+    try:
+        cands.append(os.path.join(get_kohya_dir(), "sd-scripts", "configs", "qwen3_06b"))
+    except Exception:
+        pass
+    tpl = ""
+    for c in cands:
+        if all(os.path.isfile(os.path.join(c, n)) for n in _ANIMA_QWEN3_STD_CFG_FILES):
+            tpl = c
+            break
+    if not tpl:
+        # 退路：从随包 zip 里读（安装前/被清理时）
+        try:
+            import zipfile
+            _z = os.path.join(KIT_DIR, "installers", "kohya_ss", "sd-scripts-main.zip")
+            if os.path.isfile(_z):
+                with zipfile.ZipFile(_z) as _zf:
+                    _names = [n for n in _zf.namelist()
+                              if n.endswith("/configs/qwen3_06b/config.json")]
+                    if _names:
+                        _pre = _names[0][:-len("config.json")]
+                        _stage = data_sub("cache", "anima_qwen3_std_cfg")
+                        os.makedirs(_stage, exist_ok=True)
+                        for _n in _ANIMA_QWEN3_STD_CFG_FILES:
+                            with _zf.open(_pre + _n) as _f, open(os.path.join(_stage, _n), "wb") as _o:
+                                _o.write(_f.read())
+                        tpl = _stage
+        except Exception as e:
+            logf("[Anima] 读取内置 qwen3 配置失败：%s" % e)
+    if not tpl:
+        return ""
+
+    tag = hashlib.md5(os.path.abspath(src_file).encode("utf-8")).hexdigest()[:10]
+    dst_dir = data_sub("cache", "anima_qwen3_adapted", tag)
+    try:
+        os.makedirs(dst_dir, exist_ok=True)
+        dst_w = os.path.join(dst_dir, "model.safetensors")
+        if not (os.path.isfile(dst_w) and os.path.getsize(dst_w) == os.path.getsize(src_file)):
+            try:
+                if os.path.exists(dst_w):
+                    os.remove(dst_w)
+                os.link(src_file, dst_w)            # 硬链接：不额外占空间 ✓
+            except Exception:
+                shutil.copy2(src_file, dst_w)       # 跨盘等情形退回复制 ✓
+        for n in _ANIMA_QWEN3_STD_CFG_FILES:
+            _s, _d = os.path.join(tpl, n), os.path.join(dst_dir, n)
+            if not os.path.isfile(_d):
+                shutil.copy2(_s, _d)
+    except Exception as e:
+        logf("[Anima] 自动适配文本编码器失败：%s" % e)
+        return ""
+    logf("[Anima] 已把 %s 自动适配为标准模型目录：%s"
+         % (os.path.basename(src_file), dst_dir))
+    logf("[Anima]   （原文件未被修改；适配目录里是 model.safetensors + 内置 config/tokenizer ✓）")
+    return dst_dir
+
+
 def anima_set_component(kind, path, logf=print):
     """保存用户手动指定的 Anima 组件路径。返回 (ok, 说明)。"""
     _k = _ANIMA_COMPONENT_KEYS.get(kind)
@@ -14958,6 +15100,16 @@ def anima_set_component(kind, path, logf=print):
         return False, "未知组件：%s" % kind
     _path = (path or "").strip().strip('"')
     ok, why = _anima_component_ok(kind, _path)
+    if not ok and kind == "qwen3" and os.path.isfile(_path):
+        # ★★ 2026-10-02（用户反馈）：非标准文件名的**单个权重文件**自动适配 ✓ ——
+        #   ComfyUI 等处下载的 `qwen_3_06b_base.safetensors` 这类名字，sd-scripts 不认 ✗，
+        #   以前只能提示用户「请把文件改名为 model.safetensors」✗（体验差且容易改错 ✓）
+        #   现在工具自己建一个标准模型目录（硬链接 + 内置 config/tokenizer ✓）✓
+        _adapted = _adapt_anima_qwen3_file(_path, logf)
+        if _adapted:
+            _ok2, _why2 = _anima_component_ok(kind, _adapted)
+            if _ok2:
+                _path, ok, why = _adapted, True, _why2
     if not ok:
         logf("[Anima] 组件校验未通过：%s" % why)
         return False, why
