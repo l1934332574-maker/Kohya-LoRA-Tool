@@ -240,7 +240,17 @@ def build_env(extra_dirs=()):
     try:
         _miopen_cache = os.path.join(os.path.dirname(get_kohya_dir()), "miopen_cache")
         os.makedirs(_miopen_cache, exist_ok=True)
-        env.setdefault("MIOPEN_USER_DB_PATH", _miopen_cache)
+        # ★★ 2026-10-01 修正：`MIOPEN_USER_DB_PATH` 必须指向**文件**（性能数据库文件名）✗
+        #   这里以前赋的是**目录** ✗ —— 而 build_env() 先执行且用 setdefault，
+        #   连 AMD 兼容模式分支里那份**正确**的值（`<root>\perf.db` ✓）都盖不回去 ✗
+        #   后果（用户日志 KohyaLoRA_运行日志_20261001_193121，RX 9070 XT / gfx1201 / hip 7.2）：
+        #     MIOpen Error: last_write_time: The system cannot find the file specified.:
+        #       "...\miopen_cache\miopen-lockfiles\gfx1201_32.HIP..."
+        #     RuntimeError: miopenStatusUnknownError
+        #   → VAE 的 conv2d 直接崩，训练第一步就退出 ✗
+        #   → 连工具自带的「GPU 基础计算」自检也是 failed ✗（诊断里 gpu.status: failed ✓）
+        os.makedirs(os.path.join(_miopen_cache, "miopen-lockfiles"), exist_ok=True)
+        env.setdefault("MIOPEN_USER_DB_PATH", os.path.join(_miopen_cache, "perf.db"))
         env.setdefault("MIOPEN_CUSTOM_CACHE_DIR", _miopen_cache)
     except Exception:
         pass
@@ -477,6 +487,25 @@ def diagnose_child_exit(rc, output=None):
             _txt = ""
     if _txt:
         _low = _txt.lower()
+        # ★★ 2026-10-01 修正（用户日志 KohyaLoRA_运行日志_20261001_155059，RTX 3050 Ti Laptop 4G）：
+        #   显存不足**同样会打出完整 traceback** ✗，而下面那条「有 traceback ⇒ 与内存/显存/杀软无关」✗
+        #   会把它**误判成"与显存无关"** ✗ ——
+        #   实测日志里正是如此：`torch.OutOfMemoryError: CUDA out of memory ...
+        #   total capacity of 4.00 GiB ... 0 bytes is free`，工具却打印了
+        #   「与内存、显存、杀毒软件无关」✗ ⇒ 直接把用户往**反方向**带 ✓
+        #   ⇒ OOM 判定必须**排在最前面** ✗（先于 dll 冲突与通用 traceback ✓）
+        if ("out of memory" in _low or "outofmemoryerror" in _low
+                or "cublas_status_alloc_failed" in _low
+                or "cuda_error_out_of_memory" in _low):
+            _lines.append("[诊断] ★ 检出「显存不足（OOM）」—— 这就是**显存**问题 ✗，"
+                          "与驱动/杀软/系统内存无关 ✓")
+            _lines.append("[诊断]   报错里通常会写「total capacity of X GiB … 0 bytes is free」："
+                          "卡的容量不够，装不下模型 ✗")
+            _lines.append("[诊断]   处理（按见效快慢）："
+                          "① 换更小的底模（SD1.5 最稳；SDXL/FLUX/Anima 在 8G 以下基本跑不动）"
+                          "② 分辨率降到 512 并关掉采样预览 ③ 保持梯度检查点、AdamW8bit，"
+                          "并用更小的 LoRA dim（如 8~16）")
+            return _lines
         if ("dll conflicts with this version of python" in _low
                 or "module use of python3" in _low):
             _lines.append("[诊断] ★ 检出「python3XX.dll 冲突」：这与内存/显存/显卡驱动**无关** ✗")
@@ -506,8 +535,9 @@ def diagnose_child_exit(rc, output=None):
             return _lines
         if "traceback (most recent call last)" in _low:
             # 有明确 traceback ✗ → **不该**再让用户查内存/显存/杀软 ✗（会带偏 ✓）
+            # ⚠️ 但措辞不能绝对化 ✗：OOM 也会带 traceback，只是它已在上面被单独识别并返回 ✓
             _lines.append("[诊断] 上方已有明确报错（Traceback）→ 请按该报错的模块/路径排查 ✓；"
-                          "与内存、显存、杀毒软件无关 ✓")
+                          "若报错里出现 out of memory / 显存 字样，请优先按**显存不足**处理 ✓")
             return _lines
     _lines.append("[诊断] 若上方**没有明确报错**（只有进度条）→ 多为进程被外部终止，"
                   "按顺序查：① 系统内存是否被撑满（任务管理器→性能→内存）"

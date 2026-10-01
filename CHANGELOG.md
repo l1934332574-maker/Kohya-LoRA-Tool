@@ -1,3 +1,37 @@
+## v0.18.12（2026-10-01）
+
+### 修复★：AMD（ROCm）显卡训练第一步就崩（`miopenStatusUnknownError`）
+
+- **现象**：AMD 显卡（RX 7000/9000 系，走 ROCm 通道）开始训练后，在缓存 latents 阶段直接崩：
+  `MIOpen Error: last_write_time: The system cannot find the file specified.:
+  "...\miopen_cache\miopen-lockfiles\gfx1201_32.HIP..."` →
+  `RuntimeError: miopenStatusUnknownError`（崩在 VAE 的 `conv2d`）。
+  同一台机器上，工具自带的「GPU 基础计算」检查同样为 **failed**。
+- **根因**：MIOpen 的**性能数据库路径**被设成了**目录** —— 而它必须是一个**文件**。
+  AMD 兼容模式分支里本来就写对了（`<root>\perf.db`），但更早执行的全局环境构造
+  （`kohya_core/utils.py` 的 `build_env()`）用了 `setdefault` 先把**错误**的值占住，
+  导致那份正确的值再也覆盖不进去。
+- **修复**：性能数据库改为 `<miopen_cache>\perf.db`（文件），并预先创建 `miopen-lockfiles` 子目录。
+- **升级后请先删除旧缓存目录**（里面可能已留下半损坏的文件），再重新训练：
+  `Remove-Item "<数据目录>\miopen_cache" -Recurse -Force`
+- 同时修正了测试里「该变量必须指向目录」的错误约定 —— 它正是这个 bug 长期没被发现的原因。
+
+### 修复★：显存不足（OOM）时的排查方向被带反
+
+- **现象**：日志里明明写着 `CUDA out of memory … 0 bytes is free`，工具却提示
+  「与内存、显存、杀毒软件无关」，把用户引向完全无关的方向。
+- **根因**：判断逻辑是「只要日志里有 traceback，就说明与显存无关」—— 但 **OOM 同样会带 traceback**。
+- **修复**：OOM 优先识别（`out of memory` / `OutOfMemoryError` / `cublas_status_alloc_failed`），
+  直接说明这是**显存**问题，并给出处理顺序：换更小底模（SD1.5 最稳）→ 降到 512px 并关闭采样预览
+  → 保持梯度检查点 + AdamW8bit + 更小的 LoRA dim。
+
+### 验证
+
+- `MIOPEN_FAST_MODE_ENV_OK` —— 性能数据库必须是**文件**、缓存目录必须是**已创建目录**
+- `DIAGNOSE_SPLITS_BY_OUTPUT_OK` —— OOM 时不得再出现「与显存无关」，且须给出换小底模的建议
+
+---
+
 ## v0.18.11（2026-10-01）
 
 - 修复 AMD ROCm wheel 下载文件名中的 `%2B` 未解码导致 pip 报非法版本的问题；迁移旧缓存与断点下载文件，避免重复下载。

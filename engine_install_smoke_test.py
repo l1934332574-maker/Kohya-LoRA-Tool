@@ -710,6 +710,20 @@ def test_diagnose_splits_by_output():
         "静默退出时仍应给出内存/显存/杀软排查 ✓：" + _t3
     # ④ 兼容：不传 output 时行为与旧版一致 ✓
     assert U.diagnose_child_exit(1) == U.diagnose_child_exit(1, None)
+    # ⑤ ★ 2026-10-01（用户日志 KohyaLoRA_运行日志_20261001_155059，RTX 3050 Ti Laptop 4G）：
+    #   OOM **也带 traceback** ✗，曾被「有 traceback ⇒ 与显存无关」误判成"与显存无关"✗
+    #   （实测日志 L2909 就是这么写的，而真实原因是显存不足 ✗）⇒ OOM 必须最先识别 ✓
+    _oom = ["Traceback (most recent call last):",
+            '  File "torch/nn/modules/module.py", line 1341, in convert',
+            "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 26.00 MiB. "
+            "GPU 0 has a total capacity of 4.00 GiB of which 0 bytes is free."]
+    _t4 = "\n".join(U.diagnose_child_exit(1, _oom))
+    assert "显存不足" in _t4, "必须识别 OOM ✗：" + _t4[:300]
+    assert "与内存、显存、杀毒软件无关" not in _t4, "OOM 时绝不能说与显存无关 ✗：" + _t4
+    assert "SD1.5" in _t4, "应给出「换更小底模」的建议 ✓：" + _t4[:300]
+    # 通用 traceback 分支也不该再把「与显存无关」说死 ✓
+    assert "与内存、显存、杀毒软件无关" not in "\n".join(
+        U.diagnose_child_exit(1, ["Traceback (most recent call last):", "ValueError: boom"]))
     print("DIAGNOSE_SPLITS_BY_OUTPUT_OK")
 
 
@@ -860,10 +874,22 @@ def test_miopen_fast_mode_env(base: Path):
     e = U.build_env()
     assert e.get("MIOPEN_FIND_MODE") == "FAST", \
         "缺 MIOpen FAST 模式：AMD 上会慢数倍（实测 11.45 → 2.58 s/it）✗"
-    for _k in ("MIOPEN_USER_DB_PATH", "MIOPEN_CUSTOM_CACHE_DIR"):
-        _p = e.get(_k)
-        assert _p and os.path.isdir(_p), \
-            "%s 必须指向**已创建**的可写目录（否则每个进程重搜 kernel）✗：%s" % (_k, _p)
+    # ★★ 2026-10-01 修正：这两个变量的语义**不同** ✗（以前被当成同类，测试还把错误写法保护住了）
+    #   · `MIOPEN_CUSTOM_CACHE_DIR` = kernel 缓存**目录** ✓
+    #   · `MIOPEN_USER_DB_PATH`     = 性能数据库**文件** ✗（赋成目录会直接让 MIOpen 崩 ✗）
+    #   实测（用户日志 KohyaLoRA_运行日志_20261001_193121，RX 9070 XT / gfx1201 / hip 7.2）：
+    #     赋成目录 → `MIOpen Error: last_write_time: The system cannot find the file specified.:
+    #                 "...\miopen_cache\miopen-lockfiles\gfx1201_32.HIP..."` →
+    #                 `RuntimeError: miopenStatusUnknownError` →
+    #     VAE 的 conv2d 崩、训练第一步退出，连工具自带的「GPU 基础计算」自检都 failed ✗
+    _cd = e.get("MIOPEN_CUSTOM_CACHE_DIR")
+    assert _cd and os.path.isdir(_cd), \
+        "MIOPEN_CUSTOM_CACHE_DIR 必须指向**已创建**的目录 ✗：%s" % _cd
+    _db = e.get("MIOPEN_USER_DB_PATH")
+    assert _db and not os.path.isdir(_db), \
+        "MIOPEN_USER_DB_PATH 必须是**文件**路径（不是目录）✗：%s" % _db
+    assert os.path.isdir(os.path.dirname(_db)), \
+        "MIOPEN_USER_DB_PATH 的父目录必须存在 ✗：%s" % _db
     assert U.build_direct_env().get("MIOPEN_FIND_MODE") == "FAST", \
         "镜像直连环境也必须带 MIOpen FAST ✗（它是 pip/下载与训练共用的）"
     # 用户显式设置优先
