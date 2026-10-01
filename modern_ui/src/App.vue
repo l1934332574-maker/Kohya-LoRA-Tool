@@ -834,7 +834,7 @@ async function runAction(action: string) {
     showToast('浏览器预览中，这个操作不会触碰本机数据。')
     return
   }
-  const result = await window.pywebview.api.run_action(action)
+  const result = await window.pywebview.api.run_action(action, ['export_log', 'export_diagnostics'].includes(action) ? workspaceProject.value?.name : undefined)
   if (result.log) appendLog(result.log)
   if (!result.ok) showToast(result.error ?? '操作失败。')
   else if (result.message) showToast(result.message)

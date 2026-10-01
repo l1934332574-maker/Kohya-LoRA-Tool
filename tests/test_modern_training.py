@@ -697,17 +697,44 @@ class ModernTrainingTests(unittest.TestCase):
             bridge = ModernUIBridge(core)
             desktop = Path(temp) / "Desktop"
 
-            with patch.object(bridge, "_desktop_directory", return_value=str(desktop), create=True):
+            with patch.object(bridge, "_desktop_directory", return_value=str(desktop), create=True), \
+                 patch("kohya_core.diagnostics._run", return_value={"status": "fixture"}), \
+                 patch("kohya_core.diagnostics._runtime_probe", return_value={"status": "fixture"}):
                 result = bridge.run_action("export_log")
+                bridge._diagnostics_thread.join(timeout=3)
 
             self.assertTrue(result["ok"], result)
-            exported = Path(result["message"].split("：", 1)[1])
+            exported = next(desktop.glob("KohyaLoRA_运行日志_*.txt"))
             self.assertEqual(exported.parent, desktop)
             self.assertTrue(exported.is_file())
             content = exported.read_text(encoding="utf-8")
             self.assertIn("软件版本: v0.18.4", content)
             self.assertIn("【运行日志】", content)
+            self.assertIn("【环境信息】", content)
+            self.assertIn("【训练环境 / kohya】", content)
             self.assertIn("欢迎使用 Kohya-LoRA 一键训练工具", content)
+
+    def test_diagnostic_export_keeps_active_task(self):
+        with tempfile.TemporaryDirectory() as temp:
+            bridge = ModernUIBridge(FakeCore(temp))
+            active = {"status": "running", "kind": "training", "id": "existing"}
+            bridge._task = active
+
+            def export(_core, destination, logs, task, project, session):
+                self.assertEqual(task["status"], "running")
+                self.assertIsNotNone(session)
+                Path(destination).write_text("diagnostic fixture", encoding="utf-8")
+                return destination
+
+            with patch.object(bridge, "_desktop_directory", return_value=temp), patch("gui.modern_host.write_bundle", side_effect=export) as writer:
+                result = bridge.run_action("export_diagnostics", "demo")
+                bridge._diagnostics_thread.join(timeout=3)
+
+            self.assertTrue(result["ok"], result)
+            self.assertFalse(bridge._diagnostics_thread.is_alive())
+            self.assertIs(bridge._task, active)
+            writer.assert_called_once()
+            self.assertTrue(any("运行日志已导出" in line for line in bridge.logs))
 
     def test_cancel_during_label_review_does_not_start_engine(self):
         with tempfile.TemporaryDirectory() as temp:

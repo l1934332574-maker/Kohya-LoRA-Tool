@@ -30,6 +30,7 @@ import traceback
 import tempfile
 import webbrowser
 import urllib.request
+import urllib.parse
 import ctypes
 from collections import deque
 from functools import lru_cache
@@ -161,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.18.10"
+APP_VERSION = "0.18.11"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2316,12 +2317,25 @@ def _accelerate_config_path():
 
 
 def _accelerate_config_use_cpu():
-    """残留 accelerate 默认配置是否强制 CPU（use_cpu=true）。
+    """残留 accelerate 默认配置是否会让训练跑 CPU。
 
-    根因：accelerate launch 读 ~/.cache/huggingface/accelerate/default_config.yaml，
-    若 use_cpu=true 会设置 ACCELERATE_USE_CPU=true → Accelerator().device=cpu →
-    caching latents / 训练全程 CPU（表现为“卡在训练前、无报错、CPU/GPU 无负荷”），
-    而 torch 预检（不走 accelerate）却正常 —— 与本机多次用户反馈完全吻合。"""
+    ★ 2026-09-29 扩展 ✗ —— 原来**只查 `use_cpu: true`** ✗，漏了另一种同样致命的写法
+      `distributed_type: MULTI_CPU` ✓。
+      用户日志 KohyaLoRA_运行日志_20260929_025228 实证：
+        · torch 完全正常（`cuda= True | 2.7.0+cu128 | 12.8`）✓
+        · 但训练第一步就崩：
+          `Accelerator.__init__ → AcceleratorState → PartialState(cpu) →
+           torch.distributed.get_world_size() →
+           ValueError: Default process group has not been initialized` ✗
+        · 工具侧**一条 `[加速器]` 提示都没有** ✗（因为检测不到 use_cpu，且探测失败被静默吞掉 ✗）
+      ⇒ 现在两种写法都认 ✓
+
+    根因（原注释保留）：accelerate launch 会读
+    ~/.cache/huggingface/accelerate/default_config.yaml；
+    若 use_cpu=true（或 distributed_type=MULTI_CPU），
+    则会走 CPU 多进程分支 → 调未初始化的进程组 → 训练第一步即崩 ✗；
+    而 torch 预检（不走 accelerate）却一切正常 ✓ —— 极易误判成显卡/驱动问题 ✓
+    """
     p = _accelerate_config_path()
     if not os.path.isfile(p):
         return False
@@ -2330,61 +2344,151 @@ def _accelerate_config_use_cpu():
             raw = f.read()
     except Exception:
         return False
-    return '"use_cpu": true' in raw or "'use_cpu': true" in raw or "use_cpu: true" in raw
+    _low = raw.lower()
+    # use_cpu 的三种写法（yaml/json/单引号）
+    if ("use_cpu: true" in _low or "'use_cpu': true" in _low or '"use_cpu": true' in _low):
+        return True
+    # ★ 新增：distributed_type 被设成 MULTI_CPU（同样会让 accelerate 去碰进程组 ✗）
+    _flat = _low.replace('"', "").replace("'", "").replace(" ", "")
+    return "distributed_type:multi_cpu" in _flat
 
 
 def _neutralize_accelerate_cpu_config(logf=print):
-    """把残留 accelerate 配置里的 use_cpu=true 改回 false。返回是否修复成功。"""
+    """中和会强制 CPU 的 accelerate 残留配置。返回是否修复成功。
+
+    ★ 2026-09-29：不再"只把 use_cpu 改成 false" ✗，而是**整份配置改名备份** ✓
+      理由：工具启动训练时已显式传 `--num_processes 1 --num_machines 1` ✓，
+            这份全局配置只会**覆盖/干扰**命令行 ✗（`distributed_type` 等字段改不干净 ✗）。
+      做法：重命名为 `default_config.yaml.bak_<时间戳>` ✓（可随时手动改回 ✓，不删数据 ✓）
+            —— 仅在配置确实有害（use_cpu=true / MULTI_CPU）时才动手 ✗，无害配置不碰 ✓
+    """
     p = _accelerate_config_path()
     if not os.path.isfile(p):
         return False
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            raw = f.read()
-    except Exception:
+    if not _accelerate_config_use_cpu():
         return False
-    if not ('"use_cpu": true' in raw or "'use_cpu': true" in raw or "use_cpu: true" in raw):
-        return False
-    fixed = raw.replace('"use_cpu": true', '"use_cpu": false')
-    fixed = fixed.replace("'use_cpu': true", "'use_cpu': false")
-    fixed = fixed.replace("use_cpu: true", "use_cpu: false")
+    _bak = p + ".bak_" + time.strftime("%Y%m%d_%H%M%S")
     try:
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(fixed)
+        shutil.move(p, _bak)
     except Exception as e:
-        logf(f"[加速器] ⚠ 自动修复 accelerate 配置失败（{e}）：{p}")
-        return False
-    logf(f"[加速器] 已自动修复残留 accelerate 配置 use_cpu=true→false：{p}")
+        # 退路：原地改写（老行为），至少把 use_cpu 改回 false
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                raw = f.read()
+            fixed = (raw.replace('"use_cpu": true', '"use_cpu": false')
+                        .replace("'use_cpu': true", "'use_cpu': false")
+                        .replace("use_cpu: true", "use_cpu: false"))
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(fixed)
+            logf(f"[加速器] 已就地修正 accelerate 配置（use_cpu→false）：{p}")
+            return True
+        except Exception as e2:
+            logf(f"[加速器] ⚠ 自动修复 accelerate 配置失败（{e} / {e2}）：{p}")
+            return False
+    logf(f"[加速器] 已隔离有害的 accelerate 残留配置（含 use_cpu=true 或 MULTI_CPU）→ {os.path.basename(_bak)}")
+    logf("[加速器]   说明：训练命令本身已显式指定单机单进程，这份全局配置只会干扰；备份未删除，可随时改回 ✓")
     return True
 
 
-def _probe_accelerate_device(vpy, logf=print, timeout=180):
-    """用与训练相同的 accelerate launch 路径真实探测 Accelerator 设备。
+def _venv_torch_lib(vpy):
+    """由 venv 的 python.exe 推出 torch 的 DLL 目录（训练启动时会把它的 PATH 前置）。失败返回 None。"""
+    try:
+        _venv = os.path.dirname(os.path.dirname(os.path.abspath(vpy)))
+        _p = os.path.join(_venv, "Lib", "site-packages", "torch", "lib")
+        return _p if os.path.isdir(_p) else None
+    except Exception:
+        return None
 
-    返回设备字符串（'cpu' / 'cuda:0' 等）；探测失败返回 ''（调用方不阻断）。"""
+
+# ★ 2026-09-29：探测脚本必须**复刻训练的真实构造方式** ✗
+#   用户日志 KohyaLoRA_运行日志_20260929_031129（RTX 4080S **双卡**）里，
+#   旧探测（只 `Accelerator()`）返回了 cuda ✓，训练却崩在
+#   `Default process group has not been initialized` ✗ ⇒ 典型「探测假通过」✗
+#   原因：sd-scripts 的 accelerator_setup.py 在 `torch.cuda.device_count() > 1` 时
+#   会给 Accelerator 多加一个 InitProcessGroupKwargs（多卡 DDP 用）✗
+#   ⇒ 这里按**同样的条件**复刻 ✓：
+#     · 单卡时不会加（与真实一致 ✓，不会误报 ✓）
+#     · 万一单卡隔离失效，**探测当场就能报出来** ✓，不必等训练崩 ✓
+_ACCEL_PROBE_SRC = (
+    "import os\n"
+    "import torch\n"
+    "from accelerate import Accelerator\n"
+    "handlers = []\n"
+    "try:\n"
+    "    from accelerate.utils import InitProcessGroupKwargs\n"
+    "    if torch.cuda.device_count() > 1:\n"
+    "        handlers = [InitProcessGroupKwargs()]\n"
+    "except Exception:\n"
+    "    pass\n"
+    "acc = Accelerator(gradient_accumulation_steps=1, mixed_precision='no', kwargs_handlers=handlers)\n"
+    "print('ACCELDEVICE', acc.device)\n"
+    "print('ACCELGPUS', torch.cuda.device_count())\n"
+    "print('ACCELVIS', os.environ.get('CUDA_VISIBLE_DEVICES'))\n"
+)
+
+
+def _probe_accelerate_device(vpy, logf=print, timeout=180, cwd=None):
+    """用与训练**完全相同**的条件探测 Accelerator 设备。
+
+    返回设备字符串（'cpu' / 'cuda:0' 等）；探测没结论返回 ''（调用方不阻断）。
+
+    ★ 2026-09-29：探测条件必须与训练对齐（旧版只 `Accelerator()`，会「假通过」✗）：
+      ① 同一份 env：build_direct_env + venv 的 torch\\lib 前置（与训练侧一致 ✓）
+      ② 同一个 cwd：训练是在 sd-scripts/ 目录下跑的 ✓
+      ③ 同一套构造：多卡时 sd-scripts 会加 InitProcessGroupKwargs ✓
+    """
     tmp = os.path.join(tempfile.gettempdir(), "kohya_accel_probe.py")
     try:
         with open(tmp, "w", encoding="utf-8") as f:
-            f.write("from accelerate import Accelerator\nprint('ACCELDEVICE', Accelerator().device)\n")
+            f.write(_ACCEL_PROBE_SRC)
+        _lib = _venv_torch_lib(vpy)
+        _env = build_direct_env([_lib] if _lib else [])
         r = subprocess.run(
             [vpy, "-m", "accelerate.commands.launch", "--num_processes", "1", "--num_machines", "1",
              "--num_cpu_threads_per_process", "1", tmp],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout, env=build_direct_env(),
+            timeout=timeout, env=_env,
+            cwd=(cwd if (cwd and os.path.isdir(cwd)) else None),
         )
         m = re.search(r"ACCELDEVICE\s+([A-Za-z0-9:_]+)", (r.stdout or "") + (r.stderr or ""))
         if m:
             return m.group(1)
-    except Exception:
-        pass
+        # ★★ 2026-09-29：探测**没拿到结论**时必须说出来 ✗ ——
+        #   以前静默 return '' ✗ → 用户与维护方两头都看不到线索 ✗，
+        #   直到训练第一步崩在 `Default process group has not been initialized` ✗
+        #  （用户日志 KohyaLoRA_运行日志_20260929_025228：torch 明明 `cuda= True | 2.7.0+cu128`，
+        #    日志里却**一条 [加速器] 都没有** ✓ —— 排查成本全落在猜上 ✓）
+        if logf:
+            _all = ((r.stderr or "") + "\n" + (r.stdout or "")).strip()
+            _lines = [x.strip() for x in _all.splitlines() if x.strip()]
+            logf("[加速器] ⚠ 设备探测**未取得结论**（accelerate 探测脚本异常退出）——这条本身就是问题 ✗")
+            if _lines:
+                logf("[加速器]     探测输出末行：%s" % _lines[-1][:220])
+            if "Default process group" in _all or "init_process_group" in _all:
+                logf("[加速器]     检出「进程组未初始化」：accelerate 正在走 **CPU / 多进程** 分支 ✗")
+                logf("[加速器]     ★ 这一条与显存/驱动/模型/杀软**都无关** ✗，按下面顺序查：")
+                logf("[加速器]     ① 多卡机器（最常见）：脚本在 GPU 数 > 1 时会给加速器塞分布式设置，"
+                     "而训练是单进程启动 ⇒ 相撞 ✗")
+                logf("[加速器]        → 本版已在训练前自动限定单卡（日志里会写明 CUDA_VISIBLE_DEVICES 取值）✓")
+                logf("[加速器]        → 若仍出现，请在此环境执行 $env:CUDA_VISIBLE_DEVICES=\"0\" 后重开工具 ✓")
+                logf("[加速器]     ② 残留的 accelerate 全局配置（use_cpu=true / distributed_type=MULTI_CPU）："
+                     "删除或改名 %s 后重启工具 ✓" % _accelerate_config_path())
+    except Exception as e:
+        if logf:
+            logf("[加速器] ⚠ 设备探测执行失败：%s" % e)
     return ""
 
 
-def _accelerate_launch_cmd(vpy, extra_args=(), logf=print):
+def _accelerate_launch_cmd(vpy, extra_args=(), logf=print, cwd=None):
     """通过当前训练环境的 Python 模块启动 Accelerate，避免 accelerate.exe 入口串到系统 Python。
 
     Windows 上 venv 的 Scripts\accelerate.exe 可能是迁移前生成的旧脚本，或被系统
     Python 的 PATH 覆盖；直接用 vpy -m 可以保证 accelerate、torch 和训练脚本属于同一环境。
+
+    cwd：训练脚本所在目录（sd-scripts/ 或 musubi-tuner/）。
+         ★ 2026-09-29：探测必须与训练**同 cwd + 同 env** 才有意义 ✗ ——
+           否则会出现「探测返回 cuda ✓、训练却崩」的假通过 ✗，
+           用户日志 KohyaLoRA_运行日志_20260929_031129 就是这样绕了一大圈 ✓
     """
     if not vpy or not os.path.isfile(vpy):
         raise RuntimeError(f"训练环境 Python 不存在：{vpy}")
@@ -2416,6 +2520,19 @@ def _accelerate_launch_cmd(vpy, extra_args=(), logf=print):
             # 编码已强制 UTF-8（上面 -X utf8），此处仍不一致说明 accelerate 与训练 Python 确实
             # 不在同一环境（如迁移后 venv 指向的 Python 已不存在），保留硬报错引导重建环境。
             raise RuntimeError(f"Accelerate 与训练 Python 不属于同一环境：\n训练 Python：{vpy}\nAccelerate Python：{log_py}")
+    # ★ 2026-09-29：多卡机器的单卡隔离 ✗（详见 kohya_core.utils.apply_single_gpu_isolation ✓）
+    #   build_env() 已在多卡机器上自动只暴露一张卡；这里把它**写进日志** ✓ ——
+    #   否则用户和维护方都不知道工具做了什么，出问题只能靠猜 ✗
+    try:
+        _vis = (build_env().get("CUDA_VISIBLE_DEVICES") or "").strip()
+        if _vis:
+            logf(f"[加速器] 已限定单卡训练（CUDA_VISIBLE_DEVICES={_vis}，自动取显存最大的那张）✓")
+            logf("[加速器]     原因：多卡机器上训练脚本会自动附加分布式设置，"
+                 "而工具是单进程启动，两者相撞会直接报「进程组未初始化」✗")
+            logf("[加速器]     想改用别的卡：先设置 CUDA_VISIBLE_DEVICES=<卡号> 再启动工具 ✓；"
+                 "要保留全部卡：设 KOHYA_KEEP_ALL_GPUS=1（一般不需要 ✓）")
+    except Exception:
+        pass
     # 自愈：残留 accelerate 配置若 use_cpu=true，会让整个训练（含 caching latents）跑 CPU，
     # 表现为“卡在训练前、无报错、CPU/GPU 无负荷”，而 torch 预检（不走 accelerate）却正常。
     # 命中即自动改回 false，并用与训练相同的 accelerate launch 路径复核设备。
@@ -2423,7 +2540,7 @@ def _accelerate_launch_cmd(vpy, extra_args=(), logf=print):
         if _accelerate_config_use_cpu():
             logf("[加速器] 检测到残留 accelerate 配置 use_cpu=true（会导致训练全程 CPU、卡在训练前），正在自动修复…")
             if _neutralize_accelerate_cpu_config(logf):
-                _dev = _probe_accelerate_device(vpy, logf)
+                _dev = _probe_accelerate_device(vpy, logf, cwd=cwd)
                 if _dev == "cpu":
                     logf("[加速器] ❌ 修复后 accelerate 仍为 CPU。请停止训练，检查 "
                          "~/.cache/huggingface/accelerate/default_config.yaml 的 use_cpu 是否为 false，"
@@ -2434,7 +2551,7 @@ def _accelerate_launch_cmd(vpy, extra_args=(), logf=print):
     # CPU 版 torch / 损坏的 ROCm 会让训练全程跑 CPU（accelerator device: cpu），Krea2/FLUX.2 等大模型无法训练
     # （2026-09-01 RX 7900 XT 用户复现：工具提示 rocm 就绪但实际 device: cpu，训练卡在第一步）。
     try:
-        _dev = _probe_accelerate_device(vpy, logf)
+        _dev = _probe_accelerate_device(vpy, logf, cwd=cwd)
         if _dev == "cpu":
             logf("[加速器] ⚠ 当前训练环境探测不到 GPU（accelerate 设备 = cpu）！训练会全程跑 CPU，Krea2/FLUX.2 等大模型无法训练（极慢/卡住）。")
             logf("[加速器]     请检查：① NVIDIA：显卡驱动/CUDA 是否正常，重装第二引擎；② AMD：RX 6000 走社区 ROCm 重装第二引擎；")
@@ -3186,7 +3303,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     _ensure_venv_hf_sitecustomize(os.path.dirname(os.path.dirname(mvpy)), logf)
     # 自愈防线：musubi 版本过旧会以 float32 训练（300s/步），阻止并提示重装第二引擎
     _check_musubi_krea2_version(kdir, logf)
-    accel = _accelerate_launch_cmd(mvpy, logf=logf)
+    accel = _accelerate_launch_cmd(mvpy, logf=logf, cwd=mt_dir)
     if not _ensure_torchvision_deps(mvpy, logf, label="Krea2", cwd=mt_dir):
         raise RuntimeError("Krea2 引擎（第二引擎）venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第二引擎。")
     _warn_laptop_heavy_load(logf, vram_gb, "Krea2")
@@ -3458,7 +3575,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     _ensure_venv_hf_sitecustomize(os.path.dirname(os.path.dirname(mvpy)), logf)
     # 自愈防线：musubi 版本过旧会以 float32 训练（300s/步），阻止并提示重装第二引擎
     _check_musubi_krea2_version(kdir, logf)
-    accel = _accelerate_launch_cmd(mvpy, logf=logf)
+    accel = _accelerate_launch_cmd(mvpy, logf=logf, cwd=mt_dir)
     if not _ensure_torchvision_deps(mvpy, logf, label="FLUX.2", cwd=mt_dir):
         raise RuntimeError("FLUX.2 引擎（第二引擎）venv 的 torchvision 自动补装失败，请检查网络后重试，或重装第二引擎。")
     _warn_laptop_heavy_load(logf, vram_gb, "FLUX.2")
@@ -11207,6 +11324,28 @@ def _require_healthy_amd_venv(venv_dir):
     return vpy
 
 
+def _amd_download_destination(cache, url, logf=print):
+    """URL 编码只用于请求，本地 wheel 名必须使用解码后的 PEP 440 版本号。
+
+    旧版把 + 保存为 %2B，pip 会报 Invalid wheel filename；迁移旧缓存和
+    .part 后可复用已下载的数 GB 文件，不覆盖已经存在的新格式缓存。
+    """
+    encoded = os.path.basename(urllib.parse.urlsplit(url).path)
+    name = urllib.parse.unquote(encoded)
+    if not name or os.path.basename(name) != name or "/" in name or "\\" in name:
+        raise ValueError("AMD 下载地址中的文件名无效")
+    dest = os.path.join(cache, name)
+    if encoded != name:
+        for suffix in ("", ".part"):
+            legacy = os.path.join(cache, encoded + suffix)
+            corrected = dest + suffix
+            if os.path.isfile(legacy) and not os.path.exists(corrected):
+                os.rename(legacy, corrected)
+                logf("[AMD] 已修正旧缓存文件名：%s → %s" %
+                     (os.path.basename(legacy), os.path.basename(corrected)))
+    return name, dest
+
+
 def install_amd_rocm(venv_dir, logf=print, progress_cb=None, status_cb=None):
     """自动安装 AMD ROCm 运行库（阶段 1/3，约 1~2GB，视网速 10~60 分钟）。
 
@@ -11224,9 +11363,8 @@ def install_amd_rocm(venv_dir, logf=print, progress_cb=None, status_cb=None):
     if status_cb is not None:
         status_cb("ROCm", "downloading")
     for _index, _u in enumerate(wheels, 1):
-        _fn = os.path.basename(_u)
-        _dst = os.path.join(cache, _fn)
-        _cached = os.path.isfile(_dst) and os.path.getsize(_dst) > 1024 * 1024 and _wheel_valid(_dst)
+        _fn, _dst = _amd_download_destination(cache, _u, logf)
+        _cached = os.path.isfile(_dst) and _wheel_valid(_dst)
         if not _cached:
             if os.path.isfile(_dst):
                 logf(f"[AMD] {_fn} 缓存文件不完整，重新下载…")
@@ -11269,9 +11407,8 @@ def install_amd_torch(venv_dir, logf=print, progress_cb=None, status_cb=None):
     if status_cb is not None:
         status_cb("PyTorch", "downloading")
     for _index, _u in enumerate(_urls, 1):
-        _fn = os.path.basename(_u)
-        _dst = os.path.join(cache, _fn)
-        _cached = os.path.isfile(_dst) and os.path.getsize(_dst) > 1024 * 1024 and _wheel_valid(_dst)
+        _fn, _dst = _amd_download_destination(cache, _u, logf)
+        _cached = os.path.isfile(_dst) and _wheel_valid(_dst)
         if not _cached:
             if os.path.isfile(_dst):
                 logf(f"[AMD] {_fn} 缓存文件不完整，重新下载…")
@@ -12721,6 +12858,45 @@ def _safetensors_is_prequantized(path):
         return False
 
 
+def _nvidia_fp8_capable():
+    """本机 NVIDIA 显卡是否支持 fp8（需 Ada / Hopper / Blackwell，即 compute capability >= 8.9）。
+
+    ★ 2026-09-29 新增 ✗ ——
+      用户日志 KohyaLoRA_运行日志_20260929_025228（显存 11.8GB ≈ Ampere 级）：
+      工具自动加了 `--fp8_base_unet` ✗，而日志紧接着就出现
+        `A matching Triton is not available, some optimizations will not be enabled`
+        `ModuleNotFoundError: No module named 'triton'`（后者的堆栈来自 xformers 探测）✗
+      **fp8 在 Ampere 及更老架构上不受支持** ✗ → 白开，且可能拖慢/失败 ✓
+
+    判据顺序：
+      ① 驱动报告的 `compute_cap`（较新 nvidia-smi 支持）✓
+      ② 型号白名单（Ada / Hopper / Blackwell 及专业卡）✓
+      ③ 两者都拿不到 → **返回 False（保守：不开 fp8 只少省一点显存，不会出错）** ✓
+    """
+    try:
+        r = safe_nvidia_smi(["--query-gpu=compute_cap", "--format=csv,noheader"], timeout=8)
+        if r and r.returncode == 0 and (r.stdout or "").strip():
+            _cc = (r.stdout or "").strip().splitlines()[0].strip()
+            try:
+                _maj, _min = _cc.split(".")
+                return (int(_maj), int(_min)) >= (8, 9)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        _name = (detect_gpu_info().get("name") or "").upper()
+    except Exception:
+        _name = ""
+    if not _name:
+        return False
+    for _pat in ("RTX 40", "RTX 50", "L40", "L4 ", "A100", "H100", "H200",
+                 "B100", "B200", "RTX PRO", "RTX 6000"):
+        if _pat in _name:
+            return True
+    return False
+
+
 def _sd_fp8_base_unet(family, amd_mode, mixed, vram_gb, base_model):
     """第一引擎 SD/SDXL 是否给 U-Net 加 fp8 底模（sd-scripts 的 --fp8_base_unet）。
 
@@ -12729,6 +12905,10 @@ def _sd_fp8_base_unet(family, amd_mode, mixed, vram_gb, base_model):
       · AMD(ROCm) 不加 —— fp8 在 ROCm 上没验证过；
       · 混合精度必须是 fp16/bf16（sd-scripts 的断言要求，mixed_precision=no 会直接报错）；
       · 显存 >=16G 不加 —— 那档不缺显存，fp8 在部分卡上反而略慢；
+      · **★ 2026-09-29 新增：显卡必须支持 fp8（Ada/Hopper 及更新，sm89+）** ✗
+        —— Ampere（30 系）/ Turing（20 系）等**不支持 fp8** ✗，
+           开了会让 sd-scripts 尝试 fp8 路径并报 triton 缺失/优化不可用 ✓
+           （用户日志 KohyaLoRA_运行日志_20260929_025228 实证 ✓）
       · 底模本身已是 fp8/int8 预量化则不加（再量化会冲突报错）。
 
     实测收益（本机 AniShadow_V5，只读 safetensors 头部统计）：
@@ -12743,6 +12923,9 @@ def _sd_fp8_base_unet(family, amd_mode, mixed, vram_gb, base_model):
     if mixed not in ("fp16", "bf16"):
         return False
     if vram_gb is not None and vram_gb >= 16:
+        return False
+    # ★ 算力门禁：不支持 fp8 的卡（Ampere 及更老）一律不加 ✗
+    if not _nvidia_fp8_capable():
         return False
     return not _safetensors_is_prequantized(base_model)
 
@@ -13459,7 +13642,8 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         raise RuntimeError("请选择底模（.safetensors）")
     # 任何模式都必须先解析 Accelerate 启动器（v0.9.18 回归：accel 只在 AMD 分支赋值，
     # 导致普通 NVIDIA 用户训练启动即报 UnboundLocalError: accel）。
-    accel = _accelerate_launch_cmd(vpy, logf=logf)
+    # ★ 2026-09-29：带上 cwd=sds —— 探测与训练必须同 cwd，否则会「探测通过、训练崩」✗
+    accel = _accelerate_launch_cmd(vpy, logf=logf, cwd=sds)
     if not _ensure_torchvision_deps(vpy, logf, label="Kohya", cwd=kdir):
         raise RuntimeError("Kohya venv 的 torchvision 自动补装失败，请检查网络后重试，或重跑【② 安装训练内核】重建环境。")
 

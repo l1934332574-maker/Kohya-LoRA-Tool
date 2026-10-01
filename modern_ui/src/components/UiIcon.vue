@@ -1,5 +1,5 @@
 <script setup lang="ts">
-export type IconName = 'home' | 'toolbox' | 'refresh' | 'folder' | 'database' | 'queue' | 'plus' | 'settings' | 'play' | 'export' | 'back' | 'model'
+export type IconName = 'home' | 'toolbox' | 'refresh' | 'folder' | 'database' | 'queue' | 'plus' | 'settings' | 'play' | 'export' | 'back' | 'model' | 'feedback'
 
 defineProps<{ name: IconName }>()
 </script>
@@ -18,5 +18,6 @@ defineProps<{ name: IconName }>()
     <template v-else-if="name === 'export'"><path d="M12 15V3m0 0L8 7m4-4 4 4" /><path d="M5 12v8h14v-8" /></template>
     <template v-else-if="name === 'back'"><path d="m14.5 5-7 7 7 7" /><path d="M8 12h12" /></template>
     <template v-else-if="name === 'model'"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z" /><path d="m4.5 7.7 7.5 4.2 7.5-4.2M12 12v8.5" /></template>
+    <template v-else-if="name === 'feedback'"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Z" /><path d="M7 9h10M7 13h6" /></template>
   </svg>
 </template>

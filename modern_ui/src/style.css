@@ -154,7 +154,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 
 .log-dock { display: flex; flex: 0 0 185px; flex-direction: column; min-height: 145px; padding: 8px 20px 11px 27px; background: var(--log); border-top: 1px solid var(--tone-191b21); }
 .log-header { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; min-height: 34px; margin-bottom: 4px; }
-.log-header h2 { margin: 0; color: var(--tone-c7cbd2); font-size: 16px; font-weight: 350; }
+.log-header h2 { margin: 0 auto 0 0; color: var(--tone-c7cbd2); font-size: 16px; font-weight: 350; }
+.log-header { gap: 8px; }
 .log-header .small-button { min-width: 122px; min-height: 30px; }
 .small-button .ui-icon { width: 14px; height: 14px; }
 .log-content { flex: 1; min-height: 0; padding: 6px 8px; overflow: auto; border: 1px solid var(--tone-363a43); border-radius: 6px; color: var(--tone-adb3bd); background: var(--tone-1a1c22); scrollbar-color: var(--tone-50545d) transparent; scrollbar-width: thin; }

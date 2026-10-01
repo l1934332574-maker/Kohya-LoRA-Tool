@@ -51,3 +51,8 @@ _bench/
 # 一并提交进了 v0.16.13 的发布提交 —— 补这条规则杜绝复发。
 _tmp*
 
+
+# 本地排查与打包记录
+build_exe/amd_hotfix_build/
+build_exe/*_build.log
+diagnostics_training_tests.log

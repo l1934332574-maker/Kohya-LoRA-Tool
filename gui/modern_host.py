@@ -11,7 +11,10 @@ import sys
 import threading
 import time
 import uuid
+import traceback
 from pathlib import Path
+
+from kohya_core.diagnostics import SessionLog, summary_lines, redact, write_bundle
 
 try:
     from model_downloader import ModelDownloader
@@ -116,6 +119,16 @@ class ModernUIBridge:
         self._task_downloader = None
         self._project_name_reservations = set()
         self._picker_dirs = {}
+        self._log_lock = threading.RLock()
+        self._diagnostics_thread = None
+        self._session_log = None
+        self._session_log_error = None
+        try:
+            self._session_log = SessionLog(self.core.data_sub("logs"))
+            for line in self.logs:
+                self._session_log.append(line)
+        except Exception as exc:
+            self._session_log_error = str(exc)
 
     @staticmethod
     def _count_preprocessable_images(directory):
@@ -144,9 +157,12 @@ class ModernUIBridge:
         return os.path.join(os.path.expanduser("~"), "Desktop")
 
     def _log(self, message):
-        self.logs.append(str(message))
-        if len(self.logs) > 3000:
-            del self.logs[:-3000]
+        with self._log_lock:
+            self.logs.append(str(message))
+            if self._session_log:
+                self._session_log.append(message)
+            if len(self.logs) > 3000:
+                del self.logs[:-3000]
 
     def _task_log(self, task_id, message):
         message = str(message)
@@ -238,6 +254,7 @@ class ModernUIBridge:
                     if self._task and self._task.get("id") == task_id:
                         self._task.update(status="failed", message=str(exc))
                 self._task_log(task_id, "[失败] %s" % exc)
+                self._task_log(task_id, traceback.format_exc())
 
         threading.Thread(target=worker, name="ModernSetupTask", daemon=True).start()
         return {"ok": True, "task_id": task_id}
@@ -501,6 +518,7 @@ class ModernUIBridge:
                     if self._task and self._task.get("id") == task_id:
                         self._task.update(status="failed", message="数据预处理失败：%s" % exc)
                 self._task_log(task_id, "[失败] 数据预处理失败：%s" % exc)
+                self._task_log(task_id, traceback.format_exc())
             finally:
                 try:
                     if os.path.isfile(report_path):
@@ -1414,6 +1432,7 @@ class ModernUIBridge:
                     if self._task and self._task.get("id") == task_id:
                         self._task.update(status="failed", message="训练失败：%s" % exc)
                 self._task_log(task_id, "[失败] %s" % exc)
+                self._task_log(task_id, traceback.format_exc())
             finally:
                 monitor_stop.set()
                 if monitor is not None:
@@ -2592,48 +2611,33 @@ class ModernUIBridge:
             self._log(message)
             return {"ok": True, "message": "已打开输出目录。", "log": message}
 
-        if action == "export_log":
+        if action in ("export_log", "export_diagnostics"):
             import datetime
-            exported_at = datetime.datetime.now()
-            filename = "KohyaLoRA_运行日志_%s.txt" % exported_at.strftime("%Y%m%d_%H%M%S")
-            version = str(getattr(self.core, "APP_VERSION", "") or "").strip()
-            with self._task_lock:
-                task = self._task
-                task_logs = list(task.get("logs", [])) if task else []
-                startup_logs = list(task.get("startup_logs", [])) if task else []
-                task_title = str(task.get("title", "")) if task else ""
-                task_status = str(task.get("status", "")) if task else ""
-                task_log_offset = int(task.get("log_offset", 0) or 0) if task else 0
-            exported_logs = task_logs if task_logs else list(self.logs)
-            if task_log_offset and startup_logs:
-                early_only = startup_logs[:task_log_offset]
-                omitted = task_log_offset - len(early_only)
-                exported_logs = early_only + (["[日志] 中间 %d 行超过缓存上限，以下为最近输出。" % omitted]
-                                              if omitted else []) + task_logs
-            content = "\n".join([
-                "Kohya-LoRA 一键训练工具 · 运行日志",
-                "软件版本: v%s" % version if version else "软件版本: 未知",
-                "导出时间: %s" % exported_at.strftime("%Y-%m-%d %H:%M:%S"),
-                "最近任务: %s (%s)" % (task_title, task_status) if task_logs else "",
-                "",
-                "【运行日志】",
-                *exported_logs,
-                "",
-            ])
-            desktop = self._desktop_directory()
-            dest = os.path.join(desktop, filename)
-            try:
-                os.makedirs(desktop, exist_ok=True)
-                with open(dest, "w", encoding="utf-8") as handle:
-                    handle.write(content)
-            except OSError:
-                directory = self.core.data_sub("logs")
-                os.makedirs(directory, exist_ok=True)
-                dest = os.path.join(directory, filename)
-                with open(dest, "w", encoding="utf-8") as handle:
-                    handle.write(content)
-            self._log("[导出] 运行日志已导出：%s" % dest)
-            return {"ok": True, "message": "运行日志已导出：%s" % dest}
+            with self._log_lock:
+                if self._diagnostics_thread and self._diagnostics_thread.is_alive():
+                    return {"ok": False, "error": "日志正在导出，请稍候。"}
+                logs = "\n".join(self.logs)
+                with self._task_lock:
+                    task = dict(self._task or {})
+                task["session_log_error"] = self._session_log_error
+                project = self.core.load_project(project_name) if project_name else {}
+                filename = "KohyaLoRA_运行日志_%s.txt" % datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                dest = os.path.join(self._desktop_directory(), filename)
+
+                def collect():
+                    try:
+                        try:
+                            path = write_bundle(self.core, dest, logs, task, project, self._session_log)
+                        except OSError:
+                            fallback = os.path.join(self.core.data_sub("logs"), filename)
+                            path = write_bundle(self.core, fallback, logs, task, project, self._session_log)
+                        self._log("[诊断] 运行日志已导出：%s" % path)
+                    except Exception:
+                        self._log("[诊断] 导出失败：\n%s" % traceback.format_exc())
+
+                self._diagnostics_thread = threading.Thread(target=collect, name="KohyaDiagnostics", daemon=True)
+                self._diagnostics_thread.start()
+            return {"ok": True, "message": "日志与环境诊断正在后台生成，完成后路径会显示在运行日志中。"}
 
         project_actions = {
             "label_editor", "export_config", "readme", "at_model_help",

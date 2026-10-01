@@ -1,7 +1,7 @@
 {
-  "version": "v0.18.10",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.18.10/Setup.exe",
+  "version": "v0.18.11",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.18.11/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "setup_sha256": "6bc6b3b4937e65df96efd5c8298f76db528d953629399d4795d7a47e2d908855",
-  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.18.10 更新（2026-09-29）\n\n· 第四引擎支持手动选择量化精度，包括 Qwen-Image-2.1 的 NF4。\n· 新建项目的训练分辨率默认 512，已保存设置不变。\n· 修复 AMD Krea2F 训练时重复打开软件，以及切换项目后标签显示串项目的问题。\n· 改善内置打标失败时的提示和日志。\n· 各模式新增保留分辨率的快跑档，并修复第四引擎 AMD 误拦及重复预热提醒。\n· 直接覆盖安装到原位置即可，项目和训练环境会保留。"
+  "setup_sha256": "0cff8f3d97c808a7076e2564c6bc0092117a99a062eeb7c36388067f58eb7951",
+  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.18.11 更新（2026-10-01）\n\n· 修复 AMD ROCm 安装中下载文件名带 %2B 导致 pip 无法识别 wheel 的问题，并复用已有下载缓存。\n· 合并为一个“导出日志”按钮，TXT 包含完整会话、异常堆栈、显卡驱动、各训练环境依赖和基础计算检查。\n· 增加反馈交流入口，QQ 群 602396066，支持复制群号。\n· 改善多显卡单进程训练的设备隔离和分布式初始化报错提示。\n· 直接覆盖安装到原位置即可，项目和训练环境会保留。"
 }

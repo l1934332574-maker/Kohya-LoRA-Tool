@@ -8,6 +8,7 @@ __all__ = [
     "detect_nvidia_gpu", "nvidia_driver_version", "_dxgi_adapters", "detect_vram_gb",
     "_registry_vram_gb", "detect_gpu_vendor", "detect_gpu_name", "detect_gpu_info",
     "detect_torch_backend", "detect_ram_gb", "safe_nvidia_smi", "nvidia_smi_broken",
+    "pick_primary_gpu_index",
     # ⚠️ 2026-09-17 补：Kohya一键工具.py 的 gpu_status_text() 里直接用了 `_is_igpu_name` ✗，
     # 但它原来**不在 __all__ 里** ✗ → `from kohya_core.gpu import *` 取不到 → NameError ✗ →
     # 又被那里的 `except Exception: pass` 吞掉 → AMD/未知平台上「总显存(约) X GB」这行
@@ -20,6 +21,10 @@ __all__ = [
 # 「应用程序错误」窗口；若反复调用会弹窗刷屏 + 每次最多卡 20 秒（表现=电脑卡死）。
 # 因此：nvidia-smi 只在「DXGI 已检测到 NVIDIA 独显」时才调用，且失败后本进程内不再调用。
 _NV_SMI_STATE = {"ok": None}   # None=未探测, True=可用, False=损坏/缺失
+
+# pick_primary_gpu_index 的进程内缓存 ✗ —— 它会被 build_env() 间接频繁调用（每个子进程一次），
+# 每次都跑一遍 nvidia-smi 会拖慢启动 ✓
+_PICK_INDEX_CACHE = {"done": False, "value": None}
 
 
 def nvidia_smi_broken():
@@ -217,6 +222,79 @@ def detect_vram_gb():
         except Exception:
             pass
     return _registry_vram_gb()
+
+
+def pick_primary_gpu_index():
+    """多卡机器上建议「只暴露给训练」的那张卡的序号（取显存最大者）；单卡/判断不出返回 None。
+
+    ⚠️ 结果**进程内缓存** ✓ —— 本函数会被 build_env() 间接频繁调用（每个子进程一次 ✗），
+       每次都跑 nvidia-smi 会明显拖慢启动 ✓（_nvidia_smi 自身也有失败缓存 ✓）
+
+    ★ 2026-09-29（用户日志 KohyaLoRA_运行日志_20260929_031129，RTX 4080S **双卡**）：
+      训练一启动就崩，且换 SD1.5 / SDXL / 任何模型都一样：
+        ValueError: Default process group has not been initialized, ...
+        accelerate/state.py:287   self.num_processes = torch.distributed.get_world_size()
+
+      根因（用户贴出的 sd-scripts/library/accelerator_setup.py 原文）：
+        kwargs_handlers = [
+            (InitProcessGroupKwargs(timeout=...) if torch.cuda.device_count() > 1 else None),
+            ...
+        ]
+        kwargs_handlers = [i for i in kwargs_handlers if i is not None]
+        accelerator = Accelerator(..., kwargs_handlers=kwargs_handlers, ...)
+
+      · 双卡 ⇒ `device_count() > 1` 成立 ⇒ 多出一个 InitProcessGroupKwargs ✗
+      · accelerate 见它即按「分布式」处理 ⇒ 直接调 torch.distributed.get_world_size() ✗
+      · 而工具用 `--num_processes 1 --num_machines 1` **单进程**启动，进程组从未初始化 ✗
+      · ⇒ 崩 ✓（与显存、驱动、模型、accelerate 配置**都无关** ✓）
+      · **单卡机器 `device_count()==1` ⇒ 那个 handler 是 None ⇒ 根本不会踩** ✓
+        —— 所以这是「多卡机器专有」的坑；同项目单卡用户一直正常 ✓
+
+    处理：训练时只暴露一张卡（CUDA_VISIBLE_DEVICES=<显存最大的那张>）✓
+      ⇒ device_count() 变成 1 ⇒ 与单卡用户行为**完全一致** ✓
+      ⇒ 治本，且不必改任何第三方脚本 ✓
+
+    返回：需要限定时返回该卡序号（int）；只有一张卡或判断不出时返回 None（调用方不设置 ✓）。
+    """
+    if _PICK_INDEX_CACHE["done"]:
+        return _PICK_INDEX_CACHE["value"]
+    _v = _pick_primary_gpu_index_uncached()
+    _PICK_INDEX_CACHE["value"] = _v
+    _PICK_INDEX_CACHE["done"] = True
+    return _v
+
+
+def _pick_primary_gpu_index_uncached():
+    """pick_primary_gpu_index 的实际检测（带缓存的外层见上）。"""
+    if _nvidia_present() is True:
+        try:
+            r = _nvidia_smi(["--query-gpu=index,memory.total", "--format=csv,noheader,nounits"])
+            if r and r.returncode == 0:
+                rows = []
+                for line in (r.stdout or "").strip().splitlines():
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) < 2:
+                        continue
+                    try:
+                        rows.append((int(parts[0]), float(parts[1])))
+                    except Exception:
+                        continue
+                if len(rows) >= 2:
+                    # 多卡：取显存最大的那张（最可能是用户想用来训练的主力卡）✓
+                    return max(rows, key=lambda x: x[1])[0]
+                return None          # 单卡：不需要动 ✓
+        except Exception:
+            return None
+    # 非 N 卡（AMD/Intel）：拿不到权威的显存-序号对应关系，
+    # 但 DXGI 里若有 ≥2 个独显，则至少限定成「第一张」比放任双卡安全 ✓
+    try:
+        _discrete = [d for d in _dxgi_adapters() if not _is_igpu_name(d[0])]
+        if len(_discrete) >= 2:
+            return 0
+    except Exception:
+        pass
+    return None
+
 
 def detect_ram_gb():
     """检测系统物理内存总量（GB）。Windows 用 GlobalMemoryStatusEx（权威），失败回退 WMI。返回 None=未知。"""

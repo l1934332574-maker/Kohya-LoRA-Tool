@@ -11,6 +11,7 @@ import platform
 import subprocess
 import functools
 import traceback
+from kohya_core.diagnostics import SessionLog, summary_lines, redact, write_bundle
 import re
 import time
 import tkinter as tk
@@ -440,100 +441,9 @@ def create_soft_shadow_card(parent, corner_radius=8, pad=10, offset=(1, 2),
 
 # ---------- 一键导出日志（反馈/求助时直接发这个 txt，含环境信息） ----------
 def _collect_env_lines():
-    """收集环境信息文本行（导出日志用；任一步失败不阻塞，只跳过该行）。"""
-    out = []
-    try:
-        out.append("操作系统: %s" % platform.platform())
-    except Exception:
-        pass
-    try:
-        _py, _ver = core.find_python()
-        out.append("检测到 Python: %s (%s)" % (_py, _ver or "?"))
-    except Exception:
-        pass
-    try:
-        _git = core.find_git()
-        out.append("Git: %s" % (_git or "未找到"))
-    except Exception:
-        pass
-    # 环境来源：用户是否自己指定过 Python / Git（2026-09-17 新增「自带环境」功能）
-    # 排查时这行很关键 —— 指定过的环境与自动找到的**不是同一套** ✗
-    try:
-        _ep = core.get_env_paths()
-        if _ep.get("python_exe") or _ep.get("python_dir") or _ep.get("git_exe"):
-            out.append("环境位置: 用户指定（Python=%s、Git=%s）"
-                       % (_ep.get("python_exe") or _ep.get("python_dir") or "自动",
-                          _ep.get("git_exe") or "自动"))
-            _why = core.explain_custom_python_problem()
-            if _why:
-                out.append("⚠ 指定的 Python 当前用不了：%s（已自动回落到自动查找）" % _why)
-        else:
-            out.append("环境位置: 全自动")
-    except Exception:
-        pass
-    try:
-        _gi = core.detect_gpu_info()
-        out.append("显卡: %s（厂商 %s，显存 %sGB）" % (_gi.get("name") or "?", _gi.get("vendor") or "?", _gi.get("vram_gb") or "?"))
-        if not _gi.get("gpu_ok"):
-            out.append("⚠ 未检测到可用独立显卡驱动（重装系统后常见）：请先安装显卡驱动，否则无法训练。")
-        elif _gi.get("nvidia_smi_broken"):
-            # ★ 2026-09-23：AMD / Intel 显卡上本来就**没有** nvidia-smi ✗ ——
-            #   以前这里不分厂商，一律报「NVIDIA 驱动异常」✗，把 A 卡用户吓得去重装驱动 ✗
-            #   （用户日志 KohyaLoRA_Frieren1_20260923：AMD RX 7800 XT 上就出现了这条 ✓）
-            if (_gi.get("vendor") or "").lower() in ("amd", "intel"):
-                out.append("— 未使用 nvidia-smi（当前是 AMD/Intel 显卡，属正常现象 ✓）")
-            else:
-                out.append("⚠ nvidia-smi 不可用（NVIDIA 驱动异常）：建议重装/更新显卡驱动。")
-    except Exception:
-        pass
-    try:
-        _ram = core.detect_ram_gb()
-        out.append("系统内存: %sGB" % ("%.1f" % _ram if _ram else "?"))
-    except Exception:
-        pass
-    try:
-        _r = core.safe_nvidia_smi(["--query-gpu=driver_version", "--format=csv,noheader"], timeout=6)
-        if _r and _r.returncode == 0 and (_r.stdout or "").strip():
-            out.append("NVIDIA 驱动: %s" % _r.stdout.strip().splitlines()[0].strip())
-    except Exception:
-        pass
-    # ★ 2026-09-27：补齐 CPU / 系统架构 ✗ ——
-    #   用户反馈：新版训练页导出的日志里**硬件信息整块缺失** ✗，
-    #   只有版本号和时间 → 维护方只能靠猜硬件（这次排查就吃了这个亏 ✓）
-    try:
-        out.append("CPU: %s（%s 核）" % (platform.processor() or "?", os.cpu_count() or "?"))
-    except Exception:
-        pass
-    try:
-        out.append("系统架构: %s" % (platform.machine() or "?"))
-    except Exception:
-        pass
-    out.append("安装目录: %s" % core.KIT_DIR)
-    out.append("数据目录: %s" % core.data_dir())
-    try:
-        _st = core.system_status()
-        out.append("第一引擎(kohya): %s" % ("已安装" if _st.get("kohya_ok") else "未安装"))
-        out.append("第二引擎(musubi): %s" % ("已安装" if _st.get("musubi_ok") else "未安装"))
-        out.append("第三引擎(ai-toolkit): %s" % ("已安装" if _st.get("at_ok") else "未安装"))
-        out.append("第四引擎(fizgig): %s" % ("已安装" if _st.get("fizgig_ok") else "未安装"))
-    except Exception:
-        pass
-    try:
-        _vpy = core.venv_python(core.get_kohya_dir())
-        if _vpy and os.path.isfile(_vpy):
-            # ★ 2026-09-23：**必须标明是哪个引擎** ✗ ——
-            #   以前只写「训练环境 torch 后端: cpu」✗，但它测的是**第一引擎(kohya)** 的 venv ✓，
-            #   而用户实际训练用的是**第四引擎(fizgig)**（独立 venv）✗
-            #   → 用户看到 cpu 以为自己环境全废了 ✗
-            #   （用户日志 KohyaLoRA_Frieren1_20260923：AMD 用户正被这条误导 ✓）
-            _bk = core.detect_torch_backend(_vpy) or "无法检测"
-            out.append("第一引擎(kohya) torch 后端: %s" % _bk)
-            if _bk == "cpu":
-                out.append("  （这是第一引擎的环境；第四引擎有独立环境，"
-                           "训练用的哪个引擎请看训练日志里那一行 ✓）")
-    except Exception:
-        pass
-    return out
+    """新旧界面使用相同环境采集器，失败项保留 error 字段。"""
+    return summary_lines(core)
+
 
 def _export_log_text(log_text, project, env_lines=None):
     """组装导出日志全文（纯函数，便于测试；env_lines 为空时自动收集环境信息）。"""
@@ -565,6 +475,12 @@ class App:
         self.q = queue.Queue()
         # 完整运行日志（不分行数保留，导出用；界面日志框另有 3000 行显示上限，避免 Tk 内存/GDI 耗尽）
         self._full_log = []
+        self._session_log = None
+        self._diagnostics_thread = None
+        try:
+            self._session_log = SessionLog(core.data_sub("logs"))
+        except Exception:
+            pass
         self.mode = "character"
         self._interval_values = core.normalize_interval_values({})
         self.base_type = "sd15"
@@ -824,6 +740,8 @@ class App:
     # ---------- 日志 ----------
     def _log(self, text):
         text = str(text)
+        if getattr(self, "_session_log", None):
+            self._session_log.append(text)
         if getattr(self, "_full_log", None) is None:
             self._full_log = []
         self._full_log.append(text)
@@ -1734,6 +1652,9 @@ class App:
         log_hdr = ctk.CTkFrame(logbar, fg_color="transparent")
         log_hdr.pack(fill="x", padx=26, pady=(8, 2))
         ctk.CTkLabel(log_hdr, text="运行日志", font=ui_font(FONT_TITLE), text_color=TITLE_C).pack(side="left")
+        ctk.CTkButton(log_hdr, text="💬", width=28, height=28, fg_color="transparent",
+                      hover_color="#252a36", text_color=SUB, font=ui_font(FONT_TITLE),
+                      command=self.cmd_feedback).pack(side="right", padx=(6, 0))
         ctk.CTkButton(log_hdr, text="📤 导出日志", width=120, height=28, fg_color="transparent",
                       hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
                       corner_radius=6, font=ui_font(FONT_HINT), command=self.cmd_export_log).pack(side="right")
@@ -2356,6 +2277,7 @@ class App:
         except Exception as e:
             # 手动改过 json（字段类型/结构异常）时不能静默无反应：提示并按默认配置打开。
             self._log(f"[项目] 配置恢复遇到异常（可能是手动修改 json 导致），已按默认配置打开：{e}")
+            self._log(traceback.format_exc())
             traceback.print_exc()
             try:
                 self._apply_project_data({})
@@ -3175,6 +3097,7 @@ class App:
             self.q.put(("STATUS",))
         except Exception as e:
             self._log(f"[ERROR] 第二引擎安装失败：{e}")
+            self._log(traceback.format_exc())
             traceback.print_exc()
         finally:
             self.q.put("__DONE__")
@@ -3191,6 +3114,7 @@ class App:
             self._log("[停止] 环境准备已手动停止")
         except Exception as e:
             self._log(f"[ERROR] 环境准备失败：{e}")
+            self._log(traceback.format_exc())
             traceback.print_exc()
         finally:
             self.q.put("__DONE__")
@@ -3363,6 +3287,7 @@ class App:
             self._log("[停止] 安装已手动停止（已解压/已装的部分会保留，可重跑继续）")
         except Exception as e:
             self._log(f"[ERROR] 安装失败：{e}")
+            self._log(traceback.format_exc())
             traceback.print_exc()
         finally:
             self.q.put("__DONE__")
@@ -4380,6 +4305,7 @@ class App:
             self.q.put(("AT_ENGINE_UPDATE_DONE", True, result))
         except Exception as e:
             self._log(f"[ERROR] AI Toolkit 引擎更新失败：{e}")
+            self._log(traceback.format_exc())
             traceback.print_exc()
             self.q.put(("AT_ENGINE_UPDATE_DONE", False, str(e)))
         finally:
@@ -4457,6 +4383,7 @@ class App:
             self.q.put(("FIZGIG_ENGINE_UPDATE_DONE", True, result))
         except Exception as exc:
             self._log("[ERROR] Fizgig 引擎更新失败：%s" % exc)
+            self._log(traceback.format_exc())
             traceback.print_exc()
             self.q.put(("FIZGIG_ENGINE_UPDATE_DONE", False, str(exc)))
         finally:
@@ -4930,38 +4857,69 @@ class App:
     def cmd_readme(self):
         self._show_help_window()
 
-    def cmd_export_log(self):
-        """一键导出运行日志 + 环境信息（反馈/求助时直接把 txt 发给维护者）。"""
-        log_text = ""
-        try:
-            log_text = "\n".join(getattr(self, "_full_log", None) or [])
-        except Exception:
-            pass
-        project = (self.current_project or "").strip() or "tool"
-        self._log("[导出] 正在收集运行日志与环境信息…")
+    def cmd_feedback(self):
+        existing = getattr(self, "_feedback_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return
+        w = ctk.CTkToplevel(self.root)
+        self._feedback_window = w
+        w.title("反馈与交流")
+        w.geometry("420x280")
+        w.resizable(False, False)
+        w.transient(self.root)
+        ctk.CTkLabel(w, text="反馈与交流", font=ui_font(FONT_TITLE)).pack(pady=(22, 12))
+        ctk.CTkLabel(w, text="遇到问题、提出建议，或分享使用经验，欢迎加入 QQ 群。",
+                     wraplength=360, font=ui_font(FONT_BODY)).pack(padx=24)
+        ctk.CTkLabel(w, text="反馈交流 QQ 群：602396066", font=ui_font(FONT_TITLE)).pack(pady=16)
+        status = tk.StringVar(value="")
+        def copy_group():
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append("602396066")
+                status.set("群号已复制")
+            except tk.TclError:
+                status.set("请手动复制群号：602396066")
+        ctk.CTkButton(w, text="复制群号", width=110, command=copy_group).pack()
+        ctk.CTkLabel(w, text="反馈安装或训练问题时，请附上报错截图和导出的日志 TXT。",
+                     wraplength=360, text_color=SUB, font=ui_font(FONT_HINT)).pack(pady=(14, 0))
+        ctk.CTkLabel(w, textvariable=status, font=ui_font(FONT_HINT)).pack()
+        w.bind("<Escape>", lambda _event: w.destroy())
+        w.after(100, w.focus_force)
+
+    def cmd_export_diagnostics(self):
+        if self._diagnostics_thread and self._diagnostics_thread.is_alive():
+            self._log("[诊断] 日志正在导出，请稍候。")
+            return
+        logs = "\n".join(self._full_log)
+        project = core.load_project(self.current_project) if self.current_project else {}
+        project = dict(project or {})
+        if hasattr(self, "train_env_var"):
+            project["train_env"] = self.train_env_var.get().strip()
+        task = {"title": self._task_title, "busy": self.busy}
+        dest = os.path.join(os.path.expanduser("~"), "Desktop", "KohyaLoRA_运行日志_%s.txt" % time.strftime("%Y%m%d_%H%M%S"))
+        self._log("[诊断] 正在后台收集环境和计算自检结果…")
+
         def work():
             try:
-                text = _export_log_text(log_text, project)
-                fname = "KohyaLoRA_%s_%s.txt" % (
-                    re.sub(r'[\\/:*?"<>|\r\n\t ]+', "_", project)[:40] or "日志",
-                    time.strftime("%Y%m%d_%H%M%S"))
-                dest = None
                 try:
-                    _d = os.path.join(os.path.expanduser("~"), "Desktop", fname)
-                    with open(_d, "w", encoding="utf-8") as f:
-                        f.write(text)
-                    dest = _d
-                except Exception:
-                    _d = os.path.join(core.data_sub("logs"), fname)
-                    os.makedirs(os.path.dirname(_d), exist_ok=True)
-                    with open(_d, "w", encoding="utf-8") as f:
-                        f.write(text)
-                    dest = _d
-                self.root.after(0, lambda: self._log("[导出] 日志已导出：" + dest))
-                self.root.after(0, lambda: self._show_export_dialog(dest))
-            except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror(core.APP_NAME, "导出日志失败：\n%s" % e))
-        threading.Thread(target=work, daemon=True).start()
+                    path = write_bundle(core, dest, logs, task, project, self._session_log)
+                except OSError:
+                    fallback = os.path.join(core.data_sub("logs"), os.path.basename(dest))
+                    path = write_bundle(core, fallback, logs, task, project, self._session_log)
+                self.root.after(0, lambda: self._log("[诊断] 运行日志已导出：" + path))
+                self.root.after(0, lambda: self._show_export_dialog(path))
+            except Exception:
+                error = traceback.format_exc()
+                self.root.after(0, lambda: self._log("[诊断] 导出失败：\n" + error))
+
+        self._diagnostics_thread = threading.Thread(target=work, name="KohyaDiagnostics", daemon=True)
+        self._diagnostics_thread.start()
+
+    def cmd_export_log(self):
+        """统一导出完整日志与环境诊断为 TXT。"""
+        self.cmd_export_diagnostics()
 
     def _show_export_dialog(self, dest):
         """导出成功弹窗：打开文件 / 打开所在文件夹 / 复制路径。"""
@@ -6390,6 +6348,7 @@ class App:
             self._log(f"[ERROR] 打开标签编辑器失败：{e}")
             if self._utility_only:
                 messagebox.showerror("标签编辑器", "打开标签编辑器失败：\n%s" % e)
+            self._log(traceback.format_exc())
             traceback.print_exc()
 
     def cmd_open_flux2_models(self):
@@ -6639,6 +6598,7 @@ class App:
             self.q.put(("STATUS",))
         except Exception as e:
             self._log(f"[ERROR] 第四引擎安装失败：{e}")
+            self._log(traceback.format_exc())
             traceback.print_exc()
         finally:
             self.q.put("__DONE__")
@@ -6705,6 +6665,7 @@ class App:
             self.q.put(("STATUS",))
         except Exception as e:
             self._log(f"[ERROR] 第三引擎安装失败：{e}")
+            self._log(traceback.format_exc())
             traceback.print_exc()
         finally:
             self.q.put("__DONE__")
@@ -6756,6 +6717,7 @@ class App:
             self._log("[停止] 打标已手动停止")
         except Exception as e:
             self._log(f"[ERROR] 视频自动打标失败：{e}")
+            self._log(traceback.format_exc())
             traceback.print_exc()
         finally:
             self.q.put("__DONE__")
@@ -7427,6 +7389,7 @@ class App:
             self._log("[停止] 预处理已手动停止")
         except Exception as e:
             self._log(f"[ERROR] 预处理失败：{e}")
+            self._log(traceback.format_exc())
             traceback.print_exc()
         finally:
             self._end_preprocess_progress()
@@ -7555,6 +7518,7 @@ class App:
                                   "想保住进度，至少跑完第一个 epoch 再停。")
         except Exception as e:
             self._log(f"[ERROR] 训练失败：{e}")
+            self._log(traceback.format_exc())
             traceback.print_exc()
         finally:
             try:
@@ -7668,6 +7632,7 @@ class App:
             self.q.put("__DONE__")
         except Exception as e:
             self._log(f"[ERROR] 一键训练失败：{e}")
+            self._log(traceback.format_exc())
             traceback.print_exc()
             self.q.put("__DONE__")
         finally:

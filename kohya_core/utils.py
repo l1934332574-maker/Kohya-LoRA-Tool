@@ -29,6 +29,7 @@ _ACTIVE_PROC = None
 __all__ = [
     "StopRequested", "format_eta", "_terminate_tree", "stop_active_process", "reset_stop", "active_process_pids",
     "build_env", "build_direct_env", "clear_proxy_env", "proxy_reachable", "run_stream", "_download", "find_git", "_py_version", "find_python",
+    "apply_single_gpu_isolation",
     "venv_python", "_yq", "split_triggers", "system_proxy",
     # ⚠️ 2026-09-17 补：`_py_has_venv` 原来**不在** __all__ 里 ✗ 而 Kohya一键工具.py 里
     # 有一处直接调用它（`_detect_installed_python` 的兜底扫描）✗ →
@@ -145,6 +146,41 @@ def clear_proxy_env(env):
     return env
 
 
+def apply_single_gpu_isolation(env):
+    """多卡机器上，只向子进程暴露**一张**卡（默认显存最大的那张）。返回修改后的 env。
+
+    ★ 2026-09-29（用户日志 KohyaLoRA_运行日志_20260929_031129，RTX 4080S 双卡）：
+      双卡机器上训练一启动就崩，且换 SD1.5 / SDXL / 任何模型都一样报：
+        ValueError: Default process group has not been initialized, ...
+      原因是 sd-scripts 在 `torch.cuda.device_count() > 1` 时会给 Accelerator
+      额外塞一个 InitProcessGroupKwargs（多卡 DDP 用）✗，
+      而工具是用 `--num_processes 1` **单进程**启动的 ⇒ 进程组从未初始化 ⇒ 崩 ✗
+      **单卡机器 device_count()==1 ⇒ 那个 handler 是 None ⇒ 完全不会踩** ✓
+      详细推导见 kohya_core.gpu.pick_primary_gpu_index 的说明 ✓
+
+    这里统一隔离（训练 / 探测 / 预处理都走 build_env ✓）：
+      ⇒ 只看得到 1 张卡 ⇒ 与单卡用户行为**完全一致** ✓（治本 ✓）
+
+    ⚠️ 尊重用户：已显式设置 CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES / ROCR_VISIBLE_DEVICES
+       时**不做任何改动** ✓（他可能就是想指定某张卡 ✓）
+    ⚠️ 设 KOHYA_KEEP_ALL_GPUS=1 可关闭本机制（排障用 ✓）
+    """
+    try:
+        for _k in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+            if (env.get(_k) or "").strip():
+                return env          # 用户/上游已指定 ⇒ 尊重 ✓
+        if (env.get("KOHYA_KEEP_ALL_GPUS") or "").strip().lower() in ("1", "true", "yes", "on"):
+            return env
+        from kohya_core.gpu import pick_primary_gpu_index
+        _idx = pick_primary_gpu_index()
+        if _idx is None:
+            return env              # 单卡 / 判断不出 ⇒ 不动 ✓
+        env["CUDA_VISIBLE_DEVICES"] = str(_idx)
+    except Exception:
+        pass
+    return env
+
+
 def build_env(extra_dirs=()):
     env = dict(os.environ)
     # PATH 必须先拆成独立目录再过滤。旧实现把完整 PATH 当成一个元素，
@@ -226,7 +262,11 @@ def build_env(extra_dirs=()):
             env["PYTORCH_CUDA_ALLOC_CONF"] = ",".join(_kept)
         else:
             env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
-    return env
+    # ★ 2026-09-29：多卡机器统一单卡隔离 ✗
+    #   否则 sd-scripts 会因 torch.cuda.device_count() > 1 追加 InitProcessGroupKwargs，
+    #   与工具的 `--num_processes 1` 单进程启动相撞 ⇒
+    #   `Default process group has not been initialized`（详见 apply_single_gpu_isolation ✓）
+    return apply_single_gpu_isolation(env)
 
 
 def build_direct_env(extra_dirs=()):
@@ -446,6 +486,23 @@ def diagnose_child_exit(rc, output=None):
             _lines.append("[诊断]   处理：① 升级到修复版本（已剔除脚本目录的模块搜索路径）"
                           "② 仍然报 → 重建训练环境（【② 安装训练内核】）"
                           "③ 完全绕开：手动下载所需模型放进对应 models 子目录后重跑")
+            return _lines
+        if ("default process group has not been initialized" in _low
+                or "init_process_group" in _low):
+            # ★ 2026-09-29（用户日志 KohyaLoRA_运行日志_20260929_031129，RTX 4080S **双卡**）：
+            #   训练一启动就崩，换 SD1.5 / SDXL / 任何模型都一样：
+            #     ValueError: Default process group has not been initialized, ...
+            #   根因：sd-scripts 在 `torch.cuda.device_count() > 1` 时会给加速器
+            #   追加一个分布式设置（InitProcessGroupKwargs）✗，
+            #   而工具是 `--num_processes 1` **单进程**启动 ⇒ 进程组从未初始化 ⇒ 崩 ✗
+            #   **与模型、显存、驱动、杀软、accelerate 配置都无关** ✗（别让用户白折腾 ✓）
+            _lines.append("[诊断] ★ 检出「进程组未初始化」：这是 **多卡机器 + 单进程启动** 相撞 ✗")
+            _lines.append("[诊断]   含义：训练脚本发现本机有 2 张以上显卡，就自动附加了分布式设置；"
+                          "而工具是单进程方式启动的，两边对不上 ✗")
+            _lines.append("[诊断]   与模型、显存、显卡驱动、杀毒软件**都无关** ✗"
+                          "（换 SD1.5 / SDXL / 任何模型都一样报 ✓）")
+            _lines.append("[诊断]   处理：① 升级到修复版本（训练前自动只暴露一张卡）✓；"
+                          "② 临时办法：先执行 $env:CUDA_VISIBLE_DEVICES=\"0\"，再用它启动工具 ✓")
             return _lines
         if "traceback (most recent call last)" in _low:
             # 有明确 traceback ✗ → **不该**再让用户查内存/显存/杀软 ✗（会带偏 ✓）

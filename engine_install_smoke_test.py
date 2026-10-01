@@ -881,6 +881,174 @@ def test_miopen_fast_mode_env(base: Path):
     print("MIOPEN_FAST_MODE_ENV_OK")
 
 
+def test_accelerate_cpu_config_and_fp8_gate(base: Path):
+    """★ 2026-09-29（用户日志 KohyaLoRA_运行日志_20260929_025228）两处修复 ✓
+
+    事故 ✗：
+      · torch **完全正常**（`cuda= True | 2.7.0+cu128 | 12.8`）✓，
+        却在训练第一步崩：
+        `Accelerator.__init__ → AcceleratorState → PartialState(cpu) →
+         torch.distributed.get_world_size() →
+         ValueError: Default process group has not been initialized` ✗
+      · 工具侧**一条 `[加速器]` 提示都没有** ✗ —— 因为
+        ① 配置检测只查 `use_cpu: true`，漏了 `distributed_type: MULTI_CPU` ✗
+        ② 设备探测失败时静默 `return ""` ✗
+      · 同一日志里还有 `A matching Triton is not available` ——
+        工具给 **Ampere 级卡（显存 11.8GB）** 自动开了 `--fp8_base_unet` ✗，
+        而 **fp8 需要 Ada/Hopper（sm89+）** ✓
+
+    判据：
+      ① 配置检测覆盖 3 种 use_cpu 写法 **+ distributed_type: MULTI_CPU** ✓
+      ② 正常配置**不得**误报 ✗
+      ③ 中和动作 = **隔离（改名备份）**，且**无害配置不许动** ✓
+      ④ fp8 需算力门禁；AMD / ≥16G / 非 SD 系等既有条件不能被破坏 ✓
+    """
+    import Kohya一键工具 as K
+    with tempfile.TemporaryDirectory(prefix="accelcfg_") as td:
+        p = os.path.join(td, "default_config.yaml")
+        os.environ["ACCELERATE_CONFIG_FILE"] = p
+        try:
+            def _w(_t):
+                with open(p, "w", encoding="utf-8") as _f:
+                    _f.write(_t)
+            # ① 三种 use_cpu 写法
+            for _t in ("use_cpu: true\n", '"use_cpu": true\n', "'use_cpu': true\n"):
+                _w(_t)
+                assert K._accelerate_config_use_cpu(), "漏检 use_cpu=true：%r" % _t
+            # ★ distributed_type: MULTI_CPU —— 正是本次事故的形态
+            _w("compute_environment: LOCAL_MACHINE\nuse_cpu: false\n"
+               "distributed_type: MULTI_CPU\nnum_processes: 1\n")
+            assert K._accelerate_config_use_cpu(), \
+                "漏检 distributed_type: MULTI_CPU（本次崩溃就是这个）✗"
+            _w('{"use_cpu": false, "distributed_type": "MULTI_CPU"}\n')
+            assert K._accelerate_config_use_cpu(), "漏检 json 写法的 MULTI_CPU ✗"
+            # ② 正常配置不误报
+            _w("compute_environment: LOCAL_MACHINE\nuse_cpu: false\n"
+               "distributed_type: NO\nnum_processes: 1\n")
+            assert not K._accelerate_config_use_cpu(), "正常配置被误报 ✗"
+            # ③ 中和 = 隔离（改名备份）
+            _w("use_cpu: false\ndistributed_type: MULTI_CPU\n")
+            _logs = []
+            assert K._neutralize_accelerate_cpu_config(_logs.append) is True
+            assert not os.path.isfile(p), "有害配置应被移走（隔离）✗"
+            assert [x for x in os.listdir(td) if x.startswith("default_config.yaml.bak")], \
+                "必须留下备份（可改回）✗：" + str(os.listdir(td))
+            assert any("隔离" in _x for _x in _logs), _logs
+            # 无害配置**不得**被动 ✗
+            _w("use_cpu: false\ndistributed_type: NO\n")
+            assert K._neutralize_accelerate_cpu_config(lambda _s: None) is False
+            assert os.path.isfile(p), "无害配置不该被动 ✗"
+        finally:
+            os.environ.pop("ACCELERATE_CONFIG_FILE", None)
+    # ④ fp8 算力门禁（用桩，避免依赖本机显卡）
+    for _cap, _want in ((False, False), (True, True)):
+        with patch.object(K, "_nvidia_fp8_capable", return_value=_cap):
+            _got = K._sd_fp8_base_unet("sd", False, "fp16", 11.8, None)
+        assert _got is _want, "算力门禁失效：fp8_capable=%s → %s" % (_cap, _got)
+    with patch.object(K, "_nvidia_fp8_capable", return_value=True):
+        assert K._sd_fp8_base_unet("sd", True, "fp16", 11.8, None) is False, "AMD 不该开 fp8 ✗"
+        assert K._sd_fp8_base_unet("sd", False, "fp16", 24.0, None) is False, "≥16G 不该开 fp8 ✗"
+        assert K._sd_fp8_base_unet("flux", False, "fp16", 11.8, None) is False, "非 SD 系不该开 ✗"
+        assert K._sd_fp8_base_unet("sd", False, "no", 11.8, None) is False, "非 fp16/bf16 不该开 ✗"
+    print("ACCELERATE_CPU_CONFIG_AND_FP8_GATE_OK")
+
+
+def test_single_gpu_isolation():
+    """★ 2026-09-29（用户日志 KohyaLoRA_运行日志_20260929_031129，RTX 4080S **双卡**）：
+    多卡机器上必须只暴露一张卡 ✓
+
+    事故链 ✗（用户贴出的 sd-scripts/library/accelerator_setup.py 原文）：
+      · kwargs_handlers = [InitProcessGroupKwargs(...) if torch.cuda.device_count() > 1 else None]
+      · 双卡 ⇒ 多出一个 handler ⇒ accelerate 按「分布式」处理 ⇒
+        torch.distributed.get_world_size() ⇒ 而工具是 `--num_processes 1` 单进程启动
+        ⇒ ValueError: Default process group has not been initialized ✗
+      · **单卡机器 device_count()==1 ⇒ handler 是 None ⇒ 从不触发** ✓
+        （所以这是多卡专有的坑；删 accelerate 配置、换模型/SDXL 都无用 ✓）
+    处理：build_env() 出口统一把 CUDA_VISIBLE_DEVICES 限定成一张 ✓
+    """
+    from kohya_core import utils as U
+    from kohya_core import gpu as G
+    _bak = G.pick_primary_gpu_index
+    try:
+        # ① 多卡（模拟判定为第 1 张）⇒ 写入序号
+        G.pick_primary_gpu_index = lambda: 1
+        env = U.apply_single_gpu_isolation({"PATH": "x"})
+        assert env.get("CUDA_VISIBLE_DEVICES") == "1", env
+        # ② 用户已显式指定 ⇒ 一律不动（他可能就是想用某张卡 ✓）
+        _e2 = U.apply_single_gpu_isolation({"CUDA_VISIBLE_DEVICES": "0"})
+        assert _e2 == {"CUDA_VISIBLE_DEVICES": "0"}, _e2
+        for _k in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+            _e3 = U.apply_single_gpu_isolation({_k: "1"})
+            assert _e3 == {_k: "1"}, _e3
+        # ③ 排障开关 ⇒ 不隔离
+        assert "CUDA_VISIBLE_DEVICES" not in U.apply_single_gpu_isolation({"KOHYA_KEEP_ALL_GPUS": "1"})
+        # ④ 单卡 / 判断不出 ⇒ 不写（避免无谓改动 ✓）
+        G.pick_primary_gpu_index = lambda: None
+        assert "CUDA_VISIBLE_DEVICES" not in U.apply_single_gpu_isolation({})
+    finally:
+        G.pick_primary_gpu_index = _bak
+    # ⑤ 静态锚点：build_env 出口必须接上（防以后被改回去 ✗）
+    #   注意 build_env 在 kohya_core/utils.py，不是主程序文件 ✓
+    _src = Path(U.__file__).read_text(encoding="utf-8-sig")
+    assert "return apply_single_gpu_isolation(env)" in _src, "build_env 未接入单卡隔离 ✗"
+    print("SINGLE_GPU_ISOLATION_OK")
+
+
+def test_accel_probe_matches_training(base: Path):
+    """★ 探测必须与训练**同条件** ✗ —— 否则「探测通过、训练崩」✗
+
+    用户日志 KohyaLoRA_运行日志_20260929_031129：
+      探测成功返回 cuda（日志里一条 [加速器] 都没有 ⇒ 说明探测拿到了非 cpu 结论 ✓），
+      训练却崩在 `Default process group has not been initialized` ✗
+      —— 因为探测只调 `Accelerator()`，而 train_network.py 还会传 kwargs_handlers ✗
+    修复（三点对齐）：
+      ① env 与训练一致（build_direct_env + venv 的 torch\\lib 前置 ✓）
+      ② cwd 与训练一致 ✓
+      ③ 复刻「多卡时加 InitProcessGroupKwargs」✓
+    """
+    src = Path(core.__file__).read_text(encoding="utf-8-sig")
+    i = src.find("_ACCEL_PROBE_SRC = (")
+    assert i != -1, "缺 _ACCEL_PROBE_SRC"
+    seg = src[i:i + 1500]
+    assert "InitProcessGroupKwargs" in seg and "device_count() > 1" in seg, \
+        "探测必须复刻「多卡时加 InitProcessGroupKwargs」✗"
+    assert "kwargs_handlers" in seg, "探测必须把 handlers 传给 Accelerator ✗"
+    assert "ACCELGPUS" in seg and "ACCELVIS" in seg, "探测应回显 GPU 数与 CUDA_VISIBLE_DEVICES ✓"
+    j = src.find("def _probe_accelerate_device(")
+    assert j != -1, "缺 _probe_accelerate_device"
+    seg2 = src[j:j + 2800]
+    assert "cwd=None" in seg2, "探测必须支持 cwd（与训练对齐）✗"
+    assert "_venv_torch_lib" in seg2, "探测 env 必须前置 venv 的 torch\\lib（与训练一致）✗"
+    assert "cwd=(cwd if" in seg2, "探测必须把 cwd 真正传给子进程 ✗"
+    # 三个引擎都必须把训练目录传进来
+    assert "_accelerate_launch_cmd(vpy, logf=logf, cwd=sds)" in src, "主引擎未传 cwd=sds ✗"
+    assert src.count("_accelerate_launch_cmd(mvpy, logf=logf, cwd=mt_dir)") >= 2, \
+        "Krea2 / FLUX.2 未传 cwd=mt_dir ✗"
+    print("ACCEL_PROBE_MATCHES_TRAINING_OK")
+
+
+def test_diagnose_multigpu_process_group():
+    """★ 诊断必须识别「进程组未初始化」并直接给出真实方向 ✓
+
+    以前识别不了 ⇒ 落到通用分支「有 traceback → 按报错排查」✗，
+    而用户对着 `Default process group has not been initialized` 根本不知道从哪查 ✗
+    """
+    from kohya_core import utils as U
+    _out = ["Traceback (most recent call last):",
+            '  File "accelerate/state.py", line 287, in __init__',
+            "ValueError: Default process group has not been initialized, "
+            "please make sure to call init_process_group."]
+    _t = "\n".join(U.diagnose_child_exit(1, _out))
+    assert "多卡" in _t, "必须点明「多卡机器 + 单进程启动」✗：" + _t[:300]
+    assert "CUDA_VISIBLE_DEVICES" in _t, "必须给出可执行的临时办法 ✗：" + _t[:300]
+    assert "任务管理器" not in _t and "杀软" not in _t, \
+        "已定性为多卡问题，不该再让用户查内存/杀软 ✗：" + _t[:300]
+    # 普通 traceback 仍走原分支（不能被本签名误吞 ✓）
+    _t2 = "\n".join(U.diagnose_child_exit(1, ["Traceback (most recent call last):", "ValueError: boom"]))
+    assert "多卡" not in _t2, "普通报错被误判成多卡 ✗"
+    print("DIAGNOSE_MULTIGPU_PROCESS_GROUP_OK")
+
+
 def test_optimizer_resolution(base: Path):
     """resolve_optimizer / _probe_adamw8bit / _probe_lion / _optimizer_yaml_name 单元测试（mock 子进程，不真实运行 CUDA）。"""
     logs = []
@@ -1255,9 +1423,15 @@ def test_tools_module(base: Path):
     # 查看：返回文本
     assert isinstance(core.gpu_status_text(), str) and len(core.gpu_status_text()) > 0
     # 残留进程：nvidia-smi 不可用时返回 []（不抛）
+    # ⚠️ 该结果有**两个来源**：nvidia-smi 计算进程 + 通用 WMI 命令行匹配 ✗
+    #   只屏蔽 nvidia-smi 挡不住另一条 —— 本机若有残留训练进程（python 等），
+    #   WMI 那条照样返回数据 ⇒ 原断言会失败 ✗
+    #   （2026-09-29 暴露：build_env() 现在会预热一次 nvidia-smi，环境状态变了 ✓）
     from kohya_core import gpu as _gpu
     _gpu._NV_SMI_STATE["ok"] = None
-    with patch.object(_gpu, "_nvidia_smi", return_value=None):
+    with patch.object(_gpu, "_nvidia_smi", return_value=None), \
+            patch.object(core, "_nvidia_compute_apps", return_value=[], create=True), \
+            patch.object(core, "_wmi_training_procs", return_value=[], create=True):
         assert core.vram_residual_processes() == []
     _gpu._NV_SMI_STATE["ok"] = None
     # 清理内存：返回 4 元组（本机可跑，EmptyWorkingSet 安全）
@@ -2166,7 +2340,8 @@ def test_main_engine_accel_always_defined(base: Path):
     bad = ('if amd_mode and (params.get("train_env") or "").strip():\n'
            '        accel = _accelerate_launch_cmd(vpy)')
     assert bad not in src, "accel 仍只在 AMD 分支赋值（v0.9.18 回归未修复）"
-    m = re.search(r"^    accel = _accelerate_launch_cmd\(vpy(?:, logf=logf)?\)$", src, re.M)
+    # ★ 2026-09-29：容许多余关键字参数（如 cwd=sds，用于让探测与训练同 cwd ✗）✓
+    m = re.search(r"^    accel = _accelerate_launch_cmd\(vpy[^\n]*\)$", src, re.M)
     assert m, "主引擎 train() 未找到无条件 accel 赋值"
     print("MAIN_ENGINE_ACCEL_ALWAYS_DEFINED_UNIT_TEST_OK")
 
@@ -2476,18 +2651,24 @@ def test_accelerate_cpu_config_self_heal(base):
     cfg = base / "accelerate" / "default_config.yaml"
     cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_text('{\n  "use_cpu": true,\n  "num_processes": 2\n}\n', encoding="utf-8")
+    # vpy 占位必须是**真实存在**的文件（launch 会 isfile 检查 ✓）。
+    # ⚠️ 不能再用 cfg 自己 ✗ —— 自愈现在会把有害配置**改名备份**，那个路径随后就不存在了 ✗
+    fake_py = base / "fake_python.exe"
+    fake_py.write_text("", encoding="utf-8")
 
     real_path = core._accelerate_config_path
     real_run = core.subprocess.run
     real_probe = core._probe_accelerate_device
     try:
         core._accelerate_config_path = lambda: str(cfg)
-        # 1) 检测 + 修复
+        # 1) 检测 + 修复：整份配置**改名备份**（不再原地改写 ✗，可随时手动改回 ✓）
         assert core._accelerate_config_use_cpu() is True
         assert core._neutralize_accelerate_cpu_config(print) is True
-        raw = cfg.read_text(encoding="utf-8")
-        assert '"use_cpu": false' in raw and '"use_cpu": true' not in raw
-        assert core._accelerate_config_use_cpu() is False
+        assert not cfg.exists(), "有害配置应被移走（改名备份）✗"
+        _baks = list(cfg.parent.glob("default_config.yaml.bak_*"))
+        assert _baks, "应保留可回退的备份 ✓"
+        assert "use_cpu" in _baks[0].read_text(encoding="utf-8"), "备份应保留原内容 ✓"
+        assert core._accelerate_config_use_cpu() is False, "修复后不应再判定为 use_cpu ✗"
 
         # 2) 配置干净时 launch 零探测，且 argv 带显式单进程
         calls = []
@@ -2496,15 +2677,15 @@ def test_accelerate_cpu_config_self_heal(base):
             return result(0, stdout="accelerate 1.0.0\nC:\\x\\accelerate\\__init__.py\n" + str(cmd[0]))
         core.subprocess.run = fake_run
         core._probe_accelerate_device = lambda *a, **k: (_ for _ in ()).throw(AssertionError("干净配置不应触发探测"))
-        argv = core._accelerate_launch_cmd(str(cfg))   # vpy 用存在的配置文件路径占位，fake_run 不真执行
+        argv = core._accelerate_launch_cmd(str(fake_py))   # fake_run 不真执行
         assert argv[1:3] == ["-m", "accelerate.commands.launch"]
         assert "--num_processes" in argv and "--num_machines" in argv
 
-        # 3) use_cpu=true 时 launch 内自动修复 + 复核（探测返回 cuda）
+        # 3) 又有 use_cpu=true 时 launch 内自动修复 + 复核（探测返回 cuda）
         cfg.write_text('{"use_cpu": true}', encoding="utf-8")
         core._probe_accelerate_device = lambda *a, **k: "cuda:0"
-        argv2 = core._accelerate_launch_cmd(str(cfg))
-        assert '"use_cpu": false' in cfg.read_text(encoding="utf-8")
+        argv2 = core._accelerate_launch_cmd(str(fake_py))
+        assert not cfg.exists(), "launch 内自愈也应把有害配置移走 ✗"
         assert "--num_processes" in argv2
     finally:
         core._accelerate_config_path = real_path
@@ -4739,6 +4920,11 @@ def main():
         test_aux_scripts_drop_packed_dir(base)
         test_diagnose_splits_by_output()
         test_preprocess_selfcheck_covers_network_modules(base)
+        # ★ 2026-09-29（RTX 4080S 双卡 事故）：多卡机器上训练脚本会自动附加分布式设置，
+        #   与工具的 `--num_processes 1` 单进程启动相撞 → 「进程组未初始化」✗
+        test_single_gpu_isolation()
+        test_accel_probe_matches_training(base)
+        test_diagnose_multigpu_process_group()
         test_fourth_engine(base)
         test_fourth_engine_train_pipeline(base)
         test_fizgig_deps_self_heal(base)
@@ -4844,6 +5030,8 @@ def main():
         test_trainer_batch_size_and_gradient_checkpointing(base)
         # ★ 2026-09-27：AMD 训练必须带 MIOpen FAST（实测提速 4.4 倍：11.45 → 2.58 s/it）
         test_miopen_fast_mode_env(base)
+        # ★ 2026-09-29：accelerate 被判定成 CPU（MULTI_CPU 残留配置）+ fp8 算力门禁
+        test_accelerate_cpu_config_and_fp8_gate(base)
         test_venv_hf_sitecustomize(base)
         test_torch_compile_safe_fallback(base)
         test_swap_zero_option(base)
@@ -4869,7 +5057,8 @@ def main():
 def test_cpu_device_probe_warning(base: Path):
     """训练前始终探测加速设备：CPU 版 torch/坏 ROCm 命中 device: cpu 时醒目警告（防全程 CPU 傻跑）。"""
     src = (ROOT / "Kohya一键工具.py").read_text(encoding="utf-8")
-    assert "_probe_accelerate_device(vpy, logf)" in src, "缺设备探测调用"
+    # ★ 2026-09-29：探测调用现在会带 cwd（与训练对齐 ✗），断言放宽到「有调用 + 带 vpy/logf」✓
+    assert re.search(r"_probe_accelerate_device\(vpy, logf[^\n]*\)", src), "缺设备探测调用"
     assert "探测不到 GPU" in src and "device: cpu" in src, "缺 CPU 警告文案"
     assert "def _probe_accelerate_device" in src, "缺探测函数"
     print("CPU_DEVICE_PROBE_WARNING_OK")
