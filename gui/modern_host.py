@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import os
 import re
 import math
@@ -15,6 +17,8 @@ import traceback
 from pathlib import Path
 
 from kohya_core.diagnostics import SessionLog, summary_lines, redact, write_bundle
+from kohya_core.training_history import TrainingHistory
+from kohya_core.project_config import WORKSPACE_PARAM_KEYS, BOOL_PARAM_KEYS, training_params, caption_summary
 
 try:
     from model_downloader import ModelDownloader
@@ -34,20 +38,15 @@ _MODERN_PROJECT_TEMPLATES = {
     "MiniMax H3 全模态 LoRA（Fizgig）": {"mode": "h3_fz", "base_type": "sdxl", "note": "第四引擎 Fizgig；图片、视频、音频与同名字幕可放在同一原始目录或其子目录。"},
 }
 
-_WORKSPACE_PARAM_KEYS = (
-    "rank", "alpha", "unet_lr", "te_lr", "repeats", "max_epochs", "resolution",
-    "save_every", "sample_interval", "video_steps", "video_frames", "optimizer",
-    "strong_bind", "clean_concept", "sample_preview", "compile", "crop_ratio",
-    "sample_prompt", "noise_offset", "min_snr_gamma", "quant_mode", "blocks_to_swap", "fizgig_qwen_preset",
-    "wd14_model", "overwrite", "amd_mode", "global_pos", "global_neg",
-)
+_WORKSPACE_PARAM_KEYS = WORKSPACE_PARAM_KEYS
 
 # These fields are accepted by the modern workspace save bridge, but were added
 # after the classic JSON importer whitelist was defined. Preserve them when a
 # modern project is created from a compatible JSON file.
 _MODERN_IMPORT_EXTRA_PARAMS = {
     "sample_interval", "video_frames", "noise_offset", "min_snr_gamma",
-    "wd14_model", "overwrite", "amd_mode", "fizgig_qwen_preset",
+    "wd14_model", "overwrite", "keep_user_captions", "amd_mode", "fizgig_qwen_preset",
+    "batch_size", "gc", "sample_prompt", "global_pos", "global_neg",
 }
 
 _APPEARANCE_BACKGROUND_HISTORY_LIMIT = 8
@@ -199,9 +198,95 @@ class ModernUIBridge:
                 "progress": task.get("progress"),
                 "eta_seconds": task.get("eta_seconds"),
                 "detail": task.get("detail", ""),
+                "metrics": task.get("metrics"),
+                "loss_history": list(task.get("loss_history", [])),
                 "logs": logs[max(0, offset - log_offset):],
                 "next_offset": log_offset + len(logs),
             }
+
+    @staticmethod
+    def _is_training_sample(filename, parent):
+        low = filename.lower()
+        if not low.endswith((".png", ".jpg", ".jpeg", ".webp")):
+            return False
+        return ("sample" in low or parent.lower() in ("sample", "samples")
+                or re.search(r"_\d{4,}_|-\d+\.", low) is not None)
+
+    def get_task_sample(self, task_id, after="", full=False):
+        """Return a bounded preview from the current training run's project output."""
+        with self._task_lock:
+            task = self._task
+            if not task or task.get("id") != str(task_id or "") or task.get("kind") != "training":
+                return {"ok": False, "error": "训练任务已不存在，请重新打开训练窗口。"}
+            project_name = task.get("key") or ""
+            started = float(task.get("started") or 0)
+        output_dir = Path(self.core.data_sub("output", project_name))
+        if not output_dir.is_dir():
+            return {"ok": True, "available": False}
+        latest = None
+        latest_stat = None
+        try:
+            for root, dirs, files in os.walk(output_dir):
+                root_path = Path(root)
+                depth = len(root_path.relative_to(output_dir).parts)
+                dirs[:] = [name for name in dirs if depth < 4 and not name.startswith(".")
+                           and not (root_path / name).is_symlink()]
+                for name in files:
+                    if not self._is_training_sample(name, root_path.name):
+                        continue
+                    candidate = root_path / name
+                    if candidate.is_symlink():
+                        continue
+                    try:
+                        stat = candidate.stat()
+                    except OSError:
+                        continue
+                    if stat.st_mtime < started - 2 or stat.st_size <= 0:
+                        continue
+                    if latest_stat is None or stat.st_mtime_ns > latest_stat.st_mtime_ns:
+                        latest, latest_stat = candidate, stat
+            if latest is None:
+                return {"ok": True, "available": False}
+            name = str(latest.relative_to(output_dir)).replace("\\", "/")
+            version = "%s:%s:%s" % (latest_stat.st_mtime_ns, latest_stat.st_size, name)
+            if str(after or "") == version and not full:
+                return {"ok": True, "available": True, "name": name, "version": version}
+            from PIL import Image
+            with Image.open(latest) as source:
+                if source.width * source.height > 80_000_000:
+                    raise ValueError("图片尺寸过大")
+                source.thumbnail((1400, 1400) if full else (520, 520))
+                image = source.convert("RGB")
+            buffer = io.BytesIO()
+            image.save(buffer, format="WEBP", quality=82, method=4)
+            data_url = "data:image/webp;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+            return {"ok": True, "available": True, "name": name, "version": version,
+                    "data_url": data_url}
+        except (OSError, ValueError) as exc:
+            # The engine may still be writing the newest image. The next poll retries it.
+            return {"ok": True, "available": False,
+                    "warning": "采样图暂时无法读取，稍后重试：%s" % str(exc)[:100]}
+
+    def _record_training_metrics(self, task_id, snapshot):
+        with self._task_lock:
+            task = self._task
+            if not task or task.get("id") != task_id:
+                return
+            step = int(snapshot.get("step") or 0)
+            loss = snapshot.get("loss")
+            loss = float(loss) if isinstance(loss, (int, float)) and math.isfinite(loss) else None
+            speed = snapshot.get("speed")
+            speed = float(speed) if isinstance(speed, (int, float)) and math.isfinite(speed) else 0.0
+            task["metrics"] = {"step": step, "total": int(snapshot.get("total") or 0), "loss": loss, "speed": speed}
+            if step > 0 and loss is not None:
+                points = task.setdefault("loss_history", [])
+                point = {"step": step, "loss": loss}
+                if points and points[-1]["step"] == step:
+                    points[-1] = point
+                elif not points or step > points[-1]["step"]:
+                    points.append(point)
+                    if len(points) > 600:
+                        task["loss_history"] = points[:-1:2] + [points[-1]]
 
     def _begin_task(self, title, kind, mode="", key=""):
         with self._task_lock:
@@ -284,7 +369,9 @@ class ModernUIBridge:
         partial_sizes = {}
         items = []
         for key, value in links.items():
-            filename, label, url = value
+            filename, label = value[0], value[1]
+            urls = self.core.model_url_list(value)
+            url = urls[0] if urls else ""
             present = bool(existing.get(key))
             path = str(existing.get(key) or os.path.join(asset_dir, filename))
             try:
@@ -327,7 +414,12 @@ class ModernUIBridge:
         links = getattr(self.core, links_name, {})
         if key not in links:
             return {"ok": False, "error": "所选模型文件不存在。"}
-        filename, label, url = links[key]
+        entry = links[key]
+        filename, label = entry[0], entry[1]
+        urls = self.core.model_url_list(entry)
+        if not urls:
+            return {"ok": False, "error": "当前模型没有可用的下载源，请手动获取。"}
+        url = urls[0]
         asset_dir = str(getattr(self.core, dir_name)())
         os.makedirs(asset_dir, exist_ok=True)
         dest = os.path.join(asset_dir, os.path.basename(filename))
@@ -491,6 +583,7 @@ class ModernUIBridge:
                         "concept_mode": self.core.is_concept_mode(mode, at_sub_mode),
                         "style_target": self.core.style_target_code(config.get("style_preset")),
                         "overwrite": bool(stored.get("overwrite", False)),
+                        "keep_user_captions": bool(stored.get("keep_user_captions", False)),
                     }
                     if mode == "style" and config.get("base_type") == "anima":
                         args["dataset_mode"] = None
@@ -544,57 +637,7 @@ class ModernUIBridge:
         mode = str(config.get("mode") or "")
         if mode not in ("qwen_image", "zimage"):
             raise ValueError("新版训练页直连训练目前只接入 Qwen-Image / Z-Image。")
-        stored = config.get("params") if isinstance(config.get("params"), dict) else {}
-        base_type = str(config.get("base_type") or "sdxl")
-        preset = dict(self.core.preset_for(mode, base_type) or {})
-
-        def value(key, default=None):
-            candidate = stored.get(key)
-            return preset.get(key, default) if candidate in (None, "") else candidate
-
-        def integer(key, default):
-            return self._training_number(value(key, default), default, int)
-
-        params = {
-            "mode": mode,
-            "base_type": base_type,
-            "at_sub_mode": str(config.get("at_sub_mode") or "character"),
-            "concept_type": str(config.get("concept_type") or "form"),
-            "clean_concept": bool(value("clean_concept", True)),
-            "fast_tier": str(config.get("fast_tier") or "auto"),
-            "trigger": str(config.get("trigger") or "").strip(),
-            "strong_bind": bool(value("strong_bind", True)),
-            "raw_dir": str(config.get("raw_dir") or "").strip(),
-            "reg_dir": str(config.get("reg_dir") or "").strip() or None,
-            "base_model": str(config.get("base_model") or "").strip() or None,
-            "rank": integer("rank", 16),
-            "alpha": integer("alpha", 16),
-            "unet_lr": str(value("unet_lr", "1e-4")),
-            "te_lr": str(value("te_lr", "1e-4")),
-            "repeats": integer("repeats", 1),
-            "max_epochs": integer("max_epochs", 20),
-            "resolution": integer("resolution", 512),
-            "video_steps": integer("video_steps", 2000),
-            "save_every": value("save_every", None),
-            "sample_interval": integer("sample_interval", 0),
-            "sample_prompt": str(value("sample_prompt", "") or ""),
-            "optimizer": str(value("optimizer", "auto") or "auto"),
-            "crop_ratio": self.core.normalize_crop_ratio(value("crop_ratio", "")),
-            "train_text_encoder": not bool(config.get("unet_only", False)),
-            "style_preset": str(config.get("style_preset") or "自定义"),
-            "style_caption": str(config.get("style_caption") or "").strip(),
-            "wd14_model": str(value("wd14_model", "swinv2-v3") or "swinv2-v3"),
-            "overwrite": bool(value("overwrite", False)),
-            "amd_mode": bool(value("amd_mode", False)),
-            "train_env": str(config.get("train_env") or "").strip() or None,
-            "project": project_name,
-        }
-        if stored.get("sample_preview") is not None:
-            params["sample_preview"] = bool(stored.get("sample_preview"))
-        for key in ("compile", "quant_mode", "blocks_to_swap", "noise_offset", "min_snr_gamma", "global_pos", "global_neg"):
-            if key in stored:
-                params[key] = stored[key]
-        return params
+        return training_params(self.core, config, project_name)
 
     def prepare_training(self, project_name):
         """Run read-only preflight for a modern workspace's directly supported path."""
@@ -604,10 +647,59 @@ class ModernUIBridge:
             return {"ok": False, "error": "项目不存在或配置文件已损坏。"}
         mode = str(config.get("mode") or "")
         if mode in ("qwen_image", "zimage"):
-            return self._prepare_qwen_training(project_name)
-        if mode in ("character", "style", "concept"):
-            return self._prepare_anima_training(project_name, config)
-        return self._prepare_engine_training(project_name, config)
+            result = self._prepare_qwen_training(project_name)
+        elif mode in ("character", "style", "concept"):
+            result = self._prepare_anima_training(project_name, config)
+        else:
+            result = self._prepare_engine_training(project_name, config)
+        if result.get("ok") and result.get("plan"):
+            result["plan"]["config_summary"] = self._classic_training_params(config, project_name)
+            supports = getattr(self.core, "param_supports", lambda *_: False)
+            result["plan"]["config_supports"] = {key: bool(supports(key, mode)) for key in ("quant_mode", "batch_size", "gc")}
+            interval_unit = getattr(self.core, "interval_unit_for", lambda *_: "steps")
+            save_unit = interval_unit(mode, "save_every")
+            result["plan"]["save_interval_unit"] = save_unit
+            try:
+                requested_save = int(result["plan"]["config_summary"].get("save_every") or 0)
+            except (TypeError, ValueError):
+                requested_save = 0
+            effective_save = requested_save if requested_save > 0 else (1 if save_unit == "epochs" else 200)
+            if mode in ("style", "character", "concept"):
+                effective_save = max(50, effective_save)
+            result["plan"]["save_interval_effective"] = effective_save
+            result["plan"]["sampling_rule"] = self._sampling_rule(mode, result["plan"]["config_summary"], result["plan"])
+        return result
+
+    def _sampling_rule(self, mode, params, plan):
+        """开训前展示有效的采样开关和间隔，不猜测预处理后的精确步数。"""
+        vram = plan.get("vram_gb")
+        enabled = bool(getattr(self.core, "_sample_preview_enabled", lambda p, v: p.get("sample_preview") if p.get("sample_preview") is not None else v is None or v >= 20)(params, vram))
+        reason = "手动开启" if params.get("sample_preview") is True else "手动关闭" if params.get("sample_preview") is False else "按显存自动开启" if enabled else "按显存自动关闭（低于 20GB）"
+        fast = str(params.get("fast_tier") or "auto").lower()
+        if mode in ("qwen_image", "zimage") and (fast == "on" or (fast == "auto" and mode == "zimage" and vram is not None and vram < 10)):
+            enabled, reason = False, "快跑档关闭训练采样"
+        if enabled and mode == "krea2_fz" and not getattr(self.core, "krea2_model_files", lambda: {"turbo": True})().get("turbo"):
+            enabled, reason = False, "缺少 Turbo 预览模型，本次不采样"
+        try:
+            interval = int(params.get("sample_interval") or 0)
+        except (TypeError, ValueError):
+            interval = 0
+        unit = getattr(self.core, "interval_unit_for", lambda *_: "steps")(mode, "sample_interval")
+        if interval > 0:
+            cadence = "每 %d %s" % (interval, "轮" if unit == "epochs" else "步")
+        elif unit == "epochs":
+            cadence = "按图集大小估算约每 100 步一次，至少每 1 轮"
+        elif mode in ("style", "character", "concept", "krea2", "flux2"):
+            cadence = "跟随模型保存节奏（实际步数在训练启动后确定）"
+        else:
+            cadence = "每 250 步"
+        if interval > 0 and unit == "steps" and interval < 10:
+            cadence += "；间隔很短，可能显著增加耗时或显存占用"
+        if interval > 0 and unit == "epochs" and interval > int(params.get("max_epochs") or 1):
+            cadence += "；超过总轮数，训练中可能没有定期采样"
+        if mode == "h3_fz":
+            cadence += "；视频/音频请到输出目录查看，预览窗口只显示图片"
+        return {"enabled": enabled, "reason": reason, "cadence": cadence, "unit": unit}
 
     def _prepare_engine_training(self, project_name, config):
         """Preflight the existing musubi, Fizgig and AI Toolkit engine functions."""
@@ -690,8 +782,9 @@ class ModernUIBridge:
             if vram is not None and vram < 24:
                 warnings.append("当前显存约 %.1f GB，H3 推荐 24GB 以上；训练可能很慢或显存不足。" % vram)
             model_label = "MiniMax H3（AI Toolkit 视频）"
-            schedule_value = "%d 步 · %d 帧" % (params.get("video_steps") or 2000, params.get("video_frames") or 73)
-            steps = int(params.get("video_steps") or 2000)
+            aligned_frames = getattr(self.core, "h3_align_frames", lambda value: value)(params.get("video_frames") or 73)
+            steps = max(100, min(getattr(self.core, "H3_MAX_STEPS", 3000), int(params.get("video_steps") or 2000)))
+            schedule_value = "%d 步 · %d 帧" % (steps, aligned_frames)
         else:
             try:
                 image_count = self._count_preprocessable_images(raw_dir)
@@ -752,7 +845,7 @@ class ModernUIBridge:
             "training_target": "按当前模式调用已有训练引擎入口",
             "schedule_label": "训练计划", "schedule_value": schedule_value,
             "rank": plan_rank, "alpha": plan_alpha,
-            "learning_rate": plan_learning_rate, "resolution": params["resolution"],
+            "learning_rate": plan_learning_rate, "resolution": getattr(self.core, "h3_align_resolution", lambda value: value)(params["resolution"]) if mode == "video" else params["resolution"],
             "steps": steps, "trigger": params["trigger"],
             "gpu_vendor": vendor, "vram_gb": vram, "warnings": warnings,
             "resume_path": str(resume_path or ""),
@@ -918,73 +1011,7 @@ class ModernUIBridge:
             raise ValueError("请选择有效的底模架构。")
         if base_type == "flux2":
             raise ValueError("FLUX.2 需使用第二训练引擎的 FLUX.2 模式。")
-        stored = config.get("params") if isinstance(config.get("params"), dict) else {}
-        preset = dict(self.core.preset_for(mode, base_type) or {})
-
-        def value(key, default=None):
-            candidate = stored.get(key)
-            return preset.get(key, default) if candidate in (None, "") else candidate
-
-        def integer(key, default):
-            return self._training_number(value(key, default), default, int)
-
-        def optional_integer(key):
-            candidate = value(key, None)
-            if candidate in (None, ""):
-                return None
-            try:
-                parsed = int(float(candidate))
-                return parsed if parsed > 0 else None
-            except (TypeError, ValueError, OverflowError):
-                return None
-
-        params = {
-            "mode": mode,
-            "base_type": base_type,
-            "at_sub_mode": str(config.get("at_sub_mode") or "character"),
-            "concept_type": str(config.get("concept_type") or "form"),
-            "clean_concept": bool(value("clean_concept", True)),
-            "fast_tier": str(config.get("fast_tier") or "auto"),
-            "trigger": str(config.get("trigger") or "").strip(),
-            "strong_bind": bool(value("strong_bind", True)),
-            "raw_dir": str(config.get("raw_dir") or "").strip(),
-            "reg_dir": str(config.get("reg_dir") or "").strip() or None,
-            "base_model": str(config.get("base_model") or "").strip() or None,
-            "rank": integer("rank", 12),
-            "alpha": integer("alpha", 6),
-            "unet_lr": str(value("unet_lr", "3e-4")),
-            "te_lr": str(value("te_lr", "1.5e-4")),
-            "repeats": integer("repeats", 5),
-            "max_epochs": integer("max_epochs", 8),
-            "resolution": integer("resolution", 512),
-            "video_steps": integer("video_steps", 2000),
-            "save_every": optional_integer("save_every"),
-            "sample_interval": integer("sample_interval", 0),
-            "sample_prompt": str(value("sample_prompt", "") or ""),
-            "train_text_encoder": not bool(config.get("unet_only", False)),
-            "style_preset": str(config.get("style_preset") or "自定义"),
-            "style_caption": str(config.get("style_caption") or "").strip(),
-            "crop_ratio": self.core.normalize_crop_ratio(value("crop_ratio", "")),
-            "noise_offset": value("noise_offset", ""),
-            "min_snr_gamma": value("min_snr_gamma", ""),
-            "global_pos": str(config.get("global_pos") or "").strip(),
-            "global_neg": str(config.get("global_neg") or "").strip(),
-            "optimizer": str(value("optimizer", "auto") or "auto"),
-            "quant_mode": str(value("quant_mode", "auto") or "auto"),
-            "blocks_to_swap": value("blocks_to_swap", ""),
-            "compile": bool(value("compile", False)),
-            "wd14_model": str(value("wd14_model", "swinv2-v3") or "swinv2-v3"),
-            "overwrite": bool(value("overwrite", False)),
-            "amd_mode": bool(value("amd_mode", False)),
-            "train_env": str(config.get("train_env") or "").strip() or None,
-            "project": project_name,
-        }
-        # Keep the legacy trainer's VRAM-based default when the modern UI is in
-        # "auto" mode (None is removed from the saved config). An explicit
-        # on/off selection must cross this bridge unchanged.
-        if stored.get("sample_preview") is not None:
-            params["sample_preview"] = bool(stored.get("sample_preview"))
-        return params
+        return training_params(self.core, config, project_name)
 
     def _classic_training_params(self, config, project_name):
         """Normalize an engine project's saved fields to the legacy trainer contract."""
@@ -993,68 +1020,7 @@ class ModernUIBridge:
             return self._anima_training_params(config, project_name)
         if mode in ("qwen_image", "zimage"):
             return self._qwen_training_params(config, project_name)
-        stored = config.get("params") if isinstance(config.get("params"), dict) else {}
-        base_type = str(config.get("base_type") or "sdxl")
-        preset = dict(self.core.preset_for(mode, base_type) or {})
-
-        def value(key, default=None):
-            candidate = stored.get(key)
-            return preset.get(key, default) if candidate in (None, "") else candidate
-
-        def integer(key, default):
-            return self._training_number(value(key, default), default, int)
-
-        def optional_integer(key):
-            candidate = value(key, None)
-            if candidate in (None, ""):
-                return None
-            try:
-                parsed = int(float(candidate))
-                return parsed if parsed > 0 else None
-            except (TypeError, ValueError, OverflowError):
-                return None
-
-        params = {
-            "mode": mode, "base_type": base_type,
-            "at_sub_mode": str(config.get("at_sub_mode") or "character"),
-            "concept_type": str(config.get("concept_type") or "form"),
-            "clean_concept": bool(value("clean_concept", True)),
-            "fast_tier": str(config.get("fast_tier") or "auto"),
-            "trigger": str(config.get("trigger") or "").strip(),
-            "strong_bind": bool(value("strong_bind", True)),
-            "raw_dir": str(config.get("raw_dir") or "").strip(),
-            "reg_dir": str(config.get("reg_dir") or "").strip() or None,
-            "base_model": str(config.get("base_model") or "").strip() or None,
-            "rank": integer("rank", 8 if mode in ("qwen21_fz", "h3_fz") else 32), "alpha": integer("alpha", 8 if mode in ("qwen21_fz", "h3_fz") else 32),
-            "unet_lr": str(value("unet_lr", "1e-4")), "te_lr": str(value("te_lr", "1e-4")),
-            "repeats": integer("repeats", 1), "max_epochs": integer("max_epochs", 50 if mode == "h3_fz" else 30 if mode == "qwen21_fz" else 16),
-            "resolution": integer("resolution", 512),
-            "video_steps": integer("video_steps", 2000),
-            "video_frames": integer("video_frames", getattr(self.core, "H3_FRAMES", 73)),
-            "fizgig_qwen_preset": str(value("fizgig_qwen_preset", "auto") or "auto"),
-            "save_every": optional_integer("save_every"),
-            "sample_interval": integer("sample_interval", 0),
-            "sample_prompt": str(value("sample_prompt", "") or ""),
-            "train_text_encoder": not bool(config.get("unet_only", False)),
-            "style_preset": str(config.get("style_preset") or "自定义"),
-            "style_caption": str(config.get("style_caption") or "").strip(),
-            "crop_ratio": self.core.normalize_crop_ratio(value("crop_ratio", "")),
-            "noise_offset": value("noise_offset", ""), "min_snr_gamma": value("min_snr_gamma", ""),
-            "global_pos": str(config.get("global_pos") or "").strip(),
-            "global_neg": str(config.get("global_neg") or "").strip(),
-            "optimizer": str(value("optimizer", "auto") or "auto"),
-            "quant_mode": str(value("quant_mode", "auto") or "auto"),
-            "blocks_to_swap": value("blocks_to_swap", ""),
-            "compile": bool(value("compile", False)),
-            "wd14_model": str(value("wd14_model", "swinv2-v3") or "swinv2-v3"),
-            "overwrite": bool(value("overwrite", False)),
-            "amd_mode": bool(value("amd_mode", False)),
-            "train_env": str(config.get("train_env") or "").strip() or None,
-            "project": project_name,
-        }
-        if stored.get("sample_preview") is not None:
-            params["sample_preview"] = bool(stored.get("sample_preview"))
-        return params
+        return training_params(self.core, config, project_name)
 
     def _prepare_anima_training(self, project_name, config):
         """Check the existing Kohya prerequisites without launching classic UI."""
@@ -1201,6 +1167,54 @@ class ModernUIBridge:
             },
         }
 
+    def _history_store(self):
+        return TrainingHistory(self.core.data_sub("training_runs"))
+
+    def list_training_runs(self, project_name=""):
+        try:
+            records = self._history_store().list(str(project_name or ""))
+            with self._task_lock:
+                active_id = (self._task or {}).get("id")
+            for record in records:
+                if record.get("status") in ("running", "awaiting_review") and record["id"] != active_id:
+                    record.update(status="interrupted", message="上次任务没有正常结束；可检查输出目录中的快照。")
+            return {"ok": True, "runs": records}
+        except Exception as exc:
+            return {"ok": False, "error": "读取训练记录失败：%s" % exc}
+
+    def get_training_run(self, run_id):
+        try:
+            return {"ok": True, "run": self._history_store().get(str(run_id))}
+        except (OSError, ValueError) as exc:
+            return {"ok": False, "error": "读取训练记录失败：%s" % exc}
+
+    def restore_training_run(self, run_id, project_name):
+        with self._task_lock:
+            if self._task and self._task.get("status") in ("running", "awaiting_review"):
+                return {"ok": False, "error": "请等当前任务结束后再恢复设置。"}
+            result = self.get_training_run(run_id)
+            if not result.get("ok"):
+                return result
+            record = result["run"]
+            project_name = str(project_name or "")
+            current = self.core.load_project(project_name)
+            if not current or record.get("project_name") != project_name:
+                return {"ok": False, "error": "请在原项目内恢复设置；项目已改名或删除时请手动参考记录。"}
+            patch = dict(record.get("config") or {})
+            saved_params = patch.get("params") if isinstance(patch.get("params"), dict) else {}
+            patch["params"] = {key: saved_params.get(key) for key in WORKSPACE_PARAM_KEYS}
+            for key, default in {"trigger": "", "style_preset": "自定义", "style_caption": "",
+                                 "at_sub_mode": "character", "concept_type": "form", "fast_tier": "auto",
+                                 "global_pos": "", "global_neg": "", "unet_only": False}.items():
+                patch.setdefault(key, default)
+            # Preserve current media and model locations; historical settings
+            # are reused without silently selecting another dataset or engine.
+            if patch.get("mode") != current.get("mode") or patch.get("base_type") != current.get("base_type"):
+                return {"ok": False, "error": "当前模式或底模类型已变化，不能直接恢复这条记录。"}
+            for key in ("raw_dir", "reg_dir", "base_model", "train_env"):
+                patch.pop(key, None)
+            return self.save_project_config(project_name, patch)
+
     def start_training(self, project_name, use_resume=False):
         """Run an existing engine pipeline without opening the classic Tk workspace."""
         project_name = str(project_name or "").strip()
@@ -1216,7 +1230,7 @@ class ModernUIBridge:
             params = self._classic_training_params(config, project_name)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
-        task_id = self._begin_task("%s 训练" % plan["mode_label"], "training", mode=plan["mode"])
+        task_id = self._begin_task("%s 训练" % plan["mode_label"], "training", mode=plan["mode"], key=project_name)
         if not task_id:
             return {"ok": False, "error": "已有环境、模型或训练任务正在运行，请等它完成后再试。"}
         review_event = threading.Event()
@@ -1224,6 +1238,23 @@ class ModernUIBridge:
             if self._task and self._task.get("id") == task_id:
                 self._task["review_event"] = review_event
         self.core.reset_stop()
+        root_keys = ("mode", "base_type", "at_sub_mode", "concept_type", "fast_tier", "trigger",
+                     "raw_dir", "reg_dir", "base_model", "style_preset", "style_caption",
+                     "train_env", "unet_only", "global_pos", "global_neg")
+        record_config = {key: config[key] for key in root_keys if key in config}
+        stored_params = config.get("params") if isinstance(config.get("params"), dict) else {}
+        record_config["params"] = {key: value for key, value in stored_params.items() if key in WORKSPACE_PARAM_KEYS}
+        with self._task_lock:
+            task_state = self._task
+            started = task_state["started"]
+        run_record = {"id": task_id, "project_name": project_name, "mode": params["mode"],
+                      "mode_label": plan["mode_label"], "started": started, "ended": None,
+                      "status": "running", "message": "准备训练", "config": record_config,
+                      "normalized_params": dict(params), "resume_path": str(resume_path or "")}
+        try:
+            self._history_store().save(run_record)
+        except Exception as exc:
+            self._task_log(task_id, "[WARN] 训练记录暂时无法保存：%s" % exc)
 
         def worker():
             import json
@@ -1274,6 +1305,7 @@ class ModernUIBridge:
                         "concept_mode": self.core.is_concept_mode(params["mode"], params["at_sub_mode"]),
                         "style_target": self.core.style_target_code(params["style_preset"]),
                         "overwrite": params["overwrite"],
+                        "keep_user_captions": params["keep_user_captions"],
                     }
                     self.core.preprocess(lambda line: self._task_log(task_id, line), **preprocess_args)
                     stats = {}
@@ -1328,6 +1360,7 @@ class ModernUIBridge:
                 def monitor_worker():
                     while not monitor_stop.wait(0.8):
                         snapshot = monitor.snapshot()
+                        self._record_training_metrics(task_id, snapshot)
                         total = int(snapshot.get("total") or 0)
                         step = int(snapshot.get("step") or 0)
                         speed = float(snapshot.get("speed") or 0)
@@ -1406,6 +1439,7 @@ class ModernUIBridge:
                     )
                 else:
                     raise RuntimeError("新版训练页尚未注册「%s」训练模式。" % mode)
+                self._record_training_metrics(task_id, monitor.snapshot())
                 try:
                     self.core.export_project_named_lora(
                         params.get("mode"), project_name,
@@ -1442,6 +1476,19 @@ class ModernUIBridge:
                         pass
                 if monitor_thread is not None:
                     monitor_thread.join(timeout=1)
+                if monitor is not None:
+                    self._record_training_metrics(task_id, monitor.snapshot())
+                with self._task_lock:
+                    final_task = dict(task_state)
+                run_record.update(ended=time.time(), status=final_task.get("status", "interrupted"),
+                                  message=redact(final_task.get("message", "")),
+                                  metrics=final_task.get("metrics"),
+                                  loss_history=list(final_task.get("loss_history", [])),
+                                  logs=[redact(line) for line in final_task.get("logs", [])[-300:]])
+                try:
+                    self._history_store().save(run_record)
+                except Exception as exc:
+                    self._task_log(task_id, "[WARN] 本次训练记录保存失败：%s" % exc)
                 try:
                     if os.path.isfile(report_path):
                         os.remove(report_path)
@@ -1582,19 +1629,14 @@ class ModernUIBridge:
         if not isinstance(config, dict):
             return {"ok": False, "error": "项目不存在或配置文件已损坏。"}
 
+        config = dict(config)
         root_string_fields = {
             "mode", "base_type", "base_model", "raw_dir", "trigger", "reg_dir",
             "style_preset", "style_caption", "at_sub_mode", "concept_type", "fast_tier",
             "global_pos", "global_neg", "train_env",
         }
         root_bool_fields = {"unet_only"}
-        param_fields = {
-            "rank", "alpha", "unet_lr", "te_lr", "repeats", "max_epochs", "resolution",
-            "save_every", "sample_interval", "video_steps", "video_frames", "optimizer",
-            "strong_bind", "clean_concept", "sample_preview", "compile", "crop_ratio",
-            "sample_prompt", "noise_offset", "min_snr_gamma", "quant_mode", "blocks_to_swap",
-            "wd14_model", "overwrite", "amd_mode", "fizgig_qwen_preset",
-        }
+        param_fields = set(WORKSPACE_PARAM_KEYS)
         allowed_root_fields = root_string_fields | root_bool_fields | {"params"}
         unknown_root_fields = set(patch) - allowed_root_fields
         if unknown_root_fields:
@@ -1620,15 +1662,16 @@ class ModernUIBridge:
                 return {"ok": False, "error": "字段「%s」必须为开关值。" % key}
             config[key] = value
 
-        params = config.get("params")
-        if not isinstance(params, dict):
-            params = {}
+        params = dict(config.get("params")) if isinstance(config.get("params"), dict) else {}
         incoming_params = patch.get("params", {})
         if not isinstance(incoming_params, dict):
             return {"ok": False, "error": "训练参数格式无效。"}
         for key, value in incoming_params.items():
             if key not in param_fields:
                 return {"ok": False, "error": "新版训练页尚未接入训练参数「%s」。" % key}
+            if value is None:
+                params.pop(key, None)
+                continue
             if key == "quant_mode" and value not in getattr(self.core, "QUANT_MODE_OPTIONS", {}).get(next_mode, ()):
                 return {"ok": False, "error": "当前训练模式不支持量化精度「%s」。" % value}
             if key == "sample_preview" and value is None:
@@ -1636,10 +1679,11 @@ class ModernUIBridge:
                 continue
             if key == "fizgig_qwen_preset" and value not in ("auto", "fast", "standard", "style"):
                 return {"ok": False, "error": "Qwen-Image-2.1 训练预设无效。"}
-            if key in {"strong_bind", "clean_concept", "sample_preview", "compile", "overwrite", "amd_mode"}:
+            if key in BOOL_PARAM_KEYS:
                 if not isinstance(value, bool):
                     return {"ok": False, "error": "训练参数「%s」必须为开关值。" % key}
-            elif not isinstance(value, (str, int, float)) or len(str(value)) > 128:
+            elif (not isinstance(value, (str, int, float))
+                  or len(str(value)) > (32768 if key in ("sample_prompt", "global_pos", "global_neg") else 128)):
                 return {"ok": False, "error": "训练参数「%s」的格式无效。" % key}
             params[key] = value
         config["params"] = params
@@ -1648,6 +1692,9 @@ class ModernUIBridge:
             return {"ok": False, "error": "项目保存失败，请检查磁盘空间和写入权限。"}
         self._log("[项目] 已保存「%s」的训练配置。" % name)
         return {"ok": True, "project": next((p for p in self.list_projects() if p["name"] == name), None)}
+
+    def inspect_dataset(self, directory):
+        return caption_summary(str(directory or ""))
 
     @staticmethod
     def _picker_initial_directory(path):
@@ -2257,11 +2304,14 @@ class ModernUIBridge:
                 except Exception:
                     presets[preset_mode][base_type] = {}
         interval_units = {}
+        interval_hints = {}
         for key in ("save_every", "sample_interval"):
             try:
                 interval_units[key] = str(core.interval_unit_for(mode, key))
+                interval_hints[key] = str(core.interval_help_for(mode, key))
             except Exception:
                 interval_units[key] = "steps"
+                interval_hints[key] = ""
         labels = getattr(core, "MODE_LABELS", {})
         trigger_hints = {
             "style": getattr(core, "TRIGGER_HINT_STYLE", ""),
@@ -2333,6 +2383,7 @@ class ModernUIBridge:
             "supports": supports,
             "quant_modes": list(getattr(core, "QUANT_MODE_OPTIONS", {}).get(mode, ())),
             "interval_units": interval_units,
+            "interval_hints": interval_hints,
             "defaults": preset,
             "presets": presets,
             "is_video": mode in ("video", "h3_fz"),
@@ -2482,6 +2533,10 @@ class ModernUIBridge:
         return {"ok": True, "project": next((p for p in self.list_projects() if p["name"] == name), None)}
 
     def rename_project(self, old_name, new_name):
+        with self._task_lock:
+            if (self._task and self._task.get("status") in ("running", "awaiting_review")
+                    and self._task.get("key") == str(old_name or "").strip()):
+                return {"ok": False, "error": "该项目的任务尚未结束，请结束后再改名。"}
         old_name = str(old_name or "").strip()
         new_name = str(new_name or "").strip()
         if not old_name or not self.core.load_project(old_name):
@@ -2493,27 +2548,18 @@ class ModernUIBridge:
         if any(str(p.get("name", "")).casefold() == new_name.casefold() for p in self.core.list_projects()):
             return {"ok": False, "error": "已存在同名项目。"}
 
-        data = self.core.load_project(old_name)
-        if not self.core.save_project(new_name, data):
-            return {"ok": False, "error": "新名称保存失败，原项目保持不变。"}
-        if not self.core.delete_project(old_name):
-            self.core.delete_project(new_name)
-            return {"ok": False, "error": "旧项目配置无法移除，已回滚重命名。"}
-
-        dataset_message = ""
-        try:
-            old_dir = self.core.project_data_dir(old_name)
-            new_dir = self.core.project_data_dir(new_name)
-            if old_dir and new_dir and os.path.isdir(old_dir) and not os.path.exists(new_dir):
-                os.rename(old_dir, new_dir)
-                dataset_message = "；图集目录已同步改名"
-        except Exception:
-            dataset_message = "；图集目录未能同步改名"
-        message = "[项目] 已重命名「%s」→「%s」%s" % (old_name, new_name, dataset_message)
+        ok, detail = self.core.rename_project(old_name, new_name)
+        if not ok:
+            return {"ok": False, "error": detail}
+        message = "[项目] 已重命名「%s」→「%s」；%s" % (old_name, new_name, detail)
         self._log(message)
         return {"ok": True, "log": message}
 
     def delete_project(self, name):
+        with self._task_lock:
+            if (self._task and self._task.get("status") in ("running", "awaiting_review")
+                    and self._task.get("key") == str(name or "").strip()):
+                return {"ok": False, "error": "该项目的任务尚未结束，请结束后再删除配置。"}
         name = str(name or "").strip()
         if not name or not self.core.delete_project(name):
             return {"ok": False, "error": "项目不存在或删除失败。"}
@@ -2601,7 +2647,7 @@ class ModernUIBridge:
             return {"ok": True, "message": "已打开模型目录。", "log": message}
 
         if action == "output_dir":
-            path = self.core.data_sub("output")
+            path = self.core.data_sub("output", project_name) if project_name else self.core.data_sub("output")
             os.makedirs(path, exist_ok=True)
             try:
                 os.startfile(path)

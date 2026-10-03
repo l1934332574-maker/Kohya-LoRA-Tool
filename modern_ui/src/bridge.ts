@@ -86,7 +86,40 @@ export interface QwenModelSaveResult {
   setup?: QwenModelSetup
 }
 
+export interface DatasetSummary {
+  ok: boolean
+  images?: number
+  captioned?: number
+  empty_captions?: number
+  missing_captions?: number
+  keep_user_captions?: boolean
+  error?: string
+}
+
+export interface TrainingRunSummary {
+  id: string; project_name: string; mode: string; mode_label: string; started: number;
+  ended?: number; status: string; message: string; metrics?: TrainingMetrics; resume_path?: string;
+}
+export interface TrainingRun extends TrainingRunSummary {
+  config: ProjectConfig; normalized_params: Record<string, unknown>;
+  loss_history?: TrainingMetricPoint[]; logs?: string[];
+}
+
+export interface ModernTaskSample {
+  ok: boolean
+  error?: string
+  available?: boolean
+  name?: string
+  version?: string
+  data_url?: string
+  warning?: string
+}
+
 export interface DesktopApi {
+  list_training_runs(project_name?: string): Promise<{ ok: boolean; runs?: TrainingRunSummary[]; error?: string }>
+  get_training_run(run_id: string): Promise<{ ok: boolean; run?: TrainingRun; error?: string }>
+  restore_training_run(run_id: string, project_name: string): Promise<{ ok: boolean; error?: string }>
+  inspect_dataset(directory: string): Promise<DatasetSummary>
   bootstrap(): Promise<BootstrapData>
   suggest_project_name(): Promise<{ ok: boolean; name?: string; error?: string }>
   list_projects(): Promise<ProjectCard[]>
@@ -124,6 +157,7 @@ export interface DesktopApi {
   inspect_base_model(path: string): Promise<{ ok: boolean; base_type?: string; error?: string }>
   start_setup_task(action: string): Promise<{ ok: boolean; task_id?: string; error?: string }>
   get_task_status(task_id: string, after?: number): Promise<ModernTaskStatus>
+  get_task_sample(task_id: string, after?: string, full?: boolean): Promise<ModernTaskSample>
   cancel_task(task_id: string): Promise<{ ok: boolean; error?: string }>
   get_model_downloads(mode: string): Promise<ModelDownloadList>
   start_model_download(mode: string, key: string): Promise<{ ok: boolean; task_id?: string; error?: string }>
@@ -173,6 +207,15 @@ export interface GuideStep {
   done: boolean
 }
 
+export interface TrainingMetrics {
+  step: number
+  total: number
+  loss: number | null
+  speed: number
+}
+
+export interface TrainingMetricPoint { step: number; loss: number }
+
 export interface ModernTaskStatus {
   ok: boolean
   error?: string
@@ -185,9 +228,15 @@ export interface ModernTaskStatus {
   detail?: string
   logs?: string[]
   next_offset?: number
+  metrics?: TrainingMetrics | null
+  loss_history?: TrainingMetricPoint[]
 }
 
 export interface TrainingPlan {
+  config_supports?: Record<string, boolean>
+  save_interval_unit?: string
+  save_interval_effective?: number
+  sampling_rule?: { enabled: boolean; reason: string; cadence: string; unit: string }
   project_name: string
   mode: string
   mode_label: string
@@ -218,6 +267,7 @@ export interface TrainingPlan {
   vram_gb?: number | null
   warnings: string[]
   resume_path: string
+  config_summary?: Record<string, unknown>
 }
 
 export interface ModelDownloadItem {
@@ -272,6 +322,7 @@ export interface ModeWorkspaceData {
   supports: Record<string, boolean>
   quant_modes?: string[]
   interval_units: Record<string, string>
+  interval_hints?: Record<string, string>
   defaults: Record<string, string>
   presets?: Record<string, Record<string, Record<string, unknown>>>
   is_video: boolean

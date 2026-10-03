@@ -19,33 +19,9 @@ def params_from_project(name):
     data = load_project(name)
     if not data:
         raise ValueError("项目不存在或已损坏：%s" % name)
-    mode = data.get("mode") or "character"
-    bt = data.get("base_type") or "sdxl"
-    sub = data.get("params") or {}
-    p = {
-        "mode": mode,
-        "base_type": bt,
-        "at_sub_mode": data.get("at_sub_mode") or "character",
-        "base_model": data.get("base_model") or "",
-        "raw_dir": data.get("raw_dir") or "",
-        "trigger": data.get("trigger") or "",
-        "reg_dir": data.get("reg_dir") or "",
-        "global_pos": data.get("global_pos") or "",
-        "global_neg": data.get("global_neg") or "",
-        "style_caption": data.get("style_caption") or "",
-        "train_text_encoder": not bool(data.get("unet_only", False)),
-        "train_env": data.get("train_env") or "",
-        "fast_tier": data.get("fast_tier") or "auto",
-        "project": (data.get("name") or name),
-        "sample_preview": True,
-        "strong_bind": bool(sub.get("strong_bind", True)),
-    }
-    for k in ("rank", "alpha", "unet_lr", "te_lr", "repeats", "max_epochs", "save_every",
-              "crop_ratio", "sample_prompt", "sample_interval", "optimizer",
-              "resolution", "video_steps", "video_frames", "fizgig_qwen_preset", "gc"):
-        if sub.get(k) is not None:
-            p[k] = sub[k]
-    return p
+    import Kohya一键工具 as K
+    from kohya_core.project_config import training_params
+    return training_params(K, data, name)
 
 
 def run_queue_item(name, logf=print):
@@ -85,6 +61,9 @@ def run_queue_item(name, logf=print):
                      repeats=int(p.get("repeats") or 5),
                      dedup=True, wd14=True, square_crop=False,
                      crop_ratio=p.get("crop_ratio") or "",
+                     wd14_model=p.get("wd14_model") or "swinv2-v3",
+                     overwrite=bool(p.get("overwrite")),
+                     keep_user_captions=bool(p.get("keep_user_captions")),
                      min_size=256, blur_threshold=30.0, report=None, keep_tokens=None,
                      project=name, style_caption=p.get("style_caption") or "",
                      dataset_mode="character" if mode != "style" else None,

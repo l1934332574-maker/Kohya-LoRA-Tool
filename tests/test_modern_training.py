@@ -474,6 +474,15 @@ class ModernTrainingTests(unittest.TestCase):
             self.assertEqual(params["rank"], 16)
             self.assertEqual(vram, 24)
             self.assertIsNone(resume)
+            deadline = time.time() + 5
+            record = bridge.get_training_run(task_id)
+            while record.get("run", {}).get("ended") is None and time.time() < deadline:
+                time.sleep(0.02)
+                record = bridge.get_training_run(task_id)
+            self.assertTrue(record["ok"], record)
+            self.assertEqual(record["run"]["status"], "completed")
+            self.assertEqual(record["run"]["normalized_params"]["rank"], 16)
+            self.assertEqual(record["run"]["config"]["raw_dir"], str(core.raw))
 
     def test_preflight_and_worker_call_existing_anima_pipeline_without_classic_ui(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, reactive, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import type { ModeWorkspaceData, ProjectCard, ProjectConfig } from '../bridge'
 import UiIcon from './UiIcon.vue'
 import CropRatioField from './CropRatioField.vue'
+import DatasetInspection from './DatasetInspection.vue'
+import TrainingProfileControl from './TrainingProfileControl.vue'
 import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
 import { normalizeWd14Model } from '../modelDefaults'
-import { fastRunEpochs, fastRunNumber } from '../fastRunPreset'
+import { trainingProfileChanges, type TrainingProfile } from '../fastRunPreset'
 
 type BrowseKind = 'folder' | 'model'
 const props = defineProps<{
@@ -35,7 +37,7 @@ const draft = reactive({
   blocks_to_swap: '', wd14_model: 'swinv2-v3', sample_preview_mode: 'auto', fast_tier: 'auto', fizgig_qwen_preset: 'auto',
   // ★ 2026-09-27：批大小（留空 = 自动 1）/ 梯度检查点（auto / on / off）
   batch_size: '', gc: 'auto',
-  strong_bind: true, clean_concept: true, compile: false, overwrite: false, amd_mode: false,
+  strong_bind: true, clean_concept: true, compile: false, overwrite: false, keep_user_captions: false, amd_mode: false,
 })
 
 const supported = (key: string) => Boolean(props.details.supports?.[key])
@@ -49,9 +51,9 @@ const engineUpdateAction = computed(() => String(props.details.engine_key || '')
 const assetReady = computed(() => props.details.missing_models.length === 0)
 const modelAction = computed(() => `open_models:${props.mode}`)
 const intervalUnit = (key: 'save_every' | 'sample_interval') => props.details.interval_units?.[key] === 'epochs' ? '轮' : '步'
-const intervalTooltip = (key: 'save_every' | 'sample_interval') => key === 'save_every'
+const intervalTooltip = (key: 'save_every' | 'sample_interval') => props.details.interval_hints?.[key] || (key === 'save_every'
   ? props.details.interval_units?.[key] === 'epochs' ? legacyTooltips.saveEveryEpochs : legacyTooltips.saveEverySteps
-  : props.details.interval_units?.[key] === 'epochs' ? legacyTooltips.sampleIntervalEpochs : legacyTooltips.sampleIntervalSteps
+  : props.details.interval_units?.[key] === 'epochs' ? legacyTooltips.sampleIntervalEpochs : legacyTooltips.sampleIntervalSteps)
 const presetParamKeys = ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval'] as const
 function presetFor(): Record<string, unknown> {
   return props.details.presets?.[props.mode]?.sdxl ?? props.details.defaults ?? {}
@@ -104,6 +106,7 @@ function hydrate(config?: ProjectConfig | null) {
   draft.sample_preview_mode = params.sample_preview === undefined ? 'auto' : Boolean(params.sample_preview) ? 'on' : 'off'
   draft.compile = Boolean(params.compile)
   draft.overwrite = Boolean(params.overwrite)
+  draft.keep_user_captions = Boolean(params.keep_user_captions)
   draft.amd_mode = Boolean(params.amd_mode)
   dirty.clear()
 }
@@ -139,36 +142,22 @@ function resetPreset() {
   emit('notify', '当前模式的推荐预设已恢复。保存修改后生效。')
 }
 
-function applyFastRun() {
-  const set = (key: 'rank' | 'alpha' | 'repeats' | 'max_epochs' | 'video_steps' | 'save_every' | 'batch_size' | 'quant_mode' | 'gc' | 'optimizer' | 'blocks_to_swap' | 'fizgig_qwen_preset', value: string) => {
-    draft[key] = value
-    markParam(key)
+const profileUndo = ref<Record<string, unknown> | null>(null)
+function applyProfile(profile: TrainingProfile) {
+  const changes = trainingProfileChanges(draft, props.mode, profile, (key) => supported(key))
+  profileUndo.value = Object.fromEntries(Object.keys(changes).map((key) => [key, draft[key as keyof typeof draft]]))
+  for (const [key, value] of Object.entries(changes)) {
+    draft[key as keyof typeof draft] = value as never
+    if (key === 'unet_only' || key === 'fast_tier') markRoot(key)
+    else markParam(key === 'sample_preview_mode' ? 'sample_preview' : key)
   }
-  if (props.mode !== 'qwen21_fz') {
-    const rank = fastRunNumber(draft.rank, 8)
-    set('rank', rank)
-    set('alpha', rank)
-  }
-  if (supported('repeats')) set('repeats', '1')
-  if (supported('max_epochs')) {
-    const epochs = fastRunNumber(draft.max_epochs, fastRunEpochs(props.mode))
-    set('max_epochs', epochs)
-    set('save_every', intervalUnit('save_every') === '轮' ? epochs : '1000')
-  } else if (supported('video_steps')) {
-    const steps = fastRunNumber(draft.video_steps, 600)
-    set('video_steps', steps)
-    set('save_every', steps)
-  }
-  if (supported('batch_size')) set('batch_size', '1')
-  if (supported('quant_mode')) set('quant_mode', 'auto')
-  if (supported('gc')) set('gc', 'auto')
-  if (supported('optimizer')) set('optimizer', 'auto')
-  if (supported('blocks_to_swap')) set('blocks_to_swap', '')
-  if (props.mode === 'qwen21_fz') set('fizgig_qwen_preset', 'fast')
-  draft.sample_preview_mode = 'off'
-  markParam('sample_preview')
-  if (supported('compile')) { draft.compile = false; markParam('compile') }
-  emit('notify', '已应用快跑档：小 rank、单批次、缩短训练并关闭采样；分辨率保持原值。保存设置后生效。')
+  emit('notify', `已修改：${Object.keys(changes).map((key) => ({ rank: 'rank', alpha: 'alpha', batch_size: '批大小', gc: '梯度检查点', repeats: '重复次数', max_epochs: '训练轮数', video_steps: '训练步数', sample_preview_mode: '采样预览', compile: '编译', unet_only: '训练目标', fast_tier: '引擎加速', blocks_to_swap: '块交换', fizgig_qwen_preset: '官方预设' } as Record<string, string>)[key] || key).join('、')}；分辨率和手动量化设置保持原值。可撤销或继续调整。`)
+}
+function undoProfile() {
+  if (!profileUndo.value) return
+  Object.assign(draft, profileUndo.value)
+  profileUndo.value = null
+  emit('notify', '已撤销档位修改，保存后生效。')
 }
 
 function makePatch(): ProjectConfig {
@@ -180,7 +169,7 @@ function makePatch(): ProjectConfig {
   for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model', 'fizgig_qwen_preset'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
-  for (const key of ['strong_bind', 'clean_concept', 'compile', 'overwrite', 'amd_mode'] as const) {
+  for (const key of ['strong_bind', 'clean_concept', 'compile', 'overwrite', 'keep_user_captions', 'amd_mode'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
   if (dirty.has('params.sample_preview')) params.sample_preview = draft.sample_preview_mode === 'auto' ? null : draft.sample_preview_mode === 'on'
@@ -216,7 +205,7 @@ function requestAction(action: string) {
   emit('classicAction', action, makePatch())
 }
 
-defineExpose({ startTraining, guideAction })
+defineExpose({ startTraining, guideAction, save })
 
 const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCase() === 'amd')
 </script>
@@ -230,7 +219,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
       </div>
       <div class="engine-actions">
         <button v-if="desktop && details.engine_update_available" class="engine-update-button" type="button" :title="legacyTooltips.engineUpdate" @click="requestAction(engineUpdateAction)"><span class="update-arrow">↗</span> 引擎更新可用</button>
-        <button v-if="desktop" class="engine-button" type="button" @click="save">保存修改</button>
+        <button v-if="desktop" class="engine-button" type="button" @click="save">{{ dirty.size ? '保存修改 · 未保存' : '设置已保存' }}</button>
         <!-- ★ 2026-10-02：与左侧栏重复的「一键开始训练」已移除 ✗（同一动作，只保留侧栏那个）-->
 
         <button v-else class="engine-button primary" type="button" @click="save">保存预览设置</button>
@@ -285,12 +274,15 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
             <button v-if="details.has_training_submode && !isStyle" class="engine-switch" :title="legacyTooltips.strongBind" :class="{ active: draft.strong_bind }" type="button" role="switch" :aria-checked="draft.strong_bind" @click="draft.strong_bind = !draft.strong_bind; markParam('strong_bind')"><i></i><span><strong>强绑定</strong><small>自动把 trigger + 训练集 100% 一致的特征词固定到标签开头</small></span></button>
             <button v-if="isConcept" class="engine-check" :title="legacyTooltips.cleanConcept" :class="{ checked: draft.clean_concept }" type="button" role="checkbox" :aria-checked="draft.clean_concept" @click="draft.clean_concept = !draft.clean_concept; markParam('clean_concept')"><i></i><span>自动清洗概念标签（推荐）</span></button>
             <label v-if="supported('wd14_model') && !isVideo" class="engine-field spaced" :title="legacyTooltips.wd14Model"><span>自动打标模型</span><select v-model="draft.wd14_model" class="engine-select" @change="markParam('wd14_model')"><option value="swinv2-v3">swinv2-v3（推荐）</option><option value="moat-v2">moat-v2（旧版）</option></select></label>
-            <button v-if="supported('overwrite') && !isVideo" class="engine-check" :title="legacyTooltips.overwrite" :class="{ checked: draft.overwrite }" type="button" role="checkbox" :aria-checked="draft.overwrite" @click="draft.overwrite = !draft.overwrite; markParam('overwrite')"><i></i><span>重新处理已存在的图片（改过标签后勾上，否则不生效）</span></button>
+            <button v-if="!isVideo" class="engine-check" :class="{ checked: draft.keep_user_captions }" type="button" role="checkbox" :aria-checked="draft.keep_user_captions" @click="draft.keep_user_captions = !draft.keep_user_captions; markParam('keep_user_captions')"><i></i><span>保留已有标签（不自动打标）</span></button>
+              <DatasetInspection v-if="!isVideo" :directory="draft.raw_dir" :desktop="desktop" :keep-captions="draft.keep_user_captions" @preserve="draft.keep_user_captions = true; markParam('keep_user_captions')" />
+              <button v-if="supported('overwrite') && !isVideo" class="engine-check" :title="legacyTooltips.overwrite" :class="{ checked: draft.overwrite }" type="button" role="checkbox" :aria-checked="draft.overwrite" @click="draft.overwrite = !draft.overwrite; markParam('overwrite')"><i></i><span>重新处理已存在的图片（改过标签后勾上，否则不生效）</span></button>
             <p v-if="currentTriggerHint" class="engine-hint">{{ currentTriggerHint }}</p>
           </section>
 
           <section class="engine-card">
-            <header class="engine-card-heading"><span>02</span><div><h2>常用训练参数</h2><small>空白项沿用当前引擎预设</small></div><button class="engine-utility" type="button" title="应用省显存的短程试训参数；保留当前训练分辨率" @click="applyFastRun">快跑档</button></header>
+            <header class="engine-card-heading"><span>02</span><div><h2>常用训练参数</h2><small>空白项沿用当前引擎预设</small></div></header>
+            <TrainingProfileControl :can-undo="Boolean(profileUndo)" @apply="applyProfile" @undo="undoProfile" />
             <div class="engine-param-grid">
               <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.rank"><span>LoRA rank</span><input v-model="draft.rank" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('rank')" /></label>
               <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.alpha"><span>LoRA alpha</span><input v-model="draft.alpha" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('alpha')" /></label>
@@ -332,6 +324,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
           <button class="engine-utility" type="button" :title="legacyTooltips.preprocess" @click="requestAction('preprocess')">{{ isH3Fizgig ? '扫描媒体和字幕' : '数据预处理' }}</button>
           <button v-if="!isVideo" class="engine-utility" type="button" :title="legacyTooltips.labelEditor" @click="requestAction('label_editor')">标签编辑器</button>
           <button class="engine-utility" type="button" :title="legacyTooltips.openOutput" @click="requestAction('output_dir')">打开输出目录</button>
+          <button class="engine-utility" type="button" @click="requestAction('training_history')">训练记录</button>
           <button class="engine-utility" type="button" @click="requestAction('export_config')">导出配置</button>
           <button class="engine-utility" type="button" :title="legacyTooltips.readme" @click="requestAction('readme')">训练说明</button>
           <button v-if="mode === 'krea2' || mode === 'krea2_fz'" class="engine-utility" type="button" :title="legacyTooltips.krea2Guide" @click="requestAction('krea2_guide')">Krea2 使用引导</button>

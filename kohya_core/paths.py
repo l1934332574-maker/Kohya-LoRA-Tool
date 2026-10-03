@@ -6,13 +6,15 @@ import sys
 import json
 import datetime
 
+from kohya_core.storage import atomic_json_write, STORAGE_LOCK
+
 from kohya_core import KIT_DIR, KOHYA_DIR_FILE
 
 __all__ = [
     "get_kohya_dir", "base_models_dir", "data_dir", "data_sub", "_sanitize_dirname",
     "_settings_path", "save_data_setting",
     "dataset_train_dir", "projects_dir", "_project_path", "list_projects",
-    "load_project", "save_project", "delete_project", "default_project_name",
+    "load_project", "save_project", "delete_project", "rename_project", "default_project_name",
     "project_data_dir", "project_output_dir", "dir_stats", "delete_project_data",
     "find_orphan_project_dirs", "delete_orphan_project_dirs",
 ]
@@ -295,11 +297,7 @@ def list_projects():
             if not fn.lower().endswith(".json"):
                 continue
             fp = os.path.join(d, fn)
-            try:
-                with open(fp, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception:
-                continue
+            data = _read_project_file(fp)
             if not isinstance(data, dict):
                 continue
             name = str(data.get("name") or os.path.splitext(fn)[0])
@@ -318,16 +316,25 @@ def list_projects():
     out.sort(key=lambda x: x.get("updated", ""), reverse=True)
     return out
 
-def load_project(name):
-    """读取项目。返回 dict 或 None。"""
-    fp = _project_path(name)
+def _read_project_file(fp):
+    """Read a project or its last good backup without reviving deleted projects."""
     if not os.path.isfile(fp):
         return None
-    try:
-        with open(fp, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
+    for candidate in (fp, fp + ".bak"):
+        try:
+            with open(candidate, "r", encoding="utf-8-sig") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict):
+                return data
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def load_project(name):
+    """读取项目。返回 dict 或 None。"""
+    return _read_project_file(_project_path(name))
+
 
 def save_project(name, data):
     """保存项目（自动写 updated 时间）。返回是否成功。"""
@@ -341,9 +348,8 @@ def save_project(name, data):
     if not data.get("created"):
         data["created"] = data["updated"]
     try:
-        os.makedirs(projects_dir(), exist_ok=True)
-        with open(_project_path(name), "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        data["schema_version"] = 1
+        atomic_json_write(_project_path(name), data, backup=True)
         return True
     except Exception:
         return False
@@ -354,10 +360,65 @@ def delete_project(name):
     try:
         if os.path.isfile(fp):
             os.remove(fp)
+            try:
+                os.remove(fp + ".bak")
+            except OSError:
+                # The primary configuration has been removed. A stale backup
+                # cannot resurrect a deleted project because load requires it.
+                pass
             return True
     except Exception:
         pass
     return False
+
+
+def rename_project(old_name, new_name):
+    """Rename configuration, dataset and outputs together, rolling back failures."""
+    old_name, new_name = str(old_name or "").strip(), str(new_name or "").strip()
+    if not new_name or _sanitize_dirname(new_name) != new_name:
+        return False, "项目名称无效。"
+    with STORAGE_LOCK:
+        if old_name.casefold() == new_name.casefold():
+            return True, "项目名称没有变化。"
+        data = load_project(old_name)
+        if not isinstance(data, dict):
+            return False, "原项目不存在或配置损坏。"
+        if os.path.exists(_project_path(new_name)):
+            return False, "已存在同名项目。"
+        moves = []
+        for resolver in (project_data_dir, project_output_dir):
+            source = resolver(old_name)
+            if not source:
+                continue
+            target = os.path.join(os.path.dirname(source), _sanitize_dirname(new_name))
+            if os.path.exists(target):
+                return False, "目标名称已关联图集或训练产物，请使用其他名称。"
+            if os.path.isdir(source):
+                moves.append((source, target))
+        moved = []
+        saved = False
+        try:
+            for source, target in moves:
+                os.rename(source, target)
+                moved.append((source, target))
+            if not save_project(new_name, data):
+                raise OSError("新项目配置保存失败")
+            saved = True
+            if not delete_project(old_name):
+                raise OSError("旧项目配置无法移除")
+            return True, "项目配置、图集及训练产物已同步改名。"
+        except Exception as exc:
+            rollback_errors = []
+            if saved and not delete_project(new_name):
+                rollback_errors.append("新配置未能移除")
+            for source, target in reversed(moved):
+                try:
+                    os.rename(target, source)
+                except OSError as rollback:
+                    rollback_errors.append(str(rollback))
+            detail = "；回滚异常：" + "；".join(rollback_errors) if rollback_errors else "；原项目已保留"
+            return False, "改名失败：%s%s" % (exc, detail)
+
 
 def project_data_dir(name):
     """项目的图集目录（预处理后的图片 + 打标文件 + 各引擎缓存）。

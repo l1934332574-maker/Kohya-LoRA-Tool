@@ -968,7 +968,7 @@ class App:
         self.mon_sample_txt = tk.StringVar(value="采样预览：--")
         ctk.CTkLabel(self.mon, textvariable=self.mon_sample_txt, font=ui_font(FONT_HINT),
                      text_color=SUB).pack(anchor="w", padx=26, pady=(4, 2))
-        self.mon_sample_lbl = ctk.CTkLabel(self.mon, text="（训练中每 100 步出一张预览图）",
+        self.mon_sample_lbl = ctk.CTkLabel(self.mon, text="（是否出图及间隔由当前模式、设置和显存决定）",
                                            font=ui_font(FONT_HINT), text_color="#7c8290")
         self.mon_sample_lbl.pack(anchor="w", padx=26, pady=(0, 10))
         self._mon_visible = False
@@ -1168,24 +1168,39 @@ class App:
             proj = (self.current_project or "").strip()
             out_dir = core.data_sub("output", proj if proj else "_")
             newest = None
-            for root, _dirs, files in os.walk(out_dir):
+            newest_stat = None
+            for root, dirs, files in os.walk(out_dir):
+                dirs[:] = [name for name in dirs if not name.startswith(".") and not os.path.islink(os.path.join(root, name))]
                 for f in files:
                     if not self._is_sample_file(f, os.path.basename(root)):
                         continue
                     p = os.path.join(root, f)
-                    if newest is None or os.path.getmtime(p) > os.path.getmtime(newest):
-                        newest = p
-            if newest is None or newest == getattr(self, "_sample_shown", None):
+                    if os.path.islink(p):
+                        continue
+                    try:
+                        stat = os.stat(p)
+                    except OSError:
+                        continue
+                    if newest_stat is None or stat.st_mtime_ns > newest_stat.st_mtime_ns:
+                        newest, newest_stat = p, stat
+            if newest is None:
                 return
-            self._sample_shown = newest
-            img = Image.open(newest).convert("RGB")
-            img.thumbnail((220, 220))
+            signature = (newest, newest_stat.st_mtime_ns, newest_stat.st_size)
+            if signature == getattr(self, "_sample_shown", None):
+                return
+            # 引擎可能仍在写入图片；成功解码并显示后才记为已展示，失败会在下次轮询重试。
+            with Image.open(newest) as source:
+                if source.width * source.height > 80_000_000:
+                    raise ValueError("图片尺寸过大")
+                source.thumbnail((220, 220))
+                img = source.convert("RGB")
             photo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
             self.mon_sample_lbl.configure(image=photo, text="")
             self.mon_sample_lbl.image = photo
+            self._sample_shown = signature
             self.mon_sample_txt.set(f"采样预览：{os.path.basename(newest)}")
-        except Exception:
-            pass
+        except Exception as exc:
+            self.mon_sample_txt.set(f"采样预览读取失败，稍后重试：{str(exc)[:80]}")
 
     def _draw_loss_curve(self, hist):
         try:
@@ -2326,17 +2341,11 @@ class App:
             if not data:
                 dlg.destroy()
                 return
-            core.save_project(new, data)
-            core.delete_project(old)
-            # 项目数据集目录跟着改名，避免数据"丢失"
-            try:
-                _old_ds = os.path.join(core.data_dir(), "dataset", core._sanitize_dirname(old))
-                _new_ds = os.path.join(core.data_dir(), "dataset", core._sanitize_dirname(new))
-                if os.path.isdir(_old_ds) and not os.path.isdir(_new_ds):
-                    os.rename(_old_ds, _new_ds)
-                    self._log(f"[数据集] 项目数据集目录已同步改名：{_new_ds}")
-            except Exception as _e:
-                self._log(f"[数据集] 数据集目录改名失败（忽略，可在新项目里重新预处理）: {_e}")
+            ok, detail = core.rename_project(old, new)
+            if not ok:
+                messagebox.showerror(core.APP_NAME, detail)
+                return
+            self._log("[项目] " + detail)
             if self.current_project == old:
                 self.current_project = new
                 self.proj_title.configure(text="项目：" + new)
@@ -2893,7 +2902,7 @@ class App:
         self.chk_sample_preview = ctk.CTkCheckBox(
             # ⚠️ 2026-09-19 更正：原来写死「每 100 步」✗ —— 实际频率由「采样预览间隔」决定，
         #    且各引擎口径不同（Fizgig 只能按轮）。这里不再编造具体步数 ✓
-        self.sample_preview_row, text="训练中采样预览（用当前 LoRA 出预览图，频率见下方「采样预览间隔」；低显存自动关闭）",
+        self.sample_preview_row, text="训练中采样预览（勾选后会尝试采样；低显存可能超出显存）",
             variable=self.sample_preview_var, fg_color=ACC, hover_color=ACC_H,
             text_color=TXT, font=ui_font(FONT_BODY))
         self.chk_sample_preview.pack(side="left")
@@ -2903,7 +2912,7 @@ class App:
         ctk.CTkLabel(self.sample_prompt_row, text="采样预览提示词", font=ui_font(FONT_BODY), text_color=SUB).pack(side="left")
         self.sample_prompt_entry = ctk.CTkEntry(self.sample_prompt_row, width=340, height=30,
                                                 textvariable=self.sample_prompt_var, fg_color=CARD2, border_color=BORDER,
-                                                text_color=TXT, placeholder_text="留空=自动（trigger + portrait, masterpiece, best quality）",
+                                                text_color=TXT, placeholder_text="留空按当前模式生成默认提示词",
                                                 font=ui_font(FONT_BODY))
         self.sample_prompt_entry.pack(side="left", padx=(12, 8))
         ctk.CTkLabel(self.sample_prompt_row, text="填了整句生效（是否带 trigger 自己定），不再被覆盖", font=ui_font(FONT_HINT), text_color=HINT).pack(side="left")
@@ -4502,11 +4511,7 @@ class App:
         except Exception:
             pass
         try:
-            self.lbl_si_hint.configure(
-                text=("（本引擎按「轮」出图 —— 直接填轮数：填 10 = 每 10 轮一次；"
-                      "留空=每 1 轮。它做不到「每 N 步」✗）") if _fz else
-                     "（0/留空=默认：画风/人物/Krea2/FLUX.2 跟随保存快照，视频/Qwen/Z-Image 每 250 步；"
-                     "填 N=每 N 步出预览）")
+            self.lbl_si_hint.configure(text="（" + core.interval_help_for(self.mode, "sample_interval") + "）")
         except Exception:
             pass
         # ★「模型保存间隔」同样按模式变（Krea2/FLUX.2 含 Fizgig = 轮，其它 = 步）✓
@@ -4519,11 +4524,7 @@ class App:
         except Exception:
             pass
         try:
-            self.lbl_save_hint.configure(
-                text=("（本引擎按「轮」保存 —— 直接填轮数：填 1 = 每轮都存；"
-                      "留空=默认每 1 轮。⚠ 填得比总轮数还大 → 一次快照都不会存 ✗）")
-                if _ep_engine else
-                "（画风/人物/视频/Qwen/Z-Image 按「步」：留空=默认 200 步）")
+            self.lbl_save_hint.configure(text="（" + core.interval_help_for(self.mode, "save_every") + "）")
         except Exception:
             pass
 
@@ -5969,8 +5970,7 @@ class App:
                            fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
         _se.pack(side="left", padx=(10, 8))
         self.lbl_save_hint = ctk.CTkLabel(
-            sf, text="（画风/人物=每 N 步，Krea2/FLUX.2 及它们的 Fizgig 引擎=每 N 轮，"
-                     "视频/Qwen/Z-Image=每 N 步；留空=默认 200 步 / 1 轮）",
+            sf, text="（具体单位和默认值在选择模式后显示）",
             font=ui_font(FONT_HINT), text_color=HINT)
         self.lbl_save_hint.pack(side="left")
         self._adv_entries["save_every"] = _se
@@ -5997,8 +5997,7 @@ class App:
                            fg_color=CARD2, border_color=BORDER, text_color=TXT, font=ui_font(FONT_BODY))
         _ie.pack(side="left", padx=(10, 8))
         self.lbl_si_hint = ctk.CTkLabel(
-            sf2, text="（0/留空=默认：画风/人物/Krea2/FLUX.2 跟随保存快照，视频/Qwen/Z-Image 每 250 步；"
-                      "填 N=每 N 步出预览）",
+            sf2, text="（具体单位和默认值在选择模式后显示）",
             font=ui_font(FONT_HINT), text_color=HINT)
         self.lbl_si_hint.pack(side="left")
         self._adv_entries["sample_interval"] = _ie
@@ -9238,7 +9237,14 @@ class App:
         dlg.resizable(False, False)
         dlg.transient(self.root)
         ctk.CTkLabel(dlg, text=intro, font=ui_font(FONT_BODY), text_color=TXT, justify="left", wraplength=640).pack(padx=20, pady=(14, 8), anchor="w")
-        for key, (fname, desc, url) in links.items():
+        for key, _entry in links.items():
+            # ★ 2026-10-02（用户反馈：没有代理下不了 Qwen-Image-2.1 训练适配器）：
+            #   模型表第 3 项现在可以是**多源**（tuple ✓，见 core.model_url_list）✗，
+            #   直接 `fname, desc, url = ...` 解包会 ValueError ✗
+            #   这里归一化后取第一个源，作为「🌐 浏览器」按钮的目标 ✓
+            fname, desc = _entry[0], _entry[1]
+            _urls = core.model_url_list(_entry)
+            url = _urls[0] if _urls else ""
             row = ctk.CTkFrame(dlg, fg_color="transparent"); row.pack(fill="x", padx=20, pady=3)
             done = files.get(key) is not None
             mark = "✓" if done else "○"
@@ -9337,7 +9343,16 @@ class App:
         if getattr(self, "_downloading", False):
             messagebox.showinfo(core.APP_NAME, "已有下载任务在进行中，请先完成或取消。")
             return
-        fname, desc, url = links[key]
+        # ★ 2026-10-02（用户反馈：没有代理下不了 Qwen-Image-2.1 训练适配器）：
+        #   第 3 项可能是**多源**（tuple ✓）✗ ⇒ 原来的三元解包会直接 ValueError ✗
+        #   归一化取第一个可用源（现在「训练适配器」第一个就是国内可直连的 hf-mirror ✓）
+        _entry = links[key]
+        fname, desc = _entry[0], _entry[1]
+        _urls = core.model_url_list(_entry)
+        url = _urls[0] if _urls else ""
+        if not url:
+            messagebox.showerror(core.APP_NAME, f"{fname} 没有可用的下载源，请手动获取。")
+            return
         try:
             os.makedirs(dest_dir, exist_ok=True)
         except Exception:

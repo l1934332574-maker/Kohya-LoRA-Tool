@@ -9,6 +9,7 @@ import ModernKohyaWorkspace from './components/ModernKohyaWorkspace.vue'
 import ModernEngineWorkspace from './components/ModernEngineWorkspace.vue'
 import ModernTaskDialog from './components/ModernTaskDialog.vue'
 import ModernTrainingDialog from './components/ModernTrainingDialog.vue'
+import TrainingHistoryDialog from './components/TrainingHistoryDialog.vue'
 import ModelDownloadDialog from './components/ModelDownloadDialog.vue'
 import EnvironmentDialog from './components/EnvironmentDialog.vue'
 import ModernHelpDialog from './components/ModernHelpDialog.vue'
@@ -66,6 +67,7 @@ const modeWorkspace = ref<ModeWorkspaceData | null>(null)
 const qwenModelSetup = ref<QwenModelSetup | null>(null)
 const activeWorkspaceRef = ref<{
   startTraining: () => void
+  save?: () => void
   guideAction?: (action: string) => Promise<ProjectConfig | null> | ProjectConfig | null
   openModelDialog?: () => void
 } | null>(null)
@@ -80,6 +82,9 @@ const formError = ref('')
 const toast = ref('')
 const setupDialogOpen = ref(false)
 const setupAction = ref('')
+const historyDialogOpen = ref(false)
+const trainingDialogRef = ref<{ expand: () => void } | null>(null)
+const trainingActive = ref(false)
 const trainingDialogOpen = ref(false)
 const trainingPlan = ref<TrainingPlan | null>(null)
 const trainingProjectName = ref('')
@@ -208,6 +213,7 @@ const demoQuantModes: Record<string, string[]> = {
 function setActiveWorkspace(instance: unknown) {
   activeWorkspaceRef.value = instance as {
     startTraining: () => void
+  save?: () => void
     guideAction?: (action: string) => Promise<ProjectConfig | null> | ProjectConfig | null
     openModelDialog?: () => void
   } | null
@@ -301,6 +307,7 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
     trigger_hints: { style: '为画风设置独特的 trigger。', character: '为人物设置独特的 trigger。', concept: '为概念设置独特的 trigger。' },
     engine_ready: false, engine_update_available: false, engine_key: '', gpu: '预览', gpu_vendor: 'unknown', missing_models: ['桌面模式会在打开项目时读取真实模型状态。'],
     asset_dir: '', supports, quant_modes: demoQuantModes[mode] ?? [], interval_units: { save_every: usesEpochs || ['krea2', 'flux2'].includes(mode) ? 'epochs' : 'steps', sample_interval: usesEpochs ? 'epochs' : 'steps' },
+    interval_hints: mode === 'h3_fz' ? { sample_interval: '填 N = 每 N 轮采样；留空沿用 H3 预设（当前默认 5 轮），填 0 按图集大小估算。训练开始时可能额外采样。' } : undefined,
     defaults: preset, presets: { [mode]: { sdxl: preset } }, is_video: ['video', 'h3_fz'].includes(mode), is_step_based: stepBased,
     has_training_submode: ['krea2', 'krea2_at', 'krea2_fz', 'qwen21_fz', 'flux2', 'flux2_fz'].includes(mode),
     guide_steps,
@@ -678,6 +685,14 @@ async function saveQwenModel(selection: QwenModelSelection): Promise<QwenModelSa
 }
 
 async function startModernTraining(patch: ProjectConfig) {
+  if (trainingActive.value) {
+    trainingDialogRef.value?.expand()
+    return showToast('当前已有训练任务；已返回训练进度。')
+  }
+  if (trainingDialogOpen.value) {
+    trainingDialogOpen.value = false
+    await nextTick()
+  }
   const project = workspaceProject.value
   const api = window.pywebview?.api
   if (!project) return showToast('请先打开一个项目。')
@@ -709,6 +724,15 @@ async function chooseWorkspacePath(kind: 'folder' | 'model', currentPath = '', m
   } catch (error) {
     showToast(error instanceof Error ? error.message : '选择路径失败。')
     return null
+  }
+}
+
+async function restoredTrainingSettings() {
+  const name = workspaceProject.value?.name
+  if (name && window.pywebview?.api) {
+    const result = await window.pywebview.api.load_project_config(name)
+    if (result.ok && result.config) workspaceConfig.value = result.config
+    await refreshGuideState()
   }
 }
 
@@ -812,7 +836,7 @@ async function removeProject(project: ProjectCard) {
   showToast(`已删除「${project.name}」的项目配置`)
 }
 
-async function runAction(action: string) {
+async function runAction(action: string, projectName?: string) {
   if (action === 'train') {
     if (preview.value && workspaceOpen.value) {
       activeWorkspaceRef.value?.startTraining()
@@ -834,7 +858,7 @@ async function runAction(action: string) {
     showToast('浏览器预览中，这个操作不会触碰本机数据。')
     return
   }
-  const result = await window.pywebview.api.run_action(action, ['export_log', 'export_diagnostics'].includes(action) ? workspaceProject.value?.name : undefined)
+  const result = await window.pywebview.api.run_action(action, projectName || (['export_log', 'export_diagnostics'].includes(action) ? workspaceProject.value?.name : undefined))
   if (result.log) appendLog(result.log)
   if (!result.ok) showToast(result.error ?? '操作失败。')
   else if (result.message) showToast(result.message)
@@ -1011,6 +1035,7 @@ async function loadAppearanceSettings() {
 }
 
 async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
+  if (action === 'training_history') { historyDialogOpen.value = true; return }
   if (!workspaceProject.value) return showToast('请先打开一个项目。')
   if (patch && Object.keys(patch).length && (await saveKohyaConfig(patch)) === false) return
   if (action === 'preprocess') {
@@ -1019,7 +1044,7 @@ async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
     setupDialogOpen.value = true
     return
   }
-  if (action === 'output_dir') return runAction(action)
+  if (action === 'output_dir') return runAction(action, workspaceProject.value.name)
   if (action === 'readme') return openHelp('readme', workspaceProject.value.mode)
   if (action === 'at_model_help' || action === 'krea2_guide' || action === 'flux2_guide' || action === 'h3_guide') {
     return openHelp('mode', workspaceProject.value.mode)
@@ -1070,6 +1095,11 @@ async function returnWorkspace(patch?: ProjectConfig) {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && workspaceOpen.value) {
+    event.preventDefault()
+    activeWorkspaceRef.value?.save?.()
+    return
+  }
   registerUiActivity()
   if (event.key === 'Escape' && appearanceDialogOpen.value) {
     appearanceDialogOpen.value = false
@@ -1217,6 +1247,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
             <button v-for="action in topActions" :key="action.key" class="toolbar-button" type="button" :title="action.tip" @click="runAction(action.key)">
               <UiIcon :name="action.icon" />{{ action.label }}
             </button>
+            <button class="toolbar-button" type="button" @click="historyDialogOpen = true">训练记录</button>
             <button class="toolbar-button appearance-button" type="button" title="新版训练页外观设置" aria-label="新版训练页外观设置" @click="openAppearanceDialog"><UiIcon name="settings" /></button>
             <button class="toolbar-button new-project" type="button" title="创建新的训练项目；可以从模式模板开始，也可以新建自定义项目。" @click="openCreateForSelectedMode()"><UiIcon name="plus" /> 新建项目</button>
           </div>
@@ -1266,11 +1297,14 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
       @finished="refreshGuideState"
       @notify="showToast"
     />
+    <TrainingHistoryDialog :open="historyDialogOpen" :project-name="workspaceProject?.name || ''" @close="historyDialogOpen = false" @restored="restoredTrainingSettings" @notify="showToast" />
     <ModernTrainingDialog
+      ref="trainingDialogRef"
       :open="trainingDialogOpen"
       :project-name="trainingProjectName"
       :plan="trainingPlan"
       @close="trainingDialogOpen = false"
+      @active="trainingActive = $event"
       @finished="refreshGuideState"
       @notify="showToast"
     />

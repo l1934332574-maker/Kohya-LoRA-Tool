@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.18.13"
+APP_VERSION = "0.18.14"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -3512,17 +3512,17 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         _sp = _write_sample_prompts(output_name, params, mode, resolution=_sp_res, engine="musubi", train_dir=train_dir)
         if _sp:
             _si = int(params.get("sample_interval") or 0)
-            _sample_n = _si if _si >= 10 else max(1, per_epoch * _save_ep)
+            _sample_n = _si if _si > 0 else max(1, per_epoch * _save_ep)
             cmd += ["--sample_every_n_steps=%d" % _sample_n, f"--sample_prompts={_sp}", "--text_encoder", files["te"]]   # 跟随保存快照 / 自选固定步数
             if vram_gb is not None and vram_gb < 10:
                 logf("[Krea2] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
             elif vram_gb is not None and vram_gb <= 16.5:
-                logf("[Krea2] ⚠ 16G 显存开采样预览：已把采样分辨率压到 512 防 OOM（每 100 步采样仍会略拖慢，4080S 实测 13.9→54s/it）；若仍异常请取消勾选「训练中采样预览」")
+                logf("[Krea2] ⚠ 16G 显存开采样预览：已把采样分辨率压到 512 防 OOM（采样会拖慢训练，频率见上方参数）；若仍异常请取消勾选「训练中采样预览」")
             else:
                 # ≥20G 卡默认开采样 —— 必须写明代价，否则就是"莫名其妙变慢"的来源 ✗
                 # （采样要额外加载文本编码器出图，采样后残留显存会让后续训练换页 → 越跑越慢；
                 #   16G 档实测第 100 步后 13.9→54s/it）
-                logf("[Krea2] 采样预览：每 100 步出一张预览图（输出目录）。"
+                logf(f"[Krea2] 采样预览：每 {_sample_n} 步出图（输出目录）。"
                      "⚠ 采样会额外占用显存与时间（越跑越慢的常见来源）——"
                      "如果觉得步速变慢，取消勾选「训练中采样预览」即可恢复。")
 
@@ -3748,14 +3748,14 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         _sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="musubi", train_dir=train_dir)
         if _sp:
             _si = int(params.get("sample_interval") or 0)
-            _sample_n = _si if _si >= 10 else max(1, per_epoch * _save_ep)
+            _sample_n = _si if _si > 0 else max(1, per_epoch * _save_ep)
             cmd += ["--sample_every_n_steps=%d" % _sample_n, f"--sample_prompts={_sp}"]   # 跟随保存快照 / 自选固定步数
             if vram_gb is not None and vram_gb < 10:
                 logf("[FLUX.2] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
             elif vram_gb is not None and vram_gb <= 16.5:
-                logf("[FLUX.2] ⚠ 16G 显存开采样预览：每 100 步采样会残留显存、训练越跑越慢（4080S 实测 13.9→54s/it）；强烈建议取消勾选「训练中采样预览」")
+                logf("[FLUX.2] ⚠ 16G 显存开采样预览：频繁采样可能残留显存、拖慢训练（4080S 实测 13.9→54s/it）；强烈建议取消勾选「训练中采样预览」")
             else:
-                logf("[FLUX.2] 采样预览：每 100 步出一张预览图（输出目录）")
+                logf(f"[FLUX.2] 采样预览：每 {_sample_n} 步出图（输出目录）")
 
     # 训练命令同样带 KREA2_TOKENIZER_DIR/HF_ENDPOINT/RDNA2 FP16 环境（缓存步骤已带；
     # 采样预览加载文本编码器时必须用本地 tokenizer，否则国内直连 HF 拉 tokenizer 会 SSL 失败）
@@ -3875,7 +3875,16 @@ QWEN21_FZ_MODEL_LINKS = {
            "https://modelscope.cn/models/Comfy-Org/Qwen-Image-2.1/resolve/master/text_encoders/qwen3vl_8b_bf16.safetensors"),
     "training_adapter": (
         "fizgig_qwen_image_2.1_training_adapter.safetensors", "Qwen-Image-2.1 训练适配器（推荐）",
-        "https://huggingface.co/ShootTheSound/Fizgig-Qwen-Image-2.1-Training-Adapter/resolve/main/fizgig_qwen_image_2.1_training_adapter.safetensors"),
+        # ★★ 2026-10-02（用户反馈：没有代理的用户下不了这个文件）★★
+        #   本表其余 4 项都走魔搭（ModelScope）国内直链 ✓，**只有这一项**是 huggingface.co 直连 ✗
+        #   实测：`[下载] 失败：<urlopen error [WinError 10060] 由于连接方在一段时间后没有正确答复…>`
+        #   而没有代理的用户访问 huggingface.co 必然超时 ⇒ 训练适配器永远下不下来 ✗
+        #   ⇒ 改为**多源回退**（国内镜像优先；有代理的环境也能走通 ✓）：
+        #     ① hf-mirror.com（HF 官方镜像，国内可直连 ✓；实测返回 308 重定向，属正常 ✓）
+        #     ② huggingface.co 直连（给有代理/境外用户兜底 ✓）
+        #   ⚠️ hf-mirror 会 307/308 跳到 CDN，下载器必须允许重定向跳域（见 _download_with_resume ✓）
+        ("https://hf-mirror.com/ShootTheSound/Fizgig-Qwen-Image-2.1-Training-Adapter/resolve/main/fizgig_qwen_image_2.1_training_adapter.safetensors",
+         "https://huggingface.co/ShootTheSound/Fizgig-Qwen-Image-2.1-Training-Adapter/resolve/main/fizgig_qwen_image_2.1_training_adapter.safetensors")),
     "speed_lora": (
         "Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r128.safetensors", "Qwen-Image-2.1 Turbo 采样 LoRA（可选）",
         "https://modelscope.cn/models/Viggle/Qwen-Image-2.1-viggle-turbo/resolve/master/Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r128.safetensors"),
@@ -3990,6 +3999,29 @@ def h3_missing_models(vram_gb=None):
     return missing
 
 
+def model_url_list(entry):
+    """取出模型条目的候选下载源，统一成列表。返回 [] 表示没有可用源。
+
+    ★ 2026-10-02（用户反馈：没有代理的用户下不了 Qwen-Image-2.1 训练适配器）：
+      模型表里第 3 项原先一律是**单个 URL 字符串** ✗，而「训练适配器」只有
+      huggingface.co 直连 ⇒ 无代理用户必然 `WinError 10060` 超时 ✗（实测确认 ✓）。
+      现在允许写成 **多源**（tuple/list ✓，按顺序回退 ✓），单个字符串仍然照常工作 ✓
+      —— 老条目无需改动 ✓，新条目可以「国内镜像优先 + 原站兜底」✓。
+    """
+    try:
+        _u = entry[2]
+    except Exception:
+        return []
+    if _u is None:
+        return []
+    if isinstance(_u, str):
+        return [_u] if _u.strip() else []
+    try:
+        return [str(x).strip() for x in _u if str(x or "").strip()]
+    except Exception:
+        return []
+
+
 def qwen21_fz_models_dir():
     return os.path.join(KIT_DIR, "models", "qwen_image21")
 
@@ -4022,9 +4054,17 @@ def qwen21_fz_model_files():
 
 def qwen21_fz_missing_models():
     files = qwen21_fz_model_files()
-    return [f"· {description}\n  文件: {name}\n  下载: {url}"
-            for key, (name, description, url) in QWEN21_FZ_MODEL_LINKS.items()
-            if key in ("dit", "vae", "te", "training_adapter") and not files[key]]
+    _out = []
+    for key, entry in QWEN21_FZ_MODEL_LINKS.items():
+        if key not in ("dit", "vae", "te", "training_adapter") or files.get(key):
+            continue
+        name, description = entry[0], entry[1]
+        # ★ 2026-10-02：条目第 3 项可能是**多源**（tuple）✗ ——
+        #   直接 f-string 会打印成元组的字符串形式 ✗，这里统一取第一个可用源 ✓
+        _cands = model_url_list(entry)
+        _out.append("· %s\n  文件: %s\n  下载: %s"
+                    % (description, name, _cands[0] if _cands else ""))
+    return _out
 
 
 def h3_fz_models_dir():
@@ -6388,7 +6428,8 @@ def _fizgig_v65_training_context(logf, label):
 def _fizgig_v65_sample_file(params, output_name, prefix):
     prompt = str(params.get("sample_prompt") or params.get("trigger") or "").strip()
     if not prompt:
-        return None
+        prompt = ("a detailed portrait, high quality" if prefix == "qwen21"
+                  else "a subject performing a simple action, high quality")
     folder = data_sub("cache", "sample_prompts")
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, f"{output_name}_{prefix}_prompts.txt")
@@ -6497,14 +6538,16 @@ def train_qwen21_fizgig(logf=print, mode="qwen21_fz", params=None, vram_gb=None,
             progress.set_total(sum(repeats * count for _folder, repeats, count in subsets) * epochs)
         except Exception:
             pass
-    if params.get("sample_preview"):
+    if _sample_preview_enabled(params, vram_gb):
         prompt_file = _fizgig_v65_sample_file(params, output_name, "qwen21")
-        if prompt_file:
-            cmd += ["--sample_prompts", prompt_file, "--sample_every_n_epochs",
-                    str(_fizgig_sample_epochs(params, image_count, epochs)),
-                    "--sample_width", "1024", "--sample_height", "1024", "--sample_seed", "1234"]
-            if files["speed_lora"]:
-                cmd += ["--speed_lora", files["speed_lora"]]
+        sample_epochs = _fizgig_sample_epochs(params, image_count, epochs)
+        sample_resolution = min(resolution, 512) if vram_gb is not None and vram_gb <= 16.5 else resolution
+        cmd += ["--sample_prompts", prompt_file, "--sample_every_n_epochs", str(sample_epochs),
+                "--sample_width", str(sample_resolution), "--sample_height", str(sample_resolution),
+                "--sample_seed", "1234"]
+        if files["speed_lora"]:
+            cmd += ["--speed_lora", files["speed_lora"]]
+        logf(f"[Qwen-Image-2.1(Fizgig)] 采样预览：每 {sample_epochs} 轮，{sample_resolution}px；采样文件写入项目输出目录。")
     logf(f"[Qwen-Image-2.1(Fizgig)] 预设={preset}，素材={image_count} 张，分辨率={resolution}，LoRA rank={rank}，epochs={epochs}")
     if run_stream(cmd, cwd=fz_dir, env=env, logf=logf) != 0:
         raise RuntimeError("Qwen-Image-2.1(Fizgig) 训练失败，请查看日志。")
@@ -6612,18 +6655,18 @@ def train_h3_fizgig(logf=print, mode="h3_fz", params=None, vram_gb=None, resume_
             progress.set_total(sum(repeats * count for _folder, repeats, count in subsets) * epochs)
         except Exception:
             pass
-    if params.get("sample_preview"):
+    if _sample_preview_enabled(params, vram_gb):
         prompt_file = _fizgig_v65_sample_file(params, output_name, "h3")
-        if prompt_file:
-            frames = int(params.get("sample_frames") or params.get("video_frames") or 56) if dataset["videos"] else 1
-            cmd += ["--sample_prompts", prompt_file, "--sample_every_n_epochs",
-                    str(_fizgig_sample_epochs(params, dataset["total"], epochs)),
-                    "--sample_width", str(resolution), "--sample_height", str(resolution),
-                    "--sample_frames", str(frames), "--sample_seed", "1234"]
-            if files["audio_vae"] and (dataset["videos"] or dataset["audio"]):
-                cmd += ["--sample_audio", "--audio_vae", files["audio_vae"]]
-            if files["turbo_lora"]:
-                cmd += ["--turbo_lora_path", files["turbo_lora"], "--turbo_lora_strength", "0.75", "--sample_steps", "6"]
+        sample_epochs = _fizgig_sample_epochs(params, dataset["total"], epochs)
+        frames = int(params.get("sample_frames") or params.get("video_frames") or 56) if dataset["videos"] else 1
+        cmd += ["--sample_prompts", prompt_file, "--sample_every_n_epochs", str(sample_epochs),
+                "--sample_width", str(resolution), "--sample_height", str(resolution),
+                "--sample_frames", str(frames), "--sample_seed", "1234"]
+        if files["audio_vae"] and (dataset["videos"] or dataset["audio"]):
+            cmd += ["--sample_audio", "--audio_vae", files["audio_vae"]]
+        if files["turbo_lora"]:
+            cmd += ["--turbo_lora_path", files["turbo_lora"], "--turbo_lora_strength", "0.75", "--sample_steps", "6"]
+        logf(f"[MiniMax H3(Fizgig)] 采样预览：每 {sample_epochs} 轮，{resolution}px，{frames} 帧；采样文件写入项目输出目录。")
     logf(f"[MiniMax H3(Fizgig)] 素材={dataset['total']}，分辨率={resolution}，LoRA rank={rank}，epochs={epochs}")
     if run_stream(cmd, cwd=fz_dir, env=env, logf=logf) != 0:
         raise RuntimeError("MiniMax H3(Fizgig) 训练失败，请查看日志。")
@@ -7365,6 +7408,7 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
     except Exception:
         _sample_iv = 0
     _sample_every = _sample_iv if _sample_iv > 0 else 250
+    _sample_on = _sample_preview_enabled(params, vram_gb)
     # 帧数 / 分辨率必须吸附到 H3 的硬约束网格（理由见 H3_FRAME_STEP / H3_ALIGN 的常量注释）：
     # 此前 resolution 与 sample 宽高是写死的 1280/720，video_frames 又从未被界面写入，
     # 于是用户改了这两项都不生效；而手改 yaml 会被本函数下次生成时覆盖（2026-09-15 用户反馈）。
@@ -7421,7 +7465,8 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
         logf("[视频] 使用 nvfp4 量化主模型：" + dit_nvfp4_path)
     video_dir = os.path.abspath(video_dir).replace("\\", "/")
     out_dir = os.path.abspath(out_dir).replace("\\", "/")
-    sample_prompt = (trig + ", ") if trig else ""
+    sample_prompt = str(params.get("sample_prompt") or "").strip() or (
+        ((trig + ", ") if trig else "") + "a subject performing a simple action, cinematic lighting, high quality")
     text = (
         "job: extension\n"
         "config:\n"
@@ -7457,7 +7502,8 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
         "        lr: " + repr(lr) + "\n"
         "        dtype: bf16\n"
         "        cache_text_embeddings: true\n"
-        "      model:\n"
+        + ("        disable_sampling: true\n" if not _sample_on else "")
+        + "      model:\n"
         "        name_or_path: " + _yq(model_dir) + "\n"
         "        arch: 'minimax_h3'\n"
         "        low_vram: true\n"
@@ -7474,7 +7520,7 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
         "        num_frames: " + str(frames) + "\n"
         "        fps: 24\n"
         "        prompts:\n"
-        "          - " + _yq(sample_prompt + "a subject performing a simple action, cinematic lighting, high quality") + "\n"
+        "          - " + _yq(sample_prompt) + "\n"
         "        seed: 42\n"
         "        walk_seed: true\n"
         "        guidance_scale: 1.0\n"
@@ -8085,9 +8131,8 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
     _fast8_tier = _fast_arch and (
         _ft_switch == "on" or (_ft_switch != "off" and info.get("arch") == "zimage"
                                and vram_gb is not None and vram_gb < 10))
-    # Preserve the existing AI image default (sampling on) for old queued configs
-    # that do not carry this UI field; honor an explicit checkbox value.
-    _sample_on = bool(params.get("sample_preview", True))
+    # Explicit user choice wins; a missing setting follows the shared VRAM-based default.
+    _sample_on = _sample_preview_enabled(params, vram_gb)
     _at8g_train_yaml = ("        disable_sampling: true\n"
                         if (not _sample_on or _fast8_tier) else "")
     _at8g_model_yaml = ""
@@ -8119,7 +8164,9 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
     _style_cap = (params.get("style_caption") or "").strip()
     _subj = _guess_sample_subject(train_dir) if str(params.get("at_sub_mode") or "character") == "character" else ""
     # 采样预览：画风模式把「画风描述词」带进提示词，预览才贴近实际风格
-    sample_prompt = (", ".join(x for x in (trig, _style_cap, _subj) if x) + ", ") if (trig or _style_cap or _subj) else ""
+    sample_prompt = str(params.get("sample_prompt") or "").strip() or (
+        ((", ".join(x for x in (trig, _style_cap, _subj) if x) + ", ") if (trig or _style_cap or _subj) else "")
+        + "a high quality detailed portrait, masterpiece, best quality")
     # low_vram 显存感知（v0.11.3）：官方默认开（模型放 CPU 按需搬显存，省显存但每步有搬运开销）。
     # 显存足够装下量化模型+激活时关掉提速（2026-08-28 A6000 48G 跑 Qwen-Image 20B 实测：
     # 硬开 low_vram 9.76s/it，关掉后预计回到 5~7s/it）。
@@ -8186,7 +8233,7 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
         "        height: " + str(reso) + "\n"
         "        num_frames: 1\n"
         "        prompts:\n"
-        "          - " + _yq(sample_prompt + "a high quality detailed portrait, masterpiece, best quality") + "\n"
+        "          - " + _yq(sample_prompt) + "\n"
         "        seed: 42\n"
         "        walk_seed: true\n"
         "        guidance_scale: 4.0\n"
@@ -8638,6 +8685,11 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     trig = params.get("trigger") or ""
     reso = int(params.get("resolution") or 512)
     steps = _krea2_at_steps(params, train_dir)
+    try:
+        _sample_iv = int(params.get("sample_interval") or 0)
+    except (TypeError, ValueError):
+        _sample_iv = 0
+    _sample_every = _sample_iv if _sample_iv > 0 else 250
     # 显存档位按「取整后的 GB」分档：16G 卡 DXGI 常报 15.6~15.9，也可能报 16.0x，
     # 直接用 vram_gb <= 16 会让 16.01 掉进「qfloat8 + 1024 + 无分层交换」的死区（必 OOM）。
     # 与 musubi(_resolve_krea2_swap) / Fizgig(_fizgig_quant_swap) 一致，统一用 round() 取整。
@@ -8692,8 +8744,10 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
     _style_cap = (params.get("style_caption") or "").strip()
     _subj = _guess_sample_subject(train_dir) if str(params.get("at_sub_mode") or "character") == "character" else ""
     # 采样预览：画风模式把「画风描述词」带进提示词，预览才贴近实际风格
-    sample_prompt = (", ".join(x for x in (trig, _style_cap, _subj) if x) + ", ") if (trig or _style_cap or _subj) else ""
-    # 采样预览开关：与其他引擎一致——≤16G 默认关（用户勾选才开），>16G 默认开。
+    sample_prompt = str(params.get("sample_prompt") or "").strip() or (
+        ((", ".join(x for x in (trig, _style_cap, _subj) if x) + ", ") if (trig or _style_cap or _subj) else "")
+        + "a high quality detailed portrait, masterpiece, best quality")
+    # 采样预览开关：与其他引擎一致——<20G 自动档关闭；用户显式开启时仍可采样。
     # 旧逻辑是 ≤16G 一律硬关、不理会勾选 → 16G 用户永远没有预览图（2026-09-03 反馈：Krea2 全都没预览）。
     sample_on = _sample_preview_enabled(params, vram_gb)
     _sp_res = int(reso or 512)
@@ -8753,12 +8807,12 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
         "          vae_path: " + _yq(vae_dir) + "\n"
         + ("      sample:\n"
             "        sampler: \"flowmatch\"\n"
-            "        sample_every: 250\n"
+            "        sample_every: " + str(_sample_every) + "\n"
             "        width: " + str(_sp_res) + "\n"
             "        height: " + str(_sp_res) + "\n"
             "        num_frames: 1\n"
             "        prompts:\n"
-            "          - " + _yq(sample_prompt + "a high quality detailed portrait, masterpiece, best quality") + "\n"
+            "          - " + _yq(sample_prompt) + "\n"
             "        negative_prompt: " + _yq("lowres, bad anatomy, worst quality, low quality, blurry, jpeg artifacts, signature, watermark") + "\n"
             "        seed: 42\n"
             "        walk_seed: true\n"
@@ -9480,8 +9534,8 @@ def _warn_alloc_conf(logf):
 
 _INTERVAL_PARAM_KEYS = ("save_every", "sample_interval")
 _INTERVAL_EPOCH_MODES = {
-    "save_every": frozenset(("krea2", "krea2_fz", "flux2", "flux2_fz")),
-    "sample_interval": frozenset(("krea2_fz", "flux2_fz")),
+    "save_every": frozenset(("krea2", "krea2_fz", "flux2", "flux2_fz", "qwen21_fz", "h3_fz")),
+    "sample_interval": frozenset(("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz")),
 }
 
 
@@ -9490,6 +9544,26 @@ def interval_unit_for(mode, param):
     if param not in _INTERVAL_PARAM_KEYS:
         raise ValueError("unsupported interval parameter: %s" % param)
     return "epochs" if mode in _INTERVAL_EPOCH_MODES[param] else "steps"
+
+
+def interval_help_for(mode, param):
+    """界面间隔提示；单位和默认规则以训练入口实际传参为准。"""
+    if param not in _INTERVAL_PARAM_KEYS:
+        raise ValueError("unsupported interval parameter: %s" % param)
+    unit = interval_unit_for(mode, param)
+    if param == "save_every":
+        if unit == "epochs":
+            return "填 N = 每 N 轮保存中间快照；留空/0 = 每 1 轮。若 N 大于总轮数，本次没有中间快照。"
+        if mode in ("style", "character", "concept"):
+            return "填 N = 每 N 步保存中间快照（最低 50 步）；留空/0 = 每 200 步。"
+        return "填 N = 每 N 步保存中间快照；留空/0 = 每 200 步。"
+    if unit == "epochs":
+        if mode == "h3_fz":
+            return "填 N = 每 N 轮采样；留空沿用 H3 预设（当前默认 5 轮），填 0 按图集大小估算。训练开始时可能额外采样；N 超过总轮数时可能没有定期采样。"
+        return "填 N = 每 N 轮采样；留空/0 = 按图集大小估算约每 100 步一次，至少每 1 轮。训练开始时可能额外采样；若 N 大于总轮数，训练中可能没有定期采样。"
+    if mode in ("style", "character", "concept", "krea2", "flux2"):
+        return "填 N = 每 N 步采样；留空/0 = 跟随模型保存节奏。训练开始时可能额外采样。"
+    return "填 N = 每 N 步采样；留空/0 = 每 250 步。AI Toolkit 训练开始时可能额外采样。"
 
 
 def normalize_interval_values(value):
@@ -9877,10 +9951,10 @@ def gpu_status_text():
 
 
 # ---------- 配置导出 / 导入（可分享；不含本机路径与提示词，提示词可选） ----------
-_CFG_PARAM_INT_KEYS = ("rank", "alpha", "repeats", "max_epochs", "resolution", "video_steps")
+_CFG_PARAM_INT_KEYS = ("rank", "alpha", "repeats", "max_epochs", "resolution", "video_steps", "video_frames", "batch_size", "sample_interval")
 _CFG_PARAM_FLOAT_KEYS = ("unet_lr", "te_lr")
-_CFG_PARAM_BOOL_KEYS = ("strong_bind", "clean_concept", "sample_preview", "compile")
-_CFG_PARAM_STR_KEYS = ("optimizer", "quant_mode", "blocks_to_swap", "save_every", "crop_ratio")
+_CFG_PARAM_BOOL_KEYS = ("strong_bind", "clean_concept", "sample_preview", "compile", "keep_user_captions", "overwrite", "amd_mode")
+_CFG_PARAM_STR_KEYS = ("optimizer", "quant_mode", "blocks_to_swap", "save_every", "crop_ratio", "gc", "fizgig_qwen_preset", "wd14_model", "noise_offset", "min_snr_gamma")
 _CFG_PROMPT_KEYS = ("trigger", "style_caption", "sample_prompt", "global_pos", "global_neg")
 _CFG_AT_LABEL_TO_KEY = {v: k for k, v in AT_SUB_LABELS.items()}
 _CFG_AT_LABEL_TO_KEY.update({"画风": "style", "人物": "character", "风格": "style"})  # 兼容手写短标签
@@ -11697,9 +11771,10 @@ def resolve_batch_size(params, label="训练", logf=print):
 
 def decide_gradient_checkpointing(gc_choice, vram_gb):
     """梯度检查点开关：自动 = 显存未知或 <16GB 时开启；否则跟随手动选择。"""
-    if gc_choice == "开启":
+    gc_choice = str(gc_choice or "自动").strip().lower()
+    if gc_choice in ("开启", "on", "true", "1"):
         return True
-    if gc_choice == "关闭":
+    if gc_choice in ("关闭", "off", "false", "0"):
         return False
     return (vram_gb is None) or (vram_gb < 16.0)
 
@@ -13332,7 +13407,7 @@ def _fizgig_sample_epochs(params, per_epoch, epochs):
       单位不一致是**设计的问题**，不是用户填错 ✓
       现在改为：**填几就是几轮** ✓ 与引擎口径一致 ✓
         · 填 10  → 每 10 轮 ✓（约每 1000 步）
-        · 留空/0 → 沿用原来的「约每 100 步」启发式（= 每 1 轮）✓
+        · 留空/0 → 沿用「约每 100 步」启发式（H3 项目的预设值目前是 5 轮）；至少每 1 轮
       注：本引擎**按轮**组织采样（epoch-0 的 Sample at Start + 每个 epoch 各一次，
       见 trainer.py 源码核对结论），所以**做不到「每 N 步」** ✗ ——
       需要按步请改用 Krea2（musubi 引擎，`--sample_every_n_steps`）✓
@@ -13344,7 +13419,7 @@ def _fizgig_sample_epochs(params, per_epoch, epochs):
     except Exception:
         si = 0
     if si >= 1:
-        return max(1, min(si, _eps))          # ← 直接当轮数用 ✓
+        return si                              # 显式输入不因总轮数被暗中改写
     return min(max(1, int(round(100.0 / _per))), _eps)
 
 
@@ -13370,8 +13445,7 @@ def _fizgig_sample_note(params, per_epoch, epochs, s_ep):
         si = 0
     txt = "每 %d 轮（约每 %d 步）" % (s_ep, s_ep * _per)
     if si >= 1 and si > _eps:
-        txt += ("—— ⚠ 你填的 %d 轮超过了总轮数 %d，已按 %d 轮执行（本次只会出 1 张预览）✗"
-                % (si, _eps, s_ep))
+        txt += "—— 输入间隔超过总轮数 %d，可能只有训练开始时的采样" % _eps
     return txt
 
 
@@ -13473,7 +13547,7 @@ def _write_sample_prompts(output_name, params, mode, resolution=None, engine="ko
     musubi 官方默认采样分辨率 256x256，不指定时出图又小又糊、像"怪物"（2026-08-29 用户反馈），
     故按训练分辨率出图；--s 20 与 musubi 默认采样步数一致，显式写出便于后续调整。
     """
-    if not params.get("sample_preview", True):
+    if params.get("sample_preview") is False:
         return None
     user_prompt = (params.get("sample_prompt") or "").strip()
     if user_prompt:
@@ -13540,7 +13614,7 @@ def _write_sample_prompts(output_name, params, mode, resolution=None, engine="ko
         return None
 
 def _sample_preview_enabled(params, vram_gb):
-    """采样预览开关：以用户勾选为准（20G+ 默认开；16G 档默认关）。
+    """采样预览开关：用户显式选择优先；自动档在显存 <20G 时关闭。
 
     低显存（<10G）不再硬关，只由训练函数打印 OOM 警告——
     8G 卡在 512/768 + block swap 下通常能扛住采样，扛不住用户取消勾选即可。
@@ -13551,9 +13625,10 @@ def _sample_preview_enabled(params, vram_gb):
     """
     # 阈值与 write_krea2_at_yaml 的分档一致（<20G 视为低显存档，默认不开采样）；
     # 原来写 16.5，与训练侧 16G 档判定不一致：16.6 的卡会出现「训练按 16G 优化、采样却按高档默认开」。
-    if vram_gb is not None and vram_gb < 20:
-        return bool(params.get("sample_preview", False))
-    return bool(params.get("sample_preview", True))
+    requested = params.get("sample_preview")
+    if requested is not None:
+        return bool(requested)
+    return vram_gb is None or vram_gb >= 20
 
 
 def _guard_anima_base_model(base_type, base_model):
@@ -14098,12 +14173,12 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
                                     train_dir=train_dir)
         if _sp:
             _si = int(params.get("sample_interval") or 0)
-            _sample_n = _si if _si >= 10 else int(save_every)
+            _sample_n = _si if _si > 0 else int(save_every)
             cmd += [f"--sample_every_n_steps={_sample_n}", f"--sample_prompts={_sp}"]   # 跟随保存快照 / 自选固定步数
             if vram_gb is not None and vram_gb < 10:
                 logf("[训练] ⚠ 采样预览已开启，但显存 <10G，采样可能 OOM；若训练中断请取消勾选「训练中采样预览」")
             else:
-                logf("[训练] 采样预览：每 100 步用当前 LoRA 出一张预览图（输出目录）")
+                logf(f"[训练] 采样预览：每 {_sample_n} 步用当前 LoRA 出图（输出目录）")
 
     model_path = os.path.join(out_dir, output_name + ".safetensors")
     model_before = _file_signature(model_path)

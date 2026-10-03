@@ -27,7 +27,7 @@ const summary = computed(() => {
     </div>
     <div class="project-actions">
       <button class="small-button primary" type="button" title="打开项目并恢复其训练配置。" @click="emit('open', project)">打开</button>
-      <button class="small-button" type="button" title="修改项目名称；项目配置和训练产物不会因此移动。" @click="emit('rename', project)">重命名</button>
+      <button class="small-button" type="button" title="同步修改项目名称及其图集、训练产物目录。" @click="emit('rename', project)">重命名</button>
       <button class="small-button danger" type="button" title="删除项目配置；图集数据和 output 中的训练产物会保留。" @click="emit('remove', project)">删除</button>
     </div>
   </article>

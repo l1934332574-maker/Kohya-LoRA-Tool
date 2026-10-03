@@ -979,6 +979,56 @@ def test_accelerate_cpu_config_and_fp8_gate(base: Path):
     print("ACCELERATE_CPU_CONFIG_AND_FP8_GATE_OK")
 
 
+def test_qwen21_adapter_domestic_source(base: Path):
+    """★ 2026-10-02（用户反馈：没有代理的用户下不了 Qwen-Image-2.1 训练适配器）：
+
+    `QWEN21_FZ_MODEL_LINKS` 共 5 项，其中 4 项走**魔搭国内直链** ✓，
+    **只有「训练适配器」**是 `huggingface.co` 直连 ✗ ⇒ 无代理用户必然
+    `[WinError 10060] 连接尝试失败` 超时 ✗（实测确认；同一对话框里走魔搭的
+    Turbo LoRA 显示「已就绪」✓，正好对照）。
+
+    修复：
+      ① 适配器改为**多源**（国内镜像 hf-mirror 优先，huggingface.co 兜底 ✓）
+      ② 新增 `model_url_list()` 把条目归一化成源列表（单字符串仍兼容 ✓）
+      ③ 下载链路两处解包（对话框 / 应用内下载）改为走归一化 ✗
+         —— 否则三元解包遇到多源会直接 `ValueError` ✗
+    """
+    # ---- ① 归一化函数：单源与多源都要支持 ✓ ----
+    from kohya_core import utils as _U  # noqa: F401  （保持 import 风格一致）
+    lst = core.model_url_list(("f.safetensors", "说明", "https://a.example/x"))
+    assert lst == ["https://a.example/x"], lst
+    lst2 = core.model_url_list(("f.safetensors", "说明", ("https://a.example/x", "https://b.example/y")))
+    assert lst2 == ["https://a.example/x", "https://b.example/y"], lst2
+    assert core.model_url_list(("f", "d", None)) == [], "None 源应返回空列表 ✗"
+    assert core.model_url_list(("f", "d", "")) == [], "空源应返回空列表 ✗"
+
+    # ---- ② 训练适配器必须有国内可直连的源，且不得把 HF 直连放第一位 ✗ ----
+    entry = core.QWEN21_FZ_MODEL_LINKS["training_adapter"]
+    urls = core.model_url_list(entry)
+    assert urls, "训练适配器没有任何下载源 ✗"
+    assert "hf-mirror.com" in urls[0], \
+        "训练适配器首个源应为国内镜像 hf-mirror（无代理用户必须能下）✗：%s" % urls[0]
+    assert not urls[0].startswith("https://huggingface.co"), \
+        "首个源不得是 huggingface.co 直连（无代理必然超时）✗"
+
+    # ---- ③ 整张表：不再有「唯一直连 huggingface.co」的条目 ✗ ----
+    for key, _e in core.QWEN21_FZ_MODEL_LINKS.items():
+        _us = core.model_url_list(_e)
+        assert _us, "条目 %s 没有下载源 ✗" % key
+        assert any("modelscope.cn" in u or "hf-mirror.com" in u for u in _us), \
+            "条目 %s 缺少国内可直连源（modelscope / hf-mirror）✗：%s" % (key, _us)
+
+    # ---- ④ 下载链路不得再做三元解包（多源会 ValueError）✗ ----
+    g = (ROOT / "kohya_gui.py").read_text(encoding="utf-8")
+    assert "fname, desc, url = links[key]" not in g, \
+        "应用内下载仍在三元解包 links[key] ✗（多源条目会 ValueError）"
+    assert "for key, (fname, desc, url) in links.items()" not in g, \
+        "下载对话框仍在三元解包 links ✗（多源条目会 ValueError）"
+    assert g.count("core.model_url_list(") >= 2, \
+        "两处解包都应走 core.model_url_list 归一化 ✗"
+    print("QWEN21_ADAPTER_DOMESTIC_SOURCE_OK")
+
+
 def test_modern_download_base_entry(base: Path):
     """★ 2026-10-02（用户反馈：新版界面没有模型，下载模型的按钮好像没了）：
 
@@ -5297,6 +5347,8 @@ def main():
         test_keep_user_captions(base)
         # ★ 2026-10-02：新版界面「下载模型的按钮没了」（第一引擎漏了底模下载入口）✗
         test_modern_download_base_entry(base)
+        # ★ 2026-10-02：没有代理的用户下不了 Qwen-Image-2.1 训练适配器（HF 直连超时）✗
+        test_qwen21_adapter_domestic_source(base)
         test_fourth_engine(base)
         test_fourth_engine_train_pipeline(base)
         test_fizgig_deps_self_heal(base)

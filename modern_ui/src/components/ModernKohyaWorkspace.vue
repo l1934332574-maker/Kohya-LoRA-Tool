@@ -3,10 +3,12 @@ import { computed, reactive, ref, watch } from 'vue'
 import type { ModeWorkspaceData, ProjectCard, ProjectConfig } from '../bridge'
 import UiIcon from './UiIcon.vue'
 import CropRatioField from './CropRatioField.vue'
+import DatasetInspection from './DatasetInspection.vue'
+import TrainingProfileControl from './TrainingProfileControl.vue'
 import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
 import { normalizeWd14Model } from '../modelDefaults'
-import { fastRunNumber } from '../fastRunPreset'
+import { trainingProfileChanges, type TrainingProfile } from '../fastRunPreset'
 
 type BrowseKind = 'folder' | 'model'
 const props = defineProps<{
@@ -35,7 +37,7 @@ const draft = reactive({
   rank: '', alpha: '', unet_lr: '', te_lr: '', repeats: '', max_epochs: '', resolution: '',
   save_every: '', sample_interval: '', sample_prompt: '', optimizer: 'auto', strong_bind: false, clean_concept: true,
   sample_preview_mode: 'auto', unet_only: false, compile: false, crop_ratio: '', noise_offset: '', min_snr_gamma: '',
-  wd14_model: 'swinv2-v3', overwrite: false, amd_mode: false, train_env: '',
+  batch_size: '', gc: 'auto', wd14_model: 'swinv2-v3', overwrite: false, keep_user_captions: false, amd_mode: false, train_env: '',
 })
 
 const baseTypeOptions = [
@@ -50,9 +52,9 @@ const isAmdGpu = computed(() => String(props.details?.gpu_vendor || '').toLowerC
 const supportsSdQuality = computed(() => ['sd15', 'sdxl'].includes(draft.base_type))
 const supports = (key: string) => Boolean(props.details?.supports?.[key])
 const intervalUnit = (key: 'save_every' | 'sample_interval') => props.details?.interval_units?.[key] === 'epochs' ? '轮' : '步'
-const intervalTooltip = (key: 'save_every' | 'sample_interval') => key === 'save_every'
+const intervalTooltip = (key: 'save_every' | 'sample_interval') => props.details?.interval_hints?.[key] || (key === 'save_every'
   ? props.details?.interval_units?.[key] === 'epochs' ? legacyTooltips.saveEveryEpochs : legacyTooltips.saveEverySteps
-  : props.details?.interval_units?.[key] === 'epochs' ? legacyTooltips.sampleIntervalEpochs : legacyTooltips.sampleIntervalSteps
+  : props.details?.interval_units?.[key] === 'epochs' ? legacyTooltips.sampleIntervalEpochs : legacyTooltips.sampleIntervalSteps)
 const datasetGuidance = computed(() => {
   if (currentModeKey.value === 'concept') {
     return props.details?.concept_type_hints?.[draft.concept_type] || props.details?.dataset_hints?.concept || '概念图集保持概念一致，并混合其他主体属性。'
@@ -105,9 +107,9 @@ function hydrate(config?: ProjectConfig | null) {
   configuredParams.clear()
   Object.keys(params).forEach((key) => configuredParams.add(key))
   const preset = presetFor(currentModeKey.value, draft.base_type)
-  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'save_every', 'sample_interval', 'sample_prompt', 'optimizer', 'crop_ratio', 'noise_offset', 'min_snr_gamma', 'wd14_model'] as const) {
+  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'save_every', 'sample_interval', 'sample_prompt', 'optimizer', 'crop_ratio', 'noise_offset', 'min_snr_gamma', 'wd14_model', 'batch_size', 'gc'] as const) {
     const presetValue = preset[key] === undefined ? '' : key === 'unet_lr' || key === 'te_lr' ? styledPresetValue(key, currentModeKey.value, draft.base_type, get(config?.style_preset) || '自定义') : String(preset[key])
-    const value = get(params[key]) || presetValue || (demo ? demoValues[key] ?? (key === 'optimizer' ? 'auto' : '') : key === 'optimizer' ? 'auto' : '')
+    const value = get(params[key]) || presetValue || (demo ? demoValues[key] ?? (key === 'optimizer' || key === 'gc' ? 'auto' : '') : key === 'optimizer' || key === 'gc' ? 'auto' : '')
     draft[key] = key === 'wd14_model' ? normalizeWd14Model(value) : value
   }
   draft.strong_bind = params.strong_bind === undefined ? true : Boolean(params.strong_bind)
@@ -116,6 +118,7 @@ function hydrate(config?: ProjectConfig | null) {
   draft.unet_only = Boolean(config?.unet_only)
   draft.compile = Boolean(params.compile)
   draft.overwrite = Boolean(params.overwrite)
+  draft.keep_user_captions = Boolean(params.keep_user_captions)
   draft.amd_mode = Boolean(params.amd_mode)
   dirty.clear()
 }
@@ -160,17 +163,22 @@ function resetPreset() {
   emit('notify', '当前模式和底模的推荐预设已恢复。保存修改后生效。')
 }
 
-function applyFastRun() {
-  draft.rank = fastRunNumber(draft.rank, 8); markParam('rank')
-  draft.alpha = draft.rank; markParam('alpha')
-  draft.repeats = '1'; markParam('repeats')
-  draft.max_epochs = fastRunNumber(draft.max_epochs, 8); markParam('max_epochs')
-  draft.save_every = '1000'; markParam('save_every')
-  draft.sample_preview_mode = 'off'; markParam('sample_preview')
-  draft.optimizer = 'auto'; markParam('optimizer')
-  draft.unet_only = true; markRoot('unet_only')
-  draft.compile = false; markParam('compile')
-  emit('notify', '已应用快跑档：小 rank、仅训练 UNet/DiT、缩短训练并关闭采样；分辨率保持原值。保存设置后生效。')
+const profileUndo = ref<Record<string, unknown> | null>(null)
+function applyProfile(profile: TrainingProfile) {
+  const changes = trainingProfileChanges(draft, currentModeKey.value, profile, (key) => key in draft)
+  profileUndo.value = Object.fromEntries(Object.keys(changes).map((key) => [key, draft[key as keyof typeof draft]]))
+  for (const [key, value] of Object.entries(changes)) {
+    draft[key as keyof typeof draft] = value as never
+    if (key === 'unet_only' || key === 'fast_tier') markRoot(key)
+    else markParam(key === 'sample_preview_mode' ? 'sample_preview' : key)
+  }
+  emit('notify', `已修改：${Object.keys(changes).map((key) => ({ rank: 'rank', alpha: 'alpha', batch_size: '批大小', gc: '梯度检查点', repeats: '重复次数', max_epochs: '训练轮数', video_steps: '训练步数', sample_preview_mode: '采样预览', compile: '编译', unet_only: '训练目标', fast_tier: '引擎加速', blocks_to_swap: '块交换', fizgig_qwen_preset: '官方预设' } as Record<string, string>)[key] || key).join('、')}；分辨率和手动量化设置保持原值。可撤销或继续调整。`)
+}
+function undoProfile() {
+  if (!profileUndo.value) return
+  Object.assign(draft, profileUndo.value)
+  profileUndo.value = null
+  emit('notify', '已撤销档位修改，保存后生效。')
 }
 
 const conceptOptions = [
@@ -189,13 +197,14 @@ function makePatch(): ProjectConfig {
   }
   if (dirty.has('unet_only')) patch.unet_only = draft.unet_only
   const params: Record<string, unknown> = {}
-  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'save_every', 'sample_interval', 'sample_prompt', 'optimizer', 'crop_ratio', 'noise_offset', 'min_snr_gamma', 'wd14_model'] as const) {
+  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'save_every', 'sample_interval', 'sample_prompt', 'optimizer', 'crop_ratio', 'noise_offset', 'min_snr_gamma', 'wd14_model', 'batch_size', 'gc'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
   if (dirty.has('params.strong_bind')) params.strong_bind = draft.strong_bind
   if (dirty.has('params.clean_concept')) params.clean_concept = draft.clean_concept
   if (dirty.has('params.sample_preview')) params.sample_preview = draft.sample_preview_mode === 'auto' ? null : draft.sample_preview_mode === 'on'
   if (dirty.has('params.compile')) params.compile = draft.compile
+  if (dirty.has('params.keep_user_captions')) params.keep_user_captions = draft.keep_user_captions
   if (dirty.has('params.overwrite')) params.overwrite = draft.overwrite
   if (dirty.has('params.amd_mode')) params.amd_mode = draft.amd_mode
   if (Object.keys(params).length) patch.params = params
@@ -268,7 +277,7 @@ function requestAction(action: string) {
   emit('classicAction', action, makePatch())
 }
 
-defineExpose({ startTraining, guideAction })
+defineExpose({ startTraining, guideAction, save })
 </script>
 
 <template>
@@ -327,16 +336,19 @@ defineExpose({ startTraining, guideAction })
             <p class="card-hint">{{ datasetGuidance }}</p>
             <div class="field-row equal-columns spaced-row dataset-options-row">
               <label class="kohya-field" :title="legacyTooltips.wd14Model"><span>自动打标模型</span><select v-model="draft.wd14_model" class="kohya-select" @change="markParam('wd14_model')"><option value="swinv2-v3">swinv2-v3（推荐）</option><option value="moat-v2">moat-v2（旧版）</option></select></label>
+              <button class="check-line" :class="{ checked: draft.keep_user_captions }" type="button" role="checkbox" :aria-checked="draft.keep_user_captions" @click="draft.keep_user_captions = !draft.keep_user_captions; markParam('keep_user_captions')"><i></i><span>保留已有标签（不自动打标）</span></button>
               <button class="check-line" :title="legacyTooltips.overwrite" :class="{ checked: draft.overwrite }" type="button" role="checkbox" :aria-checked="draft.overwrite" @click="draft.overwrite = !draft.overwrite; markParam('overwrite')"><i></i><span>重新处理已存在的图片（改过标签后勾上，否则不生效）</span></button>
             </div>
+              <DatasetInspection :directory="draft.raw_dir" :desktop="desktop" :keep-captions="draft.keep_user_captions" @preserve="draft.keep_user_captions = true; markParam('keep_user_captions')" />
           </section>
 
           <section class="kohya-card parameter-card">
             <header class="card-heading parameter-heading">
               <span class="step-number">03</span><div class="parameter-title"><h2>训练参数</h2><small>{{ desktop ? '项目覆盖值 · 空白沿用推荐值' : '常用参数 · 示例值' }}</small></div>
-              <button class="kohya-button compact" type="button" title="应用省显存的短程试训参数；保留当前训练分辨率" @click="applyFastRun">快跑档</button>
+
               <button class="kohya-button compact" type="button" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起高级参数' : '高级参数' }}<span class="chevron" :class="{ open: advancedOpen }">⌄</span></button>
             </header>
+            <TrainingProfileControl :can-undo="Boolean(profileUndo)" @apply="applyProfile" @undo="undoProfile" />
             <div class="parameter-grid">
               <label class="kohya-field" :title="legacyTooltips.rank"><span>LoRA rank</span><input v-model="draft.rank" class="kohya-input" type="number" min="1" @input="markParam('rank')" /></label>
               <label class="kohya-field" :title="legacyTooltips.alpha"><span>LoRA alpha</span><input v-model="draft.alpha" class="kohya-input" type="number" min="1" @input="markParam('alpha')" /></label>
@@ -348,6 +360,8 @@ defineExpose({ startTraining, guideAction })
             </div>
             <Transition name="kohya-accordion">
               <div v-if="advancedOpen" class="advanced-grid">
+                <label v-if="supports('batch_size')" class="kohya-field"><span>批大小（1–8）</span><input v-model="draft.batch_size" class="kohya-input" type="number" min="1" max="8" placeholder="默认 1；增大需要更多显存" @input="markParam('batch_size')" /></label>
+                <label v-if="supports('gc')" class="kohya-field"><span>梯度检查点</span><select v-model="draft.gc" class="kohya-select" @change="markParam('gc')"><option value="auto">按显存自动</option><option value="开启">开启（省显存）</option><option value="关闭">关闭（显存充足时更快）</option></select></label>
                 <label class="kohya-field" :title="intervalTooltip('save_every')"><span>模型保存间隔（{{ intervalUnit('save_every') }}）</span><input v-model="draft.save_every" class="kohya-input" type="text" placeholder="沿用自动值" @input="markParam('save_every')" /></label>
                 <label class="kohya-field" :title="intervalTooltip('sample_interval')"><span>采样预览间隔（{{ intervalUnit('sample_interval') }}）</span><input v-model="draft.sample_interval" class="kohya-input" type="text" placeholder="留空 / 0 沿用默认值" @input="markParam('sample_interval')" /></label>
                 <label class="kohya-field" :title="legacyTooltips.samplePrompt"><span>采样预览提示词</span><input v-model="draft.sample_prompt" class="kohya-input" placeholder="留空自动生成；填写后整句生效" @input="markParam('sample_prompt')" /></label>
@@ -398,7 +412,7 @@ defineExpose({ startTraining, guideAction })
         </div>
 
         <div class="utility-row">
-          <button v-for="action in [{ label: '数据预处理', key: 'preprocess', tip: legacyTooltips.preprocess }, { label: '标签编辑器', key: 'label_editor', tip: legacyTooltips.labelEditor }, { label: '打开输出目录', key: 'output_dir', tip: legacyTooltips.openOutput }, { label: '导出配置', key: 'export_config', tip: '' }, { label: '使用说明', key: 'readme', tip: legacyTooltips.readme }]" :key="action.key" class="utility-button" type="button" :title="action.tip || undefined" @click="desktop ? requestAction(action.key) : previewOnly(action.label)">{{ action.label }}</button>
+          <button v-for="action in [{ label: '数据预处理', key: 'preprocess', tip: legacyTooltips.preprocess }, { label: '标签编辑器', key: 'label_editor', tip: legacyTooltips.labelEditor }, { label: '打开输出目录', key: 'output_dir', tip: legacyTooltips.openOutput }, { label: '训练记录', key: 'training_history', tip: '查看每次的配置、结果和 Loss 曲线' }, { label: '导出配置', key: 'export_config', tip: '' }, { label: '使用说明', key: 'readme', tip: legacyTooltips.readme }]" :key="action.key" class="utility-button" type="button" :title="action.tip || undefined" @click="desktop ? requestAction(action.key) : previewOnly(action.label)">{{ action.label }}</button>
           <button v-if="draft.base_type === 'anima'" class="utility-button" type="button" :title="legacyTooltips.animaComponents" @click="requestAction('anima_components')">Anima 配套组件</button>
         </div>
         <p v-if="desktop" class="preview-note"><span></span>配置直接保存到项目；可在此预处理图集、检查标签，再按当前模式支持情况启动训练。</p>
@@ -409,6 +423,7 @@ defineExpose({ startTraining, guideAction })
 </template>
 
 <style scoped>
+.dataset-options-row { display:grid; grid-template-columns:1fr; gap:10px; }
 .kohya-workspace { display:flex; flex:1 1 auto; flex-direction:column; min-width:0; min-height:0; color:var(--text); }
 .kohya-toolbar { display:flex; flex:0 0 auto; align-items:center; justify-content:space-between; gap:16px; min-height:58px; padding:9px 24px 7px; border-bottom:1px solid var(--outline-subtle); }
 .kohya-heading,.kohya-heading-copy,.kohya-toolbar-actions { display:flex; align-items:center; }
@@ -429,4 +444,5 @@ defineExpose({ startTraining, guideAction })
 @media(max-width:1200px) { .kohya-toolbar { padding-right:18px; padding-left:20px; }.kohya-scroll-content { padding-right:21px; padding-left:20px; } }
 @media(max-width:1120px) { .kohya-heading-copy { display:grid; gap:2px; }.kohya-columns,.kohya-column { display:contents; }.kohya-dataset-card { order:1; }.kohya-training-card { order:2; }.parameter-card { order:3; }.utility-row { order:4; }.preview-note { order:5; }.advanced-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.base-summary { flex-wrap:wrap; }.output-name { flex:1 0 100%; width:100%; } }
 @media(prefers-reduced-motion:reduce) { .kohya-accordion-enter-active,.kohya-accordion-leave-active { transition-duration:.01ms; } }
+.field-row.dataset-options-row { display:grid; grid-template-columns:1fr; gap:10px; }
 </style>

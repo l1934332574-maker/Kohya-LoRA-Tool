@@ -3,10 +3,12 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import type { ModeWorkspaceData, ProjectCard, ProjectConfig, QwenModelChoice, QwenModelSaveResult, QwenModelSelection, QwenModelSetup } from '../bridge'
 import UiIcon from './UiIcon.vue'
 import CropRatioField from './CropRatioField.vue'
+import DatasetInspection from './DatasetInspection.vue'
+import TrainingProfileControl from './TrainingProfileControl.vue'
 import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
 import { normalizeWd14Model } from '../modelDefaults'
-import { fastRunNumber } from '../fastRunPreset'
+import { trainingProfileChanges, type TrainingProfile } from '../fastRunPreset'
 
 const props = defineProps<{
   project: ProjectCard
@@ -75,6 +77,7 @@ const trainingDraft = reactive({
   clean_concept: true,
   sample_preview_mode: 'auto',
   overwrite: false,
+  keep_user_captions: false,
   amd_mode: false,
 })
 const conceptOptions = [
@@ -185,6 +188,7 @@ function hydrateConfig(config?: ProjectConfig | null) {
   trainingDraft.clean_concept = params.clean_concept === undefined ? true : Boolean(params.clean_concept)
   trainingDraft.sample_preview_mode = params.sample_preview === undefined ? 'auto' : Boolean(params.sample_preview) ? 'on' : 'off'
   trainingDraft.overwrite = Boolean(params.overwrite)
+  trainingDraft.keep_user_captions = Boolean(params.keep_user_captions)
   trainingDraft.amd_mode = Boolean(params.amd_mode)
   dirty.clear()
 }
@@ -213,15 +217,22 @@ function resetPreset() {
   emit('notify', '当前模式的推荐预设已恢复。保存设置后生效。')
 }
 
-function applyFastRun() {
-  trainingDraft.rank = fastRunNumber(trainingDraft.rank, 8); markParam('rank')
-  trainingDraft.alpha = trainingDraft.rank; markParam('alpha')
-  trainingDraft.video_steps = fastRunNumber(trainingDraft.video_steps, 600); markParam('video_steps')
-  trainingDraft.save_every = trainingDraft.video_steps; markParam('save_every')
-  trainingDraft.sample_preview_mode = 'off'; markParam('sample_preview')
-  trainingDraft.optimizer = 'auto'; markParam('optimizer')
-  if (usesFastTier.value) { trainingDraft.fast_tier = 'on'; markRoot('fast_tier') }
-  emit('notify', '已应用快跑档：小 rank、缩短训练、开启引擎快跑并关闭采样；分辨率保持原值。保存设置后生效。')
+const profileUndo = ref<Record<string, unknown> | null>(null)
+function applyProfile(profile: TrainingProfile) {
+  const changes = trainingProfileChanges(trainingDraft, props.mode || 'qwen_image', profile, (key) => key === 'fast_tier' ? usesFastTier.value : key in trainingDraft)
+  profileUndo.value = Object.fromEntries(Object.keys(changes).map((key) => [key, trainingDraft[key as keyof typeof trainingDraft]]))
+  for (const [key, value] of Object.entries(changes)) {
+    trainingDraft[key as keyof typeof trainingDraft] = value as never
+    if (key === 'unet_only' || key === 'fast_tier') markRoot(key)
+    else markParam(key === 'sample_preview_mode' ? 'sample_preview' : key)
+  }
+  emit('notify', `已修改：${Object.keys(changes).map((key) => ({ rank: 'rank', alpha: 'alpha', batch_size: '批大小', gc: '梯度检查点', repeats: '重复次数', max_epochs: '训练轮数', video_steps: '训练步数', sample_preview_mode: '采样预览', compile: '编译', unet_only: '训练目标', fast_tier: '引擎加速', blocks_to_swap: '块交换', fizgig_qwen_preset: '官方预设' } as Record<string, string>)[key] || key).join('、')}；分辨率和手动量化设置保持原值。可撤销或继续调整。`)
+}
+function undoProfile() {
+  if (!profileUndo.value) return
+  Object.assign(trainingDraft, profileUndo.value)
+  profileUndo.value = null
+  emit('notify', '已撤销档位修改，保存后生效。')
 }
 
 function makePatch(): ProjectConfig {
@@ -233,7 +244,7 @@ function makePatch(): ProjectConfig {
   for (const key of ['crop_ratio', 'rank', 'alpha', 'unet_lr', 'resolution', 'video_steps', 'save_every', 'sample_interval', 'optimizer', 'sample_prompt', 'wd14_model'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = trainingDraft[key]
   }
-  for (const key of ['strong_bind', 'clean_concept', 'overwrite', 'amd_mode'] as const) {
+  for (const key of ['strong_bind', 'clean_concept', 'overwrite', 'keep_user_captions', 'amd_mode'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = trainingDraft[key]
   }
   if (dirty.has('params.sample_preview')) params.sample_preview = trainingDraft.sample_preview_mode === 'auto' ? null : trainingDraft.sample_preview_mode === 'on'
@@ -373,7 +384,7 @@ function requestAction(action: string) {
   emit('classicAction', action, makePatch())
 }
 
-defineExpose({ startTraining, guideAction, openModelDialog })
+defineExpose({ startTraining, guideAction, openModelDialog, save: saveConfig })
 
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape' && modelDialogOpen.value) modelDialogOpen.value = false
@@ -397,7 +408,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         <button v-if="desktop && details?.engine_update_available" class="qwen-engine-update" type="button" :title="legacyTooltips.engineUpdate" @click="requestAction('at_engine_update')"><span class="update-arrow">↗</span> 引擎更新可用</button>
         <button class="qwen-button subtle" type="button" :title="legacyTooltips.modelHelp" @click="requestAction('at_model_help')">模型 / 显存说明</button>
         <button class="qwen-button" type="button" :title="legacyTooltips.modelPath" @click="openModelDialog">{{ desktop ? '模型设置' : '选择训练模型' }}</button>
-        <button v-if="desktop" class="qwen-button" type="button" @click="saveConfig">保存设置</button>
+        <button v-if="desktop" class="qwen-button" type="button" @click="saveConfig">{{ dirty.size ? '保存修改 · 未保存' : '设置已保存' }}</button>
         <button v-else class="qwen-button" type="button" @click="saveConfig">保存预览设置</button>
         <!-- ★ 2026-10-02：与左侧栏重复的「一键开始训练」已移除 ✗（同一动作，只保留侧栏那个）-->
       </div>
@@ -440,8 +451,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             </div>
             <div class="desktop-dataset-options">
               <label class="qwen-field" :title="legacyTooltips.wd14Model"><span class="field-caption">自动打标模型</span><select v-model="trainingDraft.wd14_model" class="qwen-select" @change="markParam('wd14_model')"><option value="swinv2-v3">swinv2-v3（推荐）</option><option value="moat-v2">moat-v2（旧版）</option></select></label>
+              <button class="check-toggle" :class="{ checked: trainingDraft.keep_user_captions }" type="button" role="checkbox" :aria-checked="trainingDraft.keep_user_captions" @click="trainingDraft.keep_user_captions = !trainingDraft.keep_user_captions; markParam('keep_user_captions')"><i></i><span>保留已有标签（不自动打标）</span></button>
               <button class="check-toggle" :title="legacyTooltips.overwrite" :class="{ checked: trainingDraft.overwrite }" type="button" role="checkbox" :aria-checked="trainingDraft.overwrite" @click="trainingDraft.overwrite = !trainingDraft.overwrite; markParam('overwrite')"><i></i><span>重新处理已存在的图片（改过标签后勾上，否则不生效）</span></button>
             </div>
+              <DatasetInspection :directory="trainingDraft.raw_dir" :desktop="desktop" :keep-captions="trainingDraft.keep_user_captions" @preserve="trainingDraft.keep_user_captions = true; markParam('keep_user_captions')" />
             <p class="card-footnote">修改过标签、裁切比例或打标模型时，勾选重新处理已有图片后再执行数据预处理。</p>
             <div class="task-fields qwen-project-fields">
               <label class="qwen-field" :title="legacyTooltips.atSubMode"><span class="field-caption">训练类型</span><select v-model="trainingDraft.at_sub_mode" class="qwen-select" @change="markRoot('at_sub_mode')"><option v-for="option in trainingTypeOptions" :key="option.key" :value="option.key">{{ option.label }}</option></select></label>
@@ -462,7 +475,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           </section>
 
           <section class="qwen-card parameter-card">
-            <header class="qwen-card-header parameter-header"><div><span class="section-index">02</span><h2>训练参数</h2><span class="parameters-summary">空白沿用项目预设</span></div><button class="reset-preset" type="button" title="应用省显存的短程试训参数；保留当前训练分辨率" @click="applyFastRun">快跑档</button><button class="advanced-trigger" type="button" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起高级参数' : '高级参数' }}<span class="chevron" :class="{ open: advancedOpen }">⌄</span></button></header>
+            <header class="qwen-card-header parameter-header"><div><span class="section-index">02</span><h2>训练参数</h2><span class="parameters-summary">空白沿用项目预设</span></div><button class="advanced-trigger" type="button" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起高级参数' : '高级参数' }}<span class="chevron" :class="{ open: advancedOpen }">⌄</span></button></header>
+            <TrainingProfileControl :can-undo="Boolean(profileUndo)" @apply="applyProfile" @undo="undoProfile" />
             <div class="parameter-grid qwen-project-params">
               <label class="qwen-field parameter-field" :title="legacyTooltips.rank"><span class="field-caption">LoRA rank</span><input v-model="trainingDraft.rank" class="qwen-input" type="number" min="1" placeholder="16" @input="markParam('rank')" /></label>
               <label class="qwen-field parameter-field" :title="legacyTooltips.alpha"><span class="field-caption">LoRA alpha</span><input v-model="trainingDraft.alpha" class="qwen-input" type="number" min="1" placeholder="16" @input="markParam('alpha')" /></label>
@@ -486,6 +500,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             <button class="utility-button" type="button" :title="legacyTooltips.preprocess" @click="requestAction('preprocess')">数据预处理（含自动打标）</button>
             <button class="utility-button" type="button" :title="legacyTooltips.labelEditor" @click="requestAction('label_editor')">标签编辑器</button>
             <button class="utility-button" type="button" :title="legacyTooltips.openOutput" @click="requestAction('output_dir')">打开输出目录</button>
+            <button class="utility-button" type="button" @click="requestAction('training_history')">训练记录</button>
             <button class="utility-button" type="button" @click="requestAction('export_config')">导出配置</button>
             <button class="utility-button" type="button" :title="legacyTooltips.readme" @click="requestAction('readme')">使用说明</button>
           </div>
@@ -707,4 +722,5 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   .qwen-workspace { animation: none; }
   .accordion-enter-active, .accordion-leave-active, .model-dialog-enter-active, .model-dialog-leave-active { transition-duration: .01ms; }
 }
+.desktop-dataset-options { display:grid; grid-template-columns:1fr; gap:10px; }
 </style>
