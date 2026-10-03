@@ -232,11 +232,11 @@ MIN_IMAGES = {"style": 20, "character": 15, "concept": 15, "krea2": 15, "krea2_a
 MAX_AUTO_STEPS = 12000                          # 一键训练自动约束的最大总步数（防过拟合）
 
 PARAM_LABELS = {
-    "rank": "rank",
-    "alpha": "alpha",
-    "unet_lr": "学习率",
-    "te_lr": "文本编码器学习率",
-    "repeats": "repeats",
+    "rank": "LoRA rank：决定可训练参数容量。增大通常增加显存和文件大小，不保证更像或更清晰；需结合数据和训练量选择。",
+    "alpha": "LoRA alpha：与 rank 一起影响训练更新的缩放。模式预设各有不同，不等同于出图时的 LoRA 加载权重。",
+    "unet_lr": "UNet 学习率：控制参数更新幅度，不代表每步运行速度。适合的数值取决于底模、优化器和数据；实际学习率还受预热与调度影响。",
+    "te_lr": "文本编码器学习率：仅在文本编码器参与训练时生效。通常采用较低起始值；不同优化器不能直接比较数值。",
+    "repeats": "图片重复次数：增加每轮中同一图片的出现次数。与样本数、轮数和批大小共同决定训练量；增加不保证效果更好。",
     "max_epochs": "最大epoch",
     "resolution": "训练分辨率",
     "video_steps": "训练步数",
@@ -245,11 +245,11 @@ PARAM_LABELS = {
 
 # 高级参数通俗中文提示（鼠标悬停显示）
 PARAM_TIPS = {
-    "rank": "LoRA 秩：越大学得越细、越像，也越容易过拟合；一般 8~64。",
-    "alpha": "缩放系数：一般取 rank 的一半，影响 LoRA 的强度。",
-    "unet_lr": "UNet 学习率：越大学得越快，太大容易崩或过拟合。",
-    "te_lr": "文本编码器学习率：控制提示词理解的学习速度，建议比 UNet 学习率低。",
-    "repeats": "每张图片重复次数：越多学得越用力，小心过拟合。",
+    "rank": "LoRA rank：决定可训练参数容量。增大通常增加显存和文件大小，不保证更像或更清晰；需结合数据和训练量选择。",
+    "alpha": "LoRA alpha：与 rank 一起影响训练更新的缩放。模式预设各有不同，不等同于出图时的 LoRA 加载权重。",
+    "unet_lr": "UNet 学习率：控制参数更新幅度，不代表每步运行速度。适合的数值取决于底模、优化器和数据；实际学习率还受预热与调度影响。",
+    "te_lr": "文本编码器学习率：仅在文本编码器参与训练时生效。通常采用较低起始值；不同优化器不能直接比较数值。",
+    "repeats": "图片重复次数：增加每轮中同一图片的出现次数。与样本数、轮数和批大小共同决定训练量；增加不保证效果更好。",
     "max_epochs": "最大训练轮数：轮数越多学得越久，够用就好。",
     "resolution": "训练分辨率：512 最省显存最快，768 平衡，1024 画质最好。16G 显存跑 Krea2/SDXL 建议降到 768 或 512，防止爆显存。",
     "video_steps": "视频 LoRA 总训练步数：2000 左右较稳；步数过高会死记视频内容（过拟合）。上限 3000。",
@@ -286,6 +286,7 @@ PARAM_SCOPE = {
     "reg_dir": ("style", "character", "concept"),
     "base_model": ("style", "character", "concept"),
     # 仅视频 / AI 图像（这两个引擎按「总步数」训练，不用 epoch）
+    "fizgig_qwen_preset": ("qwen21_fz",),
     "video_steps": ("video", "qwen_image", "zimage"),
     "video_frames": ("video", "h3_fz"),
     # 量化适用于 Krea2 / FLUX.2 系及 Fizgig Qwen 2.1 / H3；块交换仅适用于前两系。
@@ -303,7 +304,7 @@ PARAM_SCOPE = {
     "gc": ("style", "character", "concept", "krea2", "flux2"),
     # 优化器：两个 Fizgig 引擎不读（用引擎自己的默认）
     "optimizer": ("style", "character", "concept", "krea2", "flux2",
-                  "krea2_at", "video", "qwen_image", "zimage", "krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz"),
+                  "krea2_at", "video", "qwen_image", "zimage"),
     # compile：仅第一引擎 + Krea2 / FLUX.2 / Krea2(Fizgig)
     "compile": ("style", "character", "concept", "krea2", "flux2", "krea2_fz"),
     # repeats / max_epochs：视频与 AI 图像按步数训练，不用这两个

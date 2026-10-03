@@ -16,20 +16,20 @@ for (const profile of ['quick', 'memory', 'speed']) {
 test('quick only includes fields supported by this mode', () => {
   const changes = trainingProfileChanges(draft, 'krea2', 'quick', (key) => ['rank', 'max_epochs'].includes(key))
   assert.equal(changes.rank, '8')
-  assert.equal(changes.max_epochs, '8')
+  assert.equal(changes.max_epochs, '4')
   assert.equal('batch_size' in changes, false)
   assert.equal('gc' in changes, false)
 })
-test('memory and speed keep the training duration', () => {
+test('memory and speed restore the standard training duration', () => {
   for (const profile of ['memory', 'speed']) {
     const changes = trainingProfileChanges(draft, 'krea2', profile, () => true)
-    assert.equal('max_epochs' in changes, false)
-    assert.equal('repeats' in changes, false)
+    assert.equal(changes.max_epochs, '8')
+    assert.equal(changes.repeats, '1')
   }
 })
 test('quick video mode sets a supported step limit', () => {
   const changes = trainingProfileChanges({ ...draft, video_steps: '2000' }, 'video', 'quick', (key) => key !== 'max_epochs')
-  assert.equal(changes.video_steps, '600')
+  assert.equal(changes.video_steps, '400')
 })
 test('Qwen 2.1 uses its official preset', () => {
   const changes = trainingProfileChanges({ ...draft, fizgig_qwen_preset: 'auto' }, 'qwen21_fz', 'quick', () => true)

@@ -8,7 +8,7 @@ import TrainingProfileControl from './TrainingProfileControl.vue'
 import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
 import { normalizeWd14Model } from '../modelDefaults'
-import { trainingProfileChanges, type TrainingProfile } from '../fastRunPreset'
+import { useTrainingProfiles } from '../useTrainingProfiles'
 
 const props = defineProps<{
   project: ProjectCard
@@ -70,6 +70,7 @@ const trainingDraft = reactive({
   video_steps: '',
   save_every: '',
   sample_interval: '',
+  sample_seed: '1234',
   optimizer: 'auto',
   sample_prompt: '',
   wd14_model: 'swinv2-v3',
@@ -151,7 +152,7 @@ function styledPresetValue(key: string, style = trainingDraft.style_preset): str
   const raw = presetFor()[key]
   if (raw === undefined || raw === null || raw === '') return ''
   const number = Number(raw)
-  const factor = style === '动漫' ? 0.85 : style === '写实' ? 1.15 : 1
+  const factor = !['unet_lr', 'te_lr'].includes(key) ? 1 : style === '动漫' ? 0.85 : style === '写实' ? 1.15 : 1
   return factor !== 1 && Number.isFinite(number) ? (number * factor).toExponential(2).replace('e-0', 'e-').replace('e+0', 'e+') : String(raw)
 }
 const componentStatus = (kind: 'text_encoder_path' | 'vae_path') => {
@@ -179,14 +180,14 @@ function hydrateConfig(config?: ProjectConfig | null) {
   Object.keys(params).forEach((key) => configuredParams.add(key))
   const preset = presetFor()
   const demoValues: Record<string, string> = { rank: '16', alpha: '16', unet_lr: '1e-4', resolution: '512', video_steps: '2000', save_every: '200', sample_interval: '250' }
-  for (const key of ['crop_ratio', 'rank', 'alpha', 'unet_lr', 'resolution', 'video_steps', 'save_every', 'sample_interval', 'optimizer', 'sample_prompt', 'wd14_model'] as const) {
+  for (const key of ['crop_ratio', 'rank', 'alpha', 'unet_lr', 'resolution', 'video_steps', 'save_every', 'sample_interval', 'sample_seed', 'optimizer', 'sample_prompt', 'wd14_model'] as const) {
     const defaultValue = preset[key] === undefined ? '' : key === 'unet_lr' ? styledPresetValue(key, trainingDraft.style_preset) : String(preset[key])
     const value = text(params[key]) || defaultValue || (demo ? demoValues[key] ?? (key === 'optimizer' ? 'auto' : '') : key === 'optimizer' ? 'auto' : '')
-    trainingDraft[key] = key === 'wd14_model' ? normalizeWd14Model(value) : value
+    trainingDraft[key] = key === 'wd14_model' ? normalizeWd14Model(value) : key === 'sample_seed' ? value || '1234' : value
   }
   trainingDraft.strong_bind = params.strong_bind === undefined ? true : Boolean(params.strong_bind)
   trainingDraft.clean_concept = params.clean_concept === undefined ? true : Boolean(params.clean_concept)
-  trainingDraft.sample_preview_mode = params.sample_preview === undefined ? 'auto' : Boolean(params.sample_preview) ? 'on' : 'off'
+  trainingDraft.sample_preview_mode = params.sample_preview == null ? 'auto' : Boolean(params.sample_preview) ? 'on' : 'off'
   trainingDraft.overwrite = Boolean(params.overwrite)
   trainingDraft.keep_user_captions = Boolean(params.keep_user_captions)
   trainingDraft.amd_mode = Boolean(params.amd_mode)
@@ -217,23 +218,10 @@ function resetPreset() {
   emit('notify', '当前模式的推荐预设已恢复。保存设置后生效。')
 }
 
-const profileUndo = ref<Record<string, unknown> | null>(null)
-function applyProfile(profile: TrainingProfile) {
-  const changes = trainingProfileChanges(trainingDraft, props.mode || 'qwen_image', profile, (key) => key === 'fast_tier' ? usesFastTier.value : key in trainingDraft)
-  profileUndo.value = Object.fromEntries(Object.keys(changes).map((key) => [key, trainingDraft[key as keyof typeof trainingDraft]]))
-  for (const [key, value] of Object.entries(changes)) {
-    trainingDraft[key as keyof typeof trainingDraft] = value as never
-    if (key === 'unet_only' || key === 'fast_tier') markRoot(key)
-    else markParam(key === 'sample_preview_mode' ? 'sample_preview' : key)
-  }
-  emit('notify', `已修改：${Object.keys(changes).map((key) => ({ rank: 'rank', alpha: 'alpha', batch_size: '批大小', gc: '梯度检查点', repeats: '重复次数', max_epochs: '训练轮数', video_steps: '训练步数', sample_preview_mode: '采样预览', compile: '编译', unet_only: '训练目标', fast_tier: '引擎加速', blocks_to_swap: '块交换', fizgig_qwen_preset: '官方预设' } as Record<string, string>)[key] || key).join('、')}；分辨率和手动量化设置保持原值。可撤销或继续调整。`)
-}
-function undoProfile() {
-  if (!profileUndo.value) return
-  Object.assign(trainingDraft, profileUndo.value)
-  profileUndo.value = null
-  emit('notify', '已撤销档位修改，保存后生效。')
-}
+const { profileUndo, profileDefaults, profileSupported, applyProfile, undoProfile } = useTrainingProfiles(
+  trainingDraft, dirty, () => ({ mode: props.mode || 'qwen_image', defaults: presetFor(), supported: (key) => key === 'fast_tier' ? usesFastTier.value : Boolean(props.details?.supports?.[key]) }),
+  (message) => emit('notify', message), () => [props.config, props.mode, selectedModelKey.value],
+)
 
 function makePatch(): ProjectConfig {
   const patch: ProjectConfig = {}
@@ -241,7 +229,7 @@ function makePatch(): ProjectConfig {
     if (dirty.has(key)) patch[key] = trainingDraft[key]
   }
   const params: Record<string, unknown> = {}
-  for (const key of ['crop_ratio', 'rank', 'alpha', 'unet_lr', 'resolution', 'video_steps', 'save_every', 'sample_interval', 'optimizer', 'sample_prompt', 'wd14_model'] as const) {
+  for (const key of ['crop_ratio', 'rank', 'alpha', 'unet_lr', 'resolution', 'video_steps', 'save_every', 'sample_interval', 'sample_seed', 'optimizer', 'sample_prompt', 'wd14_model'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = trainingDraft[key]
   }
   for (const key of ['strong_bind', 'clean_concept', 'overwrite', 'keep_user_captions', 'amd_mode'] as const) {
@@ -459,8 +447,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             <div class="task-fields qwen-project-fields">
               <label class="qwen-field" :title="legacyTooltips.atSubMode"><span class="field-caption">训练类型</span><select v-model="trainingDraft.at_sub_mode" class="qwen-select" @change="markRoot('at_sub_mode')"><option v-for="option in trainingTypeOptions" :key="option.key" :value="option.key">{{ option.label }}</option></select></label>
               <label class="qwen-field" :title="legacyTooltips.cropRatio"><span class="field-caption">预处理裁切比例</span><CropRatioField v-model="trainingDraft.crop_ratio" input-class="qwen-input" @update:model-value="markParam('crop_ratio')" /></label>
-              <label class="qwen-field" :title="legacyTooltips.stylePreset"><span class="field-caption">出图风格</span><select v-model="trainingDraft.style_preset" class="qwen-select" @change="onStylePresetChange"><option>自定义</option><option>动漫</option><option>写实</option></select></label>
-              <label v-if="usesFastTier" class="qwen-field" :title="legacyTooltips.fastTier"><span class="field-caption">引擎快跑加速</span><select v-model="trainingDraft.fast_tier" class="qwen-select" @change="markRoot('fast_tier')"><option value="auto">自动（8G）</option><option value="on">开（强制）</option><option value="off">关</option></select></label>
+              <label class="qwen-field" :title="legacyTooltips.stylePreset"><span class="field-caption">素材风格 / 学习率微调</span><select v-model="trainingDraft.style_preset" class="qwen-select" @change="onStylePresetChange"><option value="自定义">不调整（自定义）</option><option value="动漫">动漫（预设学习率 −15%）</option><option value="写实">写实（预设学习率 +15%）</option></select></label>
+              <label v-if="usesFastTier" class="qwen-field" :title="legacyTooltips.fastTier"><span class="field-caption">引擎额外省显存</span><select v-model="trainingDraft.fast_tier" class="qwen-select" @change="markRoot('fast_tier')"><option value="auto">自动（Z-Image 低于 10GB）</option><option value="on">开（强制）</option><option value="off">关</option></select></label>
               <label class="qwen-field" :title="legacyTooltips.trigger"><span class="field-caption">Trigger 触发词</span><input v-model="trainingDraft.trigger" class="qwen-input" placeholder="输入触发词" @input="markRoot('trigger')" /></label>
               <label v-if="details?.supports?.reg_dir" class="qwen-field" :title="legacyTooltips.regDir"><span class="field-caption">正则数据集（可选）</span><span class="reg-path-row"><input v-model="trainingDraft.reg_dir" class="qwen-input" placeholder="可留空" @input="markRoot('reg_dir')" /><button class="qwen-button compact" type="button" :title="legacyTooltips.chooseRegDir" @click.stop="browseRegDirectory">选择文件夹…</button></span></label>
               <label v-if="draftIsStyle" class="qwen-field" :title="legacyTooltips.styleCaption"><span class="field-caption">画风描述词（可选）</span><input v-model="trainingDraft.style_caption" class="qwen-input" placeholder="留空使用自动打标" @input="markRoot('style_caption')" /></label>
@@ -476,7 +464,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
           <section class="qwen-card parameter-card">
             <header class="qwen-card-header parameter-header"><div><span class="section-index">02</span><h2>训练参数</h2><span class="parameters-summary">空白沿用项目预设</span></div><button class="advanced-trigger" type="button" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起高级参数' : '高级参数' }}<span class="chevron" :class="{ open: advancedOpen }">⌄</span></button></header>
-            <TrainingProfileControl :can-undo="Boolean(profileUndo)" @apply="applyProfile" @undo="undoProfile" />
+            <TrainingProfileControl :draft="trainingDraft" :mode="mode || 'qwen_image'" :defaults="profileDefaults" :supported="profileSupported" :can-undo="Boolean(profileUndo)" @apply="applyProfile" @undo="undoProfile" />
             <div class="parameter-grid qwen-project-params">
               <label class="qwen-field parameter-field" :title="legacyTooltips.rank"><span class="field-caption">LoRA rank</span><input v-model="trainingDraft.rank" class="qwen-input" type="number" min="1" placeholder="16" @input="markParam('rank')" /></label>
               <label class="qwen-field parameter-field" :title="legacyTooltips.alpha"><span class="field-caption">LoRA alpha</span><input v-model="trainingDraft.alpha" class="qwen-input" type="number" min="1" placeholder="16" @input="markParam('alpha')" /></label>
@@ -491,6 +479,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                 <label class="qwen-field" :title="legacyTooltips.sampleIntervalSteps"><span class="field-caption">采样预览间隔（步）</span><input v-model="trainingDraft.sample_interval" class="qwen-input" type="number" min="0" placeholder="留空 / 0 使用默认 250 步" @input="markParam('sample_interval')" /></label>
                 <label class="qwen-field" :title="legacyTooltips.optimizer"><span class="field-caption">优化器</span><select v-model="trainingDraft.optimizer" class="qwen-select" @change="markParam('optimizer')"><option value="auto">自动</option><option value="adamw">AdamW</option><option value="adamw8bit">AdamW8bit</option><option value="lion">Lion</option></select></label>
                 <label class="qwen-field advanced-prompt" :title="legacyTooltips.samplePrompt"><span class="field-caption">采样预览提示词</span><input v-model="trainingDraft.sample_prompt" class="qwen-input" placeholder="留空自动生成；填写后整句生效" @input="markParam('sample_prompt')" /></label>
+              <label class="qwen-field" title="各次采样使用同一个正整数种子，便于比较不同训练阶段。固定种子不保证不同引擎或不同提示词的图片可直接比较。"><span>固定采样种子</span><input v-model="trainingDraft.sample_seed" class="qwen-input" type="number" min="1" max="4294967295" placeholder="默认 1234" @input="markParam('sample_seed')" /></label>
                 <button class="reset-preset" type="button" :title="legacyTooltips.resetPreset" @click="resetPreset">恢复预设</button>
               </div></div>
             </Transition>

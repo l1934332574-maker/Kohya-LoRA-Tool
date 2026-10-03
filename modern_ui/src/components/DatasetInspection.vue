@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import type { DatasetSummary } from '../bridge'
+import DatasetImageBrowser from './DatasetImageBrowser.vue'
 
 const props = defineProps<{ directory: string; desktop: boolean; keepCaptions: boolean }>()
 const emit = defineEmits<{ preserve: [] }>()
@@ -36,6 +37,7 @@ watch(() => props.directory, (directory) => { void inspect(directory) }, { immed
       <p v-else-if="result.keep_user_captions">检测到大部分图片已有标签。<button type="button" @click="emit('preserve')">保留这些标签，不重新打标</button></p>
       <p v-else-if="!result.images" class="warning">没有找到支持的图片，请检查数据文件夹。</p>
       <p v-else>未开启标签保护，预处理会按当前训练类型整理标签。</p>
+      <DatasetImageBrowser :directory="directory" :desktop="desktop" />
     </template>
     <span v-else-if="result?.error" class="warning">{{ result.error }} <button type="button" @click="inspect(directory)">重试</button></span>
   </div>

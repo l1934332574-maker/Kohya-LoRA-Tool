@@ -283,3 +283,21 @@ def write_bundle(core, destination, logs, task=None, project=None, session=None)
             archive.writestr("runtimes/%s.json" % label, _json(report))
         archive.writestr("说明.txt", "诊断包在本地生成，没有上传。包含日志、设备驱动、各 Python 环境、依赖检查和小型 GPU 前向/反向算子结果。\n不包含模型、数据集、图片或完整环境变量。常见密钥和用户目录已脱敏。\n算子自检通过不代表完整 LoRA 训练通过；missing、failed、timeout 必须分别判断。\n")
     return str(destination)
+
+
+def write_training_feedback(directory, task, gallery):
+    """Export this run's configuration and logs only; no model/data files or hardware probes."""
+    path = Path(directory) / ("KohyaLoRA_训练反馈_%s_%s.zip" % (
+        datetime.now().strftime("%Y%m%d_%H%M%S_%f"), str(task.get("id", "run"))[:8]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr("项目配置.json", _json(task.get("project_config", {})))
+        bundle.writestr("提交参数.json", _json(task.get("normalized_params", {})))
+        bundle.writestr("启动计划.json", _json(task.get("plan", {})))
+        bundle.writestr("引擎生效参数.json", _json(task.get("effective_params", {})))
+        bundle.writestr("采样状态.json", _json(task.get("sampling_status", {})))
+        bundle.writestr("采样文件清单.json", _json(gallery))
+        bundle.writestr("启动日志.txt", "\n".join(redact(line) for line in task.get("startup_logs", [])))
+        bundle.writestr("最近日志.txt", "\n".join(redact(line) for line in task.get("logs", [])))
+        bundle.writestr("说明.txt", "本资料仅包含当前任务的设置、状态和日志。未包含训练图片、采样图片或模型文件；未进行硬件实测，也不会自动上传。\n生效参数只记录工具已确认的值，缺失项不代表零或关闭。\n采样比较需确认底模、提示词、种子、尺寸与采样条件一致；Loss 不是画质评分。\n")
+    return str(path)

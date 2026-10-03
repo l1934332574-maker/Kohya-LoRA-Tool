@@ -30,7 +30,8 @@ const curve = computed(() => {
       </svg>
       <div class="chart-labels"><span>Step {{ points[0]?.step }}</span><span>Loss {{ bounds.low.toFixed(4) }}–{{ bounds.high.toFixed(4) }}</span><span>Step {{ points.at(-1)?.step }}</span></div>
     </template>
-    <p v-else>训练开始后显示 Loss 趋势。评估效果还需要查看采样结果。</p>
+    <p v-else>训练开始后显示 Loss 趋势。</p>
+    <p>Loss 是训练误差，不是画质分数；没有统一的“合格值”。请结合固定条件的采样对比，不能仅凭 Loss 越低选择成品。</p>
   </section>
 </template>
 

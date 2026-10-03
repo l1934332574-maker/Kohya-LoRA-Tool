@@ -2812,7 +2812,7 @@ class App:
             text_color=TXT, font=ui_font(FONT_BODY), dropdown_font=ui_font(FONT_BODY),
             dropdown_fg_color=CARD2, dropdown_hover_color="#3a4150", command=self._apply_style_preset)
         self.style_preset_menu.pack(side="left", padx=(12, 0))
-        ctk.CTkLabel(self.style_row, text="（只微调学习率：动漫 ×0.85 更精细、写实 ×1.15 更自然；rank 等仍按模式自动）",
+        ctk.CTkLabel(self.style_row, text="（只微调学习率：动漫将预设学习率降低 15%、写实提高 15%（不保证更清晰或更自然）；rank 等仍按模式自动）",
                      font=ui_font(FONT_HINT), text_color=HINT).pack(side="left", padx=(12, 0))
         self.style_row.pack(fill="x")
         # Qwen-Image / Z-Image 专属：画风/人物 训练类型切换（默认隐藏，仅这两个模式显示）
@@ -6295,10 +6295,10 @@ class App:
             (getattr(self, "raw_entry", None), "放原始图片的文件夹（支持 jpg/png/webp/bmp/tif/gif）。"),
             (getattr(self, "btn_pick_raw", None), "选择原始图片文件夹。"),
             (getattr(self, "trigger_entry", None), "触发词=模型的“召唤词”：人物模式=角色名；画风模式=画风专属词。训练后画图写上它就能唤出角色/画风。支持多个，用英文逗号分隔。"),
-            (getattr(self, "reg_entry", None), "正则图：同一角色的参考图文件夹，训练时防止模型学过头（可选）。"),
+            (getattr(self, "reg_entry", None), "正则数据集：保留底模原有类别表现的额外图片；需匹配训练目标和标签策略，不保证防止过拟合（可选）。"),
             (getattr(self, "btn_pick_reg", None), "选择正则数据集文件夹（人物模式可选）。"),
             (getattr(self, "style_preset_menu", None),
-             "出图风格：只在「模式+底模」基线学习率上做微调（动漫 ×0.85 更精细、写实 ×1.15 更自然）。"
+             "出图风格：只在「模式+底模」基线学习率上做微调（动漫将预设学习率降低 15%、写实提高 15%（不保证更清晰或更自然））。"
              "rank / alpha / repeats / epoch 仍按训练模式和底模自动填；选「写实」还会切换打标兜底描述与成品文件名。"),
         ]
         for w, t in tips:

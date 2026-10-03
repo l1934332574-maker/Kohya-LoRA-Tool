@@ -8,7 +8,7 @@ import TrainingProfileControl from './TrainingProfileControl.vue'
 import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
 import { normalizeWd14Model } from '../modelDefaults'
-import { trainingProfileChanges, type TrainingProfile } from '../fastRunPreset'
+import { useTrainingProfiles } from '../useTrainingProfiles'
 
 type BrowseKind = 'folder' | 'model'
 const props = defineProps<{
@@ -32,7 +32,7 @@ const configuredParams = new Set<string>()
 const draft = reactive({
   raw_dir: '', trigger: '', reg_dir: '', style_preset: '自定义', style_caption: '', at_sub_mode: 'character', concept_type: 'form',
   rank: '', alpha: '', unet_lr: '', te_lr: '', repeats: '', max_epochs: '', resolution: '',
-  video_steps: '', video_frames: '', save_every: '', sample_interval: '', optimizer: 'auto',
+  video_steps: '', video_frames: '', save_every: '', sample_interval: '', sample_seed: '1234', optimizer: 'auto',
   crop_ratio: '', sample_prompt: '', noise_offset: '', min_snr_gamma: '', quant_mode: 'auto',
   blocks_to_swap: '', wd14_model: 'swinv2-v3', sample_preview_mode: 'auto', fast_tier: 'auto', fizgig_qwen_preset: 'auto',
   // ★ 2026-09-27：批大小（留空 = 自动 1）/ 梯度检查点（auto / on / off）
@@ -46,6 +46,7 @@ const defaults = computed(() => props.details.defaults ?? {})
 const isConcept = computed(() => draft.at_sub_mode === 'concept')
 const isStyle = computed(() => draft.at_sub_mode === 'style')
 const isVideo = computed(() => props.details.is_video)
+const officialQwenPreset = computed(() => props.mode === 'qwen21_fz')
 const isH3Fizgig = computed(() => props.mode === 'h3_fz')
 const engineUpdateAction = computed(() => String(props.details.engine_key || '').includes('fizgig') ? 'fizgig_engine_update' : 'at_engine_update')
 const assetReady = computed(() => props.details.missing_models.length === 0)
@@ -62,7 +63,7 @@ function styledPresetValue(key: string, style = draft.style_preset): string {
   const raw = presetFor()[key]
   if (raw === undefined || raw === null || raw === '') return ''
   const number = Number(raw)
-  const factor = style === '动漫' ? 0.85 : style === '写实' ? 1.15 : 1
+  const factor = !['unet_lr', 'te_lr'].includes(key) ? 1 : style === '动漫' ? 0.85 : style === '写实' ? 1.15 : 1
   return factor !== 1 && Number.isFinite(number) ? (number * factor).toExponential(2).replace('e-0', 'e-').replace('e+0', 'e+') : String(raw)
 }
 const currentDatasetHint = computed(() => {
@@ -95,15 +96,15 @@ function hydrate(config?: ProjectConfig | null) {
   configuredParams.clear()
   Object.keys(params).forEach((key) => configuredParams.add(key))
   const preset = presetFor()
-  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model', 'fizgig_qwen_preset'] as const) {
+  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'sample_seed', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model', 'fizgig_qwen_preset'] as const) {
     const defaultValue = preset[key] === undefined ? defaults.value[key] : preset[key]
     const styledDefault = key === 'unet_lr' || key === 'te_lr' ? styledPresetValue(key, draft.style_preset) : defaultValue
     const hydratedValue = value(params[key], styledDefault === undefined ? (key === 'optimizer' || key === 'quant_mode' || key === 'gc' ? 'auto' : '') : String(styledDefault))
-    draft[key] = (key === 'wd14_model' ? normalizeWd14Model(hydratedValue) : hydratedValue) as never
+    draft[key] = (key === 'wd14_model' ? normalizeWd14Model(hydratedValue) : key === 'sample_seed' ? hydratedValue || '1234' : hydratedValue) as never
   }
   draft.strong_bind = params.strong_bind === undefined ? true : Boolean(params.strong_bind)
   draft.clean_concept = params.clean_concept === undefined ? true : Boolean(params.clean_concept)
-  draft.sample_preview_mode = params.sample_preview === undefined ? 'auto' : Boolean(params.sample_preview) ? 'on' : 'off'
+  draft.sample_preview_mode = params.sample_preview == null ? 'auto' : Boolean(params.sample_preview) ? 'on' : 'off'
   draft.compile = Boolean(params.compile)
   draft.overwrite = Boolean(params.overwrite)
   draft.keep_user_captions = Boolean(params.keep_user_captions)
@@ -142,23 +143,10 @@ function resetPreset() {
   emit('notify', '当前模式的推荐预设已恢复。保存修改后生效。')
 }
 
-const profileUndo = ref<Record<string, unknown> | null>(null)
-function applyProfile(profile: TrainingProfile) {
-  const changes = trainingProfileChanges(draft, props.mode, profile, (key) => supported(key))
-  profileUndo.value = Object.fromEntries(Object.keys(changes).map((key) => [key, draft[key as keyof typeof draft]]))
-  for (const [key, value] of Object.entries(changes)) {
-    draft[key as keyof typeof draft] = value as never
-    if (key === 'unet_only' || key === 'fast_tier') markRoot(key)
-    else markParam(key === 'sample_preview_mode' ? 'sample_preview' : key)
-  }
-  emit('notify', `已修改：${Object.keys(changes).map((key) => ({ rank: 'rank', alpha: 'alpha', batch_size: '批大小', gc: '梯度检查点', repeats: '重复次数', max_epochs: '训练轮数', video_steps: '训练步数', sample_preview_mode: '采样预览', compile: '编译', unet_only: '训练目标', fast_tier: '引擎加速', blocks_to_swap: '块交换', fizgig_qwen_preset: '官方预设' } as Record<string, string>)[key] || key).join('、')}；分辨率和手动量化设置保持原值。可撤销或继续调整。`)
-}
-function undoProfile() {
-  if (!profileUndo.value) return
-  Object.assign(draft, profileUndo.value)
-  profileUndo.value = null
-  emit('notify', '已撤销档位修改，保存后生效。')
-}
+const { profileUndo, profileDefaults, profileSupported, applyProfile, undoProfile } = useTrainingProfiles(
+  draft, dirty, () => ({ mode: props.mode, defaults: presetFor(), supported: (key) => supported(key) }),
+  (message) => emit('notify', message), () => [props.config, props.mode, props.details],
+)
 
 function makePatch(): ProjectConfig {
   const patch: ProjectConfig = { mode: props.mode }
@@ -166,7 +154,7 @@ function makePatch(): ProjectConfig {
     if (dirty.has(key)) patch[key] = draft[key]
   }
   const params: Record<string, unknown> = {}
-  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model', 'fizgig_qwen_preset'] as const) {
+  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'sample_seed', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model', 'fizgig_qwen_preset'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
   for (const key of ['strong_bind', 'clean_concept', 'compile', 'overwrite', 'keep_user_captions', 'amd_mode'] as const) {
@@ -264,13 +252,14 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
               <label v-if="isConcept" class="engine-field" :title="details.concept_type_hints?.[draft.concept_type] || legacyTooltips.conceptType"><span>概念类型</span><select v-model="draft.concept_type" class="engine-select" @change="markRoot('concept_type')"><option value="form">形态/种族（美人鱼·半人马）</option><option value="outfit">服装（同款衣服）</option><option value="object">物品（道具/武器）</option><option value="bodypart">身体部位（异色瞳/翅膀）</option></select></label>
             </div>
             <div class="engine-fields two-columns spaced">
-              <label v-if="!isVideo" class="engine-field" :title="legacyTooltips.stylePreset"><span>出图风格</span><select v-model="draft.style_preset" class="engine-select" @change="onStylePresetChange"><option>自定义</option><option>动漫</option><option>写实</option></select></label>
+              <label v-if="!isVideo" class="engine-field" :title="legacyTooltips.stylePreset"><span>素材风格 / 学习率微调</span><select v-model="draft.style_preset" :disabled="officialQwenPreset" class="engine-select" @change="onStylePresetChange"><option value="自定义">不调整（自定义）</option><option value="动漫">动漫（预设学习率 −15%）</option><option value="写实">写实（预设学习率 +15%）</option></select></label>
               <label class="engine-field" :title="legacyTooltips.trigger"><span>Trigger 触发词</span><input v-model="draft.trigger" class="engine-input" placeholder="可留空；建议使用少见的英文词" @input="markRoot('trigger')" /></label>
               <label v-if="isStyle" class="engine-field" :title="legacyTooltips.styleCaption"><span>画风描述词（可选）</span><input v-model="draft.style_caption" class="engine-input" placeholder="留空使用自动打标" @input="markRoot('style_caption')" /></label>
               <label v-if="supported('crop_ratio')" class="engine-field" :title="legacyTooltips.cropRatio"><span>预处理裁切比例</span><CropRatioField v-model="draft.crop_ratio" input-class="engine-input" @update:model-value="markParam('crop_ratio')" /></label>
               <label v-if="supported('reg_dir')" class="engine-field" :title="legacyTooltips.regDir"><span>正则数据集（可选）</span><input v-model="draft.reg_dir" class="engine-input" placeholder="选择正则图片文件夹" @input="markRoot('reg_dir')" /></label>
             </div>
-            <p v-if="!isVideo" class="engine-hint">只微调学习率：动漫 ×0.85 更精细、写实 ×1.15 更自然；rank 等仍按模式自动。</p>
+            <p v-if="officialQwenPreset" class="engine-hint">本模式 rank、alpha 和学习率由下方官方预设接管；页面保留的旧值不参与训练。</p>
+            <p v-else-if="!isVideo" class="engine-hint">选择后从当前模式预设重算学习率：动漫降低 15%，写实提高 15%；不保证更清晰或更自然。</p>
             <button v-if="details.has_training_submode && !isStyle" class="engine-switch" :title="legacyTooltips.strongBind" :class="{ active: draft.strong_bind }" type="button" role="switch" :aria-checked="draft.strong_bind" @click="draft.strong_bind = !draft.strong_bind; markParam('strong_bind')"><i></i><span><strong>强绑定</strong><small>自动把 trigger + 训练集 100% 一致的特征词固定到标签开头</small></span></button>
             <button v-if="isConcept" class="engine-check" :title="legacyTooltips.cleanConcept" :class="{ checked: draft.clean_concept }" type="button" role="checkbox" :aria-checked="draft.clean_concept" @click="draft.clean_concept = !draft.clean_concept; markParam('clean_concept')"><i></i><span>自动清洗概念标签（推荐）</span></button>
             <label v-if="supported('wd14_model') && !isVideo" class="engine-field spaced" :title="legacyTooltips.wd14Model"><span>自动打标模型</span><select v-model="draft.wd14_model" class="engine-select" @change="markParam('wd14_model')"><option value="swinv2-v3">swinv2-v3（推荐）</option><option value="moat-v2">moat-v2（旧版）</option></select></label>
@@ -282,11 +271,11 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
 
           <section class="engine-card">
             <header class="engine-card-heading"><span>02</span><div><h2>常用训练参数</h2><small>空白项沿用当前引擎预设</small></div></header>
-            <TrainingProfileControl :can-undo="Boolean(profileUndo)" @apply="applyProfile" @undo="undoProfile" />
+            <TrainingProfileControl :draft="draft" :mode="mode" :defaults="profileDefaults" :supported="profileSupported" :can-undo="Boolean(profileUndo)" @apply="applyProfile" @undo="undoProfile" />
             <div class="engine-param-grid">
-              <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.rank"><span>LoRA rank</span><input v-model="draft.rank" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('rank')" /></label>
-              <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.alpha"><span>LoRA alpha</span><input v-model="draft.alpha" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('alpha')" /></label>
-              <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.unet_lr"><span>学习率</span><input v-model="draft.unet_lr" class="engine-input" placeholder="按模式预设" @input="markParam('unet_lr')" /></label>
+              <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.rank"><span>LoRA rank</span><input v-model="draft.rank" :disabled="officialQwenPreset" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('rank')" /></label>
+              <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.alpha"><span>LoRA alpha</span><input v-model="draft.alpha" :disabled="officialQwenPreset" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('alpha')" /></label>
+              <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.unet_lr"><span>学习率</span><input v-model="draft.unet_lr" :disabled="officialQwenPreset" class="engine-input" placeholder="按模式预设" @input="markParam('unet_lr')" /></label>
               <label v-if="supported('te_lr')" class="engine-field" :title="legacyTooltips.te_lr"><span>文本编码器学习率</span><input v-model="draft.te_lr" class="engine-input" placeholder="按模式预设" @input="markParam('te_lr')" /></label>
               <label class="engine-field" :title="legacyTooltips.resolution"><span>训练分辨率</span><input v-model="draft.resolution" class="engine-input" type="number" min="64" step="64" placeholder="按模式预设" @input="markParam('resolution')" /></label>
               <label v-if="supported('quant_mode')" class="engine-field" :title="legacyTooltips.quantMode"><span>底模量化精度（可手动选 NF4）</span><select v-model="draft.quant_mode" class="engine-select" @change="markParam('quant_mode')"><option v-for="modeOption in quantModes" :key="modeOption" :value="modeOption">{{ modeOption === 'auto' ? '自动（由引擎选择）' : modeOption.toUpperCase() }}</option></select></label>
@@ -313,6 +302,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
             <label v-if="supported('gc')" class="engine-field" :title="legacyTooltips.gradientCheckpointing"><span>梯度检查点</span><select v-model="draft.gc" class="engine-select" @change="markParam('gc')"><option value="auto">自动（按显存）</option><option value="开启">开启（省显存，较慢）</option><option value="关闭">关闭（更快，更吃显存）</option></select></label>
             <label v-if="supported('blocks_to_swap')" class="engine-field" :title="legacyTooltips.blocksToSwap"><span>块交换数（Krea2/FLUX.2）</span><select v-model="draft.blocks_to_swap" class="engine-select" @change="markParam('blocks_to_swap')"><option value="">自动</option><option v-for="count in [0, 2, 4, 6, 8, 10, 12]" :key="count" :value="String(count)">{{ count }}</option></select></label>
             <label v-if="supported('sample_prompt')" class="engine-field wide-field" :title="legacyTooltips.samplePrompt"><span>采样预览提示词</span><input v-model="draft.sample_prompt" class="engine-input" placeholder="留空自动生成；填写后整句生效" @input="markParam('sample_prompt')" /></label>
+              <label class="engine-field" title="各次采样使用同一个正整数种子，便于比较不同训练阶段。固定种子不保证不同引擎或不同提示词的图片可直接比较。"><span>固定采样种子</span><input v-model="draft.sample_seed" class="engine-input" type="number" min="1" max="4294967295" placeholder="默认 1234" @input="markParam('sample_seed')" /></label>
             <label v-if="supported('noise_offset')" class="engine-field" :title="legacyTooltips.noiseOffset"><span>Noise offset</span><input v-model="draft.noise_offset" class="engine-input" @input="markParam('noise_offset')" /></label>
             <label v-if="supported('min_snr_gamma')" class="engine-field" :title="legacyTooltips.minSnrGamma"><span>Min-SNR gamma</span><input v-model="draft.min_snr_gamma" class="engine-input" @input="markParam('min_snr_gamma')" /></label>
             <button class="engine-utility" type="button" :title="legacyTooltips.resetPreset" @click="resetPreset">恢复预设</button>

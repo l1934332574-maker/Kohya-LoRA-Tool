@@ -4,7 +4,7 @@ from pathlib import Path
 
 WORKSPACE_PARAM_KEYS = (
     'rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution',
-    'save_every', 'sample_interval', 'video_steps', 'video_frames', 'optimizer',
+    'save_every', 'sample_interval', 'sample_seed', 'video_steps', 'video_frames', 'optimizer',
     'strong_bind', 'clean_concept', 'sample_preview', 'compile', 'crop_ratio',
     'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap',
     'fizgig_qwen_preset', 'wd14_model', 'overwrite', 'keep_user_captions', 'amd_mode',
@@ -57,6 +57,7 @@ def training_params(core, config, project_name):
         'video_frames': integer('video_frames', getattr(core, 'H3_FRAMES', 73)),
         'batch_size': integer('batch_size', 1),
         'sample_interval': integer('sample_interval', 0),
+        'sample_seed': str(value('sample_seed', 1234)),
         'unet_lr': str(value('unet_lr', '3e-4' if kohya else '1e-4')),
         'te_lr': str(value('te_lr', '1.5e-4' if kohya else '1e-4')),
         'crop_ratio': core.normalize_crop_ratio(value('crop_ratio', '')),
@@ -78,26 +79,48 @@ def training_params(core, config, project_name):
     return params
 
 
-def caption_summary(directory):
-    """Read sidecar availability without changing images or caption files."""
+def dataset_images(directory):
+    """Match the preprocessor's root-first scan without following image or directory links."""
     from preprocess import IMAGE_EXTS
     root = Path(directory)
     if not root.is_dir():
-        return {'ok': False, 'error': '图片文件夹不存在。'}
-    images = [path for path in root.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_EXTS]
+        raise OSError("图片文件夹不存在。")
+    images = [path for path in root.iterdir() if path.is_file() and not path.is_symlink() and path.suffix.lower() in IMAGE_EXTS]
     if not images:
-        images = [path for path in root.rglob('*') if path.is_file()
-                  and path.suffix.lower() in IMAGE_EXTS and not any(
-                      part.startswith('.') for part in path.relative_to(root).parts)]
+        import os
+        errors = []
+        for folder, dirs, files in os.walk(root, onerror=errors.append):
+            parent = Path(folder)
+            dirs[:] = [name for name in dirs if not name.startswith('.') and not (parent / name).is_symlink()]
+            images.extend(parent / name for name in files if (parent / name).is_file() and not (parent / name).is_symlink() and Path(name).suffix.lower() in IMAGE_EXTS)
+        if errors:
+            raise errors[0]
+    return sorted(images, key=lambda path: path.relative_to(root).as_posix().casefold())
+
+
+def read_caption(image):
+    caption = Path(image).with_suffix('.txt')
+    if caption.is_symlink():
+        return ''
+    with caption.open('rb') as handle:
+        content = handle.read(65536)
+    encoding = 'utf-16' if content.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8-sig'
+    return content.decode(encoding, errors='replace').strip()
+
+
+def caption_summary(directory, images=None):
+    """Read sidecar availability without changing images or caption files."""
+    try:
+        images = dataset_images(directory) if images is None else images
+    except OSError as exc:
+        return {'ok': False, 'error': '无法检查图片文件夹：%s' % exc}
     nonempty = empty = 0
     for image in images:
-        caption = image.with_suffix('.txt')
         try:
-            content = caption.read_bytes()
+            content = read_caption(image)
         except OSError:
             continue
-        encoding = 'utf-16' if content.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8-sig'
-        if content.decode(encoding, errors='replace').strip():
+        if content:
             nonempty += 1
         else:
             empty += 1

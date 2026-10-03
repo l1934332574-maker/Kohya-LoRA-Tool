@@ -93,6 +93,10 @@ export interface DatasetSummary {
   empty_captions?: number
   missing_captions?: number
   keep_user_captions?: boolean
+  preview_token?: string
+  preview_images?: string[]
+  next_offset?: number | null
+  source_kind?: string
   error?: string
 }
 
@@ -113,13 +117,20 @@ export interface ModernTaskSample {
   version?: string
   data_url?: string
   warning?: string
+  width?: number
+  height?: number
 }
+
+export interface TrainingSampleEntry { name: string; version: string; modified: number; bytes: number }
 
 export interface DesktopApi {
   list_training_runs(project_name?: string): Promise<{ ok: boolean; runs?: TrainingRunSummary[]; error?: string }>
   get_training_run(run_id: string): Promise<{ ok: boolean; run?: TrainingRun; error?: string }>
   restore_training_run(run_id: string, project_name: string): Promise<{ ok: boolean; error?: string }>
   inspect_dataset(directory: string): Promise<DatasetSummary>
+  inspect_task_dataset(task_id: string): Promise<DatasetSummary>
+  list_dataset_preview(token: string, offset?: number): Promise<{ ok: boolean; images?: string[]; next_offset?: number | null; error?: string }>
+  get_dataset_preview(token: string, name: string): Promise<{ ok: boolean; data_url?: string; name?: string; width?: number; height?: number; caption?: string; error?: string }>
   bootstrap(): Promise<BootstrapData>
   suggest_project_name(): Promise<{ ok: boolean; name?: string; error?: string }>
   list_projects(): Promise<ProjectCard[]>
@@ -157,7 +168,8 @@ export interface DesktopApi {
   inspect_base_model(path: string): Promise<{ ok: boolean; base_type?: string; error?: string }>
   start_setup_task(action: string): Promise<{ ok: boolean; task_id?: string; error?: string }>
   get_task_status(task_id: string, after?: number): Promise<ModernTaskStatus>
-  get_task_sample(task_id: string, after?: string, full?: boolean): Promise<ModernTaskSample>
+  list_task_samples(task_id: string, offset?: number): Promise<{ ok: boolean; samples?: TrainingSampleEntry[]; total?: number; next_offset?: number | null; error?: string }>
+  get_task_sample(task_id: string, after?: string, full?: boolean, name?: string): Promise<ModernTaskSample>
   cancel_task(task_id: string): Promise<{ ok: boolean; error?: string }>
   get_model_downloads(mode: string): Promise<ModelDownloadList>
   start_model_download(mode: string, key: string): Promise<{ ok: boolean; task_id?: string; error?: string }>
@@ -230,6 +242,8 @@ export interface ModernTaskStatus {
   next_offset?: number
   metrics?: TrainingMetrics | null
   loss_history?: TrainingMetricPoint[]
+  sampling_status?: { status?: string; reason?: string; disabled?: boolean }
+  effective_params?: Record<string, unknown>
 }
 
 export interface TrainingPlan {
@@ -268,6 +282,7 @@ export interface TrainingPlan {
   warnings: string[]
   resume_path: string
   config_summary?: Record<string, unknown>
+  execution_summary?: Array<{ label: string; value: string }>
 }
 
 export interface ModelDownloadItem {

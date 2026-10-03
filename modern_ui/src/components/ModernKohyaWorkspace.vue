@@ -8,7 +8,7 @@ import TrainingProfileControl from './TrainingProfileControl.vue'
 import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
 import { normalizeWd14Model } from '../modelDefaults'
-import { trainingProfileChanges, type TrainingProfile } from '../fastRunPreset'
+import { useTrainingProfiles } from '../useTrainingProfiles'
 
 type BrowseKind = 'folder' | 'model'
 const props = defineProps<{
@@ -35,7 +35,7 @@ const draft = reactive({
   base_type: props.project.base_type,
   base_model: '', raw_dir: '', trigger: '', reg_dir: '', style_preset: '自定义', style_caption: '', concept_type: 'form', global_pos: '', global_neg: '',
   rank: '', alpha: '', unet_lr: '', te_lr: '', repeats: '', max_epochs: '', resolution: '',
-  save_every: '', sample_interval: '', sample_prompt: '', optimizer: 'auto', strong_bind: false, clean_concept: true,
+  save_every: '', sample_interval: '', sample_seed: '1234', sample_prompt: '', optimizer: 'auto', strong_bind: false, clean_concept: true,
   sample_preview_mode: 'auto', unet_only: false, compile: false, crop_ratio: '', noise_offset: '', min_snr_gamma: '',
   batch_size: '', gc: 'auto', wd14_model: 'swinv2-v3', overwrite: false, keep_user_captions: false, amd_mode: false, train_env: '',
 })
@@ -49,6 +49,7 @@ const baseTypeOptions = [
 const currentModeKey = computed(() => trainingType.value === '画风' ? 'style' : trainingType.value === '概念' ? 'concept' : 'character')
 const isAnimaDirect = computed(() => props.desktop && draft.base_type === 'anima')
 const isAmdGpu = computed(() => String(props.details?.gpu_vendor || '').toLowerCase() === 'amd')
+const textEncoderTraining = computed(() => !draft.unet_only && draft.base_type !== 'anima')
 const supportsSdQuality = computed(() => ['sd15', 'sdxl'].includes(draft.base_type))
 const supports = (key: string) => Boolean(props.details?.supports?.[key])
 const intervalUnit = (key: 'save_every' | 'sample_interval') => props.details?.interval_units?.[key] === 'epochs' ? '轮' : '步'
@@ -73,7 +74,7 @@ function presetFor(mode = currentModeKey.value, baseType = draft.base_type): Rec
 function styledPresetValue(key: string, mode = currentModeKey.value, baseType = draft.base_type, style = draft.style_preset): string {
   const raw = presetFor(mode, baseType)[key]
   if (raw === undefined || raw === null || raw === '') return ''
-  const factor = style === '动漫' ? 0.85 : style === '写实' ? 1.15 : 1
+  const factor = !['unet_lr', 'te_lr'].includes(key) ? 1 : style === '动漫' ? 0.85 : style === '写实' ? 1.15 : 1
   const number = Number(raw)
   if (factor === 1 || !Number.isFinite(number)) return String(raw)
   return (number * factor).toExponential(2).replace('e-0', 'e-').replace('e+0', 'e+')
@@ -107,14 +108,14 @@ function hydrate(config?: ProjectConfig | null) {
   configuredParams.clear()
   Object.keys(params).forEach((key) => configuredParams.add(key))
   const preset = presetFor(currentModeKey.value, draft.base_type)
-  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'save_every', 'sample_interval', 'sample_prompt', 'optimizer', 'crop_ratio', 'noise_offset', 'min_snr_gamma', 'wd14_model', 'batch_size', 'gc'] as const) {
+  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'save_every', 'sample_interval', 'sample_seed', 'sample_prompt', 'optimizer', 'crop_ratio', 'noise_offset', 'min_snr_gamma', 'wd14_model', 'batch_size', 'gc'] as const) {
     const presetValue = preset[key] === undefined ? '' : key === 'unet_lr' || key === 'te_lr' ? styledPresetValue(key, currentModeKey.value, draft.base_type, get(config?.style_preset) || '自定义') : String(preset[key])
     const value = get(params[key]) || presetValue || (demo ? demoValues[key] ?? (key === 'optimizer' || key === 'gc' ? 'auto' : '') : key === 'optimizer' || key === 'gc' ? 'auto' : '')
-    draft[key] = key === 'wd14_model' ? normalizeWd14Model(value) : value
+    draft[key] = key === 'wd14_model' ? normalizeWd14Model(value) : key === 'sample_seed' ? value || '1234' : value
   }
   draft.strong_bind = params.strong_bind === undefined ? true : Boolean(params.strong_bind)
   draft.clean_concept = params.clean_concept === undefined ? true : Boolean(params.clean_concept)
-  draft.sample_preview_mode = params.sample_preview === undefined ? 'auto' : Boolean(params.sample_preview) ? 'on' : 'off'
+  draft.sample_preview_mode = params.sample_preview == null ? 'auto' : Boolean(params.sample_preview) ? 'on' : 'off'
   draft.unet_only = Boolean(config?.unet_only)
   draft.compile = Boolean(params.compile)
   draft.overwrite = Boolean(params.overwrite)
@@ -145,6 +146,7 @@ function onTrainingTypeChange() {
 function onStylePresetChange() {
   markRoot('style_preset')
   for (const key of ['unet_lr', 'te_lr'] as const) {
+    if (key === 'te_lr' && !textEncoderTraining.value) continue
     const value = styledPresetValue(key)
     if (value) { draft[key] = value; markParam(key) }
   }
@@ -163,23 +165,10 @@ function resetPreset() {
   emit('notify', '当前模式和底模的推荐预设已恢复。保存修改后生效。')
 }
 
-const profileUndo = ref<Record<string, unknown> | null>(null)
-function applyProfile(profile: TrainingProfile) {
-  const changes = trainingProfileChanges(draft, currentModeKey.value, profile, (key) => key in draft)
-  profileUndo.value = Object.fromEntries(Object.keys(changes).map((key) => [key, draft[key as keyof typeof draft]]))
-  for (const [key, value] of Object.entries(changes)) {
-    draft[key as keyof typeof draft] = value as never
-    if (key === 'unet_only' || key === 'fast_tier') markRoot(key)
-    else markParam(key === 'sample_preview_mode' ? 'sample_preview' : key)
-  }
-  emit('notify', `已修改：${Object.keys(changes).map((key) => ({ rank: 'rank', alpha: 'alpha', batch_size: '批大小', gc: '梯度检查点', repeats: '重复次数', max_epochs: '训练轮数', video_steps: '训练步数', sample_preview_mode: '采样预览', compile: '编译', unet_only: '训练目标', fast_tier: '引擎加速', blocks_to_swap: '块交换', fizgig_qwen_preset: '官方预设' } as Record<string, string>)[key] || key).join('、')}；分辨率和手动量化设置保持原值。可撤销或继续调整。`)
-}
-function undoProfile() {
-  if (!profileUndo.value) return
-  Object.assign(draft, profileUndo.value)
-  profileUndo.value = null
-  emit('notify', '已撤销档位修改，保存后生效。')
-}
+const { profileUndo, profileDefaults, profileSupported, applyProfile, undoProfile } = useTrainingProfiles(
+  draft, dirty, () => ({ mode: currentModeKey.value, defaults: { ...presetFor(), unet_only: ['flux', 'anima'].includes(draft.base_type) }, supported: (key) => key === 'unet_only' ? draft.base_type !== 'anima' : Boolean(props.details?.supports?.[key]) }),
+  (message) => emit('notify', message), () => [props.config, draft.base_type, currentModeKey.value],
+)
 
 const conceptOptions = [
   { key: 'form', label: '形态/种族（美人鱼·半人马）' },
@@ -197,7 +186,7 @@ function makePatch(): ProjectConfig {
   }
   if (dirty.has('unet_only')) patch.unet_only = draft.unet_only
   const params: Record<string, unknown> = {}
-  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'save_every', 'sample_interval', 'sample_prompt', 'optimizer', 'crop_ratio', 'noise_offset', 'min_snr_gamma', 'wd14_model', 'batch_size', 'gc'] as const) {
+  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'save_every', 'sample_interval', 'sample_seed', 'sample_prompt', 'optimizer', 'crop_ratio', 'noise_offset', 'min_snr_gamma', 'wd14_model', 'batch_size', 'gc'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
   if (dirty.has('params.strong_bind')) params.strong_bind = draft.strong_bind
@@ -348,12 +337,12 @@ defineExpose({ startTraining, guideAction, save })
 
               <button class="kohya-button compact" type="button" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起高级参数' : '高级参数' }}<span class="chevron" :class="{ open: advancedOpen }">⌄</span></button>
             </header>
-            <TrainingProfileControl :can-undo="Boolean(profileUndo)" @apply="applyProfile" @undo="undoProfile" />
+            <TrainingProfileControl :draft="draft" :mode="currentModeKey" :defaults="profileDefaults" :supported="profileSupported" :can-undo="Boolean(profileUndo)" @apply="applyProfile" @undo="undoProfile" />
             <div class="parameter-grid">
               <label class="kohya-field" :title="legacyTooltips.rank"><span>LoRA rank</span><input v-model="draft.rank" class="kohya-input" type="number" min="1" @input="markParam('rank')" /></label>
               <label class="kohya-field" :title="legacyTooltips.alpha"><span>LoRA alpha</span><input v-model="draft.alpha" class="kohya-input" type="number" min="1" @input="markParam('alpha')" /></label>
               <label class="kohya-field" :title="legacyTooltips.unet_lr"><span>学习率</span><input v-model="draft.unet_lr" class="kohya-input" type="text" @input="markParam('unet_lr')" /></label>
-              <label v-if="supports('te_lr')" class="kohya-field" :title="legacyTooltips.te_lr"><span>文本编码器学习率</span><input v-model="draft.te_lr" class="kohya-input" type="text" @input="markParam('te_lr')" /></label>
+              <label v-if="supports('te_lr')" class="kohya-field" :title="legacyTooltips.te_lr"><span>文本编码器学习率{{ textEncoderTraining ? '' : '（不参与训练）' }}</span><input v-model="draft.te_lr" :disabled="!textEncoderTraining" class="kohya-input" type="text" @input="markParam('te_lr')" /></label>
               <label class="kohya-field" :title="legacyTooltips.resolution"><span>训练分辨率</span><input v-model="draft.resolution" class="kohya-input" type="number" min="64" step="64" @input="markParam('resolution')" /></label>
               <label class="kohya-field" :title="legacyTooltips.maxEpochs"><span>最大 epoch</span><input v-model="draft.max_epochs" class="kohya-input" type="number" min="1" @input="markParam('max_epochs')" /></label>
               <label class="kohya-field" :title="legacyTooltips.repeats"><span>图片循环次数</span><input v-model="draft.repeats" class="kohya-input" type="number" min="1" @input="markParam('repeats')" /></label>
@@ -365,6 +354,7 @@ defineExpose({ startTraining, guideAction, save })
                 <label class="kohya-field" :title="intervalTooltip('save_every')"><span>模型保存间隔（{{ intervalUnit('save_every') }}）</span><input v-model="draft.save_every" class="kohya-input" type="text" placeholder="沿用自动值" @input="markParam('save_every')" /></label>
                 <label class="kohya-field" :title="intervalTooltip('sample_interval')"><span>采样预览间隔（{{ intervalUnit('sample_interval') }}）</span><input v-model="draft.sample_interval" class="kohya-input" type="text" placeholder="留空 / 0 沿用默认值" @input="markParam('sample_interval')" /></label>
                 <label class="kohya-field" :title="legacyTooltips.samplePrompt"><span>采样预览提示词</span><input v-model="draft.sample_prompt" class="kohya-input" placeholder="留空自动生成；填写后整句生效" @input="markParam('sample_prompt')" /></label>
+              <label class="kohya-field" title="各次采样使用同一个正整数种子，便于比较不同训练阶段。固定种子不保证不同引擎或不同提示词的图片可直接比较。"><span>固定采样种子</span><input v-model="draft.sample_seed" class="kohya-input" type="number" min="1" max="4294967295" placeholder="默认 1234" @input="markParam('sample_seed')" /></label>
                 <label class="kohya-field" :title="legacyTooltips.optimizer"><span>优化器</span><select v-model="draft.optimizer" class="kohya-select" @change="markParam('optimizer')"><option value="auto">自动</option><option value="adamw">AdamW</option><option value="adamw8bit">AdamW8bit</option><option value="lion">Lion</option></select></label>
                 <label v-if="supportsSdQuality" class="kohya-field" :title="legacyTooltips.noiseOffset"><span>Noise offset</span><input v-model="draft.noise_offset" class="kohya-input" placeholder="默认预设" @input="markParam('noise_offset')" /></label>
                 <label v-if="supportsSdQuality" class="kohya-field" :title="legacyTooltips.minSnrGamma"><span>Min-SNR gamma</span><input v-model="draft.min_snr_gamma" class="kohya-input" placeholder="默认预设" @input="markParam('min_snr_gamma')" /></label>
@@ -392,8 +382,8 @@ defineExpose({ startTraining, guideAction, save })
               <label class="kohya-field" :title="legacyTooltips.regDir"><span>正则数据集（可选）</span><span class="reg-path-row"><input v-model="draft.reg_dir" class="kohya-input" type="text" placeholder="可留空" @input="markRoot('reg_dir')" /><button class="kohya-button compact" type="button" :title="legacyTooltips.chooseRegDir" @click.stop="browse('reg_dir')">选择文件夹…</button></span></label>
             </div>
             <div class="field-row spaced-row">
-              <label class="kohya-field" :title="legacyTooltips.stylePreset"><span>出图风格</span><select v-model="draft.style_preset" class="kohya-select" @change="onStylePresetChange"><option>自定义</option><option>动漫</option><option>写实</option></select></label>
-              <span class="inline-hint">只微调学习率：动漫 ×0.85 更精细、写实 ×1.15 更自然；rank 等仍按模式自动。</span>
+              <label class="kohya-field" :title="legacyTooltips.stylePreset"><span>素材风格 / 学习率微调</span><select v-model="draft.style_preset" class="kohya-select" @change="onStylePresetChange"><option value="自定义">不调整（自定义）</option><option value="动漫">动漫（预设学习率 −15%）</option><option value="写实">写实（预设学习率 +15%）</option></select></label>
+              <span class="inline-hint">选择后从当前模式预设重算学习率：动漫降低 15%，写实提高 15%；不保证更清晰或更自然。</span>
             </div>
             <div v-if="trainingType === '画风'" class="field-row spaced-row">
               <label class="kohya-field" :title="legacyTooltips.styleCaption"><span>画风描述词（可选）</span><input v-model="draft.style_caption" class="kohya-input" placeholder="留空使用自动打标" @input="markRoot('style_caption')" /></label>

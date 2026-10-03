@@ -18,7 +18,8 @@ from pathlib import Path
 
 from kohya_core.diagnostics import SessionLog, summary_lines, redact, write_bundle
 from kohya_core.training_history import TrainingHistory
-from kohya_core.project_config import WORKSPACE_PARAM_KEYS, BOOL_PARAM_KEYS, training_params, caption_summary
+from kohya_core.training_media import sample_files, image_preview, is_sample
+from kohya_core.project_config import WORKSPACE_PARAM_KEYS, BOOL_PARAM_KEYS, training_params, caption_summary, dataset_images, read_caption
 
 try:
     from model_downloader import ModelDownloader
@@ -46,7 +47,7 @@ _WORKSPACE_PARAM_KEYS = WORKSPACE_PARAM_KEYS
 _MODERN_IMPORT_EXTRA_PARAMS = {
     "sample_interval", "video_frames", "noise_offset", "min_snr_gamma",
     "wd14_model", "overwrite", "keep_user_captions", "amd_mode", "fizgig_qwen_preset",
-    "batch_size", "gc", "sample_prompt", "global_pos", "global_neg",
+    "batch_size", "gc", "sample_prompt", "sample_seed", "global_pos", "global_neg",
 }
 
 _APPEARANCE_BACKGROUND_HISTORY_LIMIT = 8
@@ -118,6 +119,7 @@ class ModernUIBridge:
         self._task_downloader = None
         self._project_name_reservations = set()
         self._picker_dirs = {}
+        self._dataset_previews = {}
         self._log_lock = threading.RLock()
         self._diagnostics_thread = None
         self._session_log = None
@@ -169,6 +171,11 @@ class ModernUIBridge:
             task = self._task
             if task and task.get("id") == task_id:
                 task["logs"].append(message)
+                if task.get("kind") == "training":
+                    task.setdefault("effective_params", {}).update(getattr(self.core, "get_effective", lambda: {})())
+                if task.get("kind") == "training" and re.search(r"preview failed|sampling failed|disabling previews|采样(?:预览)?(?:生成)?失败|停用后续预览|(?:采样|预览).*(?:Error:|Exception:)|No prompt file", message, re.I):
+                    task["sampling_status"] = {"status": "failed", "reason": message[:600],
+                                               "disabled": "disabling previews" in message.lower() or "关闭本轮后续预览" in message or "停用后续预览" in message}
                 if len(task["startup_logs"]) < 500:
                     task["startup_logs"].append(message)
                 if len(task["logs"]) > 10000:
@@ -200,72 +207,51 @@ class ModernUIBridge:
                 "detail": task.get("detail", ""),
                 "metrics": task.get("metrics"),
                 "loss_history": list(task.get("loss_history", [])),
+                "sampling_status": dict(task.get("sampling_status") or {}),
+                "effective_params": dict(task.get("effective_params") or {}),
                 "logs": logs[max(0, offset - log_offset):],
                 "next_offset": log_offset + len(logs),
             }
 
     @staticmethod
     def _is_training_sample(filename, parent):
-        low = filename.lower()
-        if not low.endswith((".png", ".jpg", ".jpeg", ".webp")):
-            return False
-        return ("sample" in low or parent.lower() in ("sample", "samples")
-                or re.search(r"_\d{4,}_|-\d+\.", low) is not None)
+        return is_sample(filename, parent)
 
-    def get_task_sample(self, task_id, after="", full=False):
-        """Return a bounded preview from the current training run's project output."""
+    def _sample_context(self, task_id):
         with self._task_lock:
             task = self._task
             if not task or task.get("id") != str(task_id or "") or task.get("kind") != "training":
-                return {"ok": False, "error": "训练任务已不存在，请重新打开训练窗口。"}
-            project_name = task.get("key") or ""
-            started = float(task.get("started") or 0)
-        output_dir = Path(self.core.data_sub("output", project_name))
-        if not output_dir.is_dir():
-            return {"ok": True, "available": False}
-        latest = None
-        latest_stat = None
+                raise ValueError("训练任务已不存在，请重新打开训练窗口。")
+            return self.core.data_sub("output", task.get("key") or ""), float(task.get("started") or 0), dict(task.get("sample_baseline") or {})
+
+    def list_task_samples(self, task_id, offset=0):
+        """Only list images written during this task, with bounded page sizes."""
         try:
-            for root, dirs, files in os.walk(output_dir):
-                root_path = Path(root)
-                depth = len(root_path.relative_to(output_dir).parts)
-                dirs[:] = [name for name in dirs if depth < 4 and not name.startswith(".")
-                           and not (root_path / name).is_symlink()]
-                for name in files:
-                    if not self._is_training_sample(name, root_path.name):
-                        continue
-                    candidate = root_path / name
-                    if candidate.is_symlink():
-                        continue
-                    try:
-                        stat = candidate.stat()
-                    except OSError:
-                        continue
-                    if stat.st_mtime < started - 2 or stat.st_size <= 0:
-                        continue
-                    if latest_stat is None or stat.st_mtime_ns > latest_stat.st_mtime_ns:
-                        latest, latest_stat = candidate, stat
-            if latest is None:
-                return {"ok": True, "available": False}
-            name = str(latest.relative_to(output_dir)).replace("\\", "/")
-            version = "%s:%s:%s" % (latest_stat.st_mtime_ns, latest_stat.st_size, name)
-            if str(after or "") == version and not full:
-                return {"ok": True, "available": True, "name": name, "version": version}
-            from PIL import Image
-            with Image.open(latest) as source:
-                if source.width * source.height > 80_000_000:
-                    raise ValueError("图片尺寸过大")
-                source.thumbnail((1400, 1400) if full else (520, 520))
-                image = source.convert("RGB")
-            buffer = io.BytesIO()
-            image.save(buffer, format="WEBP", quality=82, method=4)
-            data_url = "data:image/webp;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
-            return {"ok": True, "available": True, "name": name, "version": version,
-                    "data_url": data_url}
+            directory, started, baseline = self._sample_context(task_id)
+            images = [item for item in sample_files(directory, started) if baseline.get(item["name"]) != item["version"]]
+            offset = max(0, int(offset or 0))
+            return {"ok": True, "samples": images[offset:offset + 100], "total": len(images),
+                    "next_offset": offset + 100 if offset + 100 < len(images) else None}
+        except (OSError, ValueError, TypeError) as exc:
+            return {"ok": False, "error": "无法读取本次采样历史：%s" % exc}
+
+    def get_task_sample(self, task_id, after="", full=False, name=""):
+        """Read the latest or a catalogued current-run image; never accept arbitrary file paths."""
+        try:
+            directory, started, baseline = self._sample_context(task_id)
+            images = [item for item in sample_files(directory, started) if baseline.get(item["name"]) != item["version"]]
+            entry = next((item for item in images if item["name"] == name), None) if name else (images[0] if images else None)
+            if not entry:
+                return {"ok": True, "available": False,
+                        "warning": "这张采样图已不存在，请刷新历史列表。" if name else ""}
+            result = {"ok": True, "available": True, **entry}
+            if str(after or "") != entry["version"] or full:
+                result.update(image_preview(directory, entry["name"], full))
+            return result
         except (OSError, ValueError) as exc:
-            # The engine may still be writing the newest image. The next poll retries it.
-            return {"ok": True, "available": False,
-                    "warning": "采样图暂时无法读取，稍后重试：%s" % str(exc)[:100]}
+            # An image may still be being written. Do not mark its version as consumed.
+            return {"ok": False, "available": False,
+                    "error": "采样图暂时无法读取，稍后重试：%s" % str(exc)[:160]}
 
     def _record_training_metrics(self, task_id, snapshot):
         with self._task_lock:
@@ -668,7 +654,35 @@ class ModernUIBridge:
                 effective_save = max(50, effective_save)
             result["plan"]["save_interval_effective"] = effective_save
             result["plan"]["sampling_rule"] = self._sampling_rule(mode, result["plan"]["config_summary"], result["plan"])
+            params = result["plan"]["config_summary"]
+            try:
+                getattr(self.core, "_sample_seed", lambda p: int(p.get("sample_seed") or 1234))(params)
+            except (ValueError, TypeError) as exc:
+                return {"ok": False, "error": str(exc)}
+            result["plan"]["execution_summary"] = self._execution_summary(mode, params, result["plan"])
         return result
+
+    def _execution_summary(self, mode, params, plan):
+        """Describe settings actually specified by our entry points without inventing engine defaults."""
+        kohya = mode in ("style", "character", "concept")
+        train_te = kohya and params.get("train_text_encoder", True) and params.get("base_type") != "anima"
+        rows = [{"label": "文本编码器训练", "value": "参与训练；起始学习率 %s" % params.get("te_lr") if train_te else "不参与训练；其学习率不生效"}]
+        if kohya or mode in ("krea2_fz", "flux2_fz"):
+            rows += [{"label": "学习率计划", "value": "cosine（余弦衰减）；输入的是起始学习率"},
+                     {"label": "学习率预热", "value": "120 步；与模型加载、缓存及编译预热不同"}]
+        elif mode == "qwen21_fz":
+            rows.append({"label": "学习率计划", "value": "官方预设接管；Fast / Standard 自适应，Style 固定"})
+        else:
+            rows.append({"label": "学习率计划", "value": "工具未指定调度 / 学习率预热，使用当前引擎默认"})
+        if mode in ("video", "qwen_image", "zimage"):
+            steps = max(100, min(3000 if mode == "video" else 6000, int(params.get("video_steps") or 2000)))
+            rows.append({"label": "实际步数限制", "value": "%d 步（入口范围 %d–%d）" % (steps, 100, 3000 if mode == "video" else 6000)})
+        else:
+            rows.append({"label": "训练量口径", "value": "轮数 × 每轮批次数；重复目录、过滤及分桶会改变总步数。启动后的生效参数和进度为准"})
+        if kohya and params.get("base_type") == "sdxl":
+            rows.append({"label": "SDXL 分辨率", "value": "默认 512 是资源起点；请查看处理后图片细节，再按显存自行调高"})
+        rows.append({"label": "采样失败边界", "value": "Fizgig 部分入口可停用后续预览；其他入口的采样异常仍可能中断训练，不能保证隔离"})
+        return rows
 
     def _sampling_rule(self, mode, params, plan):
         """开训前展示有效的采样开关和间隔，不猜测预处理后的精确步数。"""
@@ -676,8 +690,14 @@ class ModernUIBridge:
         enabled = bool(getattr(self.core, "_sample_preview_enabled", lambda p, v: p.get("sample_preview") if p.get("sample_preview") is not None else v is None or v >= 20)(params, vram))
         reason = "手动开启" if params.get("sample_preview") is True else "手动关闭" if params.get("sample_preview") is False else "按显存自动开启" if enabled else "按显存自动关闭（低于 20GB）"
         fast = str(params.get("fast_tier") or "auto").lower()
-        if mode in ("qwen_image", "zimage") and (fast == "on" or (fast == "auto" and mode == "zimage" and vram is not None and vram < 10)):
-            enabled, reason = False, "快跑档关闭训练采样"
+        fast_arch = mode
+        if mode in ("qwen_image", "zimage"):
+            try:
+                fast_arch = getattr(self.core, "at_image_info", lambda m: {"arch": m})(mode).get("arch", mode)
+            except Exception:
+                pass
+        if params.get("sample_preview") is not True and fast_arch in ("qwen_image", "zimage") and (fast == "on" or (fast == "auto" and mode == "zimage" and vram is not None and vram < 10)):
+            enabled, reason = False, "额外省显存档的自动策略关闭采样（可手动开启，需额外显存）"
         if enabled and mode == "krea2_fz" and not getattr(self.core, "krea2_model_files", lambda: {"turbo": True})().get("turbo"):
             enabled, reason = False, "缺少 Turbo 预览模型，本次不采样"
         try:
@@ -1234,16 +1254,27 @@ class ModernUIBridge:
         if not task_id:
             return {"ok": False, "error": "已有环境、模型或训练任务正在运行，请等它完成后再试。"}
         review_event = threading.Event()
+        try:
+            baseline = {item["name"]: item["version"] for item in sample_files(self.core.data_sub("output", project_name), 0)}
+        except OSError:
+            baseline = {}
         with self._task_lock:
             if self._task and self._task.get("id") == task_id:
                 self._task["review_event"] = review_event
+                self._task["plan"] = plan
+                self._task["sample_baseline"] = baseline
+                self._task["normalized_params"] = dict(params)
         self.core.reset_stop()
+        getattr(self.core, "reset_effective", lambda: None)()
         root_keys = ("mode", "base_type", "at_sub_mode", "concept_type", "fast_tier", "trigger",
                      "raw_dir", "reg_dir", "base_model", "style_preset", "style_caption",
                      "train_env", "unet_only", "global_pos", "global_neg")
         record_config = {key: config[key] for key in root_keys if key in config}
         stored_params = config.get("params") if isinstance(config.get("params"), dict) else {}
         record_config["params"] = {key: value for key, value in stored_params.items() if key in WORKSPACE_PARAM_KEYS}
+        with self._task_lock:
+            if self._task and self._task.get("id") == task_id:
+                self._task["project_config"] = record_config
         with self._task_lock:
             task_state = self._task
             started = task_state["started"]
@@ -1335,6 +1366,7 @@ class ModernUIBridge:
                 self._task_log(task_id, "[预处理] 已完成，可用数据 %d 个。请检查数据后确认是否继续训练。" % processed_count)
                 with self._task_lock:
                     if self._task and self._task.get("id") == task_id:
+                        self._task["dataset_directory"] = params["raw_dir"] if params["mode"] in ("video", "h3_fz") else self.core.dataset_train_dir(params["mode"], project_name)
                         self._task.update(
                             status="awaiting_review",
                             message=("自动打标有缺失，请核对标签。" if tagger_incomplete else
@@ -1360,6 +1392,10 @@ class ModernUIBridge:
                 def monitor_worker():
                     while not monitor_stop.wait(0.8):
                         snapshot = monitor.snapshot()
+                        effective = getattr(self.core, "get_effective", lambda: {})()
+                        with self._task_lock:
+                            if self._task and self._task.get("id") == task_id:
+                                self._task.setdefault("effective_params", {}).update(effective)
                         self._record_training_metrics(task_id, snapshot)
                         total = int(snapshot.get("total") or 0)
                         step = int(snapshot.get("step") or 0)
@@ -1479,12 +1515,16 @@ class ModernUIBridge:
                 if monitor is not None:
                     self._record_training_metrics(task_id, monitor.snapshot())
                 with self._task_lock:
+                    task_state.setdefault("effective_params", {}).update(getattr(self.core, "get_effective", lambda: {})())
                     final_task = dict(task_state)
                 run_record.update(ended=time.time(), status=final_task.get("status", "interrupted"),
                                   message=redact(final_task.get("message", "")),
                                   metrics=final_task.get("metrics"),
                                   loss_history=list(final_task.get("loss_history", [])),
-                                  logs=[redact(line) for line in final_task.get("logs", [])[-300:]])
+                                  logs=[redact(line) for line in final_task.get("logs", [])[-300:]],
+                                  effective_params=final_task.get("effective_params", {}),
+                                  sampling_rule=plan.get("sampling_rule"),
+                                  sampling_status=final_task.get("sampling_status", {}))
                 try:
                     self._history_store().save(run_record)
                 except Exception as exc:
@@ -1694,7 +1734,62 @@ class ModernUIBridge:
         return {"ok": True, "project": next((p for p in self.list_projects() if p["name"] == name), None)}
 
     def inspect_dataset(self, directory):
-        return caption_summary(str(directory or ""))
+        """Provide a read-only catalog; image reads require membership in this selected directory."""
+        if not str(directory or "").strip():
+            return {"ok": False, "error": "请先选择图片文件夹。"}
+        try:
+            root = Path(str(directory or "")).resolve()
+            images = dataset_images(root)
+            summary = caption_summary(root, images)
+            names = [image.relative_to(root).as_posix() for image in images]
+            token = uuid.uuid4().hex
+            with self._task_lock:
+                self._dataset_previews[token] = {"root": root, "names": set(names), "ordered": names}
+                while len(self._dataset_previews) > 16:
+                    self._dataset_previews.pop(next(iter(self._dataset_previews)))
+            return {**summary, "preview_token": token, "preview_images": names[:100],
+                    "next_offset": 100 if len(names) > 100 else None}
+        except (OSError, ValueError) as exc:
+            return {"ok": False, "error": "无法检查图片文件夹：%s" % exc}
+
+    def list_dataset_preview(self, token, offset=0):
+        with self._task_lock:
+            catalog = self._dataset_previews.get(str(token or ""))
+        if not catalog:
+            return {"ok": False, "error": "图集检查已过期，请重新检查。"}
+        try:
+            offset = max(0, int(offset or 0))
+        except (TypeError, ValueError):
+            offset = 0
+        names = catalog["ordered"]
+        return {"ok": True, "images": names[offset:offset + 100],
+                "next_offset": offset + 100 if offset + 100 < len(names) else None}
+
+    def get_dataset_preview(self, token, name):
+        with self._task_lock:
+            catalog = self._dataset_previews.get(str(token or ""))
+        if not catalog or str(name or "") not in catalog["names"]:
+            return {"ok": False, "error": "图片不在本次检查的图集中，请重新检查。"}
+        try:
+            image = image_preview(catalog["root"], name, full=True)
+            try:
+                caption = read_caption(catalog["root"] / name)
+            except OSError:
+                caption = ""
+            return {"ok": True, "name": name, "caption": caption, **image}
+        except (OSError, ValueError) as exc:
+            return {"ok": False, "error": "无法读取图片：%s" % exc}
+
+    def inspect_task_dataset(self, task_id):
+        with self._task_lock:
+            task = self._task
+            if not task or task.get("id") != str(task_id or "") or task.get("kind") != "training":
+                return {"ok": False, "error": "训练任务已不存在。"}
+            directory = task.get("dataset_directory")
+            is_raw = task.get("mode") in ("video", "h3_fz")
+        if not directory:
+            return {"ok": False, "error": "图片预处理尚未完成。"}
+        return {**self.inspect_dataset(directory), "source_kind": "raw_media" if is_raw else "processed"}
 
     @staticmethod
     def _picker_initial_directory(path):
@@ -2656,6 +2751,25 @@ class ModernUIBridge:
             message = "[目录] 已打开输出目录：%s" % path
             self._log(message)
             return {"ok": True, "message": "已打开输出目录。", "log": message}
+
+        if action == "export_training_feedback":
+            from kohya_core.diagnostics import write_training_feedback
+            with self._task_lock:
+                task = dict(self._task or {})
+                task["logs"] = list(task.get("logs", []))
+                task["startup_logs"] = list(task.get("startup_logs", []))
+            if task.get("kind") != "training" or task.get("key") != str(project_name or ""):
+                return {"ok": False, "error": "当前任务不属于这个项目，请在对应的训练窗口导出。"}
+            try:
+                gallery = self.list_task_samples(task["id"])
+                try:
+                    path = write_training_feedback(self._desktop_directory(), task, gallery)
+                except OSError:
+                    path = write_training_feedback(self.core.data_sub("logs"), task, gallery)
+                self._log("[导出] 本次训练反馈资料：%s" % path)
+                return {"ok": True, "message": "反馈资料已导出：%s（包含设置和日志，不包含训练图片或模型，也不会上传）" % path}
+            except Exception as exc:
+                return {"ok": False, "error": "反馈资料导出失败：%s" % exc}
 
         if action in ("export_log", "export_diagnostics"):
             import datetime

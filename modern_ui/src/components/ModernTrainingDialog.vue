@@ -2,6 +2,8 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import type { ModernTaskStatus, TrainingPlan } from '../bridge'
 import TrainingMetrics from './TrainingMetrics.vue'
+import TrainingSampleGallery from './TrainingSampleGallery.vue'
+import DatasetImageBrowser from './DatasetImageBrowser.vue'
 
 const props = defineProps<{
   open: boolean
@@ -45,28 +47,32 @@ const remainingTime = computed(() => {
   return [days && `${days} 天`, hours && `${hours} 小时`, rest && `${rest} 分钟`].filter(Boolean).join(' ')
 })
 const lines = computed(() => taskLogs.value)
-const sampleFailure = computed(() => [...taskLogs.value].reverse().find((line) =>
-  /(?:\[preview\]|\[sample\]|采样|预览).*(?:fail|error|exception|disabling previews|失败|错误|异常|崩溃|出错)/i.test(line)
+const sampleFailure = computed(() => state.value?.sampling_status?.reason || [...taskLogs.value].reverse().find((line) =>
+  /preview failed|sampling failed|disabling previews|采样(?:预览)?(?:生成)?失败|停用后续预览|(?:采样|预览).*(?:Error:|Exception:)|No prompt file/i.test(line)
 ) || '')
 const sampleEnabled = computed(() => {
+  if (state.value?.effective_params?.sample_enabled !== undefined) return Boolean(state.value.effective_params.sample_enabled)
   if (props.plan?.sampling_rule) return props.plan.sampling_rule.enabled
   const config = props.plan?.config_summary || {}
   if (['qwen_image', 'zimage'].includes(props.plan?.mode || '')) {
     const fastTier = String(config.fast_tier || 'auto')
-    if (fastTier === 'on' || (fastTier === 'auto' && props.plan?.mode === 'zimage' &&
-      props.plan.vram_gb != null && props.plan.vram_gb < 10)) return false
+    if (config.sample_preview !== true && (fastTier === 'on' || (fastTier === 'auto' && props.plan?.mode === 'zimage' &&
+      props.plan.vram_gb != null && props.plan.vram_gb < 10))) return false
   }
   if (config.sample_preview === false) return false
   if (config.sample_preview === true) return true
   return props.plan?.vram_gb == null || props.plan.vram_gb >= 20
 })
 const sampleEmptyText = computed(() => {
-  if (!sampleEnabled.value) return '本次训练的采样预览已关闭。'
+  if (state.value?.effective_params?.sample_error) return String(state.value.effective_params.sample_error)
+  if (state.value?.sampling_status?.disabled) return '引擎已停止后续采样；已生成的图片仍可查看。'
+  if (!sampleEnabled.value) return `本次采样已关闭：${props.plan?.sampling_rule?.reason || '当前引擎设置'}。`
+  if (awaitingReview.value) return '确认图片与标签并继续训练后，才会进入采样阶段。'
   if (props.plan?.mode === 'h3_fz' && !sampleData.value) return '窗口只显示图片采样；视频和音频采样请打开当前项目输出目录查看。'
   if (state.value?.status === 'completed' || state.value?.status === 'failed' || state.value?.status === 'cancelled') {
     return '本次没有生成采样图。请检查采样间隔和下方日志。'
   }
-  return '等待本次训练的首张采样图…'
+  return `等待本次首张采样图。计划：${props.plan?.sampling_rule?.cadence || '由引擎决定'}；引擎可能在训练开始时额外采样，不保证第一个间隔就成功出图。`
 })
 const logEntries = computed(() => lines.value.map((text, index) => ({
   key: `${offset.value - lines.value.length + index}:${index}`,
@@ -81,13 +87,20 @@ const settingSummary = computed(() => {
   const rows = [
     ['标签处理', rawMedia ? '读取媒体同名字幕' : config.keep_user_captions ? '保留已有标签，不自动打标' : '按当前设置预处理与打标'],
     ['训练采样', props.plan?.sampling_rule ? `${props.plan.sampling_rule.enabled ? '开启' : '关闭'}（${props.plan.sampling_rule.reason}）` : config.sample_preview === false ? '关闭' : config.sample_preview === true ? '开启' : '按显存自动选择'],
+    ['采样种子', String(config.sample_seed || 1234)],
     ['采样间隔', props.plan?.sampling_rule?.cadence || '训练时确定'],
     ['保存间隔', props.plan?.save_interval_effective != null ? `每 ${props.plan.save_interval_effective} ${props.plan.save_interval_unit === 'epochs' ? '轮' : '步'}` : '训练时确定'],
   ]
   if (supports.quant_mode) rows.unshift(['量化精度', config.quant_mode === 'auto' ? '引擎自动选择' : String(config.quant_mode || '自动')])
   if (supports.batch_size) rows.push(['批大小', String(config.batch_size || 1)])
   if (supports.gc) rows.push(['梯度检查点', ({ on: '开启', off: '关闭', 开启: '开启', 关闭: '关闭', auto: '按显存自动' } as Record<string, string>)[String(config.gc)] || '按显存自动'])
+  rows.push(...(props.plan?.execution_summary || []).map((row) => [row.label, row.value]))
   return rows
+})
+const effectiveSummary = computed(() => {
+  const p = state.value?.effective_params || {}
+  const labels: Record<string, string> = { total_steps: '引擎总步数', epochs: '实际轮数', optimizer: '实际优化器', batch_size: '实际批大小', unet_lr: '起始 UNet 学习率', te_lr: '文本编码器学习率', lr_scheduler: '学习率计划', lr_warmup_steps: '学习率预热', resolution: '训练分辨率', sample_seed: '固定采样种子', sample_width: '采样宽度', sample_height: '采样高度', sample_interval: '实际采样间隔', sample_interval_unit: '采样间隔单位', sample_error: '采样准备错误' }
+  return Object.entries(p).filter(([key, value]) => key in labels && value !== undefined).map(([key, value]) => ({ label: labels[key], value: key === 'sample_interval_unit' ? value === 'epochs' ? '轮' : '步' : value === 'engine_default' ? '引擎默认（未指定）' : String(value) }))
 })
 const hasResume = computed(() => Boolean(props.plan?.resume_path))
 const isRawMediaMode = computed(() => ['video', 'h3_fz'].includes(props.plan?.mode || ''))
@@ -262,6 +275,12 @@ async function continueAfterReview() {
   await poll()
 }
 
+async function exportFeedback() {
+  const result = await window.pywebview?.api.run_action('export_training_feedback', props.projectName)
+  if (!result?.ok) emit('notify', result?.error || '无法导出本次资料。')
+  else emit('notify', result.message || '本次资料已导出。')
+}
+
 async function openOutputDirectory() {
   const api = window.pywebview?.api
   if (!api) return emit('notify', '请在 Windows 桌面版打开输出目录。')
@@ -349,12 +368,15 @@ onUnmounted(stopPolling)
             <span>{{ plan?.mode === 'video' ? '请确认视频字幕和训练数据后继续。' : plan?.mode === 'h3_fz' ? '请确认混合媒体样本与同名字幕后继续；格式会在引擎缓存阶段校验。' : '请检查预处理后的图片和标签；需要时打开标签编辑器修改，回来后确认继续训练。' }}</span>
           </div>
           <TrainingMetrics :metrics="state?.metrics" :history="state?.loss_history" />
+          <DatasetImageBrowser v-if="awaitingReview && !isRawMediaMode" :task-id="taskId" :directory="plan?.raw_dir" :desktop="true" />
+          <details v-if="effectiveSummary.length" class="train-effective"><summary>引擎启动后记录的生效参数</summary><div v-for="row in effectiveSummary" :key="row.label"><span>{{ row.label }}</span><strong>{{ row.value }}</strong></div><p>这里记录工具已解析的设置；引擎内部再次调整以日志为准。学习率不是保证不变的实时值。</p></details>
           <section v-if="!awaitingReview" class="train-sample" aria-label="训练采样预览">
             <div class="train-sample-heading"><strong>采样预览</strong><span v-if="sampleName">{{ sampleName }}</span><button class="train-button" type="button" @click="openOutputDirectory">打开输出目录</button><button v-if="sampleData" class="train-button" type="button" @click="expandSample">查看大图</button></div>
             <button v-if="sampleData" class="train-sample-image-button" type="button" aria-label="查看采样预览大图" @click="expandSample"><img class="train-sample-image" :src="sampleData" :alt="`当前训练采样：${sampleName}`"></button>
             <p v-else class="train-sample-empty">{{ sampleEmptyText }}</p>
             <p v-if="sampleFailure" class="train-sample-warning">引擎报告采样失败：{{ sampleFailure }}</p>
             <p v-else-if="sampleWarning" class="train-sample-warning">{{ sampleWarning }}</p>
+            <TrainingSampleGallery :task-id="taskId" :active="running" :settings="state?.effective_params" />
           </section>
           <div ref="logElement" class="train-log" role="log" aria-live="polite">
             <div v-if="!logEntries.length" class="train-log-line tone-muted">等待训练日志…</div>
@@ -363,6 +385,7 @@ onUnmounted(stopPolling)
             </div>
           </div>
           <footer class="train-actions">
+            <button class="train-button" type="button" @click="exportFeedback">导出本次反馈资料</button>
             <template v-if="awaitingReview">
               <button v-if="!isRawMediaMode" class="train-button" type="button" @click="openLabelEditor">打开标签编辑器</button>
               <button class="train-button" type="button" @click="cancel">取消训练</button>
@@ -384,6 +407,7 @@ onUnmounted(stopPolling)
 </template>
 
 <style scoped>
+.train-effective { font-size:11px; color:var(--tone-9299a4); }.train-effective summary { cursor:pointer; padding:8px 0; }.train-effective > div { display:flex; gap:12px; justify-content:space-between; padding:5px 0; }.train-effective strong { color:var(--tone-c1c6cf); font-weight:400; }.train-effective p { line-height:1.6; }
 .training-mini { position:fixed; right:22px; bottom:24px; z-index:34; display:grid; gap:5px; max-width:340px; padding:12px 16px; border:1px solid var(--accent); border-radius:7px; background:var(--card); color:var(--text); text-align:left; cursor:pointer; box-shadow:0 4px 20px rgb(0 0 0 / 25%); } .training-mini strong { font-size:12px; font-weight:500; } .training-mini span { font-size:10px; color:var(--sub); overflow-wrap:anywhere; }
 .train-backdrop { position: fixed; inset: 0; z-index: 35; display: grid; place-items: center; padding: 18px; background: rgb(10 12 16 / 54%); }
 .train-dialog { display: flex; width: min(100%, 650px); max-height: min(84vh, 760px); overflow-y: auto; flex-direction: column; gap: 11px; padding: 17px; border: 1px solid var(--tone-41464f); border-radius: 8px; background: var(--tone-272a32); box-shadow: 0 16px 44px rgb(0 0 0 / 34%); }

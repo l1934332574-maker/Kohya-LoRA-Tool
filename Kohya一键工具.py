@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.18.14"
+APP_VERSION = "0.18.15"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -3423,7 +3423,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     _save_ep = _save_every_note(params, epochs, logf, "Krea2")   # 与中间保存快照对齐（采样预览同节奏）
     if per_epoch * epochs > KREA2_MAX_STEPS:
         new_epochs = max(1, int(KREA2_MAX_STEPS / max(1, per_epoch)))
-        logf(f"[Krea2] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
+        logf(f"[Krea2] 训练量上限约束：epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
         epochs = new_epochs
     if progress is not None:
         try:
@@ -3443,7 +3443,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         "--dataset_config", cfg_path,
         "--sdpa", "--mixed_precision", _mp,
         "--timestep_sampling", "shift", "--weighting_scheme", "none", "--discrete_flow_shift", "2.5",
-        "--optimizer_type", opt_k.lower(), "--learning_rate", str(lr), "--gradient_checkpointing",
+        "--optimizer_type", opt_k.lower(), "--learning_rate", str(lr),
         "--max_data_loader_n_workers", "1",
         "--network_module", "networks.lora_krea2", "--network_dim", str(rank), "--network_alpha", str(alpha),
         "--max_train_epochs", str(epochs),
@@ -3666,7 +3666,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     _save_ep = _save_every_note(params, epochs, logf, "FLUX.2")   # 与中间保存快照对齐（采样预览同节奏）
     if per_epoch * epochs > FLUX2_MAX_STEPS:
         new_epochs = max(1, int(FLUX2_MAX_STEPS / max(1, per_epoch)))
-        logf(f"[FLUX.2] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
+        logf(f"[FLUX.2] 训练量上限约束：epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
         epochs = new_epochs
     if progress is not None:
         try:
@@ -6435,6 +6435,7 @@ def _fizgig_v65_sample_file(params, output_name, prefix):
     path = os.path.join(folder, f"{output_name}_{prefix}_prompts.txt")
     with open(path, "w", encoding="utf-8") as stream:
         stream.write(prompt + "\n")
+    _record_effective(sample_prompt=prompt, sample_prompt_file=path)
     return path
 
 
@@ -6512,6 +6513,11 @@ def train_qwen21_fizgig(logf=print, mode="qwen21_fz", params=None, vram_gb=None,
     out_dir = data_sub("output", proj)
     os.makedirs(out_dir, exist_ok=True)
     output_name = _sanitize_dirname(params.get("output_name")) or "qwen21_fizgig_lora"
+    _record_effective(engine="Fizgig", rank=rank, alpha=alpha, epochs=epochs,
+                      unet_lr="Adaptive 2e-4~4e-4" if preset == "fast" else "Adaptive 1e-4~2e-4" if preset == "standard" else "Flat 1.5e-4",
+                      train_text_encoder=False, te_lr="不参与训练", resolution=resolution,
+                      total_steps=sum(repeats * count for _folder, repeats, count in subsets) * epochs,
+                      optimizer="adamw8bit（入口指定）", quant_mode=quant_mode, batch_size=1)
     cmd = [vpy, os.path.join(fz_dir, "src", "fizgig", "families", "train.py"),
            "--family", "qwen_image21", "--dataset_config", cfg_path,
            "--dit", files["dit"], "--output_dir", out_dir, "--output_name", output_name,
@@ -6538,15 +6544,19 @@ def train_qwen21_fizgig(logf=print, mode="qwen21_fz", params=None, vram_gb=None,
             progress.set_total(sum(repeats * count for _folder, repeats, count in subsets) * epochs)
         except Exception:
             pass
+    _record_effective(sample_enabled=_sample_preview_enabled(params, vram_gb), sample_seed=_sample_seed(params))
     if _sample_preview_enabled(params, vram_gb):
         prompt_file = _fizgig_v65_sample_file(params, output_name, "qwen21")
         sample_epochs = _fizgig_sample_epochs(params, image_count, epochs)
         sample_resolution = min(resolution, 512) if vram_gb is not None and vram_gb <= 16.5 else resolution
         cmd += ["--sample_prompts", prompt_file, "--sample_every_n_epochs", str(sample_epochs),
                 "--sample_width", str(sample_resolution), "--sample_height", str(sample_resolution),
-                "--sample_seed", "1234"]
+                "--sample_seed", str(_sample_seed(params))]
         if files["speed_lora"]:
             cmd += ["--speed_lora", files["speed_lora"]]
+        _record_effective(sample_width=sample_resolution, sample_height=sample_resolution, sample_interval=sample_epochs,
+                          sample_interval_unit="epochs", sample_prompt_file=prompt_file,
+                          sample_prompt=_eff("sample_prompt"))
         logf(f"[Qwen-Image-2.1(Fizgig)] 采样预览：每 {sample_epochs} 轮，{sample_resolution}px；采样文件写入项目输出目录。")
     logf(f"[Qwen-Image-2.1(Fizgig)] 预设={preset}，素材={image_count} 张，分辨率={resolution}，LoRA rank={rank}，epochs={epochs}")
     if run_stream(cmd, cwd=fz_dir, env=env, logf=logf) != 0:
@@ -6626,6 +6636,10 @@ def train_h3_fizgig(logf=print, mode="h3_fz", params=None, vram_gb=None, resume_
     out_dir = data_sub("output", proj)
     os.makedirs(out_dir, exist_ok=True)
     output_name = _sanitize_dirname(params.get("output_name")) or "h3_fizgig_lora"
+    _record_effective(engine="Fizgig", rank=rank, alpha=alpha, epochs=epochs, unet_lr=lr,
+                      train_text_encoder=False, te_lr="不参与训练", resolution=resolution,
+                      total_steps=sum(repeats * count for _folder, repeats, count in subsets) * epochs,
+                      optimizer="adamw（入口指定）", quant_mode=quant_mode, batch_size=1)
     cmd = [vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "minimax_train.py"),
            "--dataset_config", cfg_path, "--dit", files["dit"],
            "--output_dir", out_dir, "--output_name", output_name,
@@ -6655,17 +6669,21 @@ def train_h3_fizgig(logf=print, mode="h3_fz", params=None, vram_gb=None, resume_
             progress.set_total(sum(repeats * count for _folder, repeats, count in subsets) * epochs)
         except Exception:
             pass
+    _record_effective(sample_enabled=_sample_preview_enabled(params, vram_gb), sample_seed=_sample_seed(params))
     if _sample_preview_enabled(params, vram_gb):
         prompt_file = _fizgig_v65_sample_file(params, output_name, "h3")
         sample_epochs = _fizgig_sample_epochs(params, dataset["total"], epochs)
         frames = int(params.get("sample_frames") or params.get("video_frames") or 56) if dataset["videos"] else 1
         cmd += ["--sample_prompts", prompt_file, "--sample_every_n_epochs", str(sample_epochs),
                 "--sample_width", str(resolution), "--sample_height", str(resolution),
-                "--sample_frames", str(frames), "--sample_seed", "1234"]
+                "--sample_frames", str(frames), "--sample_seed", str(_sample_seed(params))]
         if files["audio_vae"] and (dataset["videos"] or dataset["audio"]):
             cmd += ["--sample_audio", "--audio_vae", files["audio_vae"]]
         if files["turbo_lora"]:
             cmd += ["--turbo_lora_path", files["turbo_lora"], "--turbo_lora_strength", "0.75", "--sample_steps", "6"]
+        _record_effective(sample_width=resolution, sample_height=resolution, sample_interval=sample_epochs,
+                          sample_interval_unit="epochs", sample_prompt_file=prompt_file,
+                          sample_prompt=_eff("sample_prompt"))
         logf(f"[MiniMax H3(Fizgig)] 采样预览：每 {sample_epochs} 轮，{resolution}px，{frames} 帧；采样文件写入项目输出目录。")
     logf(f"[MiniMax H3(Fizgig)] 素材={dataset['total']}，分辨率={resolution}，LoRA rank={rank}，epochs={epochs}")
     if run_stream(cmd, cwd=fz_dir, env=env, logf=logf) != 0:
@@ -6787,7 +6805,7 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     per_epoch = int(params.get("repeats", 1)) * count_images(train_dir)
     if per_epoch * epochs > KREA2_MAX_STEPS:
         new_epochs = max(1, int(KREA2_MAX_STEPS / max(1, per_epoch)))
-        logf(f"[Krea2(Fizgig)] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
+        logf(f"[Krea2(Fizgig)] 训练量上限约束：epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
         epochs = new_epochs
     if progress is not None:
         try:
@@ -6807,6 +6825,10 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
         # 曾有用户误以为没生效而主动关闭，留下孤儿进程占内存导致下次加载卡死（勿关闭）
         logf("[Krea2(Fizgig)] 说明：auto 档 = fp8 + 块交换（官方表），模型一部分在内存、显存占用偏低属正常，"
              "训练中请勿关闭（会残留进程占内存、导致下次加载卡死）。5s/it 左右步速正常。")
+    _record_effective(engine="Fizgig", rank=rank, alpha=alpha, epochs=epochs, unet_lr=lr,
+                      train_text_encoder=False, te_lr="不参与训练", resolution=resolution,
+                      total_steps=per_epoch * epochs, optimizer="adamw8bit（入口指定）",
+                      quant_mode=quant_detail, blocks_to_swap=swap, lr_scheduler="cosine", lr_warmup_steps=120)
     cmd = [
         vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "krea2_train.py"),
         "--dataset_config", cfg_path,
@@ -6850,6 +6872,7 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     if _sample_preview_enabled(params, vram_gb):
         _sample_turbo = files.get("turbo")
         if not _sample_turbo:
+            _record_effective(sample_enabled=False, sample_error="缺少 Turbo 预览模型")
             logf("[Krea2(Fizgig)] ⚠ 已开启「训练中采样预览」，但 models/krea2/ 缺少 turbo.safetensors（fp8 Turbo，约 13GB，预览必需），本次训练不采样。\n"
                  "下载：软件内「下载Krea2模型」勾选 Turbo，或直链 " + KREA2_MODEL_LINKS["turbo"][2])
         else:
@@ -6873,7 +6896,8 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
                 _pv_swap = _fizgig_preview_swap(vram_gb)
                 if _pv_swap:
                     cmd += ["--preview_blocks_to_swap", str(_pv_swap)]
-                cmd += ["--sample_width", str(_s_res), "--sample_height", str(_s_res)]
+                cmd += ["--sample_width", str(_s_res), "--sample_height", str(_s_res), "--sample_seed", str(_sample_seed(params))]
+                _record_effective(sample_width=_s_res, sample_height=_s_res, sample_interval=_s_ep, sample_interval_unit="epochs")
                 logf(f"[Krea2(Fizgig)] 采样预览：{_fizgig_sample_note(params, _per_ep, epochs, _s_ep)}"
                      f"用 Turbo + 当前 LoRA 出一张预览图 → {os.path.join(out_dir, 'sample')}")
                 # 每次预览本身要 1~2 分钟，会**计入界面那个累计 s/it** ✗
@@ -7013,7 +7037,7 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
     per_epoch = int(params.get("repeats", 1)) * count_images(train_dir)
     if per_epoch * epochs > FLUX2FZ_MAX_STEPS:
         new_epochs = max(1, int(FLUX2FZ_MAX_STEPS / max(1, per_epoch)))
-        logf(f"[FLUX.2(Fizgig)] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
+        logf(f"[FLUX.2(Fizgig)] 训练量上限约束：epoch 由 {epochs} 调整为 {new_epochs}（总步数约 {per_epoch * new_epochs}）")
         epochs = new_epochs
     if progress is not None:
         try:
@@ -7027,6 +7051,11 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
         swap = int(_manual_swap)
         logf(f"[FLUX.2(Fizgig)] 高级参数手动指定 blocks_to_swap={swap}")
     logf(f"[FLUX.2(Fizgig)] 量化: {quant_detail}")
+    _record_effective(engine="Fizgig", rank=rank, alpha=alpha, epochs=epochs, unet_lr=lr,
+                      train_text_encoder=False, te_lr="不参与训练", resolution=resolution,
+                      total_steps=per_epoch * epochs, optimizer="adamw8bit（入口指定）",
+                      quant_mode=quant_detail, blocks_to_swap=swap, gradient_checkpointing=True,
+                      lr_scheduler="cosine", lr_warmup_steps=120)
     cmd = [
         vpy, os.path.join(fz_dir, *FLUX2FZ_TRAIN_SCRIPT.split("/")),
         "--dataset_config", cfg_path,
@@ -7063,12 +7092,13 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
     # ---- 训练中采样出图预览（Fizgig Klein 原生：每 N epoch 用当前 LoRA 出图到 output/sample/）----
     # 不需额外下载 distilled 模型：直接用训练底模采样（约 20 步，比 4 步 distilled 慢但可用）。
     if _sample_preview_enabled(params, vram_gb):
-        _fz_sp = _write_sample_prompts(output_name, params, mode, resolution=resolution, engine="musubi",
+        _fz_sp = _write_sample_prompts(output_name, params, mode, resolution=min(resolution, 512) if vram_gb is not None and vram_gb <= 16.5 else resolution, engine="musubi",
                                        train_dir=train_dir, cfg_scale=FIZGIG_SAMPLE_CFG)
         if _fz_sp:
             _per_ep = max(1, per_epoch)
             _s_ep = _fizgig_sample_epochs(params, _per_ep, epochs)
             cmd += ["--sample_prompts", _fz_sp, "--sample_every_n_epochs", str(_s_ep)]
+            _record_effective(sample_interval=_s_ep, sample_interval_unit="epochs")
             if _te_fp8:
                 cmd.append("--fp8_text_encoder")
             _s_res = int(resolution or FLUX2FZ_RESOLUTION or 512)
@@ -7521,14 +7551,20 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
         "        fps: 24\n"
         "        prompts:\n"
         "          - " + _yq(sample_prompt) + "\n"
-        "        seed: 42\n"
-        "        walk_seed: true\n"
+        "        seed: " + str(_sample_seed(params)) + "\n"
+        "        walk_seed: false\n"
         "        guidance_scale: 1.0\n"
         "        sample_steps: 20\n"
         "meta:\n"
         "  name: " + _yq(name) + "\n"
         "  version: '1.0'\n"
     )
+    _record_effective(sample_enabled=_sample_on, sample_prompt=sample_prompt,
+                      sample_seed=_sample_seed(params), sample_width=reso,
+                      sample_height=sample_h,
+                      sample_interval=_sample_every, sample_interval_unit="steps",
+                      sample_steps=20, sample_sampler="flowmatch", sample_walk_seed=False,
+                      lr_scheduler="engine_default", lr_warmup_steps="engine_default")
     os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
     with open(cfg_path, "w", encoding="utf-8") as f:
         f.write(text)
@@ -8132,9 +8168,9 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
         _ft_switch == "on" or (_ft_switch != "off" and info.get("arch") == "zimage"
                                and vram_gb is not None and vram_gb < 10))
     # Explicit user choice wins; a missing setting follows the shared VRAM-based default.
-    _sample_on = _sample_preview_enabled(params, vram_gb)
+    _sample_on = _sample_preview_enabled(params, vram_gb) and (not _fast8_tier or params.get("sample_preview") is True)
     _at8g_train_yaml = ("        disable_sampling: true\n"
-                        if (not _sample_on or _fast8_tier) else "")
+                        if not _sample_on else "")
     _at8g_model_yaml = ""
     if _fast8_tier:
         _fast_reso_limit = 512 if info.get("arch") == "qwen_image" else (384 if (detect_ram_gb() or 0) < 32 else 512)
@@ -8159,7 +8195,7 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
     _opt_yaml = _optimizer_yaml_name(_opt_k)
     # 记录实际生效值（参数报告 / 使用模板读取）：分辨率可能被快跑档钳制，这里才是真值
     _record_effective(engine="AI Toolkit (ai-toolkit)", resolution=reso, optimizer=_opt_k,
-                      note=("⚡快跑档生效：%dpx + 文本编码器量化 + 层交换 0.6" % reso)
+                      note=("额外省显存档生效：%dpx + 文本编码器量化 + 层交换 0.6" % reso)
                            if _fast8_tier else None)
     _style_cap = (params.get("style_caption") or "").strip()
     _subj = _guess_sample_subject(train_dir) if str(params.get("at_sub_mode") or "character") == "character" else ""
@@ -8177,9 +8213,10 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
     logf(f"[{info.get('label', 'AI 图像')}] low_vram={'开' if _low_vram else '关'}"
           f"（显存 {vram_gb if vram_gb is not None else '未知'}G" + ("，驻留需 %.0fG" % _need if vram_gb is not None else "，默认开保险") + "）")
     if _fast8_tier:
-        logf(f"[{info.get('label', 'AI 图像')}] ⚡快跑档生效（{'手动开启' if _ft_switch == 'on' else '8G 自动'}）：分辨率 {reso}、已关闭训练采样、文本编码器量化、timestep=weighted、层交换 0.6")
+        logf(f"[{info.get('label', 'AI 图像')}] 额外省显存档生效（{'手动开启' if _ft_switch == 'on' else '8G 自动'}）：分辨率 {reso}、采样{'开启（手动选择）' if _sample_on else '关闭'}、文本编码器量化、timestep=weighted、层交换 0.6")
     elif not _sample_on:
         logf(f"[{info.get('label', 'AI 图像')}] 已关闭训练采样预览")
+    _record_effective(gradient_checkpointing=True, train_text_encoder=False, batch_size=1, low_vram=_low_vram, layer_offloading=_fast8_tier)
     text = (
         "job: extension\n"
         "config:\n"
@@ -8234,14 +8271,20 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
         "        num_frames: 1\n"
         "        prompts:\n"
         "          - " + _yq(sample_prompt) + "\n"
-        "        seed: 42\n"
-        "        walk_seed: true\n"
+        "        seed: " + str(_sample_seed(params)) + "\n"
+        "        walk_seed: false\n"
         "        guidance_scale: 4.0\n"
         "        sample_steps: 20\n"
         "meta:\n"
         "  name: " + _yq(name) + "\n"
         "  version: '1.0'\n"
     )
+    _record_effective(sample_enabled=_sample_on, sample_prompt=sample_prompt,
+                      sample_seed=_sample_seed(params), sample_width=reso,
+                      sample_height=reso,
+                      sample_interval=_sample_every, sample_interval_unit="steps",
+                      sample_steps=20, sample_sampler="flowmatch", sample_walk_seed=False,
+                      lr_scheduler="engine_default", lr_warmup_steps="engine_default")
     os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
     with open(cfg_path, "w", encoding="utf-8") as f:
         f.write(text)
@@ -8814,14 +8857,20 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
             "        prompts:\n"
             "          - " + _yq(sample_prompt) + "\n"
             "        negative_prompt: " + _yq("lowres, bad anatomy, worst quality, low quality, blurry, jpeg artifacts, signature, watermark") + "\n"
-            "        seed: 42\n"
-            "        walk_seed: true\n"
+            "        seed: " + str(_sample_seed(params)) + "\n"
+            "        walk_seed: false\n"
             "        guidance_scale: 4.0\n"
             "        sample_steps: 20\n")
         + "meta:\n"
         "  name: " + _yq(name) + "\n"
         "  version: '1.0'\n"
     )
+    _record_effective(sample_enabled=sample_on, sample_prompt=sample_prompt,
+                      sample_seed=_sample_seed(params), sample_width=_sp_res if sample_on else reso,
+                      sample_height=_sp_res if sample_on else reso,
+                      sample_interval=_sample_every, sample_interval_unit="steps",
+                      sample_steps=20, sample_sampler="flowmatch", sample_walk_seed=False,
+                      lr_scheduler="engine_default", lr_warmup_steps="engine_default")
     os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
     with open(cfg_path, "w", encoding="utf-8") as f:
         f.write(text)
@@ -9951,7 +10000,7 @@ def gpu_status_text():
 
 
 # ---------- 配置导出 / 导入（可分享；不含本机路径与提示词，提示词可选） ----------
-_CFG_PARAM_INT_KEYS = ("rank", "alpha", "repeats", "max_epochs", "resolution", "video_steps", "video_frames", "batch_size", "sample_interval")
+_CFG_PARAM_INT_KEYS = ("rank", "alpha", "repeats", "max_epochs", "resolution", "video_steps", "video_frames", "batch_size", "sample_interval", "sample_seed")
 _CFG_PARAM_FLOAT_KEYS = ("unet_lr", "te_lr")
 _CFG_PARAM_BOOL_KEYS = ("strong_bind", "clean_concept", "sample_preview", "compile", "keep_user_captions", "overwrite", "amd_mode")
 _CFG_PARAM_STR_KEYS = ("optimizer", "quant_mode", "blocks_to_swap", "save_every", "crop_ratio", "gc", "fizgig_qwen_preset", "wd14_model", "noise_offset", "min_snr_gamma")
@@ -12511,12 +12560,14 @@ def write_params_report(mode, params, output_name, extra=None, out_dir=None):
         lines.append("底模文件        : %s" % _bm)
     lines += [
         "训练分辨率      : %s" % reso_txt,
-        "rank / alpha    : %s / %s" % (_rv(params.get("rank")), _rv(params.get("alpha"))),
-        "学习率          : %s" % _rv(params.get("unet_lr")),
-        "文本编码器学习率: %s" % _rv(params.get("te_lr")),
+        "rank / alpha    : %s / %s" % (_eff("rank", _rv(params.get("rank"))), _eff("alpha", _rv(params.get("alpha")))),
+        "学习率          : %s" % _eff("unet_lr", _rv(params.get("unet_lr"))),
+        "文本编码器学习率: %s" % (_eff("te_lr", _rv(params.get("te_lr"))) if mode in ("style", "character", "concept") and _eff("train_text_encoder", params.get("train_text_encoder", True)) and base != "anima" else "不参与训练"),
+        "学习率计划      : %s" % _eff("lr_scheduler", "由引擎决定，未记录"),
+        "学习率预热      : %s" % _eff("lr_warmup_steps", "由引擎决定，未记录"),
         "优化器          : %s" % (_eff("optimizer") or _rv(params.get("optimizer"))),
         "repeats         : %s" % _rv(params.get("repeats")),
-        "最大 epoch      : %s" % _rv(params.get("max_epochs")),
+        "最大 epoch      : %s" % _eff("epochs", _rv(params.get("max_epochs"))),
         "实际总步数      : %s" % _eff("total_steps", "（未记录）"),
         "batch_size      : %s" % _eff("batch_size", 1),
         "保存间隔        : %s" % _eff("save_every", "（未记录）"),
@@ -13499,13 +13550,13 @@ def _warn_fizgig_sample_failure(log_text, logf=print):
     _m = re.search(r"\[preview\] epoch (\d+) preview failed", log_text)
     if _m:
         _ep = _m.group(1)
-    logf("[Fizgig] ⚠ %s，引擎已自动关闭本轮后续预览 —— 之后的 epoch 不会再出预览图。"
-         % (("第 %s 个 epoch 的采样预览失败" % _ep) if _ep else "采样预览失败"))
-    logf("[Fizgig]   影响范围：只影响预览图。训练本身与 LoRA 保存都正常，本轮权重可用。")
-    logf("[Fizgig]   最常见原因：显存不够 —— 预览要额外加载一个约 13GB 的 Turbo 模型"
-         "（本版本已自动做分块换出，仍失败多半是训练分辨率偏高或桌面程序占用过多）。")
-    logf("[Fizgig]   想继续看到预览：① 训练前关掉占显存的桌面程序（浏览器/动态壁纸/QQ 微信等）；"
-         "② 或降低训练分辨率；③ 或改为训练结束后单独出图。")
+    if _FIZGIG_SAMPLE_OFF_MARK in log_text:
+        logf("[Fizgig] ⚠ %s，引擎已停用后续预览；已生成的图片保留。" % (("第 %s 轮采样失败" % _ep) if _ep else "采样失败"))
+        logf("[Fizgig]   预览停用后引擎可以继续训练；训练和权重保存是否完成，请以最终任务状态为准。")
+    else:
+        logf("[Fizgig] ⚠ 采样发生异常；当前引擎可能中断训练，请查看最终任务状态和完整报错。")
+    logf("[Fizgig]   失败原因需结合上方引擎报错判断；可能涉及模型、依赖、采样参数或显存，不能只凭停用预览确定。")
+    logf("[Fizgig]   本次保留已生成的预览。下次可先关闭采样跑通训练，再携带报错和参数报告排查。")
     return True
 
 
@@ -13603,15 +13654,34 @@ def _write_sample_prompts(output_name, params, mode, resolution=None, engine="ko
         # Fizgig 专属：显式写 CFG scale（--l）。不写的话引擎会注入空格负向词 → 走 CFG 分支
         # 但 cfg_scale=None → denoise_cfg 崩 TypeError，且异常会跳过块交换还原，训练越跑越慢（issue #6）
         prompt += f" --l {cfg_scale}"
+    prompt += f" --d {_sample_seed(params)}"
     d = data_sub("cache", "sample_prompts")
     try:
         os.makedirs(d, exist_ok=True)
         p = os.path.join(d, (output_name or "sample") + "_prompts.txt")
         with open(p, "w", encoding="utf-8") as f:
             f.write(prompt + "\n")
+        _record_effective(sample_enabled=True, sample_prompt=prompt.split(" --", 1)[0], sample_prompt_recipe=prompt, sample_seed=_sample_seed(params),
+                          sample_width=int(resolution or 512), sample_height=int(resolution or 512),
+                          sample_prompt_file=p)
         return p
-    except Exception:
+    except (OSError, ValueError) as exc:
+        _record_effective(sample_enabled=False, sample_error="采样提示词文件准备失败：%s" % exc)
         return None
+
+def _sample_seed(params):
+    """Use a positive fixed seed; zero means random in some engines and is not portable."""
+    raw = params.get("sample_seed")
+    if raw in (None, ""):
+        return 1234
+    try:
+        seed = int(str(raw))
+    except (ValueError, TypeError):
+        raise ValueError("采样种子必须是 1 到 4294967295 的整数。") from None
+    if not 1 <= seed <= 4294967295:
+        raise ValueError("采样种子必须是 1 到 4294967295 的整数。")
+    return seed
+
 
 def _sample_preview_enabled(params, vram_gb):
     """采样预览开关：用户显式选择优先；自动档在显存 <20G 时关闭。
@@ -13904,13 +13974,14 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     per_epoch_steps = sum(n * c for _, n, c in subsets) // max(1, batch_size)
     epochs_eff, total_steps = cap_epochs_by_steps(per_epoch_steps, batch_size, epochs)
     if epochs_eff != epochs:
-        logf(f"[训练] 自动约束：为防过拟合，epoch 由 {epochs} 调整为 {epochs_eff}（总步数约 {total_steps}）")
+        logf(f"[训练] 训练量上限约束：epoch 由 {epochs} 调整为 {epochs_eff}（总步数约 {total_steps}）")
         epochs = epochs_eff
     # 记录实际生效值（界面「设定值 → 实际生效值」与产物报告都读这里）：
     # 上面的 epoch 自动约束、RDNA2→fp16、SD 质量增强等覆写必须反映出来，
     # 否则用户看到的还是自己填的数，却不知道实际跑的已经是另一个。
     _record_effective(engine="kohya (sd-scripts)", rank=params.get("rank"), alpha=params.get("alpha"),
-                      unet_lr=params.get("unet_lr"), te_lr=params.get("te_lr"),
+                      unet_lr=unet_lr, te_lr=te_lr if train_te and family != "anima" else "不参与训练",
+                      train_text_encoder=train_te and family != "anima", lr_scheduler="cosine", lr_warmup_steps=120,
                       repeats=params.get("repeats"), epochs=epochs,
                       resolution=params.get("resolution"), optimizer=optimizer_type,
                       total_steps=total_steps, mixed_precision=mixed)
@@ -13971,7 +14042,9 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         f"--learning_rate={unet_lr}",
     ]
     if family == "sd":
-        cmd += [f"--unet_lr={unet_lr}", f"--text_encoder_lr={te_lr}"]
+        cmd += [f"--unet_lr={unet_lr}"]
+        if train_te:
+            cmd += [f"--text_encoder_lr={te_lr}"]
         # v-pred 底模必须显式声明参数化：不声明会按 epsilon 训练+采样 → 预览图与实际出图都是噪点
         if _looks_like_vpred(base_model):
             cmd.append("--v_parameterization")
@@ -14088,7 +14161,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
 
     logf(f"[训练] 底模: {base_model}（{BASE_TYPE_LABELS.get(base_type, base_type)}）")
     logf(f"[训练] 模式: {MODE_LABELS.get(mode, mode)} | 脚本: {script} | 分辨率: {resolution}px")
-    logf(f"[训练] LoRA 参数: dim={rank}, alpha={alpha}, lr={unet_lr}, te_lr={te_lr}, epochs={epochs}, repeats={params.get('repeats', 5)}")
+    logf(f"[训练] LoRA 参数: dim={rank}, alpha={alpha}, lr={unet_lr}, te_lr={te_lr if train_te and family != 'anima' else '不参与训练'}, epochs={epochs}, repeats={params.get('repeats', 5)}")
     logf(f"[训练] batch={batch_size} | 混合精度={mixed} | 注意力: {'xformers' if use_xformers else 'sdpa'} | 梯度检查点: {'开' if gc_on else '关'}"
          + (f" | torch.compile: {'开' if _sd_compile_ok else '关'}" if family == "sd" else "")
          + (f"（显存 {vram_gb:.1f}GB 智能适配）" if vram_gb else ""))
