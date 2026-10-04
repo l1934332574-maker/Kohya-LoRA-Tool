@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.18.15"
+APP_VERSION = "0.18.16"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -14018,6 +14018,8 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     # Anima：合并包（内置 Qwen3 文本编码器的推理/Semi 包）→ 自动剥离 DiT 缓存后训练。
     # sd-scripts anima_train_network 只收纯 DiT，带 cond_stage_model.* 会报 Unexpected keys。
     if family == "anima":
+        from kohya_core.anima_loader import patch_anima_loader
+        patch_anima_loader(kdir, logf=logf)
         try:
             from kohya_core import anima_ckpt as _ack
             _use_base, _ak = _ack.resolve_train_base(base_model, logf=logf)

@@ -1926,16 +1926,63 @@ def crop_to_ratio(img, ratio_str):
     return img.crop(box)
 
 
-def is_blurry(img, threshold):
-    """用拉普拉斯方差判断是否模糊；方差 < threshold 视为模糊。"""
+def assess_image_sharpness(img, threshold):
+    """Conservative multi-scale heuristic; low texture is inconclusive, not bad data.
+
+    Normalize without upscaling, examine 3x3 regions at two scales, and warn only
+    when both global and regional evidence agree. Scores are not quality ratings.
+    """
+    result = {"method": "multiscale_regions_v1", "status": "ok",
+              "suspected_blur": False, "threshold": float(threshold), "scales": []}
     try:
         import cv2
         import numpy as np
-        gray = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2GRAY)
-        var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-        return var < threshold
-    except Exception:
-        return False
+        gray = cv2.cvtColor(np.asarray(img.convert("RGB")), cv2.COLOR_RGB2GRAY)
+        height, width = gray.shape
+        for long_edge in (512, 256):
+            factor = min(1.0, long_edge / max(height, width))
+            target = (max(1, round(width * factor)), max(1, round(height * factor)))
+            scaled = cv2.resize(gray, target, interpolation=cv2.INTER_AREA) if factor < 1 else gray
+            # The second scale adds no evidence for already small images.
+            if result["scales"] and result["scales"][-1]["size"] == list(target):
+                continue
+            score = float(cv2.Laplacian(scaled, cv2.CV_64F).var())
+            regions = []
+            for row in range(3):
+                for col in range(3):
+                    tile = scaled[row * target[1] // 3:(row + 1) * target[1] // 3,
+                                  col * target[0] // 3:(col + 1) * target[0] // 3]
+                    if min(tile.shape) < 24:
+                        continue
+                    contrast = float(tile.std())
+                    # Flat backgrounds cannot establish that an image is blurred.
+                    if contrast < 6.0:
+                        continue
+                    region_score = float(cv2.Laplacian(tile, cv2.CV_64F).var())
+                    regions.append({"row": row, "col": col,
+                                    "score": round(region_score, 3)})
+            low = sum(region["score"] < threshold for region in regions)
+            sharp = sum(region["score"] >= threshold * 2 for region in regions)
+            result["scales"].append({"size": list(target), "score": round(score, 3),
+                                     "regions": regions, "low_regions": low,
+                                     "informative_regions": len(regions), "sharp_regions": sharp})
+        scales = result["scales"]
+        enough_evidence = len(scales) == 2 and all(scale["informative_regions"] >= 3 for scale in scales)
+        result["suspected_blur"] = enough_evidence and all(
+            scale["score"] < threshold
+            and scale["low_regions"] / scale["informative_regions"] >= 0.75
+            and scale["sharp_regions"] == 0 for scale in scales)
+        result["status"] = "ok" if enough_evidence else "inconclusive"
+        return result
+    except Exception as exc:
+        result["status"] = "unavailable"
+        result["error_type"] = type(exc).__name__
+        return result
+
+
+def is_blurry(img, threshold):
+    """Compatibility wrapper; callers needing evidence use assess_image_sharpness."""
+    return assess_image_sharpness(img, threshold)["suspected_blur"]
 
 
 def write_dataset_config(output_dir, config_path, resolution=512, batch_size=1,
@@ -2100,7 +2147,9 @@ def main():
     parser.add_argument("--min-size", type=int, default=0,
                         help="过滤过小图片：长边小于该像素则跳过（0=不过滤）")
     parser.add_argument("--blur-threshold", type=float, default=0,
-                        help="过滤模糊图片：拉普拉斯方差小于该值则跳过（0=不过滤）")
+                        help="多尺度分区域疑似模糊检测阈值；默认仅提醒并保留（0=关闭检测）")
+    parser.add_argument("--skip-blurry", action="store_true",
+                        help="主动排除疑似模糊图片；默认仅提醒并保留")
     parser.add_argument("--square-crop", action="store_true", help="居中正方形裁剪后再缩放（等价 --crop-ratio 1:1）")
     parser.add_argument("--crop-ratio", default="",
                         help="按 宽:高 比例居中裁切后再缩放，如 3:4 / 9:16 / 1:1（默认不裁切，长边缩放保比例；范围 1:2~2:1）")
@@ -2207,7 +2256,9 @@ def main():
     if args.min_size:
         print(f"[INFO] 过小过滤: 开（长边 < {args.min_size}px 跳过）")
     if args.blur_threshold:
-        print(f"[INFO] 模糊过滤: 开（清晰度阈值 {args.blur_threshold}）")
+        blur_action = "跳过疑似模糊图片（主动开启）" if args.skip_blurry else "仅提醒，保留图片参与后续处理"
+        print(f"[INFO] 疑似模糊检测: 开（多尺度＋分区域；检测阈值 {args.blur_threshold}；{blur_action}）")
+        print("[INFO] 检测仅供参考；低纹理或小图证据不足时不判为模糊，不评价画风或训练价值。")
     if mode == "style":
         print(f"[INFO] 模式: 画风 LoRA（过滤强人物五官/角色标签）")
         print(f"[INFO] 统一 caption: {style_caption}")
@@ -2225,6 +2276,9 @@ def main():
 
     ok = skipped = failed = 0
     dups = corrupt = too_small = blurry = 0
+    blurry_warned = 0
+    blurry_candidates = []
+    blur_inconclusive = blur_unavailable = 0
     cropped = 0
     watermarked = 0
     seen_hashes = {}
@@ -2267,10 +2321,25 @@ def main():
             print(f"  [过小] {name}（{img.width}x{img.height}，长边 < {args.min_size}px）已跳过")
             continue
         if args.blur_threshold and args.blur_threshold > 0:
-            if is_blurry(img, args.blur_threshold):
-                blurry += 1
-                print(f"  [模糊] {name} 清晰度不足，已跳过")
-                continue
+            assessment = assess_image_sharpness(img, args.blur_threshold)
+            if assessment["status"] == "inconclusive":
+                blur_inconclusive += 1
+            elif assessment["status"] == "unavailable":
+                blur_unavailable += 1
+                if blur_unavailable == 1:
+                    print(f"[WARN] 清晰度检测不可用（{assessment['error_type']}），保留图片并继续；不会判为模糊")
+            if assessment["suspected_blur"]:
+                blurry_warned += 1
+                blurry_candidates.append({"file": name, "action": "skipped" if args.skip_blurry else "retained",
+                                          "assessment": assessment})
+                evidence = "；".join(f"{scale['size'][0]}×{scale['size'][1]} 分数 {scale['score']:.1f}，"
+                                    f"低分区域 {scale['low_regions']}/{scale['informative_regions']}"
+                                    for scale in assessment["scales"])
+                if args.skip_blurry:
+                    blurry += 1
+                    print(f"  [疑似模糊] {name} {evidence}；按主动过滤设置跳过")
+                    continue
+                print(f"  [提醒] {name} 多尺度、多区域细节分数偏低（{evidence}），已保留；请查看原图确认，不代表不适合训练")
         try:
             if not args.no_remove_watermark:
                 img, wm = remove_corner_watermark(
@@ -2592,7 +2661,10 @@ def main():
     print()
     print("=" * 60)
     print(f"  处理成功: {ok}  |  跳过(已存在): {skipped}  |  重复: {dups}")
-    print(f"  损坏: {corrupt}  |  过小: {too_small}  |  模糊: {blurry}  |  失败: {failed}")
+    print(f"  损坏: {corrupt}  |  过小: {too_small}  |  疑似模糊跳过: {blurry}  |  失败: {failed}")
+    print(f"  疑似模糊提醒: {blurry_warned}  |  未因模糊检测排除: {blurry_warned - blurry}")
+    if args.blur_threshold:
+        print(f"  检测证据不足: {blur_inconclusive}  |  检测不可用: {blur_unavailable}（均未因检测排除）")
     print(f"  去除黑边: {cropped}  |  去除水印: {watermarked}")
     print(f"  输出目录: {output_dir}")
     if (ok + skipped) and not args.no_caption:
@@ -2616,7 +2688,14 @@ def main():
                 "duplicates": dups,
                 "corrupt": corrupt,
                 "too_small": too_small,
-                "blurry": blurry,
+                "blurry": blurry,  # 保持旧字段表示因模糊检测跳过的数量
+                "blurry_warned": blurry_warned,
+                "blurry_retained": blurry_warned - blurry,
+                "blurry_candidates": blurry_candidates,
+                "blur_policy": ("skip" if args.skip_blurry else "warn") if args.blur_threshold > 0 else "off",
+                "blur_method": "multiscale_regions_v1",
+                "blur_inconclusive": blur_inconclusive,
+                "blur_unavailable": blur_unavailable,
                 "failed": failed,
             }
             with open(args.report, "w", encoding="utf-8") as f:

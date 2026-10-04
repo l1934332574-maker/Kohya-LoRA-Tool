@@ -6268,7 +6268,7 @@ class App:
             (getattr(self, "btn_pick_base", None), "手动浏览选择本机的 .safetensors / .ckpt 底模；选完自动识别类型。"),
             (getattr(self, "btn_refresh_base", None), "重新扫描默认模型文件夹，把新放入的底模列进下拉。"),
             (getattr(self, "btn_download_base", None), "没有底模？点这里选下载方式：推荐「应用内下载」（软件里直接下载，带进度/断点续传/下完自动识别）。"),
-            (getattr(self, "btn_one_click", None), "自动检查并过滤模糊或过小图片 → 去重 → 按裁切比例设置处理 → WD14 打标签 → 训练；点击后先处理数据，再确认训练参数。"),
+            (getattr(self, "btn_one_click", None), "检查疑似模糊图片（仅提醒并保留），过滤过小图片 → 去重 → 按裁切比例设置处理 → WD14 打标签 → 训练；点击后先处理数据，再确认训练参数。"),
             (getattr(self, "btn_stop", None), "任务进行中（训练/预处理/安装）可用：立即终止当前进程。训练中断后若已到存档点会保留快照、下次可断点续训；未到存档点则本次进度无法续训。"),
             (getattr(self, "btn_krea2_models", None), "打开 Krea2 模型文件夹（models/krea2），把 RAW/VAE/文本编码器 3 个文件放进去；软件内提供国内镜像下载链接。"),
             (getattr(self, "btn_krea2_guide", None), "打开 Krea2 训练详细逐步引导（装环境→下模型→选图→预处理→训练→出图，含常见问题）。"),
@@ -7159,7 +7159,7 @@ class App:
                 "2. 点「选择训练模型」：选 Qwen-Image-2512（默认）或 Qwen-Image-2.1，再点「使用所选模型」。架构由工具自动设置；选择会保存在本机，之后其他项目也沿用。两个版本分别缓存，各占约 40GB。\n"
                 "3. 若模型已在本机，可选完整 Diffusers 模型目录（含 model_index.json、transformer/config.json、text_encoder/config.json 和权重文件）。训练 Qwen-Image-2.1 时，也可选 ComfyUI 的 qwen_image_2.1_*.safetensors 权重文件；工具会自动查找同一 ComfyUI models 目录下 clip（或 text_encoders）和 vae 中的组件。若自动查找不到，可在选择窗口手动浏览或粘贴现有文本编码器、VAE 的 safetensors 路径，手动指定路径优先；文本编码器和 VAE 只下载缺失的组件。processor/分词器及组件配置若不在本地模型目录中，首次仅下载约 16 MB 并缓存。\n"
                 "4. 选择训练类型（人物 / 画风 / 概念）和原始图片文件夹。人物、概念建议填写专属 Trigger；至少准备 15 张清晰、同一人物或同一风格的图片。\n"
-                "5. 点左侧「🚀 一键开始训练」。它会先自动去重、过滤过小或模糊图片、按裁切设置处理并用 WD14 打标签，再弹窗确认参数；确认后才开始训练。WD14 标签可在训练前用「标签编辑器」检查。\n\n"
+                "5. 点左侧「🚀 一键开始训练」。它会先自动去重、过滤过小图片、提醒并保留疑似模糊图片、按裁切设置处理并用 WD14 打标签，再弹窗确认参数；确认后才开始训练。WD14 标签可在训练前用「标签编辑器」检查。\n\n"
                 f"当前模型：{info.get('model_id', '')}（约 {info.get('size', '')}）\n"
                 f"显存建议：{info.get('hint', '')}\n"
                 "若没有指定本地目录且模型缓存未就绪，训练阶段会下载约 40GB；默认尝试 ModelScope 国内直链，支持中断后续传，失败时会尝试在线加载。模型保存在本机数据目录的 models/at_image 下。\n"

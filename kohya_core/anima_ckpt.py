@@ -9,7 +9,7 @@
 本模块：
   1. checkpoint_kind()  —— 只读 safetensors 头判断 pure/merged；
   2. strip_to_dit()      —— 流式拷贝 DiT 权重到新文件（不加载权重进内存），
-                           可选按“参考纯 DiT key 集合”过滤，保证没有多余 key；
+                           只删除非 DiT 前缀，不按其他模型的结构裁剪；
   3. resolve_train_base()—— merged 时自动剥离并缓存到数据目录，二次直接复用。
 """
 import io
@@ -81,34 +81,26 @@ def _reference_keys(path):
 def strip_to_dit(src, dst, ref_path=None, logf=print):
     """把合并包里的 DiT 权重流式拷到新文件；返回 (写入张量数, 丢弃张量数)。
 
-    - ref_path 给定时：只保留“参考纯 DiT 也有的 key”（交集），彻底避免训练报
-      unexpected keys；若参考缺某些 key（说明合并版 DiT 结构不同）会打警告。
-    - 不给 ref_path：仅丢弃文本编码器/VAE 前缀 key。
+    - 仅丢弃文本编码器/VAE 前缀，保留原模型的全部 DiT 层。
+    - ref_path 仅作结构对照，不能用另一规格模型的 key 集合裁剪本模型。
     """
     header, data_off = _read_header(src)
     keys = _tensor_keys(header)
     if not keys:
         raise ValueError("没有张量可剥离：%s" % src)
-
-    ref = None
+    keep = [k for k in keys if not k.startswith(_DROP_PREFIXES)]
+    drop = [k for k in keys if k.startswith(_DROP_PREFIXES)]
     if ref_path:
         ref = _reference_keys(ref_path)
-        if ref:
-            keep = [k for k in keys if k in ref]
-            drop = [k for k in keys if k not in ref]
-            missing = sorted(ref - set(keys))
-            if missing:
-                logf("[Anima] ⚠ 合并包剥离后与参考纯 DiT 相比缺少 %d 个 key（可能不是标准 Anima base，训练可能仍报错）：%s"
-                     % (len(missing), ", ".join(missing[:5])))
-    if not ref:
-        keep = [k for k in keys if not k.startswith(_DROP_PREFIXES)]
-        drop = [k for k in keys if k.startswith(_DROP_PREFIXES)]
+        if ref and set(keep) != ref:
+            logf("[Anima] 合并包与参考底模的结构不同；保留本模型所有 DiT 权重，不按参考模型删层。")
     if not keep:
         raise ValueError("剥离后没有保留任何 DiT 权重：%s" % src)
 
     # 新头部（保持原张量顺序）
     meta = dict(header.get("__metadata__") or {})
     meta["kohya_dit_only"] = "1"
+    meta["kohya_dit_strip_schema"] = "2"
     new_header = {"__metadata__": meta}
     offset = 0
     for k in keep:
@@ -176,8 +168,9 @@ def _cache_valid(dst, src):
             m = json.load(f)
         st = os.stat(src)
         return (os.path.isfile(dst) and checkpoint_kind(dst) == "pure"
+                and m.get("strip_schema") == 2
                 and m.get("src") == src and m.get("size") == st.st_size
-                and m.get("mtime") == int(st.st_mtime))
+                and m.get("mtime_ns") == st.st_mtime_ns)
     except Exception:
         return False
 
@@ -186,7 +179,7 @@ def _write_cache_meta(dst, src):
     try:
         st = os.stat(src)
         with open(_cache_meta_path(dst), "w", encoding="utf-8") as f:
-            json.dump({"src": src, "size": st.st_size, "mtime": int(st.st_mtime)}, f)
+            json.dump({"src": src, "size": st.st_size, "mtime_ns": st.st_mtime_ns, "strip_schema": 2}, f)
     except Exception:
         pass
 
@@ -232,9 +225,8 @@ def resolve_train_base(path, logf=print, force=False):
             return dst, "merged_cached"
         logf("[Anima] 检测到合并包底模（内含文本编码器 Qwen3，训练需要纯 DiT），"
              "正在剥离并缓存（大文件一次性，约 1~3 分钟）…\n       源: %s" % path)
-        ref = _find_pure_reference(path)
         try:
-            strip_to_dit(path, dst, ref_path=ref, logf=logf)
+            strip_to_dit(path, dst, logf=logf)
             _write_cache_meta(dst, path)
             return dst, "merged_stripped"
         except Exception as e:
