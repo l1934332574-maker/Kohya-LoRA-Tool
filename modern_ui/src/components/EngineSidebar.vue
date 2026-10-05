@@ -12,6 +12,7 @@ const emit = defineEmits<{
   chooseMode: [mode: string]
   action: [name: string]
   guideAction: [step: GuideStep]
+  toggleAssistant: []
 }>()
 defineProps<{
   groups: EngineGroup[]
@@ -19,6 +20,8 @@ defineProps<{
   statusText: string
   trainLabel: string
   workspaceActive: boolean
+  assistantOpen?: boolean
+  assistantBusy?: boolean
   guideLabel: string
   guideSteps: GuideStep[]
 }>()
@@ -43,11 +46,17 @@ const modeTips: Record<string, string> = {
 
 <template>
   <aside class="sidebar">
+    <div class="sidebar-top">
     <div class="brand-row">
       <span class="brand-mark" aria-hidden="true"></span>
       <span>Kohya-LoRA</span>
     </div>
 
+    <button class="sidebar-assistant" :class="{ selected: assistantOpen }" type="button" :aria-expanded="Boolean(assistantOpen)" aria-controls="training-assistant-panel" :title="assistantOpen ? '收起助手；已启动的任务继续运行' : '打开训练助手，可描述目标、查看进度或分析报错'" @click="emit('toggleAssistant')">
+      <UiIcon name="feedback" /><span class="assistant-label">训练助手</span><span v-if="assistantBusy" class="assistant-running-dot" aria-label="助手正在执行"></span><span class="assistant-entry-state">{{ assistantOpen ? '收起' : '打开' }}</span>
+    </button>
+    </div>
+    <div class="sidebar-body">
     <nav class="engine-nav" aria-label="训练引擎">
       <section v-for="group in groups" :key="group.label" class="engine-group">
         <h2>{{ group.label }}</h2>
@@ -99,5 +108,21 @@ const modeTips: Record<string, string> = {
       <UiIcon name="play" /> {{ trainLabel }}
     </button>
     <p class="sidebar-status">{{ statusText }}</p>
+    </div>
   </aside>
 </template>
+
+<style scoped>
+.sidebar { overflow:hidden; }
+.sidebar-top { flex:none; min-width:0; padding-bottom:15px; }
+.sidebar-top .brand-row { padding-bottom:10px; }
+.sidebar-body { flex:1; min-height:0; min-width:0; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; scrollbar-gutter:stable; }
+.sidebar-assistant { display:flex; align-items:center; gap:9px; width:100%; min-height:36px; padding:8px 10px; border:1px solid var(--border); border-radius:7px; color:var(--text); background:transparent; font:inherit; font-size:12px; cursor:pointer; }
+.sidebar-assistant:hover { background:var(--card); border-color:var(--hint); }
+.sidebar-assistant:active { transform:translateY(1px); }
+.sidebar-assistant.selected { background:var(--card); border-color:var(--accent); }
+.assistant-label { flex:1; min-width:0; text-align:left; }
+.assistant-entry-state { color:var(--hint); font-size:10px; flex:none; }
+.assistant-running-dot { display:block; width:6px; height:6px; border-radius:50%; background:#79b995; flex:none; }
+@media(prefers-reduced-motion:reduce) { .sidebar-assistant:active { transform:none; } }
+</style>

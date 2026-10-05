@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.18.16"
+APP_VERSION = "0.19.0"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -3344,7 +3344,7 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     train_dir = dataset_train_dir("character", params.get("project"))
     _flat_n = _musubi_dataset_precheck(train_dir, "Krea2", logf)
     # 人物强绑定：trigger + 100% 一致特征固定前缀（musubi 不吃 keep_tokens，靠第一行不 shuffle 保护）
-    if _sub_mode in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+    if _sub_mode in ("character", "concept") and params.get("caption_method") not in ("natural", "existing") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
             _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf,
@@ -3597,7 +3597,7 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     train_dir = dataset_train_dir("character", params.get("project"))
     _flat_n = _musubi_dataset_precheck(train_dir, "FLUX.2", logf)
     # 人物强绑定：trigger + 100% 一致特征固定前缀（musubi 不吃 keep_tokens，靠第一行不 shuffle 保护）
-    if _sub_mode in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+    if _sub_mode in ("character", "concept") and params.get("caption_method") not in ("natural", "existing") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
             _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf,
@@ -6767,7 +6767,7 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     train_dir = dataset_train_dir("character", params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
-    if _sub_mode in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+    if _sub_mode in ("character", "concept") and params.get("caption_method") not in ("natural", "existing") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
             _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf,
@@ -6998,7 +6998,7 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
     train_dir = dataset_train_dir("character", params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
-    if _sub_mode in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+    if _sub_mode in ("character", "concept") and params.get("caption_method") not in ("natural", "existing") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
             _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf,
@@ -8978,7 +8978,7 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
     train_dir = dataset_train_dir("character", params.get("project"))
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】")
-    if _sub_mode in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+    if _sub_mode in ("character", "concept") and params.get("caption_method") not in ("natural", "existing") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
             _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf,
@@ -9077,7 +9077,7 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     if count_images(train_dir) == 0:
         raise RuntimeError(f"缺少预处理数据：{train_dir}\n请先执行【数据预处理】或【一键开始训练】")
     # 人物强绑定：trigger + 100% 一致特征固定前缀（ai-toolkit 支持 keep_tokens 语义较弱，靠第一行前置）
-    if (params.get("at_sub_mode") or "character") in ("character", "concept") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
+    if (params.get("at_sub_mode") or "character") in ("character", "concept") and params.get("caption_method") not in ("natural", "existing") and params.get("strong_bind", True) and (params.get("trigger") or "").strip():
         try:
             import preprocess as _pp
             _kt, _warns = _pp.apply_strong_binding(train_dir, params["trigger"].strip(), logf,
@@ -10003,7 +10003,7 @@ def gpu_status_text():
 _CFG_PARAM_INT_KEYS = ("rank", "alpha", "repeats", "max_epochs", "resolution", "video_steps", "video_frames", "batch_size", "sample_interval", "sample_seed")
 _CFG_PARAM_FLOAT_KEYS = ("unet_lr", "te_lr")
 _CFG_PARAM_BOOL_KEYS = ("strong_bind", "clean_concept", "sample_preview", "compile", "keep_user_captions", "overwrite", "amd_mode")
-_CFG_PARAM_STR_KEYS = ("optimizer", "quant_mode", "blocks_to_swap", "save_every", "crop_ratio", "gc", "fizgig_qwen_preset", "wd14_model", "noise_offset", "min_snr_gamma")
+_CFG_PARAM_STR_KEYS = ("optimizer", "quant_mode", "blocks_to_swap", "save_every", "crop_ratio", "gc", "fizgig_qwen_preset", "wd14_model", "noise_offset", "min_snr_gamma", "caption_method", "caption_language", "caption_length")
 _CFG_PROMPT_KEYS = ("trigger", "style_caption", "sample_prompt", "global_pos", "global_neg")
 _CFG_AT_LABEL_TO_KEY = {v: k for k, v in AT_SUB_LABELS.items()}
 _CFG_AT_LABEL_TO_KEY.update({"画风": "style", "人物": "character", "风格": "style"})  # 兼容手写短标签
@@ -10250,7 +10250,7 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
                square_crop=False, crop_ratio=None, min_size=0, blur_threshold=0.0, report=None,
                keep_tokens=None, project=None, style_caption="", dataset_mode=None,
                strong_bind=True, concept_type="", clean_concept=True, concept_mode=False,
-               style_target="anime", overwrite=False, keep_user_captions=False):
+               style_target="anime", overwrite=False, keep_user_captions=False, caption_method=None):
     """keep_user_captions：图片自带同名 .txt 时，原样保留、全程不改写 ✓
 
     ★ 2026-10-02（用户反馈：已手动打标好的用户没有可用入口 ✓）：
@@ -10312,6 +10312,23 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         raise RuntimeError(
             "自动补装 Pillow/numpy 失败（网络不稳或镜像不可达），请检查网络后重试，"
             "或重跑【② 安装训练内核】重建环境")
+    if caption_method is None:
+        _caption_project = load_project(project) if project else None
+        _caption_params = (_caption_project or {}).get("params") or {}
+        caption_method = str(_caption_params.get("caption_method") or "wd14")
+    if caption_method not in ("wd14", "natural", "existing"):
+        raise RuntimeError("图片标签与描述方式无效，请重新选择。")
+    if caption_method in ("natural", "existing"):
+        keep_user_captions = True
+    if keep_user_captions:
+        strong_bind = False
+        clean_concept = False
+        wd14 = False
+    if caption_method == "natural":
+        strong_bind = False
+        clean_concept = False
+        wd14 = False
+        logf("[描述] 使用同名自然语言文本；跳过关键词清洗、强绑定和兜底。缺失时请先批量补齐描述。")
     out = dataset_train_dir(dataset_mode or mode, project)
     os.environ["TRIGGER_WORD"] = trigger or ""
     os.environ["MODE"] = mode
@@ -10323,6 +10340,8 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         "--output", out, "--size", str(size), "--mode", mode,
         "--repeats", str(repeats),
     ]
+    if caption_method == "natural":
+        cmd += ["--caption-format", "natural"]
     # ⚠️ 输出目录里已有同名图片时，preprocess.py 默认**整张跳过**（含打标）✗
     #    —— 而 out 就是训练读取的目录（`dataset_train_dir`）✓ 于是：
     #      用户在源文件夹改了 / 用外部模型重打的标签，**跑完预处理也用不上** ✗（静默 ✗）
@@ -10336,8 +10355,7 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         #   与「重新处理已存在的图片」互斥：那个是覆盖，这个是原样保留 ✗
         cmd.append("--keep-user-captions")
         if overwrite:
-            logf("[预处理] ⚠ 同时勾了「重新处理已存在的图片」与「保留我已有的标签」："
-                 "前者会覆盖旧结果与旧标签，标签保留可能不生效，请只保留一个 ✓")
+            logf("[预处理] 重新处理图片，并从原图同名文本同步；已有输出文本变更前会备份。")
         logf("[预处理] 已勾选「保留我已有的标签」：不自动打标、不写兜底、不清洗标签 ✓"
              "（图片仍会正常缩放/裁切，触发词仍会插入标签开头 ✓）")
     if mode == "character":
@@ -10376,7 +10394,7 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
             logf("[预处理] 出图风格 = 写实：缺标签时用写实兜底描述（不再是 anime cel-shading…）")
         if trigger:
             cmd += ["--trigger", trigger]
-        if (style_caption or "").strip():
+        if (style_caption or "").strip() and caption_method != "natural":
             cmd += ["--caption", style_caption.strip()]
         if dedup:
             cmd.append("--dedup")
@@ -10391,6 +10409,8 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
     if report:
         cmd += ["--report", report]
     rc = run_stream(cmd, logf=logf)
+    if rc != 0 and caption_method == "natural":
+        raise RuntimeError("自然语言描述预处理失败：请查看具体图片的描述错误，补齐或重试后再训练；不会写入兜底文本。")
     if rc != 0:
         # 自愈：父进程自检通过、但子进程仍报缺依赖（半损坏 venv / -c 校验与脚本环境不一致），
         # 这里强制补装一轮（不依赖快速校验，内置 wheel 覆盖 cp310/311/312）并自动重试一次，
@@ -12354,7 +12374,7 @@ def auto_training_setup(vram_gb, base_type):
     return 2, False, False
 
 
-def make_global_caption_dataset(train_dir, mode, global_pos):
+def make_global_caption_dataset(train_dir, mode, global_pos, natural=False):
     """生成带全局正向提示词的临时数据集（硬链接图片 + 新 caption），不修改原 txt。
 
     支持 repeats_名称 子目录结构：子目录会原样复制（硬链接），repeats 语义保持不变。
@@ -12395,7 +12415,7 @@ def make_global_caption_dataset(train_dir, mode, global_pos):
                 except Exception:
                     cap = ""
             with open(os.path.join(dst_dir, stem + ".txt"), "w", encoding="utf-8") as fh:
-                fh.write((global_pos + (", " + cap if cap else "")))
+                fh.write((global_pos + (("\n" if natural else ", ") + cap if cap else "")))
             n += 1
     if n == 0:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -13863,7 +13883,7 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
     # ---- 全局正向提示词：训练期注入（不写进原 txt） ----
     global_dataset = None
     try:
-        global_dataset = make_global_caption_dataset(train_dir, mode, params.get("global_pos"))
+        global_dataset = make_global_caption_dataset(train_dir, mode, params.get("global_pos"), natural=params.get("caption_method") == "natural")
     except Exception as e:
         logf(f"[训练] 全局提示词注入失败，忽略（{e}）")
         global_dataset = None
@@ -13880,14 +13900,14 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
             # 训练前把当前 trigger 同步进标签：用户可能改过 trigger 但没重新预处理，
             # 若标签第一行没有当前 trigger，LoRA 就学不到它，生图"召唤不出来"。
             try:
-                _synced = _sync_trigger_to_labels(train_dir, _trig, logf)
+                _synced = 0 if params.get("caption_method") in ("natural", "existing") else _sync_trigger_to_labels(train_dir, _trig, logf)
                 if _synced:
                     logf(f"[训练] 已把{_tlabel} trigger「{_trig}」同步到 {_synced} 张标签第一行")
             except Exception as _e:
                 logf(f"[训练] trigger 标签同步失败（忽略）: {_e}")
             # 人物强绑定：自动把 trigger + 100% 一致身份特征固定到标签开头，
             # keep_tokens 覆盖整组 → kohya 打乱/丢弃标签时不动前缀，一个词绑定一个人物。
-            if mode in ("character", "concept") and params.get("strong_bind", True):
+            if mode in ("character", "concept") and params.get("caption_method") not in ("natural", "existing") and params.get("strong_bind", True):
                 try:
                     import preprocess as _pp
                     _kt, _warns = _pp.apply_strong_binding(train_dir, _trig, logf,

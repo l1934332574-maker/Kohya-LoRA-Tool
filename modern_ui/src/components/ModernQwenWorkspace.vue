@@ -4,6 +4,7 @@ import type { ModeWorkspaceData, ProjectCard, ProjectConfig, QwenModelChoice, Qw
 import UiIcon from './UiIcon.vue'
 import CropRatioField from './CropRatioField.vue'
 import DatasetInspection from './DatasetInspection.vue'
+import CaptionControls from './CaptionControls.vue'
 import TrainingProfileControl from './TrainingProfileControl.vue'
 import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
@@ -73,6 +74,7 @@ const trainingDraft = reactive({
   sample_seed: '1234',
   optimizer: 'auto',
   sample_prompt: '',
+  caption_method: 'wd14', caption_language: 'zh', caption_length: 'brief',
   wd14_model: 'swinv2-v3',
   strong_bind: true,
   clean_concept: true,
@@ -185,6 +187,9 @@ function hydrateConfig(config?: ProjectConfig | null) {
     const value = text(params[key]) || defaultValue || (demo ? demoValues[key] ?? (key === 'optimizer' ? 'auto' : '') : key === 'optimizer' ? 'auto' : '')
     trainingDraft[key] = key === 'wd14_model' ? normalizeWd14Model(value) : key === 'sample_seed' ? value || '1234' : value
   }
+  trainingDraft.caption_method = String(params.caption_method || 'wd14')
+  trainingDraft.caption_language = String(params.caption_language || 'zh')
+  trainingDraft.caption_length = String(params.caption_length || 'brief')
   trainingDraft.strong_bind = params.strong_bind === undefined ? true : Boolean(params.strong_bind)
   trainingDraft.clean_concept = params.clean_concept === undefined ? true : Boolean(params.clean_concept)
   trainingDraft.sample_preview_mode = params.sample_preview == null ? 'auto' : Boolean(params.sample_preview) ? 'on' : 'off'
@@ -229,6 +234,9 @@ function makePatch(): ProjectConfig {
     if (dirty.has(key)) patch[key] = trainingDraft[key]
   }
   const params: Record<string, unknown> = {}
+  for (const key of ['caption_method', 'caption_language', 'caption_length'] as const) {
+    if (dirty.has(`params.${key}`)) params[key] = trainingDraft[key]
+  }
   for (const key of ['crop_ratio', 'rank', 'alpha', 'unet_lr', 'resolution', 'video_steps', 'save_every', 'sample_interval', 'sample_seed', 'optimizer', 'sample_prompt', 'wd14_model'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = trainingDraft[key]
   }
@@ -372,7 +380,7 @@ function requestAction(action: string) {
   emit('classicAction', action, makePatch())
 }
 
-defineExpose({ startTraining, guideAction, openModelDialog, save: saveConfig })
+defineExpose({ hasUnsavedChanges: () => dirty.size > 0, startTraining, guideAction, openModelDialog, save: saveConfig })
 
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape' && modelDialogOpen.value) modelDialogOpen.value = false
@@ -438,11 +446,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
               <button class="qwen-button compact" type="button" :title="legacyTooltips.chooseRawDir" @click="browseDataset">浏览…</button>
             </div>
             <div class="desktop-dataset-options">
-              <label class="qwen-field" :title="legacyTooltips.wd14Model"><span class="field-caption">自动打标模型</span><select v-model="trainingDraft.wd14_model" class="qwen-select" @change="markParam('wd14_model')"><option value="swinv2-v3">swinv2-v3（推荐）</option><option value="moat-v2">moat-v2（旧版）</option></select></label>
-              <button class="check-toggle" :class="{ checked: trainingDraft.keep_user_captions }" type="button" role="checkbox" :aria-checked="trainingDraft.keep_user_captions" @click="trainingDraft.keep_user_captions = !trainingDraft.keep_user_captions; markParam('keep_user_captions')"><i></i><span>保留已有标签（不自动打标）</span></button>
+              <label v-if="trainingDraft.caption_method === 'wd14'" class="qwen-field" :title="legacyTooltips.wd14Model"><span class="field-caption">自动打标模型</span><select v-model="trainingDraft.wd14_model" class="qwen-select" @change="markParam('wd14_model')"><option value="swinv2-v3">swinv2-v3（推荐）</option><option value="moat-v2">moat-v2（旧版）</option></select></label>
+              <button v-if="trainingDraft.caption_method === 'wd14'" class="check-toggle" :class="{ checked: trainingDraft.keep_user_captions }" type="button" role="checkbox" :aria-checked="trainingDraft.keep_user_captions" @click="trainingDraft.keep_user_captions = !trainingDraft.keep_user_captions; markParam('keep_user_captions')"><i></i><span>保留已有标签（不自动打标）</span></button>
               <button class="check-toggle" :title="legacyTooltips.overwrite" :class="{ checked: trainingDraft.overwrite }" type="button" role="checkbox" :aria-checked="trainingDraft.overwrite" @click="trainingDraft.overwrite = !trainingDraft.overwrite; markParam('overwrite')"><i></i><span>重新处理已存在的图片（改过标签后勾上，否则不生效）</span></button>
             </div>
-              <DatasetInspection :directory="trainingDraft.raw_dir" :desktop="desktop" :keep-captions="trainingDraft.keep_user_captions" @preserve="trainingDraft.keep_user_captions = true; markParam('keep_user_captions')" />
+              <CaptionControls :project-name="project.name" :directory="trainingDraft.raw_dir" :desktop="desktop" :method="trainingDraft.caption_method" :language="trainingDraft.caption_language" :length="trainingDraft.caption_length" @update:method="trainingDraft.caption_method = $event; markParam('caption_method')" @update:language="trainingDraft.caption_language = $event; markParam('caption_language')" @update:length="trainingDraft.caption_length = $event; markParam('caption_length')" />
+              <DatasetInspection :directory="trainingDraft.raw_dir" :desktop="desktop" :natural="trainingDraft.caption_method === 'natural'" :keep-captions="trainingDraft.keep_user_captions || trainingDraft.caption_method !== 'wd14'" @preserve="trainingDraft.keep_user_captions = true; markParam('keep_user_captions')" />
             <p class="card-footnote">修改过标签、裁切比例或打标模型时，勾选重新处理已有图片后再执行数据预处理。</p>
             <div class="task-fields qwen-project-fields">
               <label class="qwen-field" :title="legacyTooltips.atSubMode"><span class="field-caption">训练类型</span><select v-model="trainingDraft.at_sub_mode" class="qwen-select" @change="markRoot('at_sub_mode')"><option v-for="option in trainingTypeOptions" :key="option.key" :value="option.key">{{ option.label }}</option></select></label>
@@ -455,10 +464,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
               <label v-if="draftIsConcept" class="qwen-field" :title="details?.concept_type_hints?.[trainingDraft.concept_type] || legacyTooltips.conceptType"><span class="field-caption">概念类型</span><select v-model="trainingDraft.concept_type" class="qwen-select" @change="markRoot('concept_type')"><option v-for="option in conceptOptions" :key="option.key" :value="option.key">{{ option.label }}</option></select></label>
             </div>
             <div v-if="draftIsConcept" class="concept-fields">
-              <button class="check-toggle" :title="legacyTooltips.cleanConcept" :class="{ checked: trainingDraft.clean_concept }" type="button" role="checkbox" :aria-checked="trainingDraft.clean_concept" @click="trainingDraft.clean_concept = !trainingDraft.clean_concept; markParam('clean_concept')"><i></i><span>自动清洗概念标签（推荐）</span></button>
+              <button class="check-toggle" :disabled="trainingDraft.caption_method === 'natural'" :title="legacyTooltips.cleanConcept" :class="{ checked: trainingDraft.clean_concept }" type="button" role="checkbox" :aria-checked="trainingDraft.clean_concept" @click="trainingDraft.clean_concept = !trainingDraft.clean_concept; markParam('clean_concept')"><i></i><span>自动清洗概念标签（推荐）</span></button>
               <span class="card-footnote">按概念类型去除概念本身的重复标签，仅在概念模式生效。</span>
             </div>
-            <button v-if="!draftIsStyle" class="bind-toggle" :title="legacyTooltips.strongBind" :class="{ active: trainingDraft.strong_bind }" type="button" role="switch" :aria-checked="trainingDraft.strong_bind" @click="trainingDraft.strong_bind = !trainingDraft.strong_bind; markParam('strong_bind')"><span class="toggle-track"><i></i></span><span class="bind-copy"><strong>强绑定</strong><small>自动把 trigger + 训练集 100% 一致的特征词固定到标签开头</small></span></button>
+            <button v-if="!draftIsStyle" class="bind-toggle" :disabled="trainingDraft.caption_method === 'natural'" :title="legacyTooltips.strongBind" :class="{ active: trainingDraft.strong_bind }" type="button" role="switch" :aria-checked="trainingDraft.strong_bind" @click="trainingDraft.strong_bind = !trainingDraft.strong_bind; markParam('strong_bind')"><span class="toggle-track"><i></i></span><span class="bind-copy"><strong>强绑定</strong><small>自动把 trigger + 训练集 100% 一致的特征词固定到标签开头</small></span></button>
             <label class="qwen-field sample-preview-field" :title="legacyTooltips.samplePreview"><span class="field-caption">训练中采样预览</span><select v-model="trainingDraft.sample_preview_mode" class="qwen-select" @change="markParam('sample_preview')"><option value="auto">按显存使用默认设置</option><option value="on">开启</option><option value="off">关闭（减少额外耗时）</option></select></label>
           </section>
 

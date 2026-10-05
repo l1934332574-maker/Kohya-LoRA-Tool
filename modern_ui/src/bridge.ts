@@ -123,7 +123,53 @@ export interface ModernTaskSample {
 
 export interface TrainingSampleEntry { name: string; version: string; modified: number; bytes: number }
 
+export interface CaptionServiceSettings {
+  provider: 'compatible' | 'ollama'; base_url: string; model: string; unload_after: boolean; has_key?: boolean;
+}
+export interface CaptionReport {
+  preview: boolean; directory?: string; total: number; written: number; skipped: number; failed: number;
+  items: Array<{ name: string; status: string; caption?: string; error?: string }>;
+}
+
+export interface AssistantResult {
+  ok: boolean; error?: string; id?: string; project?: string; status?: string; answer?: string;
+  changes?: Array<{ key: string; label: string; before: unknown; after: unknown }>;
+  applied?: boolean; undone?: boolean;
+}
+
+export interface AgentMessage {
+  id: string; role: 'user' | 'assistant' | 'tool' | 'system'; content: string;
+  status?: 'streaming' | 'complete'; kind?: string; tool?: string; choices?: string[]; question_id?: string;
+}
+export interface AgentPlan {
+  fields: Array<{ key: string; label: string; value: unknown }>;
+  warnings: string[]; changes: Array<Record<string, unknown>>;
+}
+export interface AgentResult { ok: boolean; status: string; message: string; error?: string }
+export interface AgentRun {
+  id: string; project: string; status: string; phase?: string; goal: string; detail: string;
+  question: string; question_id?: string; question_kind?: string; choices: string[]; path_kind?: 'folder' | 'model' | null;
+  revision: number; messages: AgentMessage[]; pause_explicit?: boolean; created_project?: boolean; plan?: AgentPlan | null; result?: AgentResult | null;
+  task_id?: string; task_active?: boolean; progress?: number | null;
+  policy?: Record<string, boolean>;
+  environment?: { version?: string; gpu?: { name?: string; vram_gb?: number | null }; installed?: Record<string, boolean>; project?: unknown; modes?: unknown[] };
+  catalog?: Array<{ name: string; title: string; description: string; arguments: Record<string, string> }>;
+  events: Array<{ kind: string; title: string; time: number; result: unknown }>;
+}
+
 export interface DesktopApi {
+  get_agent_environment(): Promise<{ ok: boolean; error?: string; environment?: AgentRun['environment'] }>
+  start_agent(project: string, options: { goal: string; execute: boolean; allow_remote: boolean; allow_install: boolean; allow_download: boolean; allow_remote_images: boolean; auto_review: boolean; allow_auto_train?: boolean }): Promise<{ ok: boolean; error?: string; id?: string }>
+  get_agent_state(project?: string): Promise<{ ok: boolean; error?: string; run?: AgentRun | null; active_project?: string | null; active_run_id?: string | null }>
+  send_agent_message(id: string, text: string): Promise<{ ok: boolean; error?: string }>
+  reply_agent(id: string, answer: string, question_id?: string): Promise<{ ok: boolean; error?: string }>
+  control_agent(id: string, action: 'pause' | 'resume' | 'takeover'): Promise<{ ok: boolean; error?: string }>
+  pick_agent_path(id: string, kind: 'folder' | 'model', path?: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean; path?: string }>
+  stop_agent(id: string, stop_task: boolean): Promise<{ ok: boolean; error?: string }>
+  get_caption_service(): Promise<{ ok: boolean; settings?: CaptionServiceSettings; task?: { id: string; status: string; project_name: string }; error?: string }>
+  save_caption_service(settings: CaptionServiceSettings & { api_key?: string; clear_key?: boolean }): Promise<{ ok: boolean; settings?: CaptionServiceSettings; error?: string }>
+  start_caption_task(project_name: string, options: { directory: string; language: string; length: string; preview: boolean; replace: boolean; allow_remote: boolean; retry_task_id?: string }): Promise<{ ok: boolean; task_id?: string; error?: string }>
+  get_caption_report(task_id: string): Promise<{ ok: boolean; report?: CaptionReport; error?: string }>
   list_training_runs(project_name?: string): Promise<{ ok: boolean; runs?: TrainingRunSummary[]; error?: string }>
   get_training_run(run_id: string): Promise<{ ok: boolean; run?: TrainingRun; error?: string }>
   restore_training_run(run_id: string, project_name: string): Promise<{ ok: boolean; error?: string }>
@@ -131,6 +177,12 @@ export interface DesktopApi {
   inspect_task_dataset(task_id: string): Promise<DatasetSummary>
   list_dataset_preview(token: string, offset?: number): Promise<{ ok: boolean; images?: string[]; next_offset?: number | null; error?: string }>
   get_dataset_preview(token: string, name: string): Promise<{ ok: boolean; data_url?: string; name?: string; width?: number; height?: number; caption?: string; error?: string }>
+  get_assistant_service(): Promise<{ ok: boolean; error?: string; settings?: CaptionServiceSettings; request?: { id: string; project: string; status: string } | null }>
+  save_assistant_service(settings: CaptionServiceSettings & { api_key?: string; clear_key?: boolean }): Promise<{ ok: boolean; error?: string; settings?: CaptionServiceSettings }>
+  start_assistant_request(project: string, options: { question: string; include_logs: boolean; allow_remote: boolean }): Promise<{ ok: boolean; error?: string; id?: string }>
+  get_assistant_result(id: string): Promise<AssistantResult>
+  stop_assistant_request(id: string): Promise<{ ok: boolean; error?: string }>
+  apply_assistant_proposal(id: string, undo: boolean): Promise<{ ok: boolean; error?: string }>
   bootstrap(): Promise<BootstrapData>
   suggest_project_name(): Promise<{ ok: boolean; name?: string; error?: string }>
   list_projects(): Promise<ProjectCard[]>
@@ -176,7 +228,17 @@ export interface DesktopApi {
   get_env_locations(): Promise<EnvLocations>
   set_env_location(kind: 'python' | 'git', directory: string): Promise<EnvLocations>
   reset_env_locations(): Promise<EnvLocations>
-  run_action(action: string, project_name?: string): Promise<{ ok: boolean; error?: string; message?: string; log?: string }>
+  get_log_export_status(export_id: string): Promise<LogExportStatus>
+  open_log_export(export_id: string, target: 'file' | 'folder'): Promise<{ ok: boolean; error?: string }>
+  run_action(action: string, project_name?: string): Promise<{ ok: boolean; error?: string; message?: string; log?: string; export_id?: string }>
+}
+
+export interface LogExportStatus {
+  ok: boolean
+  id?: string
+  status?: 'running' | 'completed' | 'failed'
+  path?: string
+  error?: string
 }
 
 export interface AppearanceSettings {
@@ -230,6 +292,9 @@ export interface TrainingMetricPoint { step: number; loss: number }
 
 export interface ModernTaskStatus {
   ok: boolean
+  kind?: string
+  project_name?: string
+  plan?: TrainingPlan
   error?: string
   id?: string
   title?: string

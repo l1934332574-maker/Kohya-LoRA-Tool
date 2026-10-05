@@ -56,3 +56,15 @@ _tmp*
 build_exe/amd_hotfix_build/
 build_exe/*_build.log
 diagnostics_training_tests.log
+
+# 助手服务与个人运行资料（仅本机保存，不发布）
+assistant_service.json
+caption_service.json
+app_settings.json
+settings/
+agent_runs/
+caption_reports/
+.env
+.env.*
+!.env.example
+*_运行日志_*.txt

@@ -29,13 +29,14 @@ const fullSampleData = ref('')
 let sampleCheckedAt = 0
 let sampleLoading = false
 let timer = 0
+let polling = false
 
 const running = computed(() => state.value?.status === 'running')
 const awaitingReview = computed(() => state.value?.status === 'awaiting_review')
 const active = computed(() => starting.value || running.value || awaitingReview.value)
 watch(active, (value) => emit('active', value), { immediate: true })
 function expand() { minimized.value = false }
-defineExpose({ expand })
+defineExpose({ expand, attach })
 const remainingTime = computed(() => {
   const seconds = state.value?.eta_seconds
   if (!running.value || seconds == null || !Number.isFinite(seconds) || seconds < 0) return ''
@@ -195,9 +196,12 @@ async function expandSample() {
 
 async function poll() {
   const api = window.pywebview?.api
-  if (!api || !taskId.value) return
+  if (!api || !taskId.value || polling) return
+  const current = taskId.value
+  polling = true
   try {
-    const result = await api.get_task_status(taskId.value, offset.value)
+    const result = await api.get_task_status(current, offset.value)
+    if (current !== taskId.value) return
     if (!result.ok) {
       stopPolling()
       emit('notify', result.error ?? '读取训练状态失败。')
@@ -207,9 +211,10 @@ async function poll() {
     const shouldFollowLog = logElement.value
       ? logElement.value.scrollHeight - logElement.value.scrollTop - logElement.value.clientHeight <= 24
       : true
-    taskLogs.value.push(...(result.logs ?? []))
+    taskLogs.value = [...taskLogs.value, ...(result.logs ?? [])].slice(-2000)
     offset.value = result.next_offset ?? offset.value
     await nextTick()
+    if (current !== taskId.value) return
     if (shouldFollowLog && logElement.value) logElement.value.scrollTop = logElement.value.scrollHeight
     if (result.status && result.status !== 'running' && result.status !== 'awaiting_review') {
       await refreshSample(true)
@@ -219,9 +224,21 @@ async function poll() {
       void refreshSample()
     }
   } catch (error) {
-    stopPolling()
-    emit('notify', error instanceof Error ? `读取训练状态失败：${error.message}` : '读取训练状态失败。')
-  }
+    if (current === taskId.value) emit('notify', error instanceof Error ? `训练状态连接中断：${error.message}` : '训练状态连接暂时中断，正在重试。')
+  } finally { polling = false }
+}
+
+async function attach(id: string) {
+  stopPolling()
+  taskId.value = id
+  offset.value = 0
+  taskLogs.value = []
+  sampleData.value = ''; sampleName.value = ''; sampleVersion.value = ''; sampleWarning.value = ''
+  sampleExpanded.value = false; fullSampleData.value = ''; sampleCheckedAt = 0
+  state.value = { ok: true, status: 'running', message: '正在读取已启动的训练任务…' }
+  minimized.value = false
+  await poll()
+  if (active.value) timer = window.setInterval(() => { void poll() }, 700)
 }
 
 async function start() {
@@ -259,7 +276,11 @@ async function start() {
 async function cancel() {
   const api = window.pywebview?.api
   if (!api || !taskId.value) return
-  const result = await api.cancel_task(taskId.value)
+  const ownership = await api.get_agent_state(props.projectName)
+  const owner = ownership.run
+  const result = owner?.task_id === taskId.value && ownership.active_run_id === owner.id
+    ? await api.stop_agent(owner.id, true)
+    : await api.cancel_task(taskId.value)
   if (!result.ok) emit('notify', result.error ?? '无法停止训练。')
   else if (state.value) state.value = { ...state.value, message: awaitingReview.value ? '已取消后续训练；预处理结果会保留。' : '正在请求停止；训练引擎会在安全位置退出…' }
 }
@@ -267,7 +288,16 @@ async function cancel() {
 async function continueAfterReview() {
   const api = window.pywebview?.api
   if (!api || !taskId.value || !awaitingReview.value) return
-  const result = await api.continue_training(taskId.value)
+  const ownership = await api.get_agent_state(props.projectName)
+  const owner = ownership.run
+  if (owner?.task_id === taskId.value && ownership.active_run_id === owner.id &&
+      !(owner.status === 'waiting_user' && owner.question_kind === 'review')) {
+    emit('notify', '助手还在检查本次数据，请等待检查完成；也可以最小化窗口，在对话中补充要求。')
+    return
+  }
+  const result = owner?.task_id === taskId.value && owner.status === 'waiting_user' && owner.question_kind === 'review'
+    ? await api.reply_agent(owner.id, '已检查，继续训练', owner.question_id)
+    : await api.continue_training(taskId.value)
   if (!result.ok) {
     emit('notify', result.error ?? '无法继续训练。')
     return
@@ -409,7 +439,7 @@ onUnmounted(stopPolling)
 <style scoped>
 .train-effective { font-size:11px; color:var(--tone-9299a4); }.train-effective summary { cursor:pointer; padding:8px 0; }.train-effective > div { display:flex; gap:12px; justify-content:space-between; padding:5px 0; }.train-effective strong { color:var(--tone-c1c6cf); font-weight:400; }.train-effective p { line-height:1.6; }
 .training-mini { position:fixed; right:22px; bottom:24px; z-index:34; display:grid; gap:5px; max-width:340px; padding:12px 16px; border:1px solid var(--accent); border-radius:7px; background:var(--card); color:var(--text); text-align:left; cursor:pointer; box-shadow:0 4px 20px rgb(0 0 0 / 25%); } .training-mini strong { font-size:12px; font-weight:500; } .training-mini span { font-size:10px; color:var(--sub); overflow-wrap:anywhere; }
-.train-backdrop { position: fixed; inset: 0; z-index: 35; display: grid; place-items: center; padding: 18px; background: rgb(10 12 16 / 54%); }
+.train-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 18px; background: rgb(10 12 16 / 54%); }
 .train-dialog { display: flex; width: min(100%, 650px); max-height: min(84vh, 760px); overflow-y: auto; flex-direction: column; gap: 11px; padding: 17px; border: 1px solid var(--tone-41464f); border-radius: 8px; background: var(--tone-272a32); box-shadow: 0 16px 44px rgb(0 0 0 / 34%); }
 .train-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }.train-kicker { color: var(--tone-858a93); font-size: 10px; }.train-header h2 { margin: 3px 0 0; color: var(--tone-cbd0d7); font-size: 16px; font-weight: 350; }.train-close { width: 29px; height: 29px; border: 0; border-radius: 5px; color: var(--tone-999da6); background: transparent; font-size: 21px; cursor: pointer; }.train-close:hover:not(:disabled) { color: var(--tone-d0d3d9); background: var(--tone-32363e); }.train-close:disabled { opacity: .45; cursor: wait; }
 .train-description { margin: 0; color: var(--tone-a0a5ae); font-size: 11px; line-height: 1.5; }.train-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }.train-summary > div { display: grid; min-width: 0; gap: 3px; padding: 9px; border: 1px solid var(--tone-373b44); border-radius: 5px; background: var(--tone-22252c); }.train-summary span { color: var(--tone-858b95); font-size: 9px; }.train-summary strong { overflow: hidden; color: var(--tone-c1c6cf); font-size: 10px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }.train-summary small { overflow: hidden; color: var(--tone-858b95); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
@@ -430,5 +460,5 @@ onUnmounted(stopPolling)
 .train-sample-heading strong { flex: none; font-weight: 500; }.train-sample-heading span { flex: 1; min-width: 0; overflow: hidden; color: var(--tone-9299a4); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }.train-sample-heading button { margin-left: auto; }
 .train-sample-image-button { display: block; width: fit-content; max-width: 100%; margin: auto; padding: 0; border: 0; background: transparent; cursor: zoom-in; }.train-sample-image { display: block; width: auto; max-width: 100%; max-height: 250px; margin: auto; border-radius: 4px; object-fit: contain; cursor: zoom-in; }
 .train-sample-empty, .train-sample-warning { margin: 0; color: var(--tone-9299a4); font-size: 10px; line-height: 1.45; }.train-sample-warning { color: var(--tone-d4b06a); overflow-wrap: anywhere; }
-.sample-lightbox { position: fixed; inset: 0; z-index: 36; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 10px; padding: 45px 20px 20px; background: rgb(10 12 16 / 90%); color: var(--tone-cbd0d7); font-size: 11px; }.sample-lightbox img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }.sample-lightbox-close { position: absolute; top: 12px; right: 18px; border: 0; background: transparent; color: var(--tone-cbd0d7); font-size: 28px; cursor: pointer; }
+.sample-lightbox { position: fixed; inset: 0; z-index: 81; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 10px; padding: 45px 20px 20px; background: rgb(10 12 16 / 90%); color: var(--tone-cbd0d7); font-size: 11px; }.sample-lightbox img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }.sample-lightbox-close { position: absolute; top: 12px; right: 18px; border: 0; background: transparent; color: var(--tone-cbd0d7); font-size: 28px; cursor: pointer; }
 </style>

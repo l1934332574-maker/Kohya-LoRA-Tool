@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import io
+import json
+import copy
 import os
 import re
 import math
@@ -48,6 +50,7 @@ _MODERN_IMPORT_EXTRA_PARAMS = {
     "sample_interval", "video_frames", "noise_offset", "min_snr_gamma",
     "wd14_model", "overwrite", "keep_user_captions", "amd_mode", "fizgig_qwen_preset",
     "batch_size", "gc", "sample_prompt", "sample_seed", "global_pos", "global_neg",
+    "caption_method", "caption_language", "caption_length",
 }
 
 _APPEARANCE_BACKGROUND_HISTORY_LIMIT = 8
@@ -120,8 +123,16 @@ class ModernUIBridge:
         self._project_name_reservations = set()
         self._picker_dirs = {}
         self._dataset_previews = {}
+        self._caption_reports = {}
+        from kohya_core.captioning import CaptionSettings
+        self._caption_settings = CaptionSettings(self.core.data_sub("settings"))
+        from kohya_core.assistant import AssistantSettings
+        self._assistant_settings = AssistantSettings(self.core.data_sub("settings"))
+        self._assistant_lock = threading.RLock()
+        self._assistant_request = None
         self._log_lock = threading.RLock()
         self._diagnostics_thread = None
+        self._log_export = {}
         self._session_log = None
         self._session_log_error = None
         try:
@@ -130,6 +141,213 @@ class ModernUIBridge:
                 self._session_log.append(line)
         except Exception as exc:
             self._session_log_error = str(exc)
+
+        from kohya_core.training_agent import TrainingAgent
+        self._agent = TrainingAgent(self)
+
+    def _agent_guard(self):
+        if not self._agent.mutation_allowed():
+            return {"ok": False, "error": "助手正在执行操作。你可以继续查看界面；需要手动修改时，请在助手里点击“我来操作”。"}
+        return None
+
+    def get_agent_environment(self):
+        try:
+            return {"ok": True, "environment": self._agent.environment()}
+        except Exception:
+            return {"ok": False, "error": "无法读取完整环境，可启动 Agent 后查看具体步骤。"}
+
+    def start_agent(self, project_name, options):
+        return self._agent.start(str(project_name or ""), options)
+
+    def get_agent_state(self, project_name=None):
+        return self._agent.snapshot(None if project_name is None else str(project_name))
+
+    def reply_agent(self, run_id, answer, question_id=""):
+        return self._agent.reply(str(run_id or ""), answer, str(question_id or ""))
+
+    def send_agent_message(self, run_id, text):
+        return self._agent.message(str(run_id or ""), text)
+
+    def control_agent(self, run_id, action):
+        return self._agent.control(str(run_id or ""), str(action or ""))
+
+    def pick_agent_path(self, run_id, kind, path=""):
+        if kind not in ("folder", "model"):
+            return {"ok": False, "error": "请选择文件夹或模型文件。"}
+        current = self._agent.snapshot().get("run") or {}
+        if current.get("id") != str(run_id or ""):
+            return {"ok": False, "error": "当前对话已变化，请刷新后重新选择。"}
+        if not path:
+            selection = self.choose_path(kind, memory_key="agent_chat_" + kind)
+            if not selection.get("ok") or selection.get("cancelled"):
+                return selection
+            path = selection.get("path", "")
+        return self._agent.provide_path(str(run_id or ""), kind, path)
+
+    def stop_agent(self, run_id, stop_task=False):
+        return self._agent.stop(str(run_id or ""), stop_task)
+
+    def _agent_computer_context(self):
+        if not self._agent.owns_thread():
+            raise ValueError("电脑工具只能由当前助手任务调用。")
+        roots = [str(_app_root()), self.core.data_sub("")]
+        config = self.core.load_project(self._agent.state.get("project", "")) or {}
+        dataset = str(config.get("raw_dir") or "")
+        if dataset and os.path.isdir(dataset):
+            roots.append(dataset)
+        with self._agent.lock:
+            authorized_paths = list(getattr(self._agent, "authorized_paths", ()))
+        for path in authorized_paths:
+            candidate = Path(path)
+            roots.append(str(candidate))
+        aliases = {"application": str(_app_root()), "data": self.core.data_sub(""),
+                   "project": dataset if dataset and os.path.isdir(dataset) else self.core.data_sub("")}
+        return roots, aliases
+
+    def inspect_agent_computer(self, options):
+        from kohya_core.agent_computer import inspect_files
+        try:
+            roots, aliases = self._agent_computer_context()
+            return inspect_files(options, aliases, roots)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:500]}
+
+    def run_agent_computer_command(self, options):
+        from kohya_core.agent_computer import run_command
+        if not self._agent.owns_thread() or not isinstance(options, dict):
+            return {"ok": False, "error": "电脑命令只能由当前助手任务调用。"}
+        command = options.get("command")
+        if not self._agent.consume_command_approval(command):
+            return {"ok": False, "error": "这条电脑命令尚未获得用户明确确认。"}
+        try:
+            self._agent._check_stop()
+            result = run_command(command, str(_app_root()), self._agent._check_stop)
+            self._log("[助手电脑操作] 已执行用户确认的命令，返回码：%s" % result.get("returncode"))
+            return result
+        except Exception as exc:
+            return {"ok": False, "error": "电脑命令未完成：%s" % type(exc).__name__}
+
+    def open_agent_browser(self, url):
+        from kohya_core.agent_computer import open_browser
+        if not self._agent.owns_thread():
+            return {"ok": False, "error": "请通过当前助手对话打开网页。"}
+        try:
+            self._agent._check_stop()
+            return open_browser(url)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:500]}
+
+    def search_agent_models(self, query, provider="huggingface"):
+        from kohya_core.agent_models import search_models
+        if not self._agent.owns_thread():
+            return {"ok": False, "error": "请通过助手对话查找模型。"}
+        return search_models(query, provider, stop=self._agent._transport_stop)
+
+    def get_agent_model_repository(self, provider, repository):
+        from kohya_core.agent_models import model_repository
+        if not self._agent.owns_thread():
+            return {"ok": False, "error": "请通过助手对话查看模型文件。"}
+        return model_repository(provider, repository, stop=self._agent._transport_stop)
+
+    def _agent_model_directory(self, project_name, requested=""):
+        config = self.core.load_project(project_name) or {}
+        mode = str(config.get("mode") or "character")
+        if requested:
+            destination = Path(str(requested)).expanduser().resolve()
+            with self._agent.lock:
+                granted_paths = list(getattr(self._agent, "authorized_paths", ()))
+            authorized = [Path(path).resolve() for path in granted_paths if Path(path).is_dir()]
+            if not any(destination == folder or folder in destination.parents for folder in authorized):
+                raise ValueError("下载目录需要用户在当前对话中明确选择。")
+            return str(destination)
+        directories = {"krea2": "krea2_models_dir", "krea2_at": "krea2_at_models_dir", "krea2_fz": "krea2_models_dir",
+                       "flux2": "flux2_models_dir", "flux2_fz": "flux2_models_dir", "qwen21_fz": "qwen21_fz_models_dir",
+                       "h3_fz": "h3_fz_models_dir", "video": "h3_models_dir"}
+        if mode in directories:
+            return str(getattr(self.core, directories[mode])())
+        if mode in ("qwen_image", "zimage"):
+            return str(self.core.at_image_local_dir(mode))
+        architecture = str(config.get("base_type") or "sdxl")
+        if architecture not in ("sd15", "sdxl", "flux", "anima"):
+            architecture = "sdxl"
+        return self.core.data_sub("models", architecture)
+
+    def start_agent_model_download(self, project_name, options):
+        from kohya_core.agent_models import download_file
+        if not self._agent.owns_thread() or not isinstance(options, dict):
+            return {"ok": False, "error": "模型下载只能由当前助手任务调用。"}
+        if not (self._agent.state.get("policy") or {}).get("allow_download"):
+            return {"ok": False, "error": "下载还没有获得本次授权。"}
+        if str(project_name or "") != self._agent.state.get("project") or not project_name:
+            return {"ok": False, "error": "请先绑定项目，再选择模型下载位置。"}
+        try:
+            destination = self._agent_model_directory(project_name, options.get("destination", ""))
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:500]}
+        task_id = self._begin_task("助手模型下载", "agent_model_download", key=project_name)
+        if not task_id:
+            return {"ok": False, "error": "其他任务正在运行，请等它结束。"}
+        run_id = self._agent.state["id"]
+        cancel_event = threading.Event()
+        with self._task_lock:
+            self._task["cancel_event"] = cancel_event
+        self._task_log(task_id, "[助手下载] 目标目录：%s" % destination)
+
+        def stop():
+            if cancel_event.is_set():
+                raise RuntimeError("下载已取消；已下载的分段保留，可再次下载继续。")
+
+        def progress(value):
+            fraction = value.get("progress") if isinstance(value, dict) else value
+            detail = value.get("message", "正在下载模型…") if isinstance(value, dict) else "正在下载模型…"
+            with self._task_lock:
+                if self._task and self._task.get("id") == task_id:
+                    self._task.update(progress=fraction, message=detail)
+
+        def worker():
+            try:
+                result = download_file(options.get("provider", "huggingface"), options.get("repository", ""),
+                                       options.get("file", ""), destination, stop, progress)
+                with self._task_lock:
+                    if self._task and self._task.get("id") == task_id:
+                        self._task["download_result"] = result
+                if result.get("ok"):
+                    with self._agent.lock:
+                        if self._agent.state and self._agent.state.get("id") == run_id:
+                            self._agent.authorized_paths.add(result["path"])
+                    self._task_log(task_id, "[助手下载] 文件已保存：%s；结构检查不代表此模式支持该模型。" % result.get("path"))
+                    self._finish_agent_download(task_id, "completed", "模型已下载并检查，请确认架构与当前训练模式兼容。")
+                else:
+                    self._finish_agent_download(task_id, "failed", result.get("error", "模型下载未完成。"))
+            except Exception as exc:
+                status = "cancelled" if cancel_event.is_set() else "failed"
+                self._finish_agent_download(task_id, status, "下载已取消，可再次选择同一文件续传。" if status == "cancelled" else "模型下载失败：%s" % str(exc)[:400])
+
+        threading.Thread(target=worker, daemon=True, name="AgentModelDownload").start()
+        return {"ok": True, "task_id": task_id, "destination": destination}
+
+    def _release_agent_model_for_task(self, task_id):
+        # Manual training uses the same release step as Agent-started training.
+        if not self._agent.state or not self._agent.state.get("messages"):
+            return
+        try:
+            connection = self._assistant_settings.connection()
+        except Exception:
+            return
+        if connection.get("provider") == "ollama":
+            from kohya_core.agent_transport import release_model
+            self._task_log(task_id, "[助手] GPU 任务前请求释放本地文字模型显存…")
+            released = release_model(connection, getattr(self.core, "check_stop", lambda: None))
+            self._task_log(task_id, "[助手] 本地文字模型已请求卸载。" if released.get("ok") else "[WARN] " + released.get("error", "文字模型卸载未确认，请检查显存。"))
+        elif connection.get("local"):
+            self._task_log(task_id, "[WARN] 本地兼容文字服务没有统一卸载接口，请在模型服务中释放文字模型显存后继续。")
+
+    def _finish_agent_download(self, task_id, status, message):
+        with self._task_lock:
+            if self._task and self._task.get("id") == task_id:
+                self._task.update(status=status, message=message, progress=1.0 if status == "completed" else self._task.get("progress"))
+        self._task_log(task_id, message)
+        self.core.clear_status_cache()
 
     @staticmethod
     def _count_preprocessable_images(directory):
@@ -200,6 +418,9 @@ class ModernUIBridge:
                 "ok": True,
                 "id": task["id"],
                 "title": task["title"],
+                "kind": task.get("kind", ""),
+                "project_name": task.get("key", ""),
+                "plan": dict(task.get("plan") or {}),
                 "status": task["status"],
                 "message": task.get("message", ""),
                 "progress": task.get("progress"),
@@ -209,6 +430,7 @@ class ModernUIBridge:
                 "loss_history": list(task.get("loss_history", [])),
                 "sampling_status": dict(task.get("sampling_status") or {}),
                 "effective_params": dict(task.get("effective_params") or {}),
+                "download_result": dict(task.get("download_result") or {}),
                 "logs": logs[max(0, offset - log_offset):],
                 "next_offset": log_offset + len(logs),
             }
@@ -276,6 +498,10 @@ class ModernUIBridge:
 
     def _begin_task(self, title, kind, mode="", key=""):
         with self._task_lock:
+            if not self._agent.mutation_allowed():
+                return None
+            if self._assistant_request and self._assistant_request.get("status") == "running":
+                return None
             if self._task and self._task.get("status") in ("running", "awaiting_review"):
                 return None
             task_id = uuid.uuid4().hex
@@ -451,6 +677,7 @@ class ModernUIBridge:
                 return {"ok": False, "error": "当前没有可停止的任务。"}
             downloader = self._task_downloader
             kind = self._task.get("kind")
+            cancel_event = self._task.get("cancel_event")
             awaiting_review = self._task.get("status") == "awaiting_review"
             review_event = self._task.get("review_event")
             self._task["message"] = "正在请求停止…"
@@ -461,13 +688,15 @@ class ModernUIBridge:
                 review_event.set()
             self._task_log(str(task_id), "[取消] 用户取消了后续训练；预处理数据已保留。")
             return {"ok": True}
-        if downloader is not None:
+        if kind == "agent_model_download" and cancel_event is not None:
+            cancel_event.set()
+        elif downloader is not None:
             downloader.cancel()
-        elif kind in ("setup", "training", "preprocess"):
+        elif kind in ("setup", "training", "preprocess", "caption"):
             self.core.stop_active_process()
         return {"ok": True}
 
-    def continue_training(self, task_id):
+    def continue_training(self, task_id, source="user"):
         """Resume a training task after the user reviews preprocessed captions."""
         with self._task_lock:
             task = self._task
@@ -478,8 +707,127 @@ class ModernUIBridge:
                 return {"ok": False, "error": "训练确认状态已失效，请重新启动训练。"}
             task.update(status="running", message="已确认标签，正在启动训练引擎…", detail="模型加载可能需要几分钟")
             review_event.set()
-        self._task_log(str(task_id), "[训练] 用户已检查标签并确认继续。")
+        self._task_log(str(task_id), "[训练] Agent 已按授权执行完整性检查并继续；尚未验证图文语义。" if source == "agent" and self._agent.owns_thread() else "[训练] 用户已检查标签并确认继续。")
         return {"ok": True}
+
+    def get_caption_service(self):
+        try:
+            with self._task_lock:
+                task = self._task
+                active = {"id": task["id"], "status": task["status"], "project_name": task["key"]} if task and task["kind"] == "caption" else None
+            return {"ok": True, "settings": self._caption_settings.public(), "task": active}
+        except Exception:
+            return {"ok": False, "error": "无法读取图片描述服务设置，请重新配置。"}
+
+    def save_caption_service(self, settings):
+        guard = self._agent_guard()
+        if guard:
+            return guard
+        from kohya_core.captioning import CaptionError
+        try:
+            if not isinstance(settings, dict):
+                raise CaptionError("服务设置格式无效。")
+            with self._task_lock:
+                if self._task and self._task.get("status") in ("running", "awaiting_review"):
+                    raise CaptionError("请先完成或停止当前任务，再修改描述服务。")
+                return {"ok": True, "settings": self._caption_settings.save(settings)}
+        except CaptionError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "无法保存描述服务设置或加密密钥。"}
+
+    def get_caption_report(self, task_id):
+        with self._task_lock:
+            report = self._caption_reports.get(str(task_id or ""))
+            return {"ok": True, "report": report} if report else {"ok": False, "error": "描述结果尚未生成或已过期。"}
+
+    def start_caption_task(self, project_name, options):
+        from kohya_core.captioning import CaptionError, caption_options, generate_captions, service_identity
+        project_name = str(project_name or "").strip()
+        config = self.core.load_project(project_name)
+        if not isinstance(config, dict) or not isinstance(options, dict):
+            return {"ok": False, "error": "项目或描述选项无效。"}
+        try:
+            language, length = caption_options(options.get("language", "zh"), options.get("length", "brief"))
+            directory = str(options.get("directory") or config.get("raw_dir") or "").strip()
+            if not os.path.isdir(directory):
+                raise CaptionError("请先选择有效的原始图片文件夹。")
+            service = self._caption_settings.connection()
+            preview, replace = bool(options.get("preview", True)), bool(options.get("replace", False))
+            names = None
+            preview_cache = {}
+            with self._task_lock:
+                for old in reversed(list(self._caption_reports.values())):
+                    if (old.get("preview") and old.get("project_name") == project_name
+                            and old.get("directory") == directory and old.get("language") == language
+                            and old.get("length") == length and old.get("service_identity") == service_identity(service)):
+                        preview_cache = {item["name"]: item for item in old["items"] if item.get("status") == "preview"}
+                        break
+            retry_id = str(options.get("retry_task_id") or "")
+            if retry_id:
+                with self._task_lock:
+                    previous = self._caption_reports.get(retry_id)
+                if not previous or previous.get("project_name") != project_name or previous.get("directory") != directory:
+                    raise CaptionError("重试任务与当前项目或图片目录不一致。")
+                names = [item["name"] for item in previous["items"] if item.get("status") == "failed"]
+                if not names:
+                    raise CaptionError("没有需要重试的失败图片。")
+                preview, replace = previous["preview"], previous.get("replace", False)
+            if not service["local"] and options.get("allow_remote") is not True:
+                raise CaptionError("请确认允许把图片发送到所选在线描述服务。")
+        except CaptionError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "无法准备描述任务，请检查服务和数据目录。"}
+        task_id = self._begin_task("图片描述预览" if preview else "批量生成图片描述", "caption", key=project_name)
+        if not task_id:
+            return {"ok": False, "error": "已有任务运行中，请先完成或停止。"}
+        self.core.reset_stop()
+
+        def progress(done, total, item):
+            with self._task_lock:
+                if self._task and self._task.get("id") == task_id:
+                    self._task.update(progress=done / total, detail="%d / %d · %s" % (done, total, item["name"]),
+                                      message="正在生成图片描述…")
+
+        def worker():
+            try:
+                report = generate_captions(service, directory, language, length, replace=replace,
+                                           preview=preview, names=names, preview_cache=preview_cache, stop=self.core.check_stop,
+                                           log=lambda line: self._task_log(task_id, line), progress=progress,
+                                           report_path=self.core.data_sub("logs", "caption_%s.json" % task_id))
+                report.update(project_name=project_name, directory=directory, replace=replace)
+                with self._task_lock:
+                    self._caption_reports[task_id] = report
+                    while len(self._caption_reports) > 8:
+                        self._caption_reports.pop(next(iter(self._caption_reports)))
+                    if self._task and self._task.get("id") == task_id:
+                        self._task.update(status="failed" if report["failed"] else "completed", progress=1.0,
+                                          message=("预览完成（未写文件）：写入 %d，保留 %d，失败 %d。" if preview else "描述完成：写入 %d，保留 %d，失败 %d。") %
+                                                  (report["written"], report["skipped"], report["failed"]))
+            except self.core.StopRequested:
+                try:
+                    with open(self.core.data_sub("logs", "caption_%s.json" % task_id), encoding="utf-8") as handle:
+                        partial = json.load(handle)
+                    partial.update(project_name=project_name, directory=directory, replace=replace)
+                    with self._task_lock:
+                        self._caption_reports[task_id] = partial
+                        while len(self._caption_reports) > 8:
+                            self._caption_reports.pop(next(iter(self._caption_reports)))
+                except (OSError, ValueError):
+                    pass
+                with self._task_lock:
+                    if self._task and self._task.get("id") == task_id:
+                        self._task.update(status="cancelled", message="描述已停止，已写入的文本保留；服务中已发出的请求可能仍在执行。")
+            except Exception as exc:
+                message = str(exc) if isinstance(exc, CaptionError) else "描述任务失败，请检查图片与服务状态。"
+                self._task_log(task_id, "[描述失败] " + message)
+                with self._task_lock:
+                    if self._task and self._task.get("id") == task_id:
+                        self._task.update(status="failed", message=message)
+
+        threading.Thread(target=worker, daemon=True, name="caption-batch").start()
+        return {"ok": True, "task_id": task_id}
 
     def start_preprocess_task(self, project_name):
         """Run the existing image/video preparation path in the modern task dialog."""
@@ -513,17 +861,17 @@ class ModernUIBridge:
             size = int(getattr(self.core, "KREA2_RESOLUTION", size))
         elif mode == "flux2_fz" and not stored.get("resolution"):
             size = int(getattr(self.core, "FLUX2FZ_RESOLUTION", size))
-        task_id = self._begin_task("%s 数据预处理" % self.core.MODE_LABELS.get(mode, mode), "preprocess", mode=mode)
+        task_id = self._begin_task("%s 数据预处理" % self.core.MODE_LABELS.get(mode, mode), "preprocess", mode=mode, key=project_name)
         if not task_id:
             return {"ok": False, "error": "已有安装、预处理或训练任务正在运行，请等它完成后再试。"}
         self.core.reset_stop()
 
         def worker():
-            import json
             import tempfile
 
             report_path = os.path.join(tempfile.gettempdir(), "kohya_modern_manual_preprocess_%s.json" % task_id)
             try:
+                self._release_agent_model_for_task(task_id)
                 if mode == "video":
                     videos, duration, no_caption = self.core.scan_video_dataset(raw_dir)
                     self._task_log(task_id, "[预处理] 视频数据已就绪：%d 个视频，%.1f 秒，%d 个缺字幕。视频无需图片预处理。" % (
@@ -570,6 +918,7 @@ class ModernUIBridge:
                         "style_target": self.core.style_target_code(config.get("style_preset")),
                         "overwrite": bool(stored.get("overwrite", False)),
                         "keep_user_captions": bool(stored.get("keep_user_captions", False)),
+                        "caption_method": str(stored.get("caption_method") or "wd14"),
                     }
                     if mode == "style" and config.get("base_type") == "anima":
                         args["dataset_mode"] = None
@@ -627,6 +976,12 @@ class ModernUIBridge:
 
     def prepare_training(self, project_name):
         """Run read-only preflight for a modern workspace's directly supported path."""
+        guard = self._agent_guard()
+        if guard:
+            return guard
+        with self._task_lock:
+            if self._assistant_request and self._assistant_request.get("status") == "running":
+                return {"ok": False, "error": "助手正在处理请求，请等待回复或先停止助手，再开始训练。"}
         project_name = str(project_name or "").strip()
         config = self.core.load_project(project_name) if project_name else None
         if not isinstance(config, dict):
@@ -1054,6 +1409,12 @@ class ModernUIBridge:
             return {"ok": False, "error": "请在新版训练页选择有效的 %s 底模文件（.safetensors 或 .ckpt）。" % base_label}
         if not params["base_model"].lower().endswith((".safetensors", ".ckpt")):
             return {"ok": False, "error": "%s 底模需为 .safetensors 或 .ckpt 文件。" % base_label}
+        if params["base_model"].lower().endswith(".safetensors"):
+            try:
+                from kohya_core.anima_ckpt import validate_safetensors_layout
+                validate_safetensors_layout(params["base_model"])
+            except (ValueError, OSError, UnicodeError) as exc:
+                return {"ok": False, "error": "底模文件检查未通过：%s" % exc}
         if not params["raw_dir"] or not os.path.isdir(params["raw_dir"]):
             return {"ok": False, "error": "请先在新版训练页选择有效的原始图片文件夹。"}
         try:
@@ -1209,6 +1570,9 @@ class ModernUIBridge:
             return {"ok": False, "error": "读取训练记录失败：%s" % exc}
 
     def restore_training_run(self, run_id, project_name):
+        guard = self._agent_guard()
+        if guard:
+            return guard
         with self._task_lock:
             if self._task and self._task.get("status") in ("running", "awaiting_review"):
                 return {"ok": False, "error": "请等当前任务结束后再恢复设置。"}
@@ -1288,7 +1652,6 @@ class ModernUIBridge:
             self._task_log(task_id, "[WARN] 训练记录暂时无法保存：%s" % exc)
 
         def worker():
-            import json
             import tempfile
 
             report_path = os.path.join(tempfile.gettempdir(), "kohya_modern_preprocess_%s.json" % task_id)
@@ -1296,6 +1659,7 @@ class ModernUIBridge:
             monitor_stop = threading.Event()
             monitor_thread = None
             try:
+                self._release_agent_model_for_task(task_id)
                 self._task_log(task_id, "[预处理] 自动检查、整理并打标当前图集…")
                 with self._task_lock:
                     if self._task and self._task.get("id") == task_id:
@@ -1337,6 +1701,7 @@ class ModernUIBridge:
                         "style_target": self.core.style_target_code(params["style_preset"]),
                         "overwrite": params["overwrite"],
                         "keep_user_captions": params["keep_user_captions"],
+                        "caption_method": params.get("caption_method", "wd14"),
                     }
                     self.core.preprocess(lambda line: self._task_log(task_id, line), **preprocess_args)
                     stats = {}
@@ -1551,6 +1916,9 @@ class ModernUIBridge:
         }
 
     def set_env_location(self, kind, directory):
+        guard = self._agent_guard()
+        if guard:
+            return guard
         kind = str(kind or "")
         directory = str(directory or "").strip()
         if kind not in ("python", "git") or not directory or not os.path.isdir(directory):
@@ -1577,6 +1945,9 @@ class ModernUIBridge:
         return self.get_env_locations()
 
     def reset_env_locations(self):
+        guard = self._agent_guard()
+        if guard:
+            return guard
         if not self.core.clear_env_paths():
             return {"ok": False, "error": "恢复自动检测失败。"}
         self._log("[环境] 已恢复自动查找 Python / Git。")
@@ -1651,6 +2022,178 @@ class ModernUIBridge:
             })
         return projects
 
+    def get_assistant_service(self):
+        try:
+            with self._assistant_lock:
+                request = self._assistant_request
+                active = {key: request.get(key) for key in ("id", "project", "status")} if request else None
+                return {"ok": True, "settings": self._assistant_settings.public(), "request": active}
+        except Exception:
+            return {"ok": False, "error": "无法读取助手设置。"}
+
+    def save_assistant_service(self, settings):
+        guard = self._agent_guard()
+        if guard:
+            return guard
+        from kohya_core.captioning import CaptionError
+        try:
+            if not isinstance(settings, dict):
+                return {"ok": False, "error": "助手设置格式无效。"}
+            with self._assistant_lock:
+                if self._assistant_request and self._assistant_request["status"] == "running":
+                    return {"ok": False, "error": "请先停止助手请求。"}
+                return {"ok": True, "settings": self._assistant_settings.save(settings)}
+        except CaptionError as exc:
+            return {"ok": False, "error": str(exc).replace("描述", "助手").replace("视觉模型", "文字模型")}
+        except Exception:
+            return {"ok": False, "error": "无法保存助手设置。"}
+
+    def start_assistant_request(self, project_name, options):
+        guard = self._agent_guard()
+        if guard:
+            return guard
+        from kohya_core.assistant import LABELS, BOUNDS, ask, validate_patch
+        from kohya_core.captioning import CaptionError
+        try:
+            if not isinstance(options, dict):
+                raise CaptionError("请求格式无效。")
+            question = str(options.get("question") or "").strip()
+            if not question or len(question) > 6000:
+                raise CaptionError("请输入问题，长度不超过 6000 字。")
+            project_name = str(project_name or "")
+            config = self.core.load_project(project_name) if project_name else {}
+            if not isinstance(config, dict):
+                raise CaptionError("项目不存在。")
+            with self._task_lock:
+                task = self._task or {}
+                if task.get("status") in ("running", "awaiting_review"):
+                    raise CaptionError("当前有任务正在运行；请在任务结束后使用助手，避免争用资源。")
+                task_key = str(task.get("key") or "")
+                context_fields = ("kind", "mode", "status", "message") if task_key == project_name and project_name else ("kind", "status")
+                task_context = {key: task.get(key) for key in context_fields}
+                log_lines = list(task.get("logs", []))[-100:] if options.get("include_logs") and task_key == project_name and project_name else []
+            service = self._assistant_settings.connection()
+            if not service["local"] and options.get("allow_remote") is not True:
+                raise CaptionError("在线助手需要允许发送本次问题、配置和所选日志。")
+            mode = str(config.get("mode") or "character")
+            effective = training_params(self.core, config, project_name) if project_name else {}
+            allowed = {key: LABELS[key] for key in LABELS if project_name and self.core.param_supports(key, mode)}
+            quant = list(getattr(self.core, "QUANT_MODE_OPTIONS", {}).get(mode, ()))
+            if not quant:
+                allowed.pop("quant_mode", None)
+            if config.get("unet_only") or config.get("base_type") in ("flux", "anima"):
+                allowed.pop("te_lr", None)
+            if mode == "qwen21_fz":
+                for key in ("rank", "alpha", "unet_lr"):
+                    allowed.pop(key, None)
+            context = {"project": project_name, "mode": config.get("mode"), "base_type": config.get("base_type"),
+                       "saved_params": {key: (config.get("params") or {}).get(key) for key in LABELS},
+                       "effective_params": {key: effective.get(key) for key in LABELS}, "allowed": allowed,
+                       "engine_note": "Qwen 2.1 Fizgig 的 rank、alpha 和学习率由引擎预设决定，本版助手不修改。" if mode == "qwen21_fz" else "",
+                       "numeric_ranges": {key: value for key, value in BOUNDS.items() if key in allowed},
+                       "quant_modes": quant, "gc_options": ["auto", "开启", "关闭"],
+                       "task": task_context, "logs": [redact(line) for line in log_lines],
+                       "log_note": "仅同项目最近任务尾部，可能不完整" if log_lines else "未附加日志"}
+            context = json.loads(redact(json.dumps(context, ensure_ascii=False)))
+            with self._task_lock, self._assistant_lock:
+                if not self._agent.mutation_allowed():
+                    raise CaptionError("Agent 已经开始执行，请等待或先停止。")
+                if (self._task or {}).get("status") in ("running", "awaiting_review"):
+                    raise CaptionError("任务已经启动，请结束后再使用助手。")
+                if self._assistant_request and self._assistant_request["status"] == "running":
+                    raise CaptionError("助手已有请求正在处理。")
+                request = {"id": uuid.uuid4().hex, "project": project_name, "status": "running", "answer": "",
+                           "changes": [], "original": copy.deepcopy(config), "stop": threading.Event()}
+                self._assistant_request = request
+
+            def worker():
+                def stop():
+                    if request["stop"].is_set():
+                        raise CaptionError("助手请求已停止；服务端可能仍在处理。")
+                try:
+                    result = ask(service, redact(question), context, stop)
+                    patch = validate_patch(result["patch"], allowed, quant)
+                    changes = [{"key": key, "label": LABELS[key], "before": effective.get(key), "after": value}
+                               for key, value in patch.items() if effective.get(key) != value]
+                    patch = {item["key"]: item["after"] for item in changes}
+                    with self._assistant_lock:
+                        stop()
+                        request.update(status="completed", answer=result["answer"], patch=patch, changes=changes)
+                except Exception as exc:
+                    with self._assistant_lock:
+                        request.update(status="cancelled" if request["stop"].is_set() else "failed",
+                                       error=str(exc) if isinstance(exc, CaptionError) else "助手请求失败，未修改参数。")
+            threading.Thread(target=worker, daemon=True, name="training-assistant").start()
+            return {"ok": True, "id": request["id"]}
+        except CaptionError as exc:
+            return {"ok": False, "error": str(exc).replace("视觉模型", "文字模型")}
+        except Exception:
+            return {"ok": False, "error": "无法准备助手上下文，请检查项目和服务设置。"}
+
+    def get_assistant_result(self, request_id):
+        with self._assistant_lock:
+            request = self._assistant_request
+            if not request or request["id"] != request_id:
+                return {"ok": False, "error": "助手请求已不存在。"}
+            return {"ok": True, **{key: request.get(key) for key in ("id", "project", "status", "answer", "changes", "error", "applied", "undone")}}
+
+    def stop_assistant_request(self, request_id):
+        with self._assistant_lock:
+            if not self._assistant_request or self._assistant_request["id"] != request_id:
+                return {"ok": False, "error": "助手请求已不存在。"}
+            self._assistant_request["stop"].set()
+            return {"ok": True}
+
+    def apply_assistant_proposal(self, request_id, undo=False):
+        guard = self._agent_guard()
+        if guard:
+            return guard
+        from kohya_core.captioning import _atomic_bytes
+        if not isinstance(undo, bool):
+            return {"ok": False, "error": "撤销选项格式无效。"}
+        with self._task_lock, self._assistant_lock:
+            request = self._assistant_request
+            if not request or request["id"] != request_id or request["status"] != "completed":
+                return {"ok": False, "error": "没有可应用的助手方案。"}
+            if (self._task or {}).get("status") in ("running", "awaiting_review"):
+                return {"ok": False, "error": "任务运行期间不能应用或撤销配置。"}
+            if request.get("undone") or (not undo and request.get("applied")):
+                return {"ok": False, "error": "此方案已经处理，请重新提问。"}
+            if undo and not request.get("applied"):
+                return {"ok": False, "error": "此方案尚未应用。"}
+            name = request["project"]
+            current = self.core.load_project(name)
+            expected = request.get("after_config") if undo else request["original"]
+            if current != expected:
+                return {"ok": False, "error": "项目在提问后已有变化，为避免覆盖手动修改，请重新提问。"}
+            patch = request.get("patch", {})
+            if not patch:
+                return {"ok": False, "error": "此回复没有参数修改。"}
+            previous = request["original"].get("params") or {}
+            values = {key: previous.get(key) for key in patch} if undo else patch
+            path = Path(self.core.data_sub("logs")) / ("assistant_change_" + request_id + ("_undo" if undo else "") + ".json")
+            try:
+                _atomic_bytes(path, json.dumps({"status": "pending", "project": name, "undo": bool(undo),
+                                               "params_before": {key: (current.get("params") or {}).get(key) for key in patch}, "patch": values},
+                                              ensure_ascii=False, indent=2).encode("utf-8"))
+            except OSError:
+                return {"ok": False, "error": "无法保存配置修改记录，未应用方案。"}
+            result = self.save_project_config(name, {"params": values})
+            if not result.get("ok"):
+                return result
+            if undo:
+                request["undone"] = True
+            else:
+                request["applied"] = True
+                request["after_config"] = copy.deepcopy(self.core.load_project(name))
+            try:
+                _atomic_bytes(path, json.dumps({"status": "applied", "project": name, "undo": bool(undo),
+                                               "params_before": {key: (current.get("params") or {}).get(key) for key in patch}, "patch": values},
+                                              ensure_ascii=False, indent=2).encode("utf-8"))
+            except OSError:
+                self._log("[助手] 配置已保存，但修改记录状态写入失败。")
+            return {"ok": True}
+
     def load_project_config(self, name):
         name = str(name or "").strip()
         if not name:
@@ -1662,6 +2205,9 @@ class ModernUIBridge:
 
     def save_project_config(self, name, patch):
         """Merge fields supported by the modern training workspaces into a project."""
+        guard = self._agent_guard()
+        if guard:
+            return guard
         name = str(name or "").strip()
         if not name or not isinstance(patch, dict):
             return {"ok": False, "error": "项目名称或配置内容无效。"}
@@ -1717,6 +2263,10 @@ class ModernUIBridge:
             if key == "sample_preview" and value is None:
                 params.pop(key, None)
                 continue
+            caption_choices = {"caption_method": ("wd14", "natural", "existing"),
+                               "caption_language": ("zh", "en"), "caption_length": ("brief", "detailed")}
+            if key in caption_choices and value not in caption_choices[key]:
+                return {"ok": False, "error": "图片描述选项无效。"}
             if key == "fizgig_qwen_preset" and value not in ("auto", "fast", "standard", "style"):
                 return {"ok": False, "error": "Qwen-Image-2.1 训练预设无效。"}
             if key in BOOL_PARAM_KEYS:
@@ -2277,6 +2827,9 @@ class ModernUIBridge:
         }
 
     def save_qwen_model_setup(self, selection):
+        guard = self._agent_guard()
+        if guard:
+            return guard
         if not isinstance(selection, dict):
             return {"ok": False, "error": "模型设置格式无效。"}
         mode = str(selection.get("mode") or "qwen_image")
@@ -2499,6 +3052,9 @@ class ModernUIBridge:
         return value.replace("提示：提示：", "提示：").strip()
 
     def create_project(self, name, template_name="自定义", config_json="", mode_override=None):
+        guard = self._agent_guard()
+        if guard:
+            return guard
         name = str(name or "").strip()
         if not name:
             return {"ok": False, "error": "请填写项目名称。"}
@@ -2628,6 +3184,9 @@ class ModernUIBridge:
         return {"ok": True, "project": next((p for p in self.list_projects() if p["name"] == name), None)}
 
     def rename_project(self, old_name, new_name):
+        guard = self._agent_guard()
+        if guard:
+            return guard
         with self._task_lock:
             if (self._task and self._task.get("status") in ("running", "awaiting_review")
                     and self._task.get("key") == str(old_name or "").strip()):
@@ -2651,6 +3210,9 @@ class ModernUIBridge:
         return {"ok": True, "log": message}
 
     def delete_project(self, name):
+        guard = self._agent_guard()
+        if guard:
+            return guard
         with self._task_lock:
             if (self._task and self._task.get("status") in ("running", "awaiting_review")
                     and self._task.get("key") == str(name or "").strip()):
@@ -2705,9 +3267,47 @@ class ModernUIBridge:
             command = [sys.executable, str(entry), "--ui=classic", *arguments]
         return subprocess.Popen(command, cwd=str(root), close_fds=True)
 
+    def get_log_export_status(self, export_id):
+        """Report completion separately from the background export request."""
+        with self._log_lock:
+            if not export_id or self._log_export.get("id") != str(export_id):
+                return {"ok": False, "error": "此日志导出任务已不存在，请重新导出。"}
+            return {"ok": True, **self._log_export}
+
+    def open_log_export(self, export_id, target="file"):
+        """Only open the file produced by this session's completed export."""
+        with self._log_lock:
+            export = dict(self._log_export)
+        if not export_id or export.get("id") != str(export_id) or export.get("status") != "completed":
+            return {"ok": False, "error": "日志尚未导出成功，请稍候或重新导出。"}
+        if target not in ("file", "folder"):
+            return {"ok": False, "error": "打开方式无效。"}
+        path = Path(export["path"]).resolve()
+        try:
+            if not path.is_file():
+                return {"ok": False, "error": "日志文件已被移动或删除，请重新导出。"}
+            if target == "folder":
+                subprocess.Popen(["explorer.exe", "/select,", str(path)])
+            else:
+                os.startfile(str(path))
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "error": "无法打开日志%s：%s" % (
+                "所在文件夹" if target == "folder" else "文件", redact(str(exc)))}
+
     def run_action(self, action, project_name=None):
         """Open legacy secondary utilities as isolated popups; never fall back to its workspace."""
         action = str(action or "")
+        view_action = action in ("output_dir", "export_training_feedback", "export_log", "export_diagnostics")
+        with self._task_lock:
+            task = self._task or {}
+            reviewing_labels = (action == "label_editor" and task.get("kind") == "training"
+                                and task.get("status") == "awaiting_review"
+                                and task.get("key") == str(project_name or ""))
+        if not view_action and not reviewing_labels:
+            guard = self._agent_guard()
+            if guard:
+                return guard
         if action.startswith("mode:") or action == "train":
             return {"ok": False, "error": "训练模式与训练任务由新版训练页直接承接。"}
         if action == "preprocess":
@@ -2783,6 +3383,8 @@ class ModernUIBridge:
                 project = self.core.load_project(project_name) if project_name else {}
                 filename = "KohyaLoRA_运行日志_%s.txt" % datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                 dest = os.path.join(self._desktop_directory(), filename)
+                export_id = uuid.uuid4().hex
+                self._log_export = {"id": export_id, "status": "running", "path": "", "error": ""}
 
                 def collect():
                     try:
@@ -2792,12 +3394,20 @@ class ModernUIBridge:
                             fallback = os.path.join(self.core.data_sub("logs"), filename)
                             path = write_bundle(self.core, fallback, logs, task, project, self._session_log)
                         self._log("[诊断] 运行日志已导出：%s" % path)
-                    except Exception:
+                        with self._log_lock:
+                            self._log_export.update(status="completed", path=str(path))
+                    except Exception as exc:
                         self._log("[诊断] 导出失败：\n%s" % traceback.format_exc())
+                        with self._log_lock:
+                            self._log_export.update(status="failed", error="日志导出失败：%s" % redact(str(exc)))
 
                 self._diagnostics_thread = threading.Thread(target=collect, name="KohyaDiagnostics", daemon=True)
-                self._diagnostics_thread.start()
-            return {"ok": True, "message": "日志与环境诊断正在后台生成，完成后路径会显示在运行日志中。"}
+                try:
+                    self._diagnostics_thread.start()
+                except Exception as exc:
+                    self._log_export.update(status="failed", error="无法开始日志导出：%s" % redact(str(exc)))
+                    return {"ok": False, "error": self._log_export["error"]}
+            return {"ok": True, "export_id": export_id, "message": "正在收集运行日志与环境信息。"}
 
         project_actions = {
             "label_editor", "export_config", "readme", "at_model_help",

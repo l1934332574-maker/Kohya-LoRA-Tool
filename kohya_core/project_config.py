@@ -9,6 +9,7 @@ WORKSPACE_PARAM_KEYS = (
     'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap',
     'fizgig_qwen_preset', 'wd14_model', 'overwrite', 'keep_user_captions', 'amd_mode',
     'batch_size', 'gc', 'global_pos', 'global_neg',
+    'caption_method', 'caption_language', 'caption_length',
 )
 BOOL_PARAM_KEYS = frozenset(('strong_bind', 'clean_concept', 'sample_preview',
                             'compile', 'overwrite', 'keep_user_captions', 'amd_mode'))
@@ -66,9 +67,20 @@ def training_params(core, config, project_name):
         params[key] = str(value(key, 'auto') or 'auto')
     for key in ('sample_prompt', 'blocks_to_swap', 'noise_offset', 'min_snr_gamma'):
         params[key] = value(key, '')
+    params['caption_method'] = str(value('caption_method', 'wd14'))
+    params['caption_language'] = str(value('caption_language', 'zh'))
+    params['caption_length'] = str(value('caption_length', 'brief'))
     params['wd14_model'] = str(value('wd14_model', 'swinv2-v3') or 'swinv2-v3')
     for key in BOOL_PARAM_KEYS - {'sample_preview'}:
         params[key] = bool(value(key, key in ('strong_bind', 'clean_concept')))
+    if params['caption_method'] == 'natural':
+        params['strong_bind'] = False
+        params['clean_concept'] = False
+        params['keep_user_captions'] = True
+    elif params['caption_method'] == 'existing':
+        params['keep_user_captions'] = True
+        params['strong_bind'] = False
+        params['clean_concept'] = False
     # An absent sampling choice must retain the engine's automatic policy.
     if stored.get('sample_preview') is not None:
         params['sample_preview'] = bool(stored['sample_preview'])

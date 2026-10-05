@@ -2155,11 +2155,17 @@ def main():
                         help="按 宽:高 比例居中裁切后再缩放，如 3:4 / 9:16 / 1:1（默认不裁切，长边缩放保比例；范围 1:2~2:1）")
     parser.add_argument("--report", default=None,
                         help="JSON 报告输出路径（含 ok/重复/模糊/过小/损坏 计数）")
+    parser.add_argument("--caption-format", choices=("tags", "natural"), default="tags",
+                        help="自然语言文本原样同步，跳过关键词清洗、强绑定和兜底")
     args = parser.parse_args()
 
     # ★ 2026-10-02：勾了「保留我已有的标签」⇒ 全程不碰用户自带的 .txt ✓
     #   （不跑 WD14 / 不写兜底 / 不清洗概念标签 / 画风模式优先用自带 ✓）
-    _keep_user_caps = bool(getattr(args, "keep_user_captions", False))
+    _natural = args.caption_format == "natural"
+    _keep_user_caps = bool(getattr(args, "keep_user_captions", False)) or _natural
+    if _keep_user_caps:
+        args.no_strong_bind = True
+        args.no_clean_concept = True
 
     def _print_import_pollution_hint(mod):
         # 常见根因：工具目录被残留的 numpy.py / numpy / PIL.py / PIL 文件夹污染。
@@ -2259,7 +2265,9 @@ def main():
         blur_action = "跳过疑似模糊图片（主动开启）" if args.skip_blurry else "仅提醒，保留图片参与后续处理"
         print(f"[INFO] 疑似模糊检测: 开（多尺度＋分区域；检测阈值 {args.blur_threshold}；{blur_action}）")
         print("[INFO] 检测仅供参考；低纹理或小图证据不足时不判为模糊，不评价画风或训练价值。")
-    if mode == "style":
+    if _natural:
+        print("[INFO] 自然语言文本：原样同步；触发词独立置于首行，不执行关键词清洗或强绑定")
+    elif mode == "style":
         print(f"[INFO] 模式: 画风 LoRA（过滤强人物五官/角色标签）")
         print(f"[INFO] 统一 caption: {style_caption}")
     else:
@@ -2282,6 +2290,44 @@ def main():
     cropped = 0
     watermarked = 0
     seen_hashes = {}
+    def sync_preserved_caption(source_image, destination_text):
+        raw_txt = os.path.splitext(source_image)[0] + ".txt"
+        if os.path.islink(raw_txt) or os.path.islink(destination_text):
+            raise ValueError("同名文本不读取或覆盖符号链接")
+        with open(raw_txt, "rb") as handle:
+            raw = handle.read(65537)
+        if len(raw) > 65536:
+            raise ValueError("描述文件过大，请缩短描述")
+        encoding = "utf-16" if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
+        caption = raw.decode(encoding).strip()
+        if not caption:
+            raise ValueError("同名文本为空，请先补齐")
+        if trigger:
+            if _natural and caption.splitlines()[0].strip() != trigger:
+                caption = trigger + "\n" + caption
+            elif not _natural:
+                caption = insert_trigger(caption, trigger)
+        data = (caption + "\n").encode("utf-8")
+        previous = None
+        if os.path.isfile(destination_text):
+            with open(destination_text, "rb") as handle:
+                previous = handle.read()
+        if previous == data:
+            return
+        if previous is not None:
+            backup = os.path.join(output_dir, ".caption_backups", str(time.time_ns()))
+            os.makedirs(backup, exist_ok=True)
+            shutil.copy2(destination_text, os.path.join(backup, os.path.basename(destination_text)))
+        import tempfile
+        fd, temporary = tempfile.mkstemp(prefix=".caption_", suffix=".part", dir=output_dir)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+            os.replace(temporary, destination_text)
+        finally:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+
     user_captions = {}  # stem -> 原图自带 .txt 内容（人物模式优先保留）
     skip_names = []     # 因「已存在同名输出」而跳过的图（原先完全静默，用户看不到做了什么）
     for name in files:
@@ -2293,6 +2339,13 @@ def main():
         out_img = os.path.join(output_dir, stem + ".png")
         out_txt = os.path.join(output_dir, stem + ".txt")
         if os.path.exists(out_img) and not args.overwrite:
+            if _keep_user_caps and not args.no_caption:
+                try:
+                    sync_preserved_caption(raw_img, out_txt)
+                except Exception as exc:
+                    failed += 1
+                    print(f"  [描述失败] {name}: {exc}")
+                    continue
             # 原先这里是**纯静默 continue**：重跑时（典型场景：先单独点了「数据预处理」，
             # 再点「一键开始训练」——后者自带预处理，会把同一批图重跑一遍）
             # 会「18 张全部跳过、屏幕上一个字都没有」，用户以为在跑，实际什么都没做。
@@ -2365,7 +2418,10 @@ def main():
             )
             img.save(out_img, format="PNG", optimize=True)
 
-            if not args.no_caption:
+            if _keep_user_caps and not args.no_caption:
+                sync_preserved_caption(raw_img, out_txt)
+
+            if not args.no_caption and not _keep_user_caps:
                 raw_txt = os.path.join(input_dir, os.path.splitext(_rel)[0] + ".txt")
                 if mode == "style":
                     # 画风模式：优先画风描述词（用户提供）；否则记录原图自带 txt，
@@ -2421,7 +2477,7 @@ def main():
                   "只会补做打标/标签环节。")
 
     # ---- 人物模式：WD14 / 内置打标 / 兜底 / 还原自带标签 / 插入 trigger ----
-    if mode == "character" and not args.no_caption and (ok + skipped):
+    if mode == "character" and not args.no_caption and not _natural and (ok + skipped):
         imgs_no_txt = _imgs_no_txt(output_dir)
         # ★ 2026-10-02：勾了「保留我已有的标签」⇒ 连 WD14 都不跑 ✓
         #   （--no-wd14 只关打标，仍会去清兜底/写兜底；本开关要的是"完全不碰用户标签" ✓）
@@ -2541,7 +2597,7 @@ def main():
                 print(f"[WARN] 人物强绑定失败（忽略）: {_e}")
 
     # ---- 画风模式：无画风描述词时，用 WD14 / 内置打标 + 过滤人物标签 ----
-    if mode == "style" and not args.no_caption and (ok + skipped) and not style_caption.strip():
+    if mode == "style" and not args.no_caption and not _natural and (ok + skipped) and not style_caption.strip():
         imgs_no_txt = _imgs_no_txt(output_dir)
         # ★ 2026-10-02：勾了「保留我已有的标签」⇒ 画风模式同样不跑 WD14 ✓
         if not args.no_wd14 and not _keep_user_caps:
@@ -2594,7 +2650,7 @@ def main():
                   "标签原样保留 ✓")
 
     # ---- 画风模式：同样支持画风专属触发词（插入每张 txt 第一行，不动 WD14 打标逻辑） ----
-    if mode == "style" and not args.no_caption and (ok + skipped) and trigger:
+    if mode == "style" and not args.no_caption and not _natural and (ok + skipped) and trigger:
         n_trig = 0
         for f in sorted(os.listdir(output_dir)):
             if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
@@ -2609,7 +2665,7 @@ def main():
         print(f"[INFO] 已把画风专属触发词「{trigger}」插入 {n_trig} 张图片的标签第一行")
 
     # ---- 最终兜底：确保每张图都有非空标签（任何环节失败都不漏标签） ----
-    if not args.no_caption and (ok + skipped):
+    if not args.no_caption and not _keep_user_caps and (ok + skipped):
         fb = style_fb if mode == "style" else DEFAULT_CHARACTER_CAPTION
         n_fill = 0
         for f in sorted(os.listdir(output_dir)):
@@ -2634,7 +2690,7 @@ def main():
             print(f"[INFO] 最终兜底：为 {n_fill} 张缺失/空标签的图片补写了 caption")
 
     # 画风模式自检：没填画风描述词时，若整批标签高度一致（<=2 种）说明自动打标没生效/全走兜底，显眼提醒
-    if mode == "style" and (ok + skipped) and not (style_caption or "").strip() and not args.no_caption:
+    if mode == "style" and (ok + skipped) and not _keep_user_caps and not (style_caption or "").strip() and not args.no_caption:
         try:
             _caps = set()
             for _f in sorted(os.listdir(output_dir)):
@@ -2668,7 +2724,11 @@ def main():
     print(f"  去除黑边: {cropped}  |  去除水印: {watermarked}")
     print(f"  输出目录: {output_dir}")
     if (ok + skipped) and not args.no_caption:
-        if mode == "style":
+        if _natural:
+            print("  同名自然语言文本已同步；仅添加独立触发词首行，未执行关键词清洗")
+        elif _keep_user_caps:
+            print("  同名已有文本已同步，未自动打标、关键词清洗或强绑定；触发词按设置插入")
+        elif mode == "style":
             print("  每张图已生成同名 .txt caption（画风描述，已过滤人物五官/角色标签" +
                   ("，trigger 已插入" if trigger else "") + "）")
         else:
@@ -2704,7 +2764,12 @@ def main():
         except Exception as e:
             print(f"[WARN] 写报告失败: {e}")
 
-    if ok and not args.no_write_dataset_config:
+    if _keep_user_caps and not args.no_caption:
+        missing = _imgs_no_txt(output_dir)
+        if failed or missing:
+            raise RuntimeError("同名文本未齐全：处理失败 %d，输出缺失/空描述 %d；请补齐或重试后训练，不使用兜底文本。" % (failed, len(missing)))
+
+    if (ok or skipped) and not args.no_write_dataset_config:
         config_path = args.config_path
         if config_path is None:
             kit_dir = os.path.dirname(os.path.abspath(__file__))

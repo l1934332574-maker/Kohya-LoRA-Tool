@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import TrainingAssistant from './components/TrainingAssistant.vue'
 import EngineSidebar from './components/EngineSidebar.vue'
 import LogDock from './components/LogDock.vue'
+import LogExportDialog from './components/LogExportDialog.vue'
 import ProjectRow from './components/ProjectRow.vue'
 import UiIcon from './components/UiIcon.vue'
 import ModernQwenWorkspace from './components/ModernQwenWorkspace.vue'
@@ -62,10 +64,13 @@ const workspaceOpen = ref(false)
 const workspaceKind = ref<'qwen' | 'kohya' | 'engine'>('qwen')
 const workspaceProject = ref<ProjectCard | null>(null)
 const workspaceConfig = ref<ProjectConfig | null>(null)
+const assistantOpen = ref(false)
+const agentBusy = ref(false)
 const previewConfigs = ref<Record<string, ProjectConfig>>({})
 const modeWorkspace = ref<ModeWorkspaceData | null>(null)
 const qwenModelSetup = ref<QwenModelSetup | null>(null)
 const activeWorkspaceRef = ref<{
+  hasUnsavedChanges?: () => boolean
   startTraining: () => void
   save?: () => void
   guideAction?: (action: string) => Promise<ProjectConfig | null> | ProjectConfig | null
@@ -80,10 +85,17 @@ const createModeOverride = ref('')
 const busy = ref(false)
 const formError = ref('')
 const toast = ref('')
+const logExportOpen = ref(false)
+const logExportBusy = ref(false)
+const logExportId = ref('')
+const logExportError = ref('')
 const setupDialogOpen = ref(false)
 const setupAction = ref('')
 const historyDialogOpen = ref(false)
-const trainingDialogRef = ref<{ expand: () => void } | null>(null)
+const trainingDialogRef = ref<{ expand: () => void; attach: (id: string) => Promise<void> } | null>(null)
+const setupDialogRef = ref<{ attach: (id: string) => Promise<void> } | null>(null)
+const agentTaskTitle = ref('')
+let seenAgentTaskId = ''
 const trainingActive = ref(false)
 const trainingDialogOpen = ref(false)
 const trainingPlan = ref<TrainingPlan | null>(null)
@@ -613,6 +625,82 @@ async function openProject(project: ProjectCard) {
   }
 }
 
+function assistantCanUseProject() {
+  return !activeWorkspaceRef.value?.hasUnsavedChanges?.()
+}
+async function refreshAssistantProject(name: string) {
+  if (!name || !window.pywebview?.api) return
+  if (data.value) data.value.projects = await window.pywebview.api.list_projects()
+  const project = projects.value.find(item => item.name === name)
+  if (!project || !workspaceOpen.value || workspaceProject.value?.name !== name || !assistantCanUseProject()) return
+  const [loaded, details, modelSetup] = await Promise.all([window.pywebview.api.load_project_config(name), window.pywebview.api.get_mode_workspace(project.mode, name), isQwenProject(project) ? window.pywebview.api.get_qwen_model_setup(project.mode === 'zimage' ? 'zimage' : 'qwen_image') : Promise.resolve(null)])
+  if (workspaceProject.value?.name !== name || !assistantCanUseProject()) return
+  if (loaded.ok && loaded.config) { workspaceProject.value = project; workspaceConfig.value = loaded.config }
+  if (details.ok) modeWorkspace.value = details
+  if (modelSetup?.ok) qwenModelSetup.value = modelSetup
+}
+async function openAssistantProject(name: string) {
+  if (!name) {
+    if (!assistantCanUseProject()) return showToast('请先保存当前页面的修改，再返回新项目对话。')
+    returnHome()
+    return
+  }
+  if (!window.pywebview?.api) return
+  if (data.value) data.value.projects = await window.pywebview.api.list_projects()
+  const project = projects.value.find(item => item.name === name)
+  if (project && isModernProject(project)) await openProject(project)
+}
+async function openAgentCreatedProject(name: string) {
+  if (!name || workspaceOpen.value || !window.pywebview?.api) return
+  if (data.value) data.value.projects = await window.pywebview.api.list_projects()
+  const project = projects.value.find(item => item.name === name)
+  if (project && isModernProject(project) && !workspaceOpen.value) await openProject(project)
+}
+async function openAgentTask(id: string, project = '', force = true) {
+  const api = window.pywebview?.api
+  if (!api || !id) return
+  const task = await api.get_task_status(id, 0)
+  if (!task.ok) { if (force) showToast(task.error || '任务记录已经不存在。'); return }
+  if (!force && id === seenAgentTaskId) return
+  seenAgentTaskId = id
+  if (task.kind === 'training') {
+    setupDialogOpen.value = false
+    trainingProjectName.value = task.project_name || project
+    trainingPlan.value = task.plan || null
+    trainingDialogOpen.value = true
+    await nextTick()
+    await trainingDialogRef.value?.attach(id)
+  } else {
+    agentTaskTitle.value = task.title || '助手执行任务'
+    setupAction.value = task.kind === 'preprocess' ? 'preprocess' : 'agent_task'
+    setupDialogOpen.value = true
+    await nextTick()
+    await setupDialogRef.value?.attach(id)
+  }
+}
+let agentOwnerTimer: ReturnType<typeof setTimeout> | undefined
+let agentOwnerDisposed = false
+let pollingAgentOwner = false
+async function pollAgentOwnership() {
+  if (agentOwnerDisposed || pollingAgentOwner || preview.value || !window.pywebview?.api) return
+  pollingAgentOwner = true
+  agentOwnerTimer = undefined
+  try {
+    const value = await window.pywebview.api.get_agent_state()
+    const run = value.run
+    const active = Boolean(value.active_project) || ['running', 'waiting_user', 'waiting_task'].includes(run?.status || '')
+    agentBusy.value = active
+    if (run?.task_id && (active || run.task_active) && run.task_id !== seenAgentTaskId) await openAgentTask(run.task_id, run.project, false)
+    if ((active || run?.task_active) && !agentOwnerDisposed && !agentOwnerTimer) agentOwnerTimer = setTimeout(pollAgentOwnership, 1500)
+  } catch {
+    // Retain ownership until the backend state is known; closing a panel must not unlock an active run.
+    if (agentBusy.value && !agentOwnerDisposed) agentOwnerTimer = setTimeout(pollAgentOwnership, 3000)
+  } finally { pollingAgentOwner = false }
+}
+watch(agentBusy, (active) => {
+  if (active && !agentOwnerTimer && !agentOwnerDisposed) agentOwnerTimer = setTimeout(pollAgentOwnership, 1500)
+})
+
 async function saveKohyaConfig(patch: ProjectConfig) {
   if (!workspaceProject.value) return false
   if (preview.value || !window.pywebview?.api) {
@@ -775,6 +863,7 @@ async function onGuideAction(step: GuideStep) {
   const mode = workspaceProject.value?.mode || selectedGuideMode.value
   if (action === 'cmd_env' || action === 'cmd_install' || action === 'cmd_install_musubi' || action === 'cmd_install_at' || action === 'cmd_install_fizgig') {
     setupAction.value = action
+    agentTaskTitle.value = ''
     setupDialogOpen.value = true
     return
   }
@@ -836,7 +925,31 @@ async function removeProject(project: ProjectCard) {
   showToast(`已删除「${project.name}」的项目配置`)
 }
 
+async function exportLog(action = 'export_log', projectName?: string) {
+  if (logExportBusy.value) { logExportOpen.value = true; return }
+  const api = window.pywebview?.api
+  if (preview.value || !api) { showToast('请在桌面版导出日志；浏览器预览不会生成文件。'); return }
+  logExportId.value = ''
+  logExportError.value = ''
+  logExportBusy.value = true
+  logExportOpen.value = true
+  try {
+    const result = await api.run_action(action, projectName || workspaceProject.value?.name)
+    if (!result.ok || !result.export_id) throw new Error(result.error || '无法开始日志导出，请重试。')
+    logExportId.value = result.export_id
+  } catch (error) {
+    logExportError.value = error instanceof Error ? error.message : '无法开始日志导出，请重试。'
+    logExportBusy.value = false
+  }
+}
+
+function logExportCompleted(path: string) {
+  appendLog(`[诊断] 运行日志已导出：${path}`)
+  if (!logExportOpen.value) showToast(`运行日志已导出：${path}`)
+}
+
 async function runAction(action: string, projectName?: string) {
+  if (action === 'export_log' || action === 'export_diagnostics') { await exportLog(action, projectName); return }
   if (action === 'train') {
     if (preview.value && workspaceOpen.value) {
       activeWorkspaceRef.value?.startTraining()
@@ -1041,6 +1154,7 @@ async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
   if (action === 'preprocess') {
     if (preview.value || !window.pywebview?.api) return showToast('浏览器预览中，这个操作不会触碰本机数据。')
     setupAction.value = 'preprocess'
+    agentTaskTitle.value = ''
     setupDialogOpen.value = true
     return
   }
@@ -1126,7 +1240,7 @@ onMounted(async () => {
       ? firstEngineSidebarModeForBaseType(firstEngineProject.base_type)
       : firstEngineSidebarModes.sdxl
     logs.value = [...loaded.data.logs]
-    if (!loaded.preview) await loadAppearanceSettings()
+    if (!loaded.preview) { await loadAppearanceSettings(); void pollAgentOwnership() }
     scheduleUiIdleFade()
     if (loaded.preview) modeWorkspace.value = demoModeWorkspace('character')
     else await refreshHomeGuide(firstEngineProject?.mode || 'character')
@@ -1147,6 +1261,8 @@ watch(dialogOpen, (isOpen) => {
 })
 
 onUnmounted(() => {
+  agentOwnerDisposed = true
+  if (agentOwnerTimer) clearTimeout(agentOwnerTimer)
   if (uiIdleFadeTimer !== undefined) window.clearTimeout(uiIdleFadeTimer)
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('pointermove', registerUiActivity)
@@ -1168,20 +1284,24 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
     @pointerenter="registerUiActivity"
     :style="appShellStyle"
   >
+    <TrainingAssistant v-if="assistantOpen" :desktop="!preview" :project-name="workspaceOpen ? workspaceProject?.name || '' : ''" :can-use-project="assistantCanUseProject" @close="assistantOpen = false" @changed="refreshAssistantProject" @created-project="openAgentCreatedProject" @open-project="openAssistantProject" @open-task="(id) => openAgentTask(id)" @active="agentBusy = $event" />
     <EngineSidebar
       :groups="sidebarGroups"
       :selected-mode="selectedMode"
       :train-label="trainActionLabel"
       :status-text="projects.length ? '✓ 选择项目后进入新版训练页' : '新建项目后开始配置训练'"
       :workspace-active="workspaceOpen"
+      :assistant-open="assistantOpen"
+      :assistant-busy="agentBusy"
       :guide-label="guideLabel"
       :guide-steps="guideSteps"
+      @toggle-assistant="assistantOpen = !assistantOpen"
       @choose-mode="chooseMode"
       @action="runAction"
       @guide-action="onGuideAction"
     />
 
-    <main class="right-shell">
+    <main class="right-shell" :aria-busy="agentBusy">
       <div class="right-content">
       <Transition name="view" mode="out-in">
       <ModernQwenWorkspace
@@ -1283,19 +1403,30 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
       <div v-else key="error" class="error-state"><strong>无法连接桌面工作区</strong><span>{{ loadError }}</span></div>
       </Transition>
       </div>
-      <LogDock v-if="!loading && !loadError" :entries="logs" @export="runAction('export_log')" />
+      <LogDock v-if="!loading && !loadError" :entries="logs" :exporting="logExportBusy" @export="runAction('export_log')" />
       <span v-if="preview && !workspaceOpen" class="preview-pill">界面预览 · 不写入项目 / 不启动训练</span>
     </main>
 
     <ModernTaskDialog
+      ref="setupDialogRef"
       :open="setupDialogOpen"
-      :title="setupAction === 'preprocess' ? '数据预处理' : setupAction === 'cmd_env' ? '环境准备（Git / Python）' : setupAction === 'cmd_install' ? '安装 Kohya 训练内核' : setupAction === 'cmd_install_musubi' ? '安装第二引擎 · musubi' : setupAction === 'cmd_install_at' ? '安装第三引擎 · AI Toolkit' : '安装第四引擎 · Fizgig'"
+      :title="agentTaskTitle || (setupAction === 'preprocess' ? '数据预处理' : setupAction === 'cmd_env' ? '环境准备（Git / Python）' : setupAction === 'cmd_install' ? '安装 Kohya 训练内核' : setupAction === 'cmd_install_musubi' ? '安装第二引擎 · musubi' : setupAction === 'cmd_install_at' ? '安装第三引擎 · AI Toolkit' : '安装第四引擎 · Fizgig')"
       :action="setupAction"
-      :description="setupAction === 'preprocess' ? '调用现有预处理器处理当前项目图集和标签；只预处理，不启动训练。' : setupAction === 'cmd_env' ? '检测并准备 Git 与兼容版本的 Python。此项通常只需要完成一次。' : '安装过程会复用现有训练内核安装逻辑；已安装的部分会检测并复用。'"
+      :description="setupAction === 'agent_task' ? '助手已启动此任务；这里显示软件的实际执行进度与日志。' : setupAction === 'preprocess' ? '调用现有预处理器处理当前项目图集和标签；只预处理，不启动训练。' : setupAction === 'cmd_env' ? '检测并准备 Git 与兼容版本的 Python。此项通常只需要完成一次。' : '安装过程会复用现有训练内核安装逻辑；已安装的部分会检测并复用。'"
       :project-name="workspaceProject?.name ?? ''"
       @close="setupDialogOpen = false"
       @finished="refreshGuideState"
       @notify="showToast"
+    />
+    <LogExportDialog
+      :open="logExportOpen"
+      :export-id="logExportId"
+      :start-error="logExportError"
+      @close="logExportOpen = false"
+      @pending="logExportBusy = $event"
+      @completed="logExportCompleted"
+      @notify="showToast"
+      @retry="exportLog()"
     />
     <TrainingHistoryDialog :open="historyDialogOpen" :project-name="workspaceProject?.name || ''" @close="historyDialogOpen = false" @restored="restoredTrainingSettings" @notify="showToast" />
     <ModernTrainingDialog
@@ -1399,4 +1530,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
   line-height: 1.4;
   letter-spacing: 0;
 }
+</style>
+
+<style scoped>
 </style>

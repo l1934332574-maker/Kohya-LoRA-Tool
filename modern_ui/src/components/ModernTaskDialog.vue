@@ -15,11 +15,13 @@ const emit = defineEmits<{
   notify: [message: string]
 }>()
 
+defineExpose({ attach })
 const taskId = ref('')
 const state = ref<ModernTaskStatus | null>(null)
 const taskLogs = ref<string[]>([])
 const offset = ref(0)
-const starting = ref(false)
+const starting = ref(false), minimized = ref(false)
+let polling = false
 let timer = 0
 
 const running = () => state.value?.status === 'running'
@@ -31,20 +33,29 @@ function stopPolling() {
 }
 
 async function poll() {
-  if (!taskId.value || !window.pywebview?.api) return
-  const result = await window.pywebview.api.get_task_status(taskId.value, offset.value)
-  if (!result.ok) {
-    stopPolling()
-    emit('notify', result.error ?? '读取任务状态失败。')
-    return
-  }
-  state.value = result
-  taskLogs.value.push(...(result.logs ?? []))
-  offset.value = result.next_offset ?? offset.value
-  if (result.status && result.status !== 'running') {
-    stopPolling()
-    emit('finished')
-  }
+  if (!taskId.value || !window.pywebview?.api || polling) return
+  const current = taskId.value
+  polling = true
+  try {
+    const result = await window.pywebview.api.get_task_status(current, offset.value)
+    if (current !== taskId.value) return
+    if (!result.ok) { stopPolling(); emit('notify', result.error ?? '读取任务状态失败。'); return }
+    state.value = result
+    taskLogs.value = [...taskLogs.value, ...(result.logs ?? [])].slice(-2000)
+    offset.value = result.next_offset ?? offset.value
+    if (result.status && result.status !== 'running') { stopPolling(); emit('finished') }
+  } catch (error) {
+    if (current === taskId.value) emit('notify', error instanceof Error ? error.message : '任务连接暂时中断，正在重试。')
+  } finally { polling = false }
+}
+
+async function attach(id: string) {
+  stopPolling()
+  minimized.value = false
+  taskId.value = id; offset.value = 0; taskLogs.value = []
+  state.value = { ok: true, status: 'running', message: '正在读取已启动的任务…' }
+  await poll()
+  if (running()) timer = window.setInterval(() => { void poll() }, 700)
 }
 
 async function start() {
@@ -75,7 +86,11 @@ async function start() {
 
 async function cancel() {
   if (!taskId.value || !window.pywebview?.api) return
-  const result = await window.pywebview.api.cancel_task(taskId.value)
+  const ownership = await window.pywebview.api.get_agent_state()
+  const owner = ownership.run
+  const result = owner?.task_id === taskId.value && ownership.active_run_id === owner.id
+    ? await window.pywebview.api.stop_agent(owner.id, true)
+    : await window.pywebview.api.cancel_task(taskId.value)
   if (!result.ok) emit('notify', result.error ?? '无法停止当前任务。')
   else state.value = { ...state.value, ok: true, message: '正在请求停止…' }
 }
@@ -87,6 +102,7 @@ function close() {
 }
 
 watch(() => props.open, (open) => {
+  minimized.value = false
   if (!open) {
     stopPolling()
     taskId.value = ''
@@ -101,11 +117,11 @@ onUnmounted(stopPolling)
 
 <template>
   <Transition name="dialog">
-    <div v-if="open" class="task-backdrop">
+    <div v-if="open && !minimized" class="task-backdrop">
       <section class="task-dialog" role="dialog" aria-modal="true" :aria-labelledby="`task-title-${action}`">
         <header class="task-header">
-          <div><span class="task-kicker">训练环境设置</span><h2 :id="`task-title-${action}`">{{ title }}</h2></div>
-          <button class="task-close" type="button" aria-label="关闭" :disabled="running()" @click="close">×</button>
+          <div><span class="task-kicker">{{ action==='agent_task'?'助手执行任务':action==='preprocess'?'数据准备':'训练环境设置' }}</span><h2 :id="`task-title-${action}`">{{ title }}</h2></div>
+          <button v-if="running()" class="task-button" type="button" @click="minimized=true">最小化</button><button class="task-close" type="button" aria-label="关闭" :disabled="running()" @click="close">×</button>
         </header>
         <p class="task-description">{{ description }}</p>
         <template v-if="!taskId">
@@ -120,7 +136,9 @@ onUnmounted(stopPolling)
             <span v-if="running()" class="task-spinner"></span>
             <span>{{ state?.message || '任务运行中…' }}</span>
           </div>
-          <pre class="task-log" aria-live="polite">{{ lines().length ? lines().join('\n') : (action === 'preprocess' ? '等待预处理日志…' : '等待安装日志…') }}</pre>
+          <progress v-if="state?.progress!=null" class="task-progress" :value="state.progress" max="1" aria-label="任务进度"></progress>
+          <p v-if="state?.detail" class="task-description">{{ state.detail }}</p>
+          <pre class="task-log" aria-live="polite">{{ lines().length ? lines().join('\n') : (action === 'preprocess' ? '等待预处理日志…' : '等待任务日志…') }}</pre>
           <footer class="task-actions">
             <button v-if="running()" class="task-button" type="button" @click="cancel">停止任务</button>
             <button class="task-button primary" type="button" :disabled="running()" @click="close">{{ running() ? '运行中…' : '完成' }}</button>
@@ -129,10 +147,11 @@ onUnmounted(stopPolling)
       </section>
     </div>
   </Transition>
+  <button v-if="open && minimized" class="task-mini" type="button" @click="minimized=false">{{ title }} · {{ state?.status==='running'?'运行中':'查看结果' }} · 查看进度</button>
 </template>
 
 <style scoped>
-.task-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 20px; background: rgb(10 12 16 / 52%); }
+.task-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px; background: rgb(10 12 16 / 52%); }
 .task-dialog { display: flex; width: min(100%, 640px); max-height: min(80vh, 720px); flex-direction: column; padding: 18px; border: 1px solid var(--tone-41464f); border-radius: 8px; background: var(--tone-272a32); box-shadow: 0 16px 44px rgb(0 0 0 / 32%); }
 .task-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .task-kicker { color: var(--tone-858a93); font-size: 10px; }
@@ -158,4 +177,5 @@ onUnmounted(stopPolling)
 .dialog-enter-from .task-dialog, .dialog-leave-to .task-dialog { opacity: 0; transform: translateY(5px) scale(.99); }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .task-spinner { animation-duration: 1.8s; } }
+.task-progress{width:100%;height:6px;margin:8px 0}.task-mini{position:fixed;right:18px;bottom:18px;z-index:70;border:1px solid var(--tone-515763);border-radius:8px;padding:12px 16px;background:var(--tone-272a32);color:var(--tone-cbd0d7);cursor:pointer;max-width:calc(100vw - 36px)}
 </style>

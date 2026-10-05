@@ -64,6 +64,7 @@ def run_queue_item(name, logf=print):
                      wd14_model=p.get("wd14_model") or "swinv2-v3",
                      overwrite=bool(p.get("overwrite")),
                      keep_user_captions=bool(p.get("keep_user_captions")),
+                     caption_method=p.get("caption_method", "wd14"),
                      min_size=256, blur_threshold=30.0, report=None, keep_tokens=None,
                      project=name, style_caption=p.get("style_caption") or "",
                      dataset_mode="character" if mode != "style" else None,

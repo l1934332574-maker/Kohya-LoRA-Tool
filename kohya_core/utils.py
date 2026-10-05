@@ -27,7 +27,7 @@ _ACTIVE_PROC = None
 
 # 显式导出全部名字（含下划线开头），供 `from kohya_core.utils import *` 使用。
 __all__ = [
-    "StopRequested", "format_eta", "_terminate_tree", "stop_active_process", "reset_stop", "active_process_pids",
+    "StopRequested", "format_eta", "_terminate_tree", "stop_active_process", "reset_stop", "check_stop", "active_process_pids",
     "build_env", "build_direct_env", "clear_proxy_env", "proxy_reachable", "run_stream", "_download", "find_git", "_py_version", "find_python",
     "apply_single_gpu_isolation",
     "venv_python", "_yq", "split_triggers", "system_proxy",
@@ -108,6 +108,12 @@ def active_process_pids():
     except Exception:
         pass
     return pids
+
+
+def check_stop():
+    """Cooperative cancellation for in-process dataset operations."""
+    if _STOP_EVENT.is_set():
+        raise StopRequested("用户停止了当前任务")
 
 
 def reset_stop():

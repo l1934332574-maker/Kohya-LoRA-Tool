@@ -5,7 +5,7 @@ import { ref } from 'vue'
 
 const feedbackOpen = ref(false)
 
-defineProps<{ entries: string[] }>()
+defineProps<{ entries: string[]; exporting?: boolean }>()
 const emit = defineEmits<{ export: [] }>()
 </script>
 
@@ -13,7 +13,7 @@ const emit = defineEmits<{ export: [] }>()
   <section class="log-dock" aria-label="运行日志">
     <header class="log-header">
       <h2>运行日志</h2>
-      <button class="small-button" type="button" title="将完整日志、设备驱动、Python 依赖及 GPU 基础检查统一导出为 TXT，保存到桌面。" @click="emit('export')"><UiIcon name="export" /> 导出日志</button>
+      <button class="small-button" type="button" title="导出完整日志与环境信息；完成后显示保存位置，可打开文件或复制路径。" @click="emit('export')"><UiIcon name="export" /> {{ exporting ? '查看导出进度' : '导出日志' }}</button>
       <button class="feedback-button" type="button" title="反馈与交流" aria-label="反馈与交流" @click="feedbackOpen = true"><UiIcon name="feedback" /></button>
     </header>
     <div class="log-content" role="log" aria-live="polite" aria-relevant="additions text">

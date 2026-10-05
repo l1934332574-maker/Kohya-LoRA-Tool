@@ -35,13 +35,43 @@ def _read_header(path):
         if len(head) < 8:
             raise ValueError("文件过小，不是 safetensors：%s" % path)
         (n,) = struct.unpack("<Q", head)
-        if n <= 0 or n > (4 << 30):  # 4GB 头部上限兜底
+        if n <= 0 or n > min(64 << 20, os.path.getsize(path) - 8):  # Bounded header-only inspection
             raise ValueError("safetensors 头部长度异常：%s" % path)
         blob = f.read(n)
         if len(blob) != n:
             raise ValueError("safetensors 头部不完整：%s" % path)
     header = json.loads(blob.decode("utf-8"))
     return header, 8 + n
+
+
+def validate_safetensors_layout(path):
+    """Read the header only and require tensor offsets to cover the actual payload."""
+    header, offset = _read_header(path)
+    if not isinstance(header, dict):
+        raise ValueError("模型头部不是有效的张量目录。")
+    spans = []
+    for name, tensor in header.items():
+        if name == "__metadata__":
+            continue
+        values = tensor.get("data_offsets") if isinstance(tensor, dict) else None
+        if not isinstance(values, list) or len(values) != 2 or any(type(v) is not int for v in values):
+            raise ValueError("模型张量偏移格式无效。")
+        start, end = values
+        if start < 0 or end < start:
+            raise ValueError("模型张量偏移无效。")
+        spans.append((start, end))
+    if not spans:
+        raise ValueError("模型文件中没有可用张量。")
+    cursor = 0
+    for start, end in sorted(spans):
+        if start != cursor:
+            raise ValueError("模型张量数据有空隙或重叠，无法正常加载。")
+        cursor = end
+    actual = os.path.getsize(path) - offset
+    if cursor != actual:
+        extra = actual - cursor
+        note = "实际数据比头部声明多 %d 字节" % extra if extra > 0 else "实际数据比头部声明少 %d 字节" % -extra
+        raise ValueError("safetensors 文件布局异常：%s。请核对原始模型或重新准备文件；工具不会自动裁剪或覆盖底模。" % note)
 
 
 def _tensor_keys(header):

@@ -4,6 +4,7 @@ import type { ModeWorkspaceData, ProjectCard, ProjectConfig } from '../bridge'
 import UiIcon from './UiIcon.vue'
 import CropRatioField from './CropRatioField.vue'
 import DatasetInspection from './DatasetInspection.vue'
+import CaptionControls from './CaptionControls.vue'
 import TrainingProfileControl from './TrainingProfileControl.vue'
 import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
@@ -37,6 +38,7 @@ const draft = reactive({
   rank: '', alpha: '', unet_lr: '', te_lr: '', repeats: '', max_epochs: '', resolution: '',
   save_every: '', sample_interval: '', sample_seed: '1234', sample_prompt: '', optimizer: 'auto', strong_bind: false, clean_concept: true,
   sample_preview_mode: 'auto', unet_only: false, compile: false, crop_ratio: '', noise_offset: '', min_snr_gamma: '',
+  caption_method: 'wd14', caption_language: 'zh', caption_length: 'brief',
   batch_size: '', gc: 'auto', wd14_model: 'swinv2-v3', overwrite: false, keep_user_captions: false, amd_mode: false, train_env: '',
 })
 
@@ -113,6 +115,9 @@ function hydrate(config?: ProjectConfig | null) {
     const value = get(params[key]) || presetValue || (demo ? demoValues[key] ?? (key === 'optimizer' || key === 'gc' ? 'auto' : '') : key === 'optimizer' || key === 'gc' ? 'auto' : '')
     draft[key] = key === 'wd14_model' ? normalizeWd14Model(value) : key === 'sample_seed' ? value || '1234' : value
   }
+  draft.caption_method = String(params.caption_method || 'wd14')
+  draft.caption_language = String(params.caption_language || 'zh')
+  draft.caption_length = String(params.caption_length || 'brief')
   draft.strong_bind = params.strong_bind === undefined ? true : Boolean(params.strong_bind)
   draft.clean_concept = params.clean_concept === undefined ? true : Boolean(params.clean_concept)
   draft.sample_preview_mode = params.sample_preview == null ? 'auto' : Boolean(params.sample_preview) ? 'on' : 'off'
@@ -186,6 +191,9 @@ function makePatch(): ProjectConfig {
   }
   if (dirty.has('unet_only')) patch.unet_only = draft.unet_only
   const params: Record<string, unknown> = {}
+  for (const key of ['caption_method', 'caption_language', 'caption_length'] as const) {
+    if (dirty.has(`params.${key}`)) params[key] = draft[key]
+  }
   for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'save_every', 'sample_interval', 'sample_seed', 'sample_prompt', 'optimizer', 'crop_ratio', 'noise_offset', 'min_snr_gamma', 'wd14_model', 'batch_size', 'gc'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
@@ -266,7 +274,7 @@ function requestAction(action: string) {
   emit('classicAction', action, makePatch())
 }
 
-defineExpose({ startTraining, guideAction, save })
+defineExpose({ hasUnsavedChanges: () => dirty.size > 0, startTraining, guideAction, save })
 </script>
 
 <template>
@@ -324,11 +332,12 @@ defineExpose({ startTraining, guideAction, save })
             <div class="dataset-counts"><span>{{ desktop ? '图片数量会在数据预处理时检查' : '26 张示例图片' }}</span><span v-if="!desktop" class="sample-state">预览数据</span></div>
             <p class="card-hint">{{ datasetGuidance }}</p>
             <div class="field-row equal-columns spaced-row dataset-options-row">
-              <label class="kohya-field" :title="legacyTooltips.wd14Model"><span>自动打标模型</span><select v-model="draft.wd14_model" class="kohya-select" @change="markParam('wd14_model')"><option value="swinv2-v3">swinv2-v3（推荐）</option><option value="moat-v2">moat-v2（旧版）</option></select></label>
-              <button class="check-line" :class="{ checked: draft.keep_user_captions }" type="button" role="checkbox" :aria-checked="draft.keep_user_captions" @click="draft.keep_user_captions = !draft.keep_user_captions; markParam('keep_user_captions')"><i></i><span>保留已有标签（不自动打标）</span></button>
+              <label v-if="draft.caption_method === 'wd14'" class="kohya-field" :title="legacyTooltips.wd14Model"><span>自动打标模型</span><select v-model="draft.wd14_model" class="kohya-select" @change="markParam('wd14_model')"><option value="swinv2-v3">swinv2-v3（推荐）</option><option value="moat-v2">moat-v2（旧版）</option></select></label>
+              <button v-if="draft.caption_method === 'wd14'" class="check-line" :class="{ checked: draft.keep_user_captions }" type="button" role="checkbox" :aria-checked="draft.keep_user_captions" @click="draft.keep_user_captions = !draft.keep_user_captions; markParam('keep_user_captions')"><i></i><span>保留已有标签（不自动打标）</span></button>
               <button class="check-line" :title="legacyTooltips.overwrite" :class="{ checked: draft.overwrite }" type="button" role="checkbox" :aria-checked="draft.overwrite" @click="draft.overwrite = !draft.overwrite; markParam('overwrite')"><i></i><span>重新处理已存在的图片（改过标签后勾上，否则不生效）</span></button>
             </div>
-              <DatasetInspection :directory="draft.raw_dir" :desktop="desktop" :keep-captions="draft.keep_user_captions" @preserve="draft.keep_user_captions = true; markParam('keep_user_captions')" />
+              <CaptionControls :project-name="project.name" :directory="draft.raw_dir" :desktop="desktop" :method="draft.caption_method" :language="draft.caption_language" :length="draft.caption_length" @update:method="draft.caption_method = $event; markParam('caption_method')" @update:language="draft.caption_language = $event; markParam('caption_language')" @update:length="draft.caption_length = $event; markParam('caption_length')" />
+              <DatasetInspection :directory="draft.raw_dir" :desktop="desktop" :natural="draft.caption_method === 'natural'" :keep-captions="draft.keep_user_captions || draft.caption_method !== 'wd14'" @preserve="draft.keep_user_captions = true; markParam('keep_user_captions')" />
           </section>
 
           <section class="kohya-card parameter-card">
@@ -391,9 +400,9 @@ defineExpose({ startTraining, guideAction, save })
             <p v-if="triggerGuidance" class="card-hint trigger-hint">{{ triggerGuidance }}</p>
             <div v-if="trainingType === '概念'" class="field-row spaced-row concept-row">
               <label class="kohya-field" :title="datasetGuidance"><span>概念类型</span><select v-model="draft.concept_type" class="kohya-select" @change="markRoot('concept_type')"><option v-for="option in conceptOptions" :key="option.key" :value="option.key">{{ option.label }}</option></select></label>
-              <button class="check-line" :title="legacyTooltips.cleanConcept" :class="{ checked: draft.clean_concept }" type="button" role="checkbox" :aria-checked="draft.clean_concept" @click="draft.clean_concept = !draft.clean_concept; markParam('clean_concept')"><i></i><span>自动清洗概念标签（推荐）</span></button>
+              <button class="check-line" :disabled="draft.caption_method === 'natural'" :title="legacyTooltips.cleanConcept" :class="{ checked: draft.clean_concept }" type="button" role="checkbox" :aria-checked="draft.clean_concept" @click="draft.clean_concept = !draft.clean_concept; markParam('clean_concept')"><i></i><span>自动清洗概念标签（推荐）</span></button>
             </div>
-            <button v-if="trainingType !== '画风'" class="switch-line" :title="legacyTooltips.strongBind" :class="{ enabled: draft.strong_bind }" type="button" role="switch" :aria-checked="draft.strong_bind" @click="draft.strong_bind = !draft.strong_bind; markParam('strong_bind')">
+            <button v-if="trainingType !== '画风'" class="switch-line" :disabled="draft.caption_method === 'natural'" :title="legacyTooltips.strongBind" :class="{ enabled: draft.strong_bind }" type="button" role="switch" :aria-checked="draft.strong_bind" @click="draft.strong_bind = !draft.strong_bind; markParam('strong_bind')">
               <span class="switch-track"><i></i></span><span><strong>强绑定</strong><small>固定 trigger 与训练集共有特征词在标签开头</small></span>
             </button>
             <label class="kohya-field sample-preview-field" :title="legacyTooltips.samplePreview"><span>训练中采样预览</span><select v-model="draft.sample_preview_mode" class="kohya-select" @change="markParam('sample_preview')"><option value="auto">按显存使用默认设置</option><option value="on">开启</option><option value="off">关闭（减少额外耗时）</option></select></label>

@@ -4,6 +4,7 @@ import type { ModeWorkspaceData, ProjectCard, ProjectConfig } from '../bridge'
 import UiIcon from './UiIcon.vue'
 import CropRatioField from './CropRatioField.vue'
 import DatasetInspection from './DatasetInspection.vue'
+import CaptionControls from './CaptionControls.vue'
 import TrainingProfileControl from './TrainingProfileControl.vue'
 import AmdCompatibilityBar from './AmdCompatibilityBar.vue'
 import { legacyTooltips } from '../legacyTooltips'
@@ -36,6 +37,7 @@ const draft = reactive({
   crop_ratio: '', sample_prompt: '', noise_offset: '', min_snr_gamma: '', quant_mode: 'auto',
   blocks_to_swap: '', wd14_model: 'swinv2-v3', sample_preview_mode: 'auto', fast_tier: 'auto', fizgig_qwen_preset: 'auto',
   // ★ 2026-09-27：批大小（留空 = 自动 1）/ 梯度检查点（auto / on / off）
+  caption_method: 'wd14', caption_language: 'zh', caption_length: 'brief',
   batch_size: '', gc: 'auto',
   strong_bind: true, clean_concept: true, compile: false, overwrite: false, keep_user_captions: false, amd_mode: false,
 })
@@ -102,6 +104,9 @@ function hydrate(config?: ProjectConfig | null) {
     const hydratedValue = value(params[key], styledDefault === undefined ? (key === 'optimizer' || key === 'quant_mode' || key === 'gc' ? 'auto' : '') : String(styledDefault))
     draft[key] = (key === 'wd14_model' ? normalizeWd14Model(hydratedValue) : key === 'sample_seed' ? hydratedValue || '1234' : hydratedValue) as never
   }
+  draft.caption_method = String(params.caption_method || 'wd14')
+  draft.caption_language = String(params.caption_language || 'zh')
+  draft.caption_length = String(params.caption_length || 'brief')
   draft.strong_bind = params.strong_bind === undefined ? true : Boolean(params.strong_bind)
   draft.clean_concept = params.clean_concept === undefined ? true : Boolean(params.clean_concept)
   draft.sample_preview_mode = params.sample_preview == null ? 'auto' : Boolean(params.sample_preview) ? 'on' : 'off'
@@ -154,6 +159,9 @@ function makePatch(): ProjectConfig {
     if (dirty.has(key)) patch[key] = draft[key]
   }
   const params: Record<string, unknown> = {}
+  for (const key of ['caption_method', 'caption_language', 'caption_length'] as const) {
+    if (dirty.has(`params.${key}`)) params[key] = draft[key]
+  }
   for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'sample_seed', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model', 'fizgig_qwen_preset'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
@@ -193,7 +201,7 @@ function requestAction(action: string) {
   emit('classicAction', action, makePatch())
 }
 
-defineExpose({ startTraining, guideAction, save })
+defineExpose({ hasUnsavedChanges: () => dirty.size > 0, startTraining, guideAction, save })
 
 const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCase() === 'amd')
 </script>
@@ -260,11 +268,12 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
             </div>
             <p v-if="officialQwenPreset" class="engine-hint">本模式 rank、alpha 和学习率由下方官方预设接管；页面保留的旧值不参与训练。</p>
             <p v-else-if="!isVideo" class="engine-hint">选择后从当前模式预设重算学习率：动漫降低 15%，写实提高 15%；不保证更清晰或更自然。</p>
-            <button v-if="details.has_training_submode && !isStyle" class="engine-switch" :title="legacyTooltips.strongBind" :class="{ active: draft.strong_bind }" type="button" role="switch" :aria-checked="draft.strong_bind" @click="draft.strong_bind = !draft.strong_bind; markParam('strong_bind')"><i></i><span><strong>强绑定</strong><small>自动把 trigger + 训练集 100% 一致的特征词固定到标签开头</small></span></button>
-            <button v-if="isConcept" class="engine-check" :title="legacyTooltips.cleanConcept" :class="{ checked: draft.clean_concept }" type="button" role="checkbox" :aria-checked="draft.clean_concept" @click="draft.clean_concept = !draft.clean_concept; markParam('clean_concept')"><i></i><span>自动清洗概念标签（推荐）</span></button>
-            <label v-if="supported('wd14_model') && !isVideo" class="engine-field spaced" :title="legacyTooltips.wd14Model"><span>自动打标模型</span><select v-model="draft.wd14_model" class="engine-select" @change="markParam('wd14_model')"><option value="swinv2-v3">swinv2-v3（推荐）</option><option value="moat-v2">moat-v2（旧版）</option></select></label>
-            <button v-if="!isVideo" class="engine-check" :class="{ checked: draft.keep_user_captions }" type="button" role="checkbox" :aria-checked="draft.keep_user_captions" @click="draft.keep_user_captions = !draft.keep_user_captions; markParam('keep_user_captions')"><i></i><span>保留已有标签（不自动打标）</span></button>
-              <DatasetInspection v-if="!isVideo" :directory="draft.raw_dir" :desktop="desktop" :keep-captions="draft.keep_user_captions" @preserve="draft.keep_user_captions = true; markParam('keep_user_captions')" />
+            <button v-if="details.has_training_submode && !isStyle" class="engine-switch" :disabled="draft.caption_method === 'natural'" :title="legacyTooltips.strongBind" :class="{ active: draft.strong_bind }" type="button" role="switch" :aria-checked="draft.strong_bind" @click="draft.strong_bind = !draft.strong_bind; markParam('strong_bind')"><i></i><span><strong>强绑定</strong><small>自动把 trigger + 训练集 100% 一致的特征词固定到标签开头</small></span></button>
+            <button v-if="isConcept" class="engine-check" :disabled="draft.caption_method === 'natural'" :title="legacyTooltips.cleanConcept" :class="{ checked: draft.clean_concept }" type="button" role="checkbox" :aria-checked="draft.clean_concept" @click="draft.clean_concept = !draft.clean_concept; markParam('clean_concept')"><i></i><span>自动清洗概念标签（推荐）</span></button>
+            <label v-if="supported('wd14_model') && !isVideo && draft.caption_method === 'wd14'" class="engine-field spaced" :title="legacyTooltips.wd14Model"><span>自动打标模型</span><select v-model="draft.wd14_model" class="engine-select" @change="markParam('wd14_model')"><option value="swinv2-v3">swinv2-v3（推荐）</option><option value="moat-v2">moat-v2（旧版）</option></select></label>
+            <button v-if="!isVideo && draft.caption_method === 'wd14'" class="engine-check" :class="{ checked: draft.keep_user_captions }" type="button" role="checkbox" :aria-checked="draft.keep_user_captions" @click="draft.keep_user_captions = !draft.keep_user_captions; markParam('keep_user_captions')"><i></i><span>保留已有标签（不自动打标）</span></button>
+              <CaptionControls v-if="!isVideo" :project-name="project.name" :directory="draft.raw_dir" :desktop="desktop" :method="draft.caption_method" :language="draft.caption_language" :length="draft.caption_length" @update:method="draft.caption_method = $event; markParam('caption_method')" @update:language="draft.caption_language = $event; markParam('caption_language')" @update:length="draft.caption_length = $event; markParam('caption_length')" />
+              <DatasetInspection v-if="!isVideo" :directory="draft.raw_dir" :desktop="desktop" :natural="draft.caption_method === 'natural'" :keep-captions="draft.keep_user_captions || draft.caption_method !== 'wd14'" @preserve="draft.keep_user_captions = true; markParam('keep_user_captions')" />
               <button v-if="supported('overwrite') && !isVideo" class="engine-check" :title="legacyTooltips.overwrite" :class="{ checked: draft.overwrite }" type="button" role="checkbox" :aria-checked="draft.overwrite" @click="draft.overwrite = !draft.overwrite; markParam('overwrite')"><i></i><span>重新处理已存在的图片（改过标签后勾上，否则不生效）</span></button>
             <p v-if="currentTriggerHint" class="engine-hint">{{ currentTriggerHint }}</p>
           </section>

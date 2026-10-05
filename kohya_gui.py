@@ -2136,6 +2136,7 @@ class App:
         只清空"项目专属"字段（图集/底模/触发词/正则/全局提示词/参数覆盖标记）；
         模式/架构/预设随后由所选模板重新填充。
         """
+        self._caption_options = {}
         self._manual_override.clear()
         self._interval_values = core.normalize_interval_values({})
         for _key in ("save_every", "sample_interval"):
@@ -2476,6 +2477,7 @@ class App:
                 "batch_size": params.get("batch_size", "") or "",
                 "gc": params.get("gc", "") or "自动",
                 "wd14_model": params.get("wd14_model") or "swinv2-v3",
+                **{key: params.get(key, default) for key, default in (("caption_method", "wd14"), ("caption_language", "zh"), ("caption_length", "brief"))},
                 "overwrite": bool(params.get("overwrite")),
         # ★ 2026-10-02：用户自带标签（图 + 同名 .txt 同目录）⇒ 原样保留 ✓
         "keep_user_captions": bool(params.get("keep_user_captions")),
@@ -2555,6 +2557,8 @@ class App:
             p = data.get("params") or {}
             if not isinstance(p, dict):
                 p = {}
+            self._caption_options = {key: p.get(key, default) for key, default in
+                                     (("caption_method", "wd14"), ("caption_language", "zh"), ("caption_length", "brief"))}
             # 清掉上一个项目遗留的共享输入；旧项目再从它当前模式迁移到对应单位桶。
             for _key in ("save_every", "sample_interval"):
                 self._set_param_value(_key, "")
@@ -6324,6 +6328,7 @@ class App:
             except Exception:
                 return default
         return {
+            **getattr(self, "_caption_options", {}),
             "mode": self.mode,
             "base_type": self.base_type,
             "at_sub_mode": self._at_sub_label(),

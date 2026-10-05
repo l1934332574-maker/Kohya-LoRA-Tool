@@ -1,4 +1,4 @@
-﻿# -*- mode: python ; coding: utf-8 -*-
+# -*- mode: python ; coding: utf-8 -*-
 # PyInstaller 便携目录包（onedir）配置：dist\Kohya一键工具\ 即整个便携包。
 # contents_directory='.' 让所有文件直接放在 exe 旁边，用户解压即可运行。
 # 说明：不打包 torch / 大模型 / numpy / cv2 等；新界面依赖 Vue 构建产物与 pywebview。
@@ -59,6 +59,12 @@ a = Analysis(
         'kohya_core.tagging.complete',
         'kohya_core.anima_ckpt',
         'kohya_core.anima_loader',
+        'kohya_core.captioning',
+        'kohya_core.assistant',
+        'kohya_core.training_agent',
+        'kohya_core.agent_transport',
+        'kohya_core.agent_models',
+        'kohya_core.agent_computer',
         'kohya_core.lora_naming',
         'kohya_core.queue',
         'gui.queue_window',
