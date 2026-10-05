@@ -68,3 +68,6 @@ caption_reports/
 .env.*
 !.env.example
 *_运行日志_*.txt
+
+# 本机发布隐私检查（与 release.py 配套，不分发）
+release_privacy.py
