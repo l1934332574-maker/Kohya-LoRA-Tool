@@ -14,7 +14,7 @@
     <rect x="52" y="44" width="252" height="30" rx="15" fill="#ffffff" fill-opacity=".055" stroke="#a2b3e9" stroke-opacity=".16"/>
     <circle cx="69" cy="59" r="4" fill="#77ddce"/>
     <text x="84" y="64" fill="#b9c8df" font-size="12" font-weight="600" letter-spacing="1.2">WINDOWS · LOCAL LoRA TRAINING</text>
-    <text x="52" y="143" fill="#f3f6ff" font-size="45" font-weight="700">把训练流程，连起来。</text>
+    <text x="52" y="143" fill="#f3f6ff" font-size="45" font-weight="700">一套界面，四类引擎。</text>
     <text x="54" y="185" fill="#becbe1" font-size="19">Kohya-LoRA 一键训练工具</text>
     <text x="54" y="215" fill="#99acc8" font-size="14">四类引擎 · 项目工作区 · 数据与标签 · 可选训练 Agent</text>
     <g transform="translate(52 265)">
