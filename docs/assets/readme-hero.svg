@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">Kohya-LoRA 一键训练工具</title>
+  <desc id="desc">Windows 本地训练工作台。四类训练引擎，共用从环境、数据、训练到结果的一套项目流程。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#111827"/><stop offset="1" stop-color="#172442"/></linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#8b9cff"/><stop offset="1" stop-color="#77ddce"/></linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#526084" stroke-width=".6" opacity=".19"/></pattern>
+  </defs>
+  <rect width="1200" height="360" rx="20" fill="url(#bg)"/>
+  <rect width="1200" height="360" rx="20" fill="url(#grid)"/>
+  <circle cx="1150" cy="34" r="165" fill="#536bd9" opacity=".08"/>
+  <circle cx="730" cy="364" r="205" fill="#4bbdad" opacity=".04"/>
+  <g font-family="Segoe UI, Microsoft YaHei, Noto Sans CJK SC, sans-serif">
+    <rect x="52" y="44" width="252" height="30" rx="15" fill="#ffffff" fill-opacity=".055" stroke="#a2b3e9" stroke-opacity=".16"/>
+    <circle cx="69" cy="59" r="4" fill="#77ddce"/>
+    <text x="84" y="64" fill="#b9c8df" font-size="12" font-weight="600" letter-spacing="1.2">WINDOWS · LOCAL LoRA TRAINING</text>
+    <text x="52" y="143" fill="#f3f6ff" font-size="45" font-weight="700">把训练流程，连起来。</text>
+    <text x="54" y="185" fill="#becbe1" font-size="19">Kohya-LoRA 一键训练工具</text>
+    <text x="54" y="215" fill="#99acc8" font-size="14">四类引擎 · 项目工作区 · 数据与标签 · 可选训练 Agent</text>
+    <g transform="translate(52 265)">
+      <path d="M60 17H546" stroke="url(#accent)" stroke-opacity=".5" stroke-width="2"/>
+      <g fill="#192940" stroke="#6375a1" stroke-opacity=".65"><rect width="112" height="36" rx="9"/><rect x="142" width="112" height="36" rx="9"/><rect x="284" width="112" height="36" rx="9"/><rect x="426" width="112" height="36" rx="9"/></g>
+      <g fill="#e1e8f6" font-size="13" text-anchor="middle"><text x="56" y="23">准备环境</text><text x="198" y="23">整理数据</text><text x="340" y="23">执行训练</text><text x="482" y="23">查看结果</text></g>
+    </g>
+    <g transform="translate(772 49)">
+      <rect width="376" height="262" rx="16" fill="#0b1325" fill-opacity=".65" stroke="#7389b8" stroke-opacity=".25"/>
+      <text x="22" y="31" fill="#adbed9" font-size="11" letter-spacing="1.4">ONE WORKSPACE / FOUR ENGINES</text>
+      <path d="M22 47H354" stroke="#7b8bb1" stroke-opacity=".18"/>
+      <g font-size="14">
+        <circle cx="28" cy="76" r="4" fill="#a29aff"/><text x="43" y="81" fill="#e6ecf8" font-weight="600">kohya / sd-scripts</text><text x="43" y="101" fill="#8499bb" font-size="11">SD1.5 · SDXL · FLUX.1 · Anima</text>
+        <circle cx="28" cy="127" r="4" fill="#77b4ed"/><text x="43" y="132" fill="#e6ecf8" font-weight="600">musubi-tuner</text><text x="43" y="152" fill="#8499bb" font-size="11">Krea 2 · FLUX.2</text>
+        <circle cx="28" cy="178" r="4" fill="#7ad9c7"/><text x="43" y="183" fill="#e6ecf8" font-weight="600">AI Toolkit</text><text x="43" y="203" fill="#8499bb" font-size="11">Krea2 · Qwen-Image · Z-Image · H3</text>
+        <circle cx="28" cy="229" r="4" fill="#f2c881"/><text x="43" y="234" fill="#e6ecf8" font-weight="600">Fizgig</text><text x="147" y="234" fill="#8499bb" font-size="11">Image / Video / Audio</text>
+      </g>
+    </g>
+  </g>
+</svg>
