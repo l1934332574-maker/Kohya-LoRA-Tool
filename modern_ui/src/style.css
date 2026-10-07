@@ -164,7 +164,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .preview-pill { position: fixed; right: 14px; bottom: 195px; z-index: 4; padding: 4px 8px; border: 1px solid var(--tone-514c3e); border-radius: 5px; color: var(--tone-b5aa86); background: var(--tone-26241f); font-size: 10px; }
 
 .dialog-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: rgb(10 12 16 / 48%); }
-.project-dialog { width: min(100%, 460px); padding: 20px; border: 1px solid var(--tone-41464f); border-radius: 9px; background: var(--tone-272a32); box-shadow: 0 16px 48px rgb(0 0 0 / 32%); }
+.project-dialog { width: min(100%, 560px); max-height:calc(100dvh - 40px); overflow-y:auto; padding: 20px; border: 1px solid var(--tone-41464f); border-radius: 9px; background: var(--tone-272a32); box-shadow: 0 16px 48px rgb(0 0 0 / 32%); }
 .dialog-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
 .dialog-header h2 { margin: 0; color: var(--tone-cbd0d7); font-size: 18px; font-weight: 350; }
 .dialog-close { width: 32px; height: 32px; border: 0; border-radius: 5px; color: var(--sub); background: transparent; font-size: 23px; cursor: pointer; }
@@ -227,3 +227,5 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+.startup-recovery-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }

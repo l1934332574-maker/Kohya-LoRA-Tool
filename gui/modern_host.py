@@ -21,6 +21,9 @@ from pathlib import Path
 from kohya_core.diagnostics import SessionLog, summary_lines, redact, write_bundle
 from kohya_core.training_history import TrainingHistory
 from kohya_core.training_media import sample_files, image_preview, is_sample
+from kohya_core.model_catalog import catalog as model_catalog, resolve_choice
+from kohya_core.fizgig_engine import runtime as fizgig_runtime, source_version as fizgig_source_version, VERSION as FIZGIG_TARGET
+from kohya_core.fizgig_adapter import FAMILIES as FIZGIG_FAMILIES, models as fizgig_models, missing as fizgig_missing, _validate as validate_fizgig_models
 from kohya_core.project_config import WORKSPACE_PARAM_KEYS, BOOL_PARAM_KEYS, training_params, caption_summary, dataset_images, read_caption
 
 try:
@@ -30,6 +33,8 @@ except Exception:  # pragma: no cover - desktop package may omit the optional he
 
 
 _MODERN_PROJECT_TEMPLATES = {
+    "Anima LoRA（Fizgig）": {"mode": "anima_fz", "base_type": "anima", "note": "Fizgig v7.0.1 标准 28 层 Anima，普通 LoRA；上游实验性入口。"},
+    "SDXL LoRA（Fizgig）": {"mode": "sdxl_fz", "base_type": "sdxl", "note": "Fizgig v7.0.1 完整 SDXL 底模，冻结文本编码器；上游实验性入口。"},
     "概念 LoRA（SDXL）": {"mode": "concept", "base_type": "sdxl", "note": "旧版兼容模板：SDXL 概念训练。", "visible": False},
     "Krea 2 图像 LoRA": {"mode": "krea2", "base_type": "sdxl", "note": "第二引擎 musubi；模型文件放在 models/krea2。"},
     "H3 视频 LoRA": {"mode": "video", "base_type": "sdxl", "note": "第三引擎 AI Toolkit；使用视频文件和同名字幕。"},
@@ -47,6 +52,7 @@ _WORKSPACE_PARAM_KEYS = WORKSPACE_PARAM_KEYS
 # after the classic JSON importer whitelist was defined. Preserve them when a
 # modern project is created from a compatible JSON file.
 _MODERN_IMPORT_EXTRA_PARAMS = {
+    "fizgig_version",
     "sample_interval", "video_frames", "noise_offset", "min_snr_gamma",
     "wd14_model", "overwrite", "keep_user_captions", "amd_mode", "fizgig_qwen_preset",
     "batch_size", "gc", "sample_prompt", "sample_seed", "global_pos", "global_neg",
@@ -113,6 +119,7 @@ class ModernUIBridge:
         # pywebview 6 recursively inspects public object attributes while
         # building the bridge; exposing this object can stall initialization.
         self._window = None
+        self._startup = None
         self.logs = [
             "欢迎使用 Kohya-LoRA 一键训练工具",
             "按左侧新手引导顺序操作；打开项目后进入新版训练页。",
@@ -124,6 +131,7 @@ class ModernUIBridge:
         self._picker_dirs = {}
         self._dataset_previews = {}
         self._caption_reports = {}
+        self._prompt_reports = {}
         from kohya_core.captioning import CaptionSettings
         self._caption_settings = CaptionSettings(self.core.data_sub("settings"))
         from kohya_core.assistant import AssistantSettings
@@ -522,7 +530,9 @@ class ModernUIBridge:
             "cmd_install": ("安装 Kohya 训练内核", self.core.install_kohya),
             "cmd_install_musubi": ("安装第二引擎 · musubi", self.core.install_musubi_engine),
             "cmd_install_at": ("安装第三引擎 · AI Toolkit", self.core.install_ai_toolkit_engine),
-            "cmd_install_fizgig": ("安装第四引擎 · Fizgig", self.core.install_fizgig_engine),
+            "cmd_install_fizgig": ("安装 Fizgig v7.0.1", self.core.install_fizgig_engine),
+            "fizgig_engine_update": ("更新 Fizgig v7.0.1", self.core.update_fizgig_engine),
+            "fizgig_engine_rollback": ("回退 Fizgig 活动版本", self.core.rollback_fizgig_engine),
         }
         spec = installers.get(action)
         if not spec:
@@ -559,6 +569,8 @@ class ModernUIBridge:
     def _model_download_spec(self, mode):
         mode = str(mode or "")
         specs = {
+            "anima_fz": ("Anima 模型", "Fizgig 标准 28 层 Anima 组件", "ANIMA_FZ_MODEL_LINKS", "anima_fz_models_dir", "anima_fz_model_files", {"dit", "te", "vae"}),
+            "sdxl_fz": ("SDXL 模型", "完整 SDXL 底模；已有第三方底模可直接选择", "SDXL_FZ_MODEL_LINKS", "sdxl_fz_models_dir", "sdxl_fz_model_files", {"dit"}),
             "krea2": ("Krea 2 模型", "Krea2 训练文件", "KREA2_MODEL_LINKS", "krea2_models_dir", "krea2_model_files", {"raw", "vae", "te"}),
             "krea2_at": ("Krea2 模型", "Krea2 AI Toolkit 训练文件", "KREA2_MODEL_LINKS", "krea2_models_dir", "krea2_model_files", {"raw", "vae"}),
             "krea2_fz": ("Krea2 模型", "Krea2 Fizgig 训练文件", "KREA2_MODEL_LINKS", "krea2_models_dir", "krea2_model_files", {"raw", "vae", "te"}),
@@ -692,7 +704,7 @@ class ModernUIBridge:
             cancel_event.set()
         elif downloader is not None:
             downloader.cancel()
-        elif kind in ("setup", "training", "preprocess", "caption"):
+        elif kind in ("setup", "training", "preprocess", "caption", "prompt_reverse"):
             self.core.stop_active_process()
         return {"ok": True}
 
@@ -740,6 +752,101 @@ class ModernUIBridge:
         with self._task_lock:
             report = self._caption_reports.get(str(task_id or ""))
             return {"ok": True, "report": report} if report else {"ok": False, "error": "描述结果尚未生成或已过期。"}
+
+    def get_prompt_reverse(self, task_id=""):
+        with self._task_lock:
+            key = str(task_id or "") or next(reversed(self._prompt_reports), "")
+            report = self._prompt_reports.get(key)
+            task = self._task if self._task and self._task.get("kind") == "prompt_reverse" and self._task.get("id") == key else None
+            return {"ok": True, "task_id": key, "report": copy.deepcopy(report),
+                    "task": {field: task.get(field) for field in ("id", "status", "message", "detail", "progress")} if task else None}
+
+    def start_prompt_reverse(self, options):
+        from kohya_core.captioning import CaptionError, _atomic_bytes
+        from kohya_core.prompt_reverse import prepare, generate
+        try:
+            selection = prepare(options)
+            service = self._caption_settings.connection() if selection["method"] == "natural" else None
+            if service and not service["local"] and options.get("allow_remote") is not True:
+                raise CaptionError("请确认允许将所选图片发送到在线视觉服务。")
+        except CaptionError as exc:
+            return {"ok": False, "error": str(exc)}
+        except (OSError, ValueError):
+            return {"ok": False, "error": "无法读取图片或服务设置，请检查选择的文件。"}
+        task_id = self._begin_task("反推图片提示词", "prompt_reverse")
+        if not task_id:
+            return {"ok": False, "error": "已有训练、助手或准备任务正在运行，请先完成或停止。"}
+        self.core.reset_stop()
+        report = {"task_id": task_id, "directory": str(selection["root"]), "path": selection["path"],
+                  "method": selection["method"], "language": selection["language"], "length": selection["length"],
+                  "status": "running", "total": len(selection["images"]), "generated": 0, "failed": 0, "items": []}
+        report_path = self.core.data_sub("logs", "prompt_reverse_%s.json" % task_id)
+
+        def publish(value):
+            with self._task_lock:
+                self._prompt_reports[task_id] = copy.deepcopy(value)
+                while len(self._prompt_reports) > 8:
+                    self._prompt_reports.pop(next(iter(self._prompt_reports)))
+
+        def progress(done, total, item):
+            with self._task_lock:
+                if self._task and self._task.get("id") == task_id:
+                    self._task.update(progress=done / max(total, 1), detail="%s / %s · %s" % (done, total, item["name"]),
+                                      message="正在反推图片提示词…")
+
+        def worker():
+            message = "反推任务已结束。"
+            try:
+                generate(self.core, selection, service, report, lambda line: self._task_log(task_id, line), progress, publish)
+                report["status"] = "failed" if report["failed"] or report.get("error") else "completed"
+                message = report.get("error") or "反推完成：生成 %d 张，失败 %d 张。结果可以编辑、复制或导出。" % (report["generated"], report["failed"])
+            except self.core.StopRequested:
+                report["status"], message = "cancelled", "已停止反推，已生成的结果保留；已发出的在线请求可能仍在执行。"
+            except Exception as exc:
+                report["status"] = "failed"
+                message = str(exc) if isinstance(exc, CaptionError) else "反推失败，请检查图片、模型和运行日志。"
+                report["error"] = message
+            finally:
+                publish(report)
+                try:
+                    _atomic_bytes(Path(report_path), json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"))
+                except OSError:
+                    self._task_log(task_id, "[反推] 无法保存本地结果记录；仍可在本次会话复制和导出。")
+                with self._task_lock:
+                    if self._task and self._task.get("id") == task_id:
+                        self._task.update(status=report["status"], message=message, progress=None if report["status"] == "cancelled" else 1.0)
+        publish(report)
+        threading.Thread(target=worker, daemon=True, name="prompt-reverse").start()
+        return {"ok": True, "task_id": task_id}
+
+    def get_prompt_reverse_image(self, task_id, name):
+        with self._task_lock:
+            report = self._prompt_reports.get(str(task_id or ""))
+            root = report.get("directory") if report and any(item["name"] == name for item in report["items"]) else None
+        if not root:
+            return {"ok": False, "error": "图片不属于本次反推结果。"}
+        try:
+            return {"ok": True, **image_preview(root, name)}
+        except (OSError, ValueError):
+            return {"ok": False, "error": "无法读取这张图片。"}
+
+    def export_prompt_reverse(self, task_id, items, directory):
+        guard = self._agent_guard()
+        if guard:
+            return guard
+        from kohya_core.captioning import CaptionError
+        from kohya_core.prompt_reverse import export_report
+        with self._task_lock:
+            report = copy.deepcopy(self._prompt_reports.get(str(task_id or "")))
+        if not report:
+            return {"ok": False, "error": "反推结果已过期，请重新生成。"}
+        try:
+            files = export_report(report, items, directory)
+            return {"ok": True, "directory": str(Path(directory).resolve()), "written": len(files), "files": files}
+        except CaptionError as exc:
+            return {"ok": False, "error": str(exc)}
+        except OSError:
+            return {"ok": False, "error": "无法写入输出文件夹；请检查权限，部分文本可能已导出。"}
 
     def start_caption_task(self, project_name, options):
         from kohya_core.captioning import CaptionError, caption_options, generate_captions, service_identity
@@ -1022,7 +1129,10 @@ class ModernUIBridge:
         kohya = mode in ("style", "character", "concept")
         train_te = kohya and params.get("train_text_encoder", True) and params.get("base_type") != "anima"
         rows = [{"label": "文本编码器训练", "value": "参与训练；起始学习率 %s" % params.get("te_lr") if train_te else "不参与训练；其学习率不生效"}]
-        if kohya or mode in ("krea2_fz", "flux2_fz"):
+        if mode in FIZGIG_FAMILIES and params.get("fizgig_version") == FIZGIG_TARGET:
+            rows += [{"label": "引擎版本", "value": "Fizgig v7.0.1 · 普通 LoRA"},
+                     {"label": "学习率计划", "value": "Qwen 官方预设接管" if mode == "qwen21_fz" else "constant；无学习率预热"}]
+        elif kohya or mode in ("krea2_fz", "flux2_fz"):
             rows += [{"label": "学习率计划", "value": "cosine（余弦衰减）；输入的是起始学习率"},
                      {"label": "学习率预热", "value": "120 步；与模型加载、缓存及编译预热不同"}]
         elif mode == "qwen21_fz":
@@ -1053,7 +1163,7 @@ class ModernUIBridge:
                 pass
         if params.get("sample_preview") is not True and fast_arch in ("qwen_image", "zimage") and (fast == "on" or (fast == "auto" and mode == "zimage" and vram is not None and vram < 10)):
             enabled, reason = False, "额外省显存档的自动策略关闭采样（可手动开启，需额外显存）"
-        if enabled and mode == "krea2_fz" and not getattr(self.core, "krea2_model_files", lambda: {"turbo": True})().get("turbo"):
+        if enabled and mode == "krea2_fz" and params.get("fizgig_version") != FIZGIG_TARGET and not getattr(self.core, "krea2_model_files", lambda: {"turbo": True})().get("turbo"):
             enabled, reason = False, "缺少 Turbo 预览模型，本次不采样"
         try:
             interval = int(params.get("sample_interval") or 0)
@@ -1074,6 +1184,8 @@ class ModernUIBridge:
             cadence += "；超过总轮数，训练中可能没有定期采样"
         if mode == "h3_fz":
             cadence += "；视频/音频请到输出目录查看，预览窗口只显示图片"
+        if mode in FIZGIG_FAMILIES and params.get("fizgig_version") == FIZGIG_TARGET:
+            cadence += "；开始时不额外采样，最后一轮只有满足间隔才采样"
         return {"enabled": enabled, "reason": reason, "cadence": cadence, "unit": unit}
 
     def _prepare_engine_training(self, project_name, config):
@@ -1104,7 +1216,14 @@ class ModernUIBridge:
             return {"ok": False, "error": "当前模式的必需模型文件尚未齐全：\n%s\n\n模型目录：%s" % (
                 "\n".join(str(item) for item in missing), details.get("asset_dir") or "未指定")}
 
+        if mode in FIZGIG_FAMILIES and params.get("fizgig_version") == FIZGIG_TARGET:
+            try:
+                validate_fizgig_models(self.core, FIZGIG_FAMILIES[mode], fizgig_models(self.core, FIZGIG_FAMILIES[mode], params))
+            except (ValueError, RuntimeError, OSError) as exc:
+                return {"ok": False, "error": str(exc)}
         warnings = []
+        if mode in ("anima_fz", "sdxl_fz"):
+            warnings.append("当前为上游实验性普通 LoRA 入口；文本编码器冻结，具体训练效果需自行观察采样。")
         min_count = int(getattr(self.core, "MIN_IMAGES", {}).get(mode, 15))
         media_summary = None
         if mode == "h3_fz":
@@ -1207,9 +1326,9 @@ class ModernUIBridge:
             "project_name": project_name, "mode": mode,
             "mode_label": self.core.MODE_LABELS.get(mode, mode),
             "training_engine": self._engine_kind_for_mode(mode),
-            "engine_label": self._engine_label_for_mode(mode),
+            "engine_label": ("Fizgig · " + params.get("fizgig_version", "")) if mode in FIZGIG_FAMILIES else self._engine_label_for_mode(mode),
             "model_label": model_label,
-            "model_path": str(details.get("asset_dir") or "由引擎管理"),
+            "model_path": str(params.get("base_model") or details.get("asset_dir") or "由引擎管理"),
             "model_download_required": False, "model_size": "",
             "raw_dir": raw_dir, "image_count": image_count, "min_images": min_count,
             "data_count": image_count,
@@ -1217,7 +1336,7 @@ class ModernUIBridge:
             "data_unit": "个" if mode == "h3_fz" else ("段" if mode == "video" else "张"),
             "media_summary": media_summary,
             "training_type": params.get("at_sub_mode") or mode,
-            "training_target": "按当前模式调用已有训练引擎入口",
+            "training_target": "冻结底模和文本编码器，只训练普通 LoRA" if mode in FIZGIG_FAMILIES else "按当前模式调用已有训练引擎入口",
             "schedule_label": "训练计划", "schedule_value": schedule_value,
             "rank": plan_rank, "alpha": plan_alpha,
             "learning_rate": plan_learning_rate, "resolution": getattr(self.core, "h3_align_resolution", lambda value: value)(params["resolution"]) if mode == "video" else params["resolution"],
@@ -1237,14 +1356,14 @@ class ModernUIBridge:
     def _engine_kind_for_mode(mode):
         return {"style": "kohya", "character": "kohya", "concept": "kohya",
                 "krea2": "musubi", "flux2": "musubi", "krea2_fz": "fizgig", "flux2_fz": "fizgig",
-                "qwen21_fz": "fizgig", "h3_fz": "fizgig",
+                "qwen21_fz": "fizgig", "h3_fz": "fizgig", "anima_fz": "fizgig", "sdxl_fz": "fizgig",
                 "video": "ai_toolkit", "krea2_at": "ai_toolkit", "qwen_image": "ai_toolkit", "zimage": "ai_toolkit"}.get(mode, "unknown")
 
     @staticmethod
     def _engine_label_for_mode(mode):
         return {"style": "Kohya / sd-scripts", "character": "Kohya / sd-scripts", "concept": "Kohya / sd-scripts",
                 "krea2": "musubi-tuner", "flux2": "musubi-tuner", "krea2_fz": "Fizgig", "flux2_fz": "Fizgig",
-                "qwen21_fz": "Fizgig", "h3_fz": "Fizgig",
+                "qwen21_fz": "Fizgig", "h3_fz": "Fizgig", "anima_fz": "Fizgig", "sdxl_fz": "Fizgig",
                 "video": "AI Toolkit", "krea2_at": "AI Toolkit", "qwen_image": "AI Toolkit", "zimage": "AI Toolkit"}.get(mode, "训练引擎")
 
     def _resume_path(self, project_name, mode, params):
@@ -1253,8 +1372,8 @@ class ModernUIBridge:
         try:
             output_dir = self.core.data_sub("output", project_name)
             output_name = self.core.output_name_for(mode, params.get("style_preset"))
-            if mode in ("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz"):
-                return self.core.find_fizgig_state(output_dir, output_name)
+            if mode in FIZGIG_FAMILIES:
+                return self.core.find_fizgig_state(output_dir, output_name, params.get("fizgig_version"), FIZGIG_FAMILIES[mode], params.get("max_epochs"))
             if mode in ("krea2", "flux2"):
                 return self.core.find_musubi_state(output_dir, output_name)
             return self.core.find_latest_state(output_dir, output_name)
@@ -1832,6 +1951,9 @@ class ModernUIBridge:
                         lambda line: self._task_log(task_id, line), mode=mode, params=params,
                         vram_gb=plan.get("vram_gb"), resume_from=resume_path, progress=monitor,
                     )
+                elif mode in ("anima_fz", "sdxl_fz"):
+                    self.core.train_fizgig_lora(lambda line: self._task_log(task_id, line), mode=mode, params=params,
+                        vram_gb=plan.get("vram_gb"), resume_from=resume_path, progress=monitor)
                 elif mode == "h3_fz":
                     params["train_data_dir"] = params.get("raw_dir") or ""
                     self.core.train_h3_fizgig(
@@ -1953,6 +2075,20 @@ class ModernUIBridge:
         self._log("[环境] 已恢复自动查找 Python / Git。")
         return self.get_env_locations()
 
+    def report_ui_startup(self, stage, detail=""):
+        return self._startup.frontend_report(str(stage), str(detail)) if self._startup else {"ok": False}
+
+    def open_ui_startup_report(self):
+        return self._startup.open_report() if self._startup else {"ok": False}
+
+    def use_classic_ui(self):
+        with self._task_lock:
+            if self._task and self._task.get("status") in ("running", "starting"):
+                return {"ok": False, "error": "当前有任务运行，请先正常停止任务。"}
+        if self._agent_guard():
+            return {"ok": False, "error": "助手正在执行任务，请先停止助手。"}
+        return self._startup.request_classic() if self._startup else {"ok": False}
+
     def bootstrap(self):
         labels = getattr(self.core, "MODE_LABELS", {})
         templates = getattr(self.core, "PROJECT_TEMPLATES", {})
@@ -1993,6 +2129,7 @@ class ModernUIBridge:
             "default_project_name": self.core.default_project_name(),
             "modes": [{"key": key, "label": value} for key, value in labels.items()],
             "templates": public_templates,
+            "model_catalog": model_catalog(self.core),
             "engine_groups": [
                 {
                     "label": name,
@@ -2248,6 +2385,12 @@ class ModernUIBridge:
                 return {"ok": False, "error": "字段「%s」必须为开关值。" % key}
             config[key] = value
 
+        if next_mode in ("anima_fz", "sdxl_fz") and patch.get("base_model"):
+            try:
+                from kohya_core.fizgig_adapter import validate_base
+                validate_base(self.core, FIZGIG_FAMILIES[next_mode], config["base_model"])
+            except (OSError, ValueError, RuntimeError) as exc:
+                return {"ok": False, "error": str(exc)}
         params = dict(config.get("params")) if isinstance(config.get("params"), dict) else {}
         incoming_params = patch.get("params", {})
         if not isinstance(incoming_params, dict):
@@ -2258,7 +2401,14 @@ class ModernUIBridge:
             if value is None:
                 params.pop(key, None)
                 continue
-            if key == "quant_mode" and value not in getattr(self.core, "QUANT_MODE_OPTIONS", {}).get(next_mode, ()):
+            if key == "fizgig_version" and value not in ("v6.5.0", FIZGIG_TARGET):
+                return {"ok": False, "error": "未接入这个 Fizgig 版本。"}
+            if key == "fizgig_version" and next_mode in ("anima_fz", "sdxl_fz") and value != FIZGIG_TARGET:
+                return {"ok": False, "error": "Anima / SDXL Fizgig 项目需要 v7.0.1。"}
+            allowed_quant = getattr(self.core, "QUANT_MODE_OPTIONS", {}).get(next_mode, ())
+            if next_mode in FIZGIG_FAMILIES and (incoming_params.get("fizgig_version") or params.get("fizgig_version") or (FIZGIG_TARGET if next_mode in ("anima_fz", "sdxl_fz") else "v6.5.0")) == FIZGIG_TARGET:
+                allowed_quant = (("auto", "int8", "nf4", "hqq") if next_mode == "h3_fz" else ("auto", "bf16", "int8", "nf4"))
+            if key == "quant_mode" and value not in allowed_quant:
                 return {"ok": False, "error": "当前训练模式不支持量化精度「%s」。" % value}
             if key == "sample_preview" and value is None:
                 params.pop(key, None)
@@ -2276,6 +2426,11 @@ class ModernUIBridge:
                   or len(str(value)) > (32768 if key in ("sample_prompt", "global_pos", "global_neg") else 128)):
                 return {"ok": False, "error": "训练参数「%s」的格式无效。" % key}
             params[key] = value
+        if next_mode in FIZGIG_FAMILIES:
+            version = params.get("fizgig_version") or (FIZGIG_TARGET if next_mode in ("anima_fz", "sdxl_fz") else "v6.5.0")
+            allowed_quant = ((("auto", "int8", "nf4", "hqq") if next_mode == "h3_fz" else ("auto", "bf16", "int8", "nf4"))) if version == FIZGIG_TARGET else self.core.QUANT_MODE_OPTIONS.get(next_mode, ())
+            if (params.get("quant_mode") or "auto") not in allowed_quant:
+                return {"ok": False, "error": "所选引擎版本不支持已保存的量化精度，请同时改为自动或此版本支持的精度。"}
         config["params"] = params
 
         if not self.core.save_project(name, config):
@@ -2878,19 +3033,24 @@ class ModernUIBridge:
         self._log("[模型] 已保存 %s 模型设置：%s" % (mode, choice.get("model_id") or choice.get("label", key)))
         return self.get_qwen_model_setup(mode)
 
+    def get_model_catalog(self):
+        return model_catalog(self.core)
+
     def get_mode_workspace(self, mode, project_name=""):
         """Return UI metadata and read-only readiness checks for a classic training mode."""
         mode = str(mode or "")
         if mode not in getattr(self.core, "MODE_KEYS", ()):
             return {"ok": False, "error": "未知的训练模式。"}
         core = self.core
+        project_config = core.load_project(str(project_name or "").strip()) if project_name else {}
+        project_config = project_config if isinstance(project_config, dict) else {}
         status = core.system_status()
         engine_key = {
             "style": "kohya_ok", "character": "kohya_ok", "concept": "kohya_ok",
             "krea2": "musubi_ok", "flux2": "musubi_ok",
             "video": "at_ok", "krea2_at": "at_ok", "qwen_image": "at_ok", "zimage": "at_ok",
             "krea2_fz": "fizgig_ok", "flux2_fz": "fizgig_ok",
-            "qwen21_fz": "fizgig_ok", "h3_fz": "fizgig_ok",
+            "qwen21_fz": "fizgig_ok", "h3_fz": "fizgig_ok", "anima_fz": "fizgig_ok", "sdxl_fz": "fizgig_ok",
         }.get(mode)
         engine_ready = bool(status.get(engine_key)) if engine_key else False
         engine_update_available = False
@@ -2899,7 +3059,7 @@ class ModernUIBridge:
                 engine_update_available = bool(core.ai_toolkit_engine_update_status().get("update_available"))
             except Exception:
                 engine_update_available = False
-        elif mode in ("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz"):
+        elif mode in FIZGIG_FAMILIES:
             try:
                 engine_update_available = bool(core.fizgig_engine_update_status().get("update_available"))
             except Exception:
@@ -2907,7 +3067,10 @@ class ModernUIBridge:
         missing = []
         asset_dir = ""
         try:
-            if mode in ("krea2", "krea2_fz"):
+            if mode in ("anima_fz", "sdxl_fz"):
+                missing = fizgig_missing(core, FIZGIG_FAMILIES[mode], project_config)
+                asset_dir = core.anima_fz_models_dir() if mode == "anima_fz" else core.sdxl_fz_models_dir()
+            elif mode in ("krea2", "krea2_fz"):
                 missing = list(core.krea2_missing_models())
                 asset_dir = core.krea2_models_dir()
             elif mode == "krea2_at":
@@ -2934,10 +3097,22 @@ class ModernUIBridge:
                 asset_dir = core.at_image_local_dir(mode)
         except Exception as exc:
             missing = ["无法读取模型状态：%s" % exc]
+        version_info = core.fizgig_engine_update_status() if mode in FIZGIG_FAMILIES else {}
+        version = str((project_config.get("params") or {}).get("fizgig_version") or (FIZGIG_TARGET if mode in ("anima_fz", "sdxl_fz") or not project_name else "v6.5.0"))
+        if mode in FIZGIG_FAMILIES:
+            record = fizgig_runtime(core, version)
+            engine_ready = Path(record["python"]).is_file() and bool(fizgig_source_version(record["source"]))
         supports = {
             key: bool(core.param_supports(key, mode))
             for key in _WORKSPACE_PARAM_KEYS
         }
+        if mode in FIZGIG_FAMILIES and version == FIZGIG_TARGET:
+            for key in ("optimizer", "compile", "global_pos", "global_neg"):
+                supports[key] = True
+            supports["blocks_to_swap"] = mode in ("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz")
+        quant_modes = list(getattr(core, "QUANT_MODE_OPTIONS", {}).get(mode, ()))
+        if mode in FIZGIG_FAMILIES and version == FIZGIG_TARGET:
+            quant_modes = ["auto", "int8", "nf4", "hqq"] if mode == "h3_fz" else ["auto", "bf16", "int8", "nf4"]
         try:
             preset = dict(core.preset_for(mode, "sdxl") or {})
         except Exception:
@@ -2984,12 +3159,12 @@ class ModernUIBridge:
             "kohya": bool(status.get("kohya_ok")),
             "musubi": bool(status.get("musubi_ok")),
             "at": bool(status.get("at_ok")),
-            "fizgig": bool(status.get("fizgig_ok")),
+            "fizgig": engine_ready if mode in FIZGIG_FAMILIES else bool(status.get("fizgig_ok")),
             "base": bool(project_config.get("base_model")),
             "raw": bool(project_config.get("raw_dir")),
         }
         model_checks = {
-            "krea2_models", "krea2_at_models", "flux2_models", "flux2_fz_models", "h3_models", "qwen21_fz_models", "h3_fz_models", "at_model",
+            "krea2_models", "krea2_at_models", "flux2_models", "flux2_fz_models", "h3_models", "qwen21_fz_models", "h3_fz_models", "at_model", "fizgig_new_models",
         }
         for step in getattr(core, "GUIDE_STEPS", {}).get(mode, ()):
             check = step.get("check")
@@ -3029,14 +3204,18 @@ class ModernUIBridge:
             "missing_models": [self._plain_ui_text(item) for item in missing],
             "asset_dir": str(asset_dir or ""),
             "supports": supports,
-            "quant_modes": list(getattr(core, "QUANT_MODE_OPTIONS", {}).get(mode, ())),
+            "quant_modes": quant_modes,
+            "fizgig_version": version if mode in FIZGIG_FAMILIES else "",
+            "fizgig_versions": version_info.get("versions", []),
+            "fizgig_target_version": FIZGIG_TARGET,
+            "model_choice": project_config.get("model_choice"),
             "interval_units": interval_units,
             "interval_hints": interval_hints,
             "defaults": preset,
             "presets": presets,
             "is_video": mode in ("video", "h3_fz"),
             "is_step_based": mode in ("video", "qwen_image", "zimage"),
-            "has_training_submode": mode in ("krea2", "krea2_at", "krea2_fz", "qwen21_fz", "flux2", "flux2_fz"),
+            "has_training_submode": mode in ("krea2", "krea2_at", "krea2_fz", "qwen21_fz", "flux2", "flux2_fz", "anima_fz", "sdxl_fz"),
             "guide_steps": guide_steps,
         }
 
@@ -3051,7 +3230,7 @@ class ModernUIBridge:
         value = re.sub(r"[\U0001f000-\U0001faff\u2600-\u27bf\ufe0e\ufe0f\u200d]+", "", value)
         return value.replace("提示：提示：", "提示：").strip()
 
-    def create_project(self, name, template_name="自定义", config_json="", mode_override=None):
+    def create_project(self, name, template_name="自定义", config_json="", mode_override=None, model_choice=None, training_type="character"):
         guard = self._agent_guard()
         if guard:
             return guard
@@ -3115,6 +3294,18 @@ class ModernUIBridge:
             except Exception as exc:
                 return {"ok": False, "error": "配置导入失败：%s" % exc}
 
+        if model_choice and not imported_config:
+            try:
+                choice = resolve_choice(model_choice)
+                template_name = choice["template"]
+                if training_type not in ("character", "style", "concept"):
+                    raise ValueError("训练目的无效。")
+                if choice["mode"] == "character": mode_override = training_type
+                vendor = self.core.detect_gpu_vendor()
+                if vendor and vendor != "unknown" and vendor not in choice["vendors"]:
+                    raise ValueError("这个模型版本尚未接入当前显卡的训练路径。")
+            except (TypeError, ValueError) as exc:
+                return {"ok": False, "error": str(exc)}
         templates = getattr(self.core, "PROJECT_TEMPLATES", {})
         mode_override = str(mode_override or "").strip()
         if template_name == "Qwen-Image":
@@ -3139,6 +3330,10 @@ class ModernUIBridge:
             "preset_version": int(self.core.PRESET_VERSION),
             "params": {},
         }
+        if not imported_config:
+            data["at_sub_mode"] = training_type
+            if model_choice: data["model_choice"] = {k: model_choice[k] for k in ("model", "variant", "engine")}
+            if mode in FIZGIG_FAMILIES: data["params"]["fizgig_version"] = FIZGIG_TARGET
         if imported_config:
             mode = imported_config.get("mode", mode)
             base_type = imported_config.get("base_type", base_type)
@@ -3498,18 +3693,27 @@ def launch(core, dev=False, debug=False, engine_groups=(), short_mode_labels=Non
             "新版训练页运行组件尚未安装。开发环境请运行 `python -m pip install -r requirements-ui.txt`。"
         ) from exc
 
+    from gui.ui_startup import StartupMonitor, check_page_assets
+
+    startup = StartupMonitor(core)
     root = _app_root()
     index = root / "modern_ui" / "dist" / "index.html"
     if dev:
         url = os.environ.get("KOHYA_UI_DEV_URL", "http://127.0.0.1:5173")
-    elif index.is_file():
-        url = str(index)
     else:
-        raise RuntimeError(
-            "新版训练页资源尚未构建。请先在 modern_ui 目录运行 `npm install` 和 `npm run build`。"
-        )
+        try:
+            check_page_assets(index, startup._log)
+        except Exception as exc:
+            startup.record("asset_check_failed", exc)
+            raise RuntimeError("%s\n\n启动诊断：%s" % (exc, startup.path)) from exc
+        url = str(index)
 
-    bridge = ModernUIBridge(core, engine_groups, short_mode_labels)
+    try:
+        bridge = ModernUIBridge(core, engine_groups, short_mode_labels)
+    except Exception as exc:
+        startup.record("bridge_initialization_failed", exc)
+        raise RuntimeError("工作区初始化失败：%s\n\n启动诊断：%s" % (redact(str(exc)), startup.path)) from exc
+    bridge._startup = startup
     app_name = getattr(core, "APP_NAME", "Kohya-LoRA")
     app_version = getattr(core, "APP_VERSION", "0.0.0")
     window = webview.create_window(
@@ -3523,5 +3727,14 @@ def launch(core, dev=False, debug=False, engine_groups=(), short_mode_labels=Non
         text_select=True,
     )
     bridge._window = window
-    webview.start(gui="edgechromium", debug=debug, http_server=not dev, icon=str(root / "app.ico"))
-    return 0
+    startup.attach(window)
+    try:
+        webview.start(startup.watch, gui="edgechromium", debug=debug, http_server=not dev,
+                      user_agent="KohyaLoRA-Desktop/%s" % app_version, icon=str(root / "app.ico"))
+    except Exception as exc:
+        startup.record("host_failed", exc)
+        raise RuntimeError("新版页面启动失败：%s\n\n启动诊断：%s" % (redact(str(exc)), startup.path)) from exc
+    finally:
+        startup.detach()
+    # Reuse the launcher's existing classic fallback in this process.
+    return "classic" if startup.classic_requested else 0

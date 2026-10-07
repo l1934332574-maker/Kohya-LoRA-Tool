@@ -26,7 +26,7 @@ TOOLS = [
     ('bind_project', '首页开始时绑定用户明确选择的已有项目；本次绑定后不切换到其他项目。', {'name': 'projects 返回的项目名'}),
     ('create_project', '创建新项目并绑定给本次 Agent；不能覆盖已有项目。', {'name': '项目名', 'template': 'projects 返回的模板名'}),
     ('select_dataset', '用户先明确选择或粘贴目录，再保存为当前项目训练数据。', {'path': '可选：当前会话中用户明确授权的完整目录路径；省略时打开文件夹选择器'}),
-    ('select_base_model', '第一引擎：用户明确选择的 safetensors 底模文件会自动识别架构并保存。其他引擎使用各自模型设置。', {'path': '可选：当前会话中用户明确授权的 safetensors 完整文件路径；省略时打开模型选择器'}),
+    ('select_base_model', 'Kohya 或 Fizgig 的 SDXL / Anima：用户明确选择的 safetensors 底模会识别架构并保存。其他模型使用专用模型设置。', {'path': '可选：当前会话中用户明确授权的 safetensors 完整文件路径；省略时打开模型选择器'}),
     ('project', '刷新当前项目的已保存和默认合成参数、缺少的信息。', {}),
     ('inspect_data', '只检查当前项目图集；图片统计不等于视觉质量判断。', {}),
     ('configure', '自动保存经过校验的参数。遵守用户约束，每次返回真实变更差异与备份记录。', {'params': 'project.allowed 中的键值对象', 'reason': '修改依据'}),
@@ -332,6 +332,10 @@ class TrainingAgent:
         params = training_params(self.bridge.core, config, name)
         allowed = {key: LABELS[key] for key in LABELS if self.bridge.core.param_supports(key, mode)}
         quant = list(getattr(self.bridge.core, 'QUANT_MODE_OPTIONS', {}).get(mode, ()))
+        if params.get('fizgig_version') == 'v7.0.1':
+            quant = ['auto', 'int8', 'nf4', 'hqq'] if mode == 'h3_fz' else ['auto', 'bf16', 'int8', 'nf4']
+            for key in ('optimizer', 'compile', 'global_pos', 'global_neg'):
+                if key in LABELS: allowed[key] = LABELS[key]
         if not quant:
             allowed.pop('quant_mode', None)
         if config.get('unet_only') or config.get('base_type') in ('flux', 'anima'):
@@ -340,7 +344,7 @@ class TrainingAgent:
             for key in ('rank', 'alpha', 'unet_lr'):
                 allowed.pop(key, None)
         stored = config.get('params') or {}
-        return {'name': name, 'mode': mode, 'base_type': config.get('base_type'),
+        return {'name': name, 'mode': mode, 'base_type': config.get('base_type'), 'fizgig_version': params.get('fizgig_version'),
                 'dataset_selected': bool(config.get('raw_dir')), 'base_model_selected': bool(config.get('base_model')),
                 'caption_method': stored.get('caption_method', 'wd14'), 'trigger': config.get('trigger', ''),
                 'training_type': mode if mode in ('character', 'style', 'concept') else config.get('at_sub_mode', 'character'),
@@ -367,10 +371,18 @@ class TrainingAgent:
                   'engine': ('kohya' if mode in ('character', 'style', 'concept') else 'fizgig' if mode.endswith('_fz') else 'musubi' if mode in ('krea2', 'flux2') else 'ai_toolkit'),
                   'quant_modes': list(getattr(core, 'QUANT_MODE_OPTIONS', {}).get(mode, ()))}
                  for mode in getattr(core, 'MODE_KEYS', ())]
+        for row in modes:
+            if row['mode'].endswith('_fz'):
+                row['new_project_version'] = 'v7.0.1'
+                row['quant_modes'] = ['auto', 'int8', 'nf4', 'hqq'] if row['mode'] == 'h3_fz' else ['auto', 'bf16', 'int8', 'nf4']
+                row['assistant_params'] += [key for key in ('optimizer', 'compile', 'global_pos', 'global_neg') if key in LABELS and key not in row['assistant_params']]
+                row['note'] = '新项目使用 v7.0.1；旧项目按 project 中的版本与量化选项处理。'
         with self.bridge._task_lock:
             task = self.bridge._task or {}
             task_state = {key: task.get(key) for key in ('id', 'kind', 'status', 'key', 'message')}
-        return public_data({'version': getattr(core, 'APP_VERSION', ''), 'os': platform.platform(), 'gpu': gpu,
+        from kohya_core.model_catalog import catalog
+        catalog_info = catalog(core)
+        return public_data({'model_catalog': catalog_info, 'fizgig_versions': core.fizgig_engine_update_status(), 'version': getattr(core, 'APP_VERSION', ''), 'os': platform.platform(), 'gpu': gpu,
                             'ram_gb': ram, 'python_version': status.get('python'), 'python_conda': bool(status.get('python_conda')),
                             'installed_note': '目录标记与基础检测状态；详细可用性以训练预检为准。', 'installed': {key: bool(status.get(key)) for key in ('git', 'python', 'kohya_ok', 'musubi_ok', 'at_ok', 'fizgig_ok')},
                             'modes': modes, 'task': task_state,
@@ -944,7 +956,7 @@ class TrainingAgent:
         if name == 'project':
             return self.project_context()
         if name in ('select_dataset', 'select_base_model'):
-            if name == 'select_base_model' and mode not in ('character', 'style', 'concept'):
+            if name == 'select_base_model' and mode not in ('character', 'style', 'concept', 'anima_fz', 'sdxl_fz'):
                 return {'ok': False, 'error': '此模式使用独立模型管理，请先查看 environment / model_files，或让用户在对应模型面板设置。'}
             candidate = args.get('path')
             if candidate:
@@ -970,6 +982,12 @@ class TrainingAgent:
                 detected = None
             if detected not in ('sd15', 'sdxl', 'flux', 'anima'):
                 raise CaptionError('无法从 safetensors 元数据识别底模架构，没有更改项目配置。')
+            if mode in ('anima_fz', 'sdxl_fz'):
+                expected = 'anima' if mode == 'anima_fz' else 'sdxl'
+                if detected != expected:
+                    raise CaptionError('所选底模架构与此项目不匹配；没有修改配置。')
+                from kohya_core.fizgig_adapter import validate_base
+                validate_base(bridge.core, expected, selected_path)
             return self._save({'base_model': selected_path, 'base_type': detected}, '用户明确选择并识别 safetensors 底模')
         if name == 'configure':
             context = self.project_context()
@@ -1005,7 +1023,7 @@ class TrainingAgent:
                     raise CaptionError('当前模式不接受此 AMD 开关。')
                 patch['params'] = {'amd_mode': args['amd_mode']}
             if 'unet_only' in args:
-                if not isinstance(args['unet_only'], bool) or mode not in ('character', 'style', 'concept'):
+                if not isinstance(args['unet_only'], bool) or mode not in ('character', 'style', 'concept', 'anima_fz', 'sdxl_fz'):
                     raise CaptionError('当前模式不接受文本编码器训练开关。')
                 patch['unet_only'] = args['unet_only']
             if not patch:
@@ -1160,7 +1178,7 @@ class TrainingAgent:
             actions = {'character': 'cmd_install', 'style': 'cmd_install', 'concept': 'cmd_install',
                        'krea2': 'cmd_install_musubi', 'flux2': 'cmd_install_musubi',
                        'video': 'cmd_install_at', 'krea2_at': 'cmd_install_at', 'qwen_image': 'cmd_install_at', 'zimage': 'cmd_install_at',
-                       'krea2_fz': 'cmd_install_fizgig', 'flux2_fz': 'cmd_install_fizgig', 'qwen21_fz': 'cmd_install_fizgig', 'h3_fz': 'cmd_install_fizgig'}
+                       'krea2_fz': 'cmd_install_fizgig', 'flux2_fz': 'cmd_install_fizgig', 'qwen21_fz': 'cmd_install_fizgig', 'h3_fz': 'cmd_install_fizgig', 'anima_fz': 'cmd_install_fizgig', 'sdxl_fz': 'cmd_install_fizgig'}
             action = 'cmd_env' if target == 'prerequisites' else actions.get(mode) if target == 'engine' else None
             if not action:
                 raise CaptionError('环境修复目标无效。')
@@ -1205,7 +1223,7 @@ class TrainingAgent:
                     self._update(policy=policy)
             return self._wait_task(result)
         if name == 'use_downloaded_model':
-            if mode not in ('character', 'style', 'concept'):
+            if mode not in ('character', 'style', 'concept', 'anima_fz', 'sdxl_fz'):
                 return {'ok': False, 'error': '当前模式使用专用模型管理；已下载文件保留在模型目录，请在相应模型设置中配置。'}
             downloaded = self.state.get('last_download') or {}
             path = downloaded.get('path')
@@ -1220,6 +1238,12 @@ class TrainingAgent:
             current_arch = config.get('base_type')
             if current_arch and current_arch not in (actual, 'unknown'):
                 return {'ok': False, 'error': '下载模型架构为 %s，与项目当前 %s 不匹配；项目配置未更改。' % (actual, current_arch)}
+            if mode in ('anima_fz', 'sdxl_fz'):
+                expected = 'anima' if mode == 'anima_fz' else 'sdxl'
+                if actual != expected:
+                    return {'ok': False, 'error': '下载底模与此项目的模型架构不匹配。'}
+                from kohya_core.fizgig_adapter import validate_base
+                validate_base(bridge.core, expected, path)
             return self._save({'base_model': path, 'base_type': actual}, '使用本轮从公开仓库下载并校验的模型文件')
         if name == 'training_history':
             return public_data(bridge.list_training_runs(project_name))

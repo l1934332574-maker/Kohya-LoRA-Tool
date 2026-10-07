@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import ModelTrainingChooser from './components/ModelTrainingChooser.vue'
+import catalogData from '../../kohya_core/model_catalog.json'
 import TrainingAssistant from './components/TrainingAssistant.vue'
 import EngineSidebar from './components/EngineSidebar.vue'
 import LogDock from './components/LogDock.vue'
@@ -14,11 +16,14 @@ import ModernTrainingDialog from './components/ModernTrainingDialog.vue'
 import TrainingHistoryDialog from './components/TrainingHistoryDialog.vue'
 import ModelDownloadDialog from './components/ModelDownloadDialog.vue'
 import EnvironmentDialog from './components/EnvironmentDialog.vue'
+import PromptReverseDialog from './components/PromptReverseDialog.vue'
 import ModernHelpDialog from './components/ModernHelpDialog.vue'
 import AppearanceDialog from './components/AppearanceDialog.vue'
 import {
   loadBootstrap,
   type BootstrapData,
+  type ModelChoice,
+  type ModelCatalogData,
   type ProjectCard,
   type ProjectConfig,
   type QwenModelSaveResult,
@@ -65,6 +70,7 @@ const workspaceKind = ref<'qwen' | 'kohya' | 'engine'>('qwen')
 const workspaceProject = ref<ProjectCard | null>(null)
 const workspaceConfig = ref<ProjectConfig | null>(null)
 const assistantOpen = ref(false)
+const promptReverseOpen = ref(false)
 const agentBusy = ref(false)
 const previewConfigs = ref<Record<string, ProjectConfig>>({})
 const modeWorkspace = ref<ModeWorkspaceData | null>(null)
@@ -82,6 +88,10 @@ const editingProject = ref<ProjectCard | null>(null)
 const projectName = ref('')
 const templateName = ref('自定义')
 const createModeOverride = ref('')
+const createChoice = ref<ModelChoice | undefined>()
+const createModel = ref('sdxl')
+const createGoal = ref('character')
+const createChoiceAvailable = ref(true)
 const busy = ref(false)
 const formError = ref('')
 const toast = ref('')
@@ -123,7 +133,7 @@ const importedConfigPreview = ref<ProjectConfig | null>(null)
 const importedConfigLabel = ref('')
 let previousFocus: HTMLElement | null = null
 let projectNameSuggestionRequest = 0
-let uiIdleFadeTimer: ReturnType<typeof setTimeout> | undefined
+let uiIdleFadeTimer: number | undefined
 const UI_IDLE_FADE_DELAY_MS = 45_000
 const reservedPreviewProjectNames = new Set<string>()
 let systemThemeQuery: MediaQueryList | null = null
@@ -153,6 +163,7 @@ function registerUiActivity() {
 
 const projects = computed(() => data.value?.projects ?? [])
 function projectMatchesSidebarMode(project: ProjectCard, mode: string) {
+  if (mode.startsWith("model:")) return modelKeyForProject(project) === mode.slice(6)
   const baseType = firstEngineBaseTypeForSidebarMode(mode)
   if (baseType) return isKohyaProject(project) && project.base_type === baseType
   return mode === '_kohya' ? isKohyaProject(project) : project.mode === mode
@@ -162,21 +173,29 @@ const visibleProjects = computed(() => projectModeFilter.value
   : projects.value)
 const projectModeFilterLabel = computed(() => sidebarGroups.value
   .flatMap((group) => group.modes)
-  .find((mode) => mode.key === projectModeFilter.value)?.label ?? '当前引擎')
+  .find((mode) => mode.key === projectModeFilter.value)?.label ?? '当前模型')
 const templates = computed(() => data.value?.templates ?? [])
-const sidebarGroups = computed(() => (data.value?.engine_groups ?? []).map((group) => {
-  if (!group.modes.some((mode) => mode.key === '_kohya')) return group
-  const firstEngineEntries = [
-    { key: firstEngineSidebarModes.sd15, label: 'SD 1.5' },
-    { key: firstEngineSidebarModes.sdxl, label: 'SDXL 1.0' },
-    { key: firstEngineSidebarModes.flux, label: 'FLUX.1' },
-    { key: firstEngineSidebarModes.anima, label: 'Anima' },
-  ]
-  return {
-    ...group,
-    modes: group.modes.flatMap((mode) => mode.key === '_kohya' ? firstEngineEntries : [mode]),
-  }
-}))
+const catalog = computed<ModelCatalogData>(() => data.value?.model_catalog ?? { models: catalogData, gpu_vendor: 'unknown', gpu: '浏览器预览' })
+const sidebarGroups = computed(() => [{label: '选择模型', modes: catalog.value.models.map(model => ({key: `model:${model.key}`, label: model.label}))}])
+function modelKeyForProject(project: ProjectCard): string {
+  if (isKohyaProject(project)) return project.base_type
+  const modeMap: Record<string, string> = {anima_fz:'anima',sdxl_fz:'sdxl',krea2:'krea2',krea2_at:'krea2',krea2_fz:'krea2',flux2:'klein',flux2_fz:'klein',qwen_image:'qwen',qwen21_fz:'qwen',video:'h3',h3_fz:'h3',zimage:'zimage'}
+  return modeMap[project.mode] || project.mode
+}
+const selectedNavModel = computed(() => workspaceProject.value ? `model:${modelKeyForProject(workspaceProject.value)}` : selectedMode.value.startsWith('model:') ? selectedMode.value : `model:${firstEngineBaseTypeForSidebarMode(selectedMode.value) || modelKeyForProject({mode:selectedMode.value,base_type:'sdxl'} as ProjectCard)}`)
+function preferredModeForModel(key: string): string {
+  const model = catalog.value.models.find(m => m.key === key)
+  const choices = model?.variants.flatMap(v => v.engines) || []
+  return (choices.find(e => e.recommended) || choices.find(e => catalog.value.gpu_vendor === 'unknown' || e.vendors.includes(catalog.value.gpu_vendor)) || choices[0])?.mode || 'character'
+}
+function onModelChoice(choice: ModelChoice, template: string, mode: string, goal: string) {
+  createChoice.value = choice
+  createChoiceAvailable.value = true
+  templateName.value = template
+  createModeOverride.value = firstEngineModes.includes(mode as FirstEngineMode) ? goal : ''
+  createGoal.value = goal
+}
+
 const topActions = [
   { key: 'tools', icon: 'toolbox', label: '小工具', tip: '打开查看显存、清理显存/内存和缓存等训练辅助工具。' },
   { key: 'check_update', icon: 'refresh', label: '检查更新', tip: '检查 Kohya-LoRA 软件更新；训练引擎更新在对应训练引擎界面中处理。' },
@@ -187,7 +206,7 @@ const topActions = [
 const trainActionLabel = computed(() => workspaceOpen.value ? '一键开始训练' : '打开新版训练页')
 const guideSteps = computed(() => modeWorkspace.value?.guide_steps ?? [])
 const guideLabel = computed(() => workspaceProject.value?.mode_label || modeWorkspace.value?.label || '')
-const selectedGuideMode = computed(() => selectedMode.value === '_kohya'
+const selectedGuideMode = computed(() => selectedMode.value.startsWith('model:') ? preferredModeForModel(selectedMode.value.slice(6)) : selectedMode.value === '_kohya'
   ? (projects.value.find(isKohyaProject)?.mode || 'character')
   : firstEngineBaseTypeForSidebarMode(selectedMode.value)
     ? (projects.value.find((project) => isKohyaProject(project)
@@ -200,6 +219,8 @@ const demoPresets: Record<string, Record<string, string>> = {
   style: { rank: '16', alpha: '8', unet_lr: '1.5e-4', te_lr: '7.5e-5', repeats: '5', max_epochs: '8', resolution: '512', noise_offset: '0.05', min_snr_gamma: '5' },
   character: { rank: '32', alpha: '16', unet_lr: '7e-5', te_lr: '4e-5', repeats: '3', max_epochs: '6', resolution: '512', noise_offset: '0.05', min_snr_gamma: '5' },
   concept: { rank: '32', alpha: '16', unet_lr: '1e-4', te_lr: '5e-5', repeats: '3', max_epochs: '8', resolution: '512', noise_offset: '0.05', min_snr_gamma: '5' },
+  anima_fz: {rank:'16',alpha:'16',unet_lr:'1e-4',te_lr:'0',repeats:'2',max_epochs:'16',resolution:'512'},
+  sdxl_fz: {rank:'16',alpha:'16',unet_lr:'1e-4',te_lr:'0',repeats:'2',max_epochs:'16',resolution:'512'},
   krea2: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '16', resolution: '512' },
   krea2_at: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '8', resolution: '512' },
   krea2_fz: { rank: '32', alpha: '32', unet_lr: '1e-4', te_lr: '1e-4', repeats: '2', max_epochs: '16', resolution: '512' },
@@ -214,6 +235,8 @@ const demoPresets: Record<string, Record<string, string>> = {
 
 
 const demoQuantModes: Record<string, string[]> = {
+  anima_fz: ['auto','bf16','int8','nf4'],
+  sdxl_fz: ['auto','bf16','int8','nf4'],
   krea2: ['auto', 'fp8', 'int8', 'nf4'],
   flux2: ['auto', 'fp8', 'int8', 'nf4'],
   krea2_fz: ['auto', 'fp8', 'int8', 'nf4', 'bf16'],
@@ -277,15 +300,15 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
   const template = templates.value.find((item) => item.mode === mode)
   const preset = demoPresets[mode] ?? {}
   const stepBased = ['video', 'qwen_image', 'zimage'].includes(mode)
-  const usesEpochs = ['krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz'].includes(mode)
+  const usesEpochs = ['krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz'].includes(mode)
   const supports: Record<string, boolean> = {
     rank: true, alpha: true, unet_lr: true, te_lr: false, repeats: !stepBased,
     max_epochs: !stepBased, resolution: true, save_every: true, sample_interval: true,
-    video_steps: stepBased, video_frames: ['video', 'h3_fz'].includes(mode), optimizer: !['krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz'].includes(mode),
+    video_steps: stepBased, video_frames: ['video', 'h3_fz'].includes(mode), optimizer: !['krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz'].includes(mode),
     strong_bind: true, clean_concept: true, sample_preview: true, compile: ['krea2', 'flux2', 'krea2_fz'].includes(mode),
     global_pos: ['style', 'character', 'concept'].includes(mode), global_neg: ['style', 'character', 'concept'].includes(mode),
     crop_ratio: true, sample_prompt: true, noise_offset: false, min_snr_gamma: false,
-    quant_mode: ['krea2', 'flux2', 'krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz'].includes(mode),
+    quant_mode: ['krea2', 'flux2', 'krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz'].includes(mode),
     blocks_to_swap: ['krea2', 'flux2', 'krea2_fz', 'flux2_fz'].includes(mode),
     // ★ 2026-09-27 新增：批大小 / 梯度检查点（用户诉求「训练器能改 bs 和梯度检查点」）
     //   第一引擎（画风/人物/概念）与第二引擎的 Krea2 / FLUX.2 都真读它们；
@@ -341,7 +364,7 @@ function showToast(message: string) {
 function normalizeImportedConfig(raw: unknown): ProjectConfig {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('配置文件内容不是有效的 JSON 对象。')
   const source = raw as Record<string, unknown>
-  const modes = new Set(['style', 'character', 'concept', 'krea2', 'krea2_at', 'krea2_fz', 'qwen21_fz', 'h3_fz', 'flux2', 'flux2_fz', 'video', 'qwen_image', 'zimage'])
+  const modes = new Set(['style', 'character', 'concept', 'krea2', 'krea2_at', 'krea2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz', 'flux2', 'flux2_fz', 'video', 'qwen_image', 'zimage'])
   const baseTypes = new Set(['sd15', 'sdxl', 'flux', 'anima'])
   const mode = typeof source.mode === 'string' && modes.has(source.mode) ? source.mode : 'character'
   const requestedBaseType = typeof source.base_type === 'string' ? source.base_type : ''
@@ -416,6 +439,9 @@ function openCreate(preselectedTemplate?: string, preselectedMode?: FirstEngineM
   dialogKind.value = 'create'
   editingProject.value = null
   createModeOverride.value = preselectedMode ?? ''
+  createChoice.value = undefined
+  createGoal.value = preselectedMode || 'character'
+  createModel.value = selectedNavModel.value.slice(6) || 'sdxl'
   const fallbackName = preview.value ? nextPreviewProjectName() : data.value?.default_project_name ?? ''
   projectName.value = fallbackName
   templateName.value = preselectedTemplate ?? templates.value.find((item) => item.name === '自定义')?.name ?? templates.value[0]?.name ?? '自定义'
@@ -439,6 +465,7 @@ function openCreate(preselectedTemplate?: string, preselectedMode?: FirstEngineM
 function openCreateForSelectedMode() {
   if (!projectModeFilter.value) return openCreate()
   const mode = projectModeFilter.value
+  if (mode.startsWith('model:')) return openCreate()
   const baseType = firstEngineBaseTypeForSidebarMode(mode)
   if (baseType) return openCreate(templateForBaseType(baseType))
   if (mode === '_kohya') return openCreate()
@@ -456,6 +483,7 @@ function openRename(project: ProjectCard) {
 }
 
 async function saveDialog() {
+  if (dialogKind.value === 'create' && !importedConfigJson.value && !createChoiceAvailable.value) { formError.value='这个模型版本尚未接入当前显卡，请选择其他版本。'; return }
   const name = projectName.value.trim()
   if (!name) {
     formError.value = '请填写项目名称。'
@@ -499,7 +527,10 @@ async function saveDialog() {
           raw_dir: '',
           base_model: String(imported?.base_model ?? ''),
         }
-        if (imported) previewConfigs.value = { ...previewConfigs.value, [name]: imported }
+        previewConfigs.value = { ...previewConfigs.value, [name]: imported ?? {
+          mode, base_type: baseType, at_sub_mode: createGoal.value, model_choice: createChoice.value,
+          params: mode.endsWith('_fz') ? { fizgig_version: 'v7.0.1' } : {},
+        } }
         data.value!.projects = [project, ...projects.value]
         appendLog(imported
           ? `[项目] 已在预览中创建「${name}」，并载入 ${importedConfigLabel.value || '导入配置'}。`
@@ -520,6 +551,8 @@ async function saveDialog() {
         templateName.value,
         importedConfigJson.value || undefined,
         importedConfigJson.value ? undefined : modeOverrideForSelectedTemplate(),
+        importedConfigJson.value ? undefined : createChoice.value,
+        createGoal.value,
       )
       if (!result.ok) {
         formError.value = result.error ?? '项目创建失败。'
@@ -829,10 +862,12 @@ async function refreshGuideState() {
   const mode = workspaceProject.value?.mode || selectedGuideMode.value
   const projectName = workspaceProject.value?.name || ''
   try {
-    const [details, latestProjects] = await Promise.all([
+    const [details, latestProjects, catalog] = await Promise.all([
       window.pywebview.api.get_mode_workspace(mode, projectName),
       window.pywebview.api.list_projects(),
+      window.pywebview.api.get_model_catalog(),
     ])
+    data.value!.model_catalog = catalog
     if (details.ok && (!workspaceOpen.value || workspaceProject.value?.mode === mode)) modeWorkspace.value = details
     data.value!.projects = latestProjects
     if (workspaceProject.value) {
@@ -867,7 +902,7 @@ async function onGuideAction(step: GuideStep) {
     setupDialogOpen.value = true
     return
   }
-  if (action === 'cmd_dl_krea2_models' || action === 'cmd_dl_flux2_models' || action === 'cmd_dl_h3_models' || action === 'cmd_dl_qwen21_fz_models' || action === 'cmd_dl_h3_fz_models') {
+  if (action === 'cmd_dl_krea2_models' || action === 'cmd_dl_flux2_models' || action === 'cmd_dl_h3_models' || action === 'cmd_dl_qwen21_fz_models' || action === 'cmd_dl_h3_fz_models' || action === 'cmd_dl_anima_fz_models' || action === 'cmd_dl_sdxl_fz_models') {
     modelDialogOpen.value = true
     return
   }
@@ -949,6 +984,7 @@ function logExportCompleted(path: string) {
 }
 
 async function runAction(action: string, projectName?: string) {
+  if (action === 'prompt_reverse') { promptReverseOpen.value = true; return }
   if (action === 'export_log' || action === 'export_diagnostics') { await exportLog(action, projectName); return }
   if (action === 'train') {
     if (preview.value && workspaceOpen.value) {
@@ -1148,6 +1184,14 @@ async function loadAppearanceSettings() {
 }
 
 async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
+  if (action === 'fizgig_engine_update' || action === 'fizgig_engine_rollback') {
+    if (patch && Object.keys(patch).length && (await saveKohyaConfig(patch)) === false) return
+    setupAction.value = action
+    agentTaskTitle.value = ''
+    setupDialogOpen.value = true
+    return
+  }
+  if (action === 'cmd_dl_anima_fz_models' || action === 'cmd_dl_sdxl_fz_models') { modelDialogOpen.value=true; return }
   if (action === 'training_history') { historyDialogOpen.value = true; return }
   if (!workspaceProject.value) return showToast('请先打开一个项目。')
   if (patch && Object.keys(patch).length && (await saveKohyaConfig(patch)) === false) return
@@ -1183,9 +1227,9 @@ function chooseMode(mode: string) {
   qwenModelSetup.value = null
   modeWorkspace.value = null
   projectModeFilter.value = mode
-  const targetMode = mode === '_kohya' ? selectedGuideMode.value : mode
+  const targetMode = mode.startsWith("model:") ? preferredModeForModel(mode.slice(6)) : mode === '_kohya' ? selectedGuideMode.value : mode
   void refreshHomeGuide(targetMode)
-  if (visibleProjects.value.length) showToast('请选择要打开的项目；切换引擎不会自动切换项目。')
+  if (visibleProjects.value.length) showToast('请选择要打开的项目；选择模型不会改变已有项目的引擎。')
   else openCreateForSelectedMode()
 }
 
@@ -1222,6 +1266,22 @@ function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape' && dialogOpen.value) dialogOpen.value = false
 }
 
+function reloadStartup() { window.location.reload() }
+
+async function startupRecovery(action: 'open_ui_startup_report' | 'use_classic_ui') {
+  const api = window.pywebview?.api
+  if (!api?.[action]) {
+    loadError.value = '本机连接不可用，请退出软件后通过经典界面入口启动。启动诊断保存在数据目录的 logs 文件夹。'
+    return
+  }
+  try {
+    const result = await api[action]()
+    if (!result.ok) loadError.value = result.error || '操作未完成。'
+  } catch {
+    loadError.value = '本机连接未响应，请先退出软件，再从经典界面入口启动。'
+  }
+}
+
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('pointermove', registerUiActivity, { passive: true })
@@ -1246,6 +1306,7 @@ onMounted(async () => {
     else await refreshHomeGuide(firstEngineProject?.mode || 'character')
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : '无法连接桌面程序。'
+    window.__kohyaStartup?.report('page_error', loadError.value)
   } finally {
     loading.value = false
   }
@@ -1287,7 +1348,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
     <TrainingAssistant v-if="assistantOpen" :desktop="!preview" :project-name="workspaceOpen ? workspaceProject?.name || '' : ''" :can-use-project="assistantCanUseProject" @close="assistantOpen = false" @changed="refreshAssistantProject" @created-project="openAgentCreatedProject" @open-project="openAssistantProject" @open-task="(id) => openAgentTask(id)" @active="agentBusy = $event" />
     <EngineSidebar
       :groups="sidebarGroups"
-      :selected-mode="selectedMode"
+      :selected-mode="selectedNavModel"
       :train-label="trainActionLabel"
       :status-text="projects.length ? '✓ 选择项目后进入新版训练页' : '新建项目后开始配置训练'"
       :workspace-active="workspaceOpen"
@@ -1373,7 +1434,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
           </div>
         </header>
         <div class="project-hint">
-          {{ projectModeFilter ? `请选择 ${projectModeFilterLabel} 的项目；切换引擎不会自动打开其他项目。` : '每个项目保存一套完整的训练配置（模式 / 底模 / 数据集 / 触发词 / 全部参数），下次直接打开续用。' }}
+          {{ projectModeFilter ? `请选择 ${projectModeFilterLabel} 的项目；选择模型不会自动打开其他项目。` : '每个项目保存一套完整的训练配置（模式 / 底模 / 数据集 / 触发词 / 全部参数），下次直接打开续用。' }}
           <button v-if="projectModeFilter" class="small-button" type="button" @click="projectModeFilter = null">显示全部项目</button>
         </div>
         <section class="project-list" aria-label="项目列表">
@@ -1388,7 +1449,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
             />
           </TransitionGroup>
           <div v-else-if="projectModeFilter" class="empty-projects">
-            <strong>这个引擎还没有项目</strong>
+            <strong>这个模型还没有项目</strong>
             <span>新建项目后再选择图片和标签。</span>
             <button class="small-button primary" type="button" @click="openCreateForSelectedMode()">新建项目</button>
           </div>
@@ -1400,7 +1461,14 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
         </section>
       </div>
       <div v-else-if="loading" key="loading" class="loading-state"><span class="loader"></span>正在连接本机工作区…</div>
-      <div v-else key="error" class="error-state"><strong>无法连接桌面工作区</strong><span>{{ loadError }}</span></div>
+      <div v-else key="error" class="error-state">
+        <strong>无法连接桌面工作区</strong><span>{{ loadError }}</span>
+        <div class="startup-recovery-actions">
+          <button class="small-button" type="button" @click="reloadStartup">重新加载页面</button>
+          <button class="small-button" type="button" @click="startupRecovery('open_ui_startup_report')">打开启动诊断</button>
+          <button class="small-button" type="button" @click="startupRecovery('use_classic_ui')">改用经典界面</button>
+        </div>
+      </div>
       </Transition>
       </div>
       <LogDock v-if="!loading && !loadError" :entries="logs" :exporting="logExportBusy" @export="runAction('export_log')" />
@@ -1410,7 +1478,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
     <ModernTaskDialog
       ref="setupDialogRef"
       :open="setupDialogOpen"
-      :title="agentTaskTitle || (setupAction === 'preprocess' ? '数据预处理' : setupAction === 'cmd_env' ? '环境准备（Git / Python）' : setupAction === 'cmd_install' ? '安装 Kohya 训练内核' : setupAction === 'cmd_install_musubi' ? '安装第二引擎 · musubi' : setupAction === 'cmd_install_at' ? '安装第三引擎 · AI Toolkit' : '安装第四引擎 · Fizgig')"
+      :title="agentTaskTitle || (setupAction === 'preprocess' ? '数据预处理' : setupAction === 'cmd_env' ? '环境准备（Git / Python）' : setupAction === 'cmd_install' ? '安装 Kohya 训练内核' : setupAction === 'cmd_install_musubi' ? '安装第二引擎 · musubi' : setupAction === 'cmd_install_at' ? '安装第三引擎 · AI Toolkit' : setupAction === 'fizgig_engine_rollback' ? '回退 Fizgig 活动版本' : setupAction === 'fizgig_engine_update' ? '更新 Fizgig v7.0.1' : '安装 Fizgig v7.0.1')"
       :action="setupAction"
       :description="setupAction === 'agent_task' ? '助手已启动此任务；这里显示软件的实际执行进度与日志。' : setupAction === 'preprocess' ? '调用现有预处理器处理当前项目图集和标签；只预处理，不启动训练。' : setupAction === 'cmd_env' ? '检测并准备 Git 与兼容版本的 Python。此项通常只需要完成一次。' : '安装过程会复用现有训练内核安装逻辑；已安装的部分会检测并复用。'"
       :project-name="workspaceProject?.name ?? ''"
@@ -1446,6 +1514,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
       @changed="refreshGuideState"
       @notify="showToast"
     />
+    <PromptReverseDialog :open="promptReverseOpen" :desktop="!preview" @close="promptReverseOpen = false" @notify="showToast" />
     <EnvironmentDialog
       :open="envDialogOpen"
       :choose-path="chooseWorkspacePath"
@@ -1485,11 +1554,8 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
             <button class="dialog-close" type="button" aria-label="关闭" @click="dialogOpen = false">×</button>
           </header>
           <template v-if="dialogKind === 'create'">
-            <label class="field-label" for="project-template">选择预设模板</label>
-            <select id="project-template" v-model="templateName" class="dialog-select">
-              <option v-for="template in templates" :key="template.name" :value="template.name">{{ template.name }}</option>
-            </select>
-            <p class="template-note">{{ templates.find((item) => item.name === templateName)?.note ?? '模板只设置训练模式和底模类型。' }}</p>
+            <ModelTrainingChooser v-if="!importedConfigLabel" :catalog="catalog" :initial-model="createModel" :initial-goal="createGoal" @choose="onModelChoice" @valid="createChoiceAvailable = $event" />
+            <p v-else class="template-note">保留导入配置中的模型、引擎版本和参数。</p>
             <div class="import-config-row">
               <input ref="importFileInput" class="import-config-input" type="file" accept=".json,application/json" @change="readImportConfig" />
               <div class="import-config-actions">

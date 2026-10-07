@@ -1,3 +1,8 @@
+export interface ModelChoice { model: string; variant: string; engine: string }
+export interface ModelEngineChoice { key: string; label: string; mode: string; template: string; vendors: string[]; reason: string; experimental: boolean; recommended?: boolean; supported?: boolean; installed?: boolean; status?: string }
+export interface ModelVariant { key: string; label: string; note: string; preferred: Record<string, string | undefined>; engines: ModelEngineChoice[] }
+export interface ModelCatalogData { models: Array<{ key: string; label: string; variants: ModelVariant[] }>; gpu_vendor: string; gpu: string }
+
 export interface ProjectCard {
   name: string
   updated: string
@@ -25,6 +30,7 @@ export interface BootstrapData {
   modes: Array<{ key: string; label: string }>
   templates: ProjectTemplate[]
   projects: ProjectCard[]
+  model_catalog?: ModelCatalogData
   engine_groups: EngineGroup[]
   logs: string[]
 }
@@ -131,6 +137,12 @@ export interface CaptionReport {
   items: Array<{ name: string; status: string; caption?: string; error?: string }>;
 }
 
+export interface PromptReverseItem { name: string; status: string; caption?: string; error?: string }
+export interface PromptReverseReport {
+  task_id: string; directory: string; path: string; method: 'natural' | 'wd14'; language: 'zh' | 'en'; length: 'brief' | 'detailed';
+  status: string; total: number; generated: number; failed: number; items: PromptReverseItem[]; error?: string;
+}
+
 export interface AssistantResult {
   ok: boolean; error?: string; id?: string; project?: string; status?: string; answer?: string;
   changes?: Array<{ key: string; label: string; before: unknown; after: unknown }>;
@@ -158,6 +170,9 @@ export interface AgentRun {
 }
 
 export interface DesktopApi {
+  report_ui_startup(stage: string, detail?: string): Promise<{ ok: boolean }>
+  open_ui_startup_report(): Promise<{ ok: boolean; error?: string; path?: string }>
+  use_classic_ui(): Promise<{ ok: boolean; error?: string }>
   get_agent_environment(): Promise<{ ok: boolean; error?: string; environment?: AgentRun['environment'] }>
   start_agent(project: string, options: { goal: string; execute: boolean; allow_remote: boolean; allow_install: boolean; allow_download: boolean; allow_remote_images: boolean; auto_review: boolean; allow_auto_train?: boolean }): Promise<{ ok: boolean; error?: string; id?: string }>
   get_agent_state(project?: string): Promise<{ ok: boolean; error?: string; run?: AgentRun | null; active_project?: string | null; active_run_id?: string | null }>
@@ -166,6 +181,10 @@ export interface DesktopApi {
   control_agent(id: string, action: 'pause' | 'resume' | 'takeover'): Promise<{ ok: boolean; error?: string }>
   pick_agent_path(id: string, kind: 'folder' | 'model', path?: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean; path?: string }>
   stop_agent(id: string, stop_task: boolean): Promise<{ ok: boolean; error?: string }>
+  start_prompt_reverse(options: { path: string; method: 'natural' | 'wd14'; language: 'zh' | 'en'; length: 'brief' | 'detailed'; wd14_model: string; threshold: number; allow_remote: boolean }): Promise<{ ok: boolean; task_id?: string; error?: string }>
+  get_prompt_reverse(task_id?: string): Promise<{ ok: boolean; task_id: string; report?: PromptReverseReport | null; task?: { id: string; status: string; message: string; detail: string; progress: number | null } | null }>
+  get_prompt_reverse_image(task_id: string, name: string): Promise<{ ok: boolean; data_url?: string; error?: string }>
+  export_prompt_reverse(task_id: string, items: Array<{ name: string; caption: string }>, directory: string): Promise<{ ok: boolean; directory?: string; written?: number; error?: string }>
   get_caption_service(): Promise<{ ok: boolean; settings?: CaptionServiceSettings; task?: { id: string; status: string; project_name: string }; error?: string }>
   save_caption_service(settings: CaptionServiceSettings & { api_key?: string; clear_key?: boolean }): Promise<{ ok: boolean; settings?: CaptionServiceSettings; error?: string }>
   start_caption_task(project_name: string, options: { directory: string; language: string; length: string; preview: boolean; replace: boolean; allow_remote: boolean; retry_task_id?: string }): Promise<{ ok: boolean; task_id?: string; error?: string }>
@@ -186,7 +205,7 @@ export interface DesktopApi {
   bootstrap(): Promise<BootstrapData>
   suggest_project_name(): Promise<{ ok: boolean; name?: string; error?: string }>
   list_projects(): Promise<ProjectCard[]>
-  create_project(name: string, templateName: string, configJson?: string, modeOverride?: string): Promise<CreateProjectResult>
+  create_project(name: string, templateName: string, configJson?: string, modeOverride?: string, modelChoice?: ModelChoice, trainingType?: string): Promise<CreateProjectResult>
   rename_project(oldName: string, newName: string): Promise<{ ok: boolean; error?: string; log?: string }>
   delete_project(name: string): Promise<{ ok: boolean; error?: string; log?: string }>
   open_project(name: string): Promise<{ ok: boolean; error?: string }>
@@ -216,6 +235,7 @@ export interface DesktopApi {
   start_training(project_name: string, use_resume?: boolean): Promise<{ ok: boolean; task_id?: string; error?: string }>
   continue_training(task_id: string): Promise<{ ok: boolean; error?: string }>
   start_preprocess_task(project_name: string): Promise<{ ok: boolean; task_id?: string; error?: string }>
+  get_model_catalog(): Promise<ModelCatalogData>
   get_mode_workspace(mode: string, project_name?: string): Promise<ModeWorkspaceData>
   inspect_base_model(path: string): Promise<{ ok: boolean; base_type?: string; error?: string }>
   start_setup_task(action: string): Promise<{ ok: boolean; task_id?: string; error?: string }>
@@ -394,6 +414,10 @@ export interface ModeWorkspaceData {
   concept_type_hints?: Record<string, string>
   engine_ready: boolean
   engine_update_available?: boolean
+  fizgig_version?: string
+  fizgig_versions?: string[]
+  fizgig_target_version?: string
+  model_choice?: ModelChoice
   engine_key: string
   gpu: string
   gpu_vendor: string
@@ -418,6 +442,7 @@ export interface ModeWorkspaceData {
 declare global {
   interface Window {
     pywebview?: { api: DesktopApi }
+    __kohyaStartup?: { mounted(): void; fail(detail: string): void; report(stage: string, detail?: string): void }
   }
 }
 
@@ -446,7 +471,7 @@ const demoEngineGroups: EngineGroup[] = [
   { label: '第四引擎 · fizgig', modes: [{ key: 'krea2_fz', label: 'Krea2F' }, { key: 'flux2_fz', label: 'Klein9B' }, { key: 'qwen21_fz', label: 'Qwen2.1F' }, { key: 'h3_fz', label: 'H3-F' }] },
 ]
 
-export async function waitForDesktopBridge(timeoutMs = 1800): Promise<boolean> {
+export async function waitForDesktopBridge(timeoutMs = 15000): Promise<boolean> {
   const isReady = () => typeof window.pywebview?.api?.bootstrap === 'function'
   if (isReady()) return true
   return new Promise((resolve) => {
@@ -465,9 +490,30 @@ export async function waitForDesktopBridge(timeoutMs = 1800): Promise<boolean> {
 }
 
 export async function loadBootstrap(): Promise<{ data: BootstrapData; preview: boolean }> {
-  const ready = await waitForDesktopBridge()
+  const desktopExpected = navigator.userAgent.includes('KohyaLoRA-Desktop/') || Boolean(window.pywebview)
+  // Browser previews have no desktop API. Only the installed host waits for it.
+  const ready = await waitForDesktopBridge(desktopExpected ? 15000 : 1800)
   if (ready && window.pywebview?.api) {
-    return { data: await window.pywebview.api.bootstrap(), preview: false }
+    let timer: number | undefined
+    try {
+      const data = await Promise.race([
+        window.pywebview.api.bootstrap(),
+        new Promise<never>((_resolve, reject) => {
+          timer = window.setTimeout(() => {
+            window.__kohyaStartup?.report('bootstrap_timeout', '工作区信息请求超过 20 秒')
+            reject(new Error('本机工作区未在 20 秒内响应。请打开启动诊断，或重新加载页面。'))
+          }, 20000)
+        }),
+      ])
+      window.__kohyaStartup?.report('workspace_connected')
+      return { data, preview: false }
+    } finally {
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }
+  if (desktopExpected || window.pywebview) {
+    window.__kohyaStartup?.report('bridge_timeout', '15 秒内未建立本机连接')
+    throw new Error('页面已打开，但本机连接未建立。请打开启动诊断，或改用经典界面。')
   }
   return {
     preview: true,

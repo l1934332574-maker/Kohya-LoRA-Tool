@@ -71,3 +71,4 @@ caption_reports/
 
 # 本机发布隐私检查（与 release.py 配套，不分发）
 release_privacy.py
+build_exe/release_*.log

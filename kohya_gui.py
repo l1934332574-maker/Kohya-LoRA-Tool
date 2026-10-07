@@ -2441,6 +2441,7 @@ class App:
             "unet_only": params.get("train_text_encoder") is False,
             "train_env": params.get("train_env") or "",
             "params": {
+                **({"fizgig_version": params["fizgig_version"]} if str(self.mode).endswith("_fz") else {}),
                 "rank": params.get("rank"),
                 "alpha": params.get("alpha"),
                 "unet_lr": params.get("unet_lr"),
@@ -6322,6 +6323,10 @@ class App:
 
     # ============ 参数收集 ============
     def _collect_params(self):
+        _saved_project = core.load_project(self.current_project) if self.current_project else None
+        _saved_params = ((_saved_project or {}).get("params") or {})
+        _fizgig_version = (_saved_params.get("fizgig_version") or
+                          ("v7.0.1" if not _saved_project or self.mode in ("anima_fz", "sdxl_fz") else "v6.5.0"))
         def _getv(key, default=""):
             try:
                 return self.param_vars[key].get().strip() or default
@@ -6330,6 +6335,7 @@ class App:
         return {
             **getattr(self, "_caption_options", {}),
             "mode": self.mode,
+            "fizgig_version": _fizgig_version,
             "base_type": self.base_type,
             "at_sub_mode": self._at_sub_label(),
             "concept_type": self._concept_type_key(),
@@ -7555,6 +7561,9 @@ class App:
             elif params.get("mode") == "krea2_at":
                 core.train_krea2_at(self._log, mode="krea2_at", params=params,
                                     vram_gb=vram, resume_from=resume, progress=self._train_mon)
+            elif params.get("mode") in ("anima_fz", "sdxl_fz"):
+                core.train_fizgig_lora(self._log, mode=params["mode"], params=params,
+                                       vram_gb=vram, resume_from=resume, progress=self._train_mon)
             elif params.get("mode") == "krea2_fz":
                 core.train_krea2_fizgig(self._log, mode="krea2_fz", params=params,
                                         vram_gb=vram, resume_from=resume, progress=self._train_mon)
@@ -8552,8 +8561,8 @@ class App:
             if (params or {}).get("mode") in ("video", "krea2_at", "qwen_image", "zimage"):
                 return None  # These AI Toolkit modes do not consume training-state resume snapshots.
             # 第四引擎（Fizgig）断点目录是 {name}-NNNNNN-state（按 epoch 命名），另有专门查找
-            if (params or {}).get("mode") in ("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz"):
-                return core.find_fizgig_state(_odir, _name)
+            if (params or {}).get("mode") in ("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz", "anima_fz", "sdxl_fz"):
+                return core.find_fizgig_state(_odir, _name, (params or {}).get("fizgig_version"), epochs=(params or {}).get("max_epochs"))
             if (params or {}).get("mode") in ("krea2", "flux2"):
                 return core.find_musubi_state(_odir, _name)
             return core.find_latest_state(_odir, _name)
@@ -10690,8 +10699,10 @@ def main(argv=None):
     if args.ui == "next":
         try:
             from gui.modern_host import launch
-            return launch(core, dev=args.ui_dev, debug=args.ui_debug,
-                          engine_groups=ENGINE_GROUPS, short_mode_labels=SHORT_MODE_LABELS)
+            result = launch(core, dev=args.ui_dev, debug=args.ui_debug,
+                            engine_groups=ENGINE_GROUPS, short_mode_labels=SHORT_MODE_LABELS)
+            if result != "classic":
+                return result
         except Exception as exc:
             use_classic = messagebox.askyesno(
                 core.APP_NAME,

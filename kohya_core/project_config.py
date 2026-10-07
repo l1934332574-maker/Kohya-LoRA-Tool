@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 WORKSPACE_PARAM_KEYS = (
-    'rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution',
+    'fizgig_version', 'rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution',
     'save_every', 'sample_interval', 'sample_seed', 'video_steps', 'video_frames', 'optimizer',
     'strong_bind', 'clean_concept', 'sample_preview', 'compile', 'crop_ratio',
     'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap',
@@ -31,12 +31,17 @@ def training_params(core, config, project_name):
         except (TypeError, ValueError, OverflowError):
             return default
 
+    if mode.endswith('_fz'):
+        params_version = str(stored.get('fizgig_version') or ('v7.0.1' if mode in ('anima_fz', 'sdxl_fz') else 'v6.5.0'))
+    else:
+        params_version = ''
     kohya = mode in ('character', 'style', 'concept')
     ai_image = mode in ('qwen_image', 'zimage')
     small_rank = mode in ('qwen21_fz', 'h3_fz')
     rank_default = 12 if kohya else 16 if ai_image else 8 if small_rank else 32
     epoch_default = 8 if kohya else 20 if ai_image else 50 if mode == 'h3_fz' else 30 if mode == 'qwen21_fz' else 16
     params = {
+        'fizgig_version': params_version,
         'mode': mode, 'base_type': base_type, 'project': project_name,
         'at_sub_mode': str(config.get('at_sub_mode') or 'character'),
         'concept_type': str(config.get('concept_type') or 'form'),

@@ -5,8 +5,69 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#1e2128" />
     <title>Kohya-LoRA Studio</title>
+    <style>
+      html,body{margin:0;background:#1e2128;color:#e8eaf0;font-family:system-ui,sans-serif}
+      #startup{position:fixed;inset:0;z-index:9999;display:grid;place-items:center;padding:24px;background:#1e2128}
+      #startup[hidden]{display:none}
+      #startup section{max-width:540px;line-height:1.7}
+      #startup h1{font-size:22px;margin:0 0 12px}
+      #startup p{color:#bec5d1;white-space:pre-wrap;overflow-wrap:anywhere}
+      #startup button{font:inherit;border:1px solid #596375;border-radius:8px;padding:9px 14px;margin:6px 8px 0 0;background:#303948;color:#fff;cursor:pointer}
+    </style>
   </head>
   <body>
+    <div id="startup" role="status" aria-live="polite">
+      <section><h1 id="startup-title">正在打开训练工具…</h1>
+        <p id="startup-detail">正在加载本机页面文件。首次启动可能需要稍等。</p>
+        <div id="startup-actions" hidden>
+          <button id="startup-retry" type="button">重新加载页面</button>
+          <button id="startup-report" type="button">打开启动诊断</button>
+          <button id="startup-classic" type="button">改用经典界面</button>
+        </div>
+      </section>
+    </div>
+    <script>
+      (function () {
+        var mounted = false, pending = [], lastError = '';
+        var shell = document.getElementById('startup');
+        function flush() {
+          var api = window.pywebview && window.pywebview.api;
+          if (!api || !api.report_ui_startup) return;
+          pending.splice(0).forEach(function (item) { api.report_ui_startup(item[0], item[1]).catch(function () {}); });
+        }
+        function report(stage, detail) { pending.push([stage, String(detail || '').slice(0, 8000)]); flush(); }
+        function fail(detail) {
+          if (mounted) return;
+          detail = String(detail || '页面程序未能正常启动。').slice(0, 1500);
+          if (detail === lastError) return;
+          lastError = detail;
+          document.getElementById('startup-title').textContent = '新版页面加载失败';
+          document.getElementById('startup-detail').textContent = detail + '\n请先打开启动诊断，将文件发给维护者；也可以重新加载或改用经典界面。';
+          document.getElementById('startup-actions').hidden = false;
+          report('page_error', detail);
+        }
+        var timer = setTimeout(function () { fail('等待页面程序启动超过 20 秒。可能是页面文件加载失败或浏览器运行环境异常。'); }, 20000);
+        window.__kohyaStartup = {
+          mounted: function () { mounted = true; clearTimeout(timer); shell.hidden = true; report('ui_visible', 'Vue 页面已挂载'); },
+          fail: fail, report: report
+        };
+        window.addEventListener('pywebviewready', flush);
+        window.addEventListener('error', function (event) {
+          var target = event.target;
+          if (target && target !== window && target.tagName === 'SCRIPT') fail('程序文件加载失败：' + (target.getAttribute('src') || '未知文件'));
+          else if (event.message) fail(event.message);
+        }, true);
+        window.addEventListener('unhandledrejection', function (event) { fail(event.reason && event.reason.message || String(event.reason)); });
+        document.getElementById('startup-retry').onclick = function () { location.reload(); };
+        function call(name) {
+          var api = window.pywebview && window.pywebview.api;
+          if (!api || !api[name]) { document.getElementById('startup-detail').textContent = '本机连接未建立，暂时无法执行此操作。若持续无响应，软件将在启动超时后弹出独立提示，说明诊断文件位置。'; return; }
+          api[name]().then(function (result) { if (!result.ok) document.getElementById('startup-detail').textContent = result.error || '操作未完成。'; }).catch(function () { document.getElementById('startup-detail').textContent = '本机连接未响应，请等待独立启动提示。'; });
+        }
+        document.getElementById('startup-report').onclick = function () { call('open_ui_startup_report'); };
+        document.getElementById('startup-classic').onclick = function () { call('use_classic_ui'); };
+      })();
+    </script>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

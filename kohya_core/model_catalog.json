@@ -1,0 +1,365 @@
+[
+  {
+    "key": "sd15",
+    "label": "SD 1.5",
+    "variants": [
+      {
+        "key": "sd15",
+        "label": "SD 1.5",
+        "engines": [
+          {
+            "key": "kohya",
+            "label": "Kohya",
+            "mode": "character",
+            "template": "SD1.5",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "已有训练参数和项目继续使用此路径；AMD 需兼容模式。",
+            "experimental": false
+          }
+        ],
+        "note": "",
+        "preferred": {}
+      }
+    ]
+  },
+  {
+    "key": "sdxl",
+    "label": "SDXL",
+    "variants": [
+      {
+        "key": "sdxl",
+        "label": "SDXL / 同架构第三方底模",
+        "engines": [
+          {
+            "key": "kohya",
+            "label": "Kohya",
+            "mode": "character",
+            "template": "SDXL",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "已有训练参数和项目继续使用此路径；AMD 需兼容模式。",
+            "experimental": false
+          },
+          {
+            "key": "fizgig",
+            "label": "Fizgig v7.0.1",
+            "mode": "sdxl_fz",
+            "template": "SDXL LoRA（Fizgig）",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "提供 CUDA / ROCm 路径；当前只接入普通 LoRA。上游实验性模型入口，效果与驱动兼容性需实际训练确认。",
+            "experimental": true
+          }
+        ],
+        "note": "Fizgig 只训练 UNet LoRA，不训练文本编码器。",
+        "preferred": {
+          "nvidia": "kohya",
+          "amd": "fizgig"
+        }
+      }
+    ]
+  },
+  {
+    "key": "flux",
+    "label": "FLUX.1",
+    "variants": [
+      {
+        "key": "flux",
+        "label": "FLUX.1",
+        "engines": [
+          {
+            "key": "kohya",
+            "label": "Kohya",
+            "mode": "character",
+            "template": "FLUX.1",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "已有训练参数和项目继续使用此路径；AMD 需兼容模式。",
+            "experimental": false
+          }
+        ],
+        "note": "AMD 走原有兼容路径，需自行确认显卡支持。",
+        "preferred": {}
+      }
+    ]
+  },
+  {
+    "key": "anima",
+    "label": "Anima",
+    "variants": [
+      {
+        "key": "anima_2b",
+        "label": "标准 2B / 28 层",
+        "engines": [
+          {
+            "key": "kohya",
+            "label": "Kohya",
+            "mode": "character",
+            "template": "Anima",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "已有训练参数和项目继续使用此路径；AMD 需兼容模式。",
+            "experimental": false
+          },
+          {
+            "key": "fizgig",
+            "label": "Fizgig v7.0.1",
+            "mode": "anima_fz",
+            "template": "Anima LoRA（Fizgig）",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "提供 CUDA / ROCm 路径；当前只接入普通 LoRA。上游实验性模型入口，效果与驱动兼容性需实际训练确认。",
+            "experimental": true
+          }
+        ],
+        "note": "已有第三方底模可手动选择；Fizgig 会检查 28 层结构。",
+        "preferred": {
+          "nvidia": "kohya",
+          "amd": "fizgig"
+        }
+      },
+      {
+        "key": "anima_29b",
+        "label": "2.9B / 40 层",
+        "engines": [
+          {
+            "key": "kohya",
+            "label": "Kohya",
+            "mode": "character",
+            "template": "Anima",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "已有训练参数和项目继续使用此路径；AMD 需兼容模式。",
+            "experimental": false
+          }
+        ],
+        "note": "Fizgig v7.0.1 不支持 40 层，请使用 Kohya。",
+        "preferred": {}
+      }
+    ]
+  },
+  {
+    "key": "krea2",
+    "label": "Krea 2",
+    "variants": [
+      {
+        "key": "raw",
+        "label": "Krea 2 RAW",
+        "engines": [
+          {
+            "key": "musubi",
+            "label": "Musubi",
+            "mode": "krea2",
+            "template": "Krea 2 图像 LoRA",
+            "vendors": [
+              "nvidia"
+            ],
+            "reason": "适合沿用 Musubi 参数；本工具当前按 NVIDIA 路径接入。",
+            "experimental": false
+          },
+          {
+            "key": "ai_toolkit",
+            "label": "AI Toolkit",
+            "mode": "krea2_at",
+            "template": "Krea2 图像 LoRA（AI Toolkit）",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "按总步数训练；沿用 AI Toolkit 项目。",
+            "experimental": false
+          },
+          {
+            "key": "fizgig",
+            "label": "Fizgig v7.0.1",
+            "mode": "krea2_fz",
+            "template": "Krea2 图像 LoRA（Fizgig）",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "提供 CUDA / ROCm 路径；当前只接入普通 LoRA。",
+            "experimental": false
+          }
+        ],
+        "note": "三个入口训练同一类 RAW 模型，可复用本地模型文件。",
+        "preferred": {
+          "nvidia": "musubi",
+          "amd": "fizgig"
+        }
+      }
+    ]
+  },
+  {
+    "key": "klein",
+    "label": "FLUX.2 Klein",
+    "variants": [
+      {
+        "key": "4b",
+        "label": "Klein Base 4B",
+        "engines": [
+          {
+            "key": "musubi",
+            "label": "Musubi",
+            "mode": "flux2",
+            "template": "FLUX.2 人物",
+            "vendors": [
+              "nvidia"
+            ],
+            "reason": "适合沿用 Musubi 参数；本工具当前按 NVIDIA 路径接入。",
+            "experimental": false
+          }
+        ],
+        "note": "当前 4B 使用 Musubi；不自动替换为 9B。",
+        "preferred": {}
+      },
+      {
+        "key": "9b",
+        "label": "Klein Base 9B",
+        "engines": [
+          {
+            "key": "fizgig",
+            "label": "Fizgig v7.0.1",
+            "mode": "flux2_fz",
+            "template": "Klein 9B LoRA（Fizgig）",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "提供 CUDA / ROCm 路径；当前只接入普通 LoRA。",
+            "experimental": false
+          }
+        ],
+        "note": "9B 使用不同的 DiT 和 Qwen3-8B 文本编码器，VAE 可复用。",
+        "preferred": {}
+      }
+    ]
+  },
+  {
+    "key": "qwen",
+    "label": "Qwen-Image",
+    "variants": [
+      {
+        "key": "qwen_2512",
+        "label": "Qwen-Image / 2512",
+        "engines": [
+          {
+            "key": "ai_toolkit",
+            "label": "AI Toolkit",
+            "mode": "qwen_image",
+            "template": "Qwen-Image",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "按总步数训练；沿用 AI Toolkit 项目。",
+            "experimental": false
+          }
+        ],
+        "note": "进入项目后选择具体底模或本地组件。",
+        "preferred": {}
+      },
+      {
+        "key": "qwen_21",
+        "label": "Qwen-Image-2.1",
+        "engines": [
+          {
+            "key": "fizgig",
+            "label": "Fizgig v7.0.1",
+            "mode": "qwen21_fz",
+            "template": "Qwen-Image-2.1 LoRA（Fizgig）",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "提供 CUDA / ROCm 路径；当前只接入普通 LoRA。",
+            "experimental": false
+          }
+        ],
+        "note": "需要 2.1 专用底模和训练适配器，不与 2512 混用。",
+        "preferred": {}
+      }
+    ]
+  },
+  {
+    "key": "h3",
+    "label": "MiniMax H3",
+    "variants": [
+      {
+        "key": "h3",
+        "label": "H3 图片 / 视频 / 音频",
+        "engines": [
+          {
+            "key": "ai_toolkit",
+            "label": "AI Toolkit",
+            "mode": "video",
+            "template": "H3 视频 LoRA",
+            "vendors": [
+              "nvidia"
+            ],
+            "reason": "按总步数训练；沿用 AI Toolkit 项目。",
+            "experimental": false
+          },
+          {
+            "key": "fizgig",
+            "label": "Fizgig v7.0.1",
+            "mode": "h3_fz",
+            "template": "MiniMax H3 全模态 LoRA（Fizgig）",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "提供 CUDA / ROCm 路径；当前只接入普通 LoRA。",
+            "experimental": false
+          }
+        ],
+        "note": "Fizgig 支持混合媒体；AI Toolkit 入口训练视频。",
+        "preferred": {
+          "nvidia": "fizgig",
+          "amd": "fizgig"
+        }
+      }
+    ]
+  },
+  {
+    "key": "zimage",
+    "label": "Z-Image",
+    "variants": [
+      {
+        "key": "zimage",
+        "label": "Z-Image",
+        "engines": [
+          {
+            "key": "ai_toolkit",
+            "label": "AI Toolkit",
+            "mode": "zimage",
+            "template": "Z-Image LoRA",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "按总步数训练；沿用 AI Toolkit 项目。",
+            "experimental": false
+          }
+        ],
+        "note": "AMD 使用原有兼容路径。",
+        "preferred": {}
+      }
+    ]
+  }
+]

@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.0"
+APP_VERSION = "0.19.1"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -1490,7 +1490,7 @@ def _preinstall_torch(vpy, kdir, logf=print, torch_ver="2.7.0", tv_ver="0.22.0",
 # 第二引擎=musubi（kdir/musubi-tuner + musubi-venv）；第三引擎=ai-toolkit（kdir/ai-toolkit + ai_toolkit_venv）
 # 这些目录都是 get_kohya_dir() 同一个 kdir 下的子目录，安装 kohya 时不应误判"目录被占用"
 KOHYA_COEXIST_SUBDIRS = frozenset({
-    "musubi-tuner", "musubi-venv", "ai-toolkit", "ai_toolkit_venv", "fizgig", "fizgig_venv",
+    "musubi-tuner", "musubi-venv", "ai-toolkit", "ai_toolkit_venv", "fizgig", "fizgig_venv", "fizgig_versions", "fizgig_installs.json",
     "venv", "venv_broken",  # venv 也可能已存在（部分安装残留），kohya 安装会自行校验/重建
 })
 
@@ -5233,7 +5233,7 @@ def install_ai_toolkit_engine(logf=print):
 # NVIDIA 是主场（torch cu128）。做成双平台引擎：NVIDIA→CUDA 路径，AMD→ROCm 路径。
 # 模型 100% 复用 models/krea2/（raw / qwen_image_vae / qwen3vl_4b_bf16）。
 
-FIZGIG_VERSION = "v6.5.0"          # 钉死版本（Fizgig 更新节奏快，不追 master）
+FIZGIG_VERSION = "v7.0.1"          # 钉死版本（Fizgig 更新节奏快，不追 master）
 FIZGIG_SRC_MARKER = "src/fizgig/scripts/krea2_train.py"
 FIZGIG_SRC_REQUIRED = (
     "requirements.txt", FIZGIG_SRC_MARKER,
@@ -5289,42 +5289,29 @@ FIZGIG_NVIDIA_EXTRA_DEPS = "bitsandbytes==0.48.2 triton-windows>=3.5.1,<3.7"
 
 
 def _fizgig_dirs():
-    """返回第四引擎目录 (venv_py, src_dir)。"""
-    kdir = get_kohya_dir()
-    return (os.path.join(kdir, "fizgig_venv", "Scripts", "python.exe"),
-            os.path.join(kdir, "fizgig"))
+    """Resolve the active install, or the runtime pinned to a training project."""
+    from kohya_core.fizgig_engine import runtime
+    record = runtime(sys.modules[__name__])
+    return record["python"], record["source"]
 
 
 def _fizgig_marker_ok():
-    """第四引擎快速标记检查（秒级）：venv + Fizgig 源码 + krea2_train.py。"""
-    vpy, fz_dir = _fizgig_dirs()
-    if not os.path.isfile(vpy):
-        return False
-    return os.path.isfile(os.path.join(fz_dir, *FIZGIG_SRC_MARKER.split("/")))
+    from kohya_core.fizgig_engine import source_version
+    vpy, source = _fizgig_dirs()
+    return os.path.isfile(vpy) and bool(source_version(source))
 
 
 def _fizgig_source_current(fz_dir):
-    """静态确认本机源码含 v6.5.0 的 H3 与 Qwen-Image-2.1 入口。"""
-    return all(os.path.isfile(os.path.join(fz_dir, *rel.split("/")))
-               for rel in FIZGIG_SRC_REQUIRED)
+    from kohya_core.fizgig_engine import source_version, VERSION
+    return source_version(fz_dir) == VERSION or all(
+        os.path.isfile(os.path.join(fz_dir, *rel.split("/"))) for rel in FIZGIG_SRC_REQUIRED)
 
 
 def fizgig_engine_update_status():
-    """供界面显示第四引擎更新提示，不运行 GPU 或网络检查。"""
-    vpy, fz_dir = _fizgig_dirs()
-    installed = os.path.isfile(vpy) and os.path.isfile(
-        os.path.join(fz_dir, *FIZGIG_SRC_MARKER.split("/")))
-    h3_supported = os.path.isfile(os.path.join(fz_dir, "src", "fizgig", "scripts", "minimax_train.py"))
-    qwen21_supported = os.path.isfile(os.path.join(fz_dir, "src", "fizgig", "families", "train.py"))
-    current = bool(installed and _fizgig_source_current(fz_dir))
-    return {
-        "installed": bool(installed),
-        "h3_supported": bool(installed and h3_supported),
-        "qwen_image_2_supported": bool(installed and qwen21_supported),
-        "update_available": bool(installed and not current),
-        "engine_dir": fz_dir,
-        "target_version": FIZGIG_VERSION,
-    }
+    from kohya_core.fizgig_engine import update_status
+    return update_status(sys.modules[__name__])
+
+
 
 def fizgig_engine_status():
     """第四训练引擎（Fizgig）状态：返回 (ok, detail, venv_python, backend)。
@@ -5332,8 +5319,8 @@ def fizgig_engine_status():
     vpy, fz_dir = _fizgig_dirs()
     if not os.path.isfile(vpy):
         return False, "未安装（未检测到 venv）", vpy, None
-    if not os.path.isfile(os.path.join(fz_dir, *FIZGIG_SRC_MARKER.split("/"))):
-        return False, "Fizgig 源码缺失", vpy, None
+    if not _fizgig_marker_ok():
+        return False, "Fizgig 源码缺失或版本校验失败", vpy, None
     _vok, _vdetail = _venv_python_ok(vpy)
     if not _vok:
         return False, "环境异常（%s）" % _vdetail, vpy, None
@@ -5359,7 +5346,7 @@ def fizgig_engine_status():
 
 def _download_fizgig_source(logf=print):
     """按国内优先顺序获取 Fizgig 源码 ZIP，缓存到用户数据目录。"""
-    name = "fizgig-%s.zip" % FIZGIG_VERSION
+    name = "fizgig-v6.5.0.zip"
     dest = os.path.join(_engine_source_cache_dir(), name)
     if _valid_zip(dest, FIZGIG_SRC_REQUIRED):
         logf(f"[第四引擎] 已复用源码缓存：{name}")
@@ -5491,7 +5478,7 @@ def _install_fizgig_v65_deps(vpy, fz_dir, backend, logf=print):
         raise RuntimeError("Fizgig v6.5.0 依赖安装失败；旧源码尚未替换，可检查网络后重试。")
 
 
-def update_fizgig_engine(logf=print):
+def _update_fizgig_engine_legacy(logf=print):
     """把已安装的 Fizgig 升到 v6.5.0；旧源码、venv 和模型均保留。"""
     ok, detail, vpy, backend = fizgig_engine_status()
     if not ok:
@@ -5988,7 +5975,10 @@ def _fizgig_verify(vpy, fz_dir, logf=print, backend="nvidia"):
             _kok, _kdetail = _amd_gpu_kernel_check(vpy, _env, logf, "第四引擎")
             if not _kok:
                 raise RuntimeError(_kdetail)
-        if _fizgig_source_current(fz_dir):
+        from kohya_core.fizgig_engine import source_version, VERSION, cli_ready
+        if source_version(fz_dir) == VERSION:
+            cli_ready(sys.modules[__name__], {"python": vpy, "source": fz_dir, "backend": backend})
+        elif _fizgig_source_current(fz_dir):
             _fizgig_v65_cli_ready(vpy, fz_dir, backend)
         else:
             r2 = subprocess.run([vpy, os.path.join(fz_dir, "src", "fizgig", "scripts", "krea2_train.py"), "--help"],
@@ -6076,7 +6066,7 @@ def _ensure_fizgig_deps(vpy, fz_dir, logf=print):
         return _fz_selftest(vpy, logf)
     logf("[第四引擎] Fizgig 依赖补装失败（网络/镜像问题），可稍后重试或重装第四引擎")
     return False
-def install_fizgig_engine(logf=print):
+def _install_fizgig_engine_legacy(logf=print):
     """安装第四训练引擎 Fizgig（Krea2 图像 LoRA，NVIDIA/AMD 双平台）。
 
     - 独立 fizgig_venv（不碰 kohya / musubi / ai-toolkit venv）；
@@ -6099,7 +6089,7 @@ def install_fizgig_engine(logf=print):
     if lock_f is None:
         raise RuntimeError("检测到另一个安装任务正在运行，请先等待完成后再试。")
     try:
-        fz_dir = os.path.join(kdir, "fizgig")
+        fz_dir = _fizgig_dirs()[1]
         _deploy_fizgig_source(fz_dir, logf)
         fv = os.path.join(kdir, "fizgig_venv")
         vpy = os.path.join(fv, "Scripts", "python.exe")
@@ -6463,7 +6453,7 @@ def _fizgig_qwen21_local_processor(fz_dir, logf=print):
     return os.path.join(root, "processor")
 
 
-def train_qwen21_fizgig(logf=print, mode="qwen21_fz", params=None, vram_gb=None, resume_from=None, progress=None):
+def _train_qwen21_fizgig_legacy(logf=print, mode="qwen21_fz", params=None, vram_gb=None, resume_from=None, progress=None):
     """Cache and train Qwen-Image-2.1 LoRA with Fizgig v6.5.0's family driver."""
     params = params or {}
     quant_mode = str(params.get("quant_mode") or "auto").strip().lower()
@@ -6564,7 +6554,7 @@ def train_qwen21_fizgig(logf=print, mode="qwen21_fz", params=None, vram_gb=None,
     return out_dir
 
 
-def train_h3_fizgig(logf=print, mode="h3_fz", params=None, vram_gb=None, resume_from=None, progress=None):
+def _train_h3_fizgig_legacy(logf=print, mode="h3_fz", params=None, vram_gb=None, resume_from=None, progress=None):
     """Train H3 on a shared photo, MP4 and/or audio folder with Fizgig v6.5.0."""
     params = params or {}
     quant_mode = str(params.get("quant_mode") or "auto").strip().lower()
@@ -6709,7 +6699,7 @@ def _fizgig_warmup_log_filter(logf, keep_first=False):
     return _filtered
 
 
-def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, resume_from=None, progress=None):
+def _train_krea2_fizgig_legacy(logf=print, mode="krea2_fz", params=None, vram_gb=None, resume_from=None, progress=None):
     """Krea2 图像 LoRA 训练（第四引擎 Fizgig，NVIDIA/AMD 双平台）。
 
     流程：校验 Fizgig 环境 → 校验模型文件 → 写 Fizgig 数据集配置 →
@@ -6724,7 +6714,7 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
     if not ok:
         raise RuntimeError("第四训练引擎（Fizgig）未安装，请先点「⚙ 安装第四引擎」。\n" + detail)
     kdir = get_kohya_dir()
-    fz_dir = os.path.join(kdir, "fizgig")
+    fz_dir = _fizgig_dirs()[1]
     if not _ensure_fizgig_deps(vpy, fz_dir, logf):
         raise RuntimeError("Fizgig 依赖补装失败（网络不稳或镜像不可达）。请检查网络后重试，或点「⚙ 安装第四引擎」重装。")
     _ram_gb = detect_ram_gb()
@@ -6940,7 +6930,7 @@ def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, r
         raise RuntimeError("Krea2(Fizgig) 训练失败，退出码 %d，请查看上方日志。" % rc)
     logf(f"[Krea2(Fizgig)] 训练完成：{os.path.join(out_dir, output_name)}")
     return out_dir
-def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, resume_from=None, progress=None):
+def _train_flux2_fizgig_legacy(logf=print, mode="flux2_fz", params=None, vram_gb=None, resume_from=None, progress=None):
     """FLUX.2 Klein 9B 图像 LoRA 训练（第四引擎 Fizgig，NVIDIA/AMD 双平台）。
 
     流程：校验 Fizgig 环境→ 校验 Klein 9B 模型→ 写 Fizgig 数据集配置→
@@ -6954,7 +6944,7 @@ def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, r
     if not ok:
         raise RuntimeError("第四训练引擎（Fizgig）未安装，请先点「⚙ 安装第四引擎」。\n" + detail)
     kdir = get_kohya_dir()
-    fz_dir = os.path.join(kdir, "fizgig")
+    fz_dir = _fizgig_dirs()[1]
     # Klein 9B 需要 Fizgig train.py / cache_latents.py / cache_text.py（过旧版本缺失则提示重装）
     for _rel in ("src/fizgig/scripts/train.py",
                  "src/fizgig/scripts/cache_latents.py",
@@ -9565,6 +9555,10 @@ def _pick_preprocess_python():
     不再因为没装第一引擎（Kohya）而误报「Kohya 尚未安装」。
     """
     kdir = get_kohya_dir()
+    from kohya_core.fizgig_engine import runtime, source_version
+    active = runtime(sys.modules[__name__])
+    if os.path.isfile(active["python"]) and source_version(active["source"]):
+        return active["python"]
     for sub in ("venv", "musubi-venv", "ai_toolkit_venv", "fizgig_venv"):
         c = os.path.join(kdir, sub, "Scripts", "python.exe")
         if os.path.isfile(c):
@@ -9583,8 +9577,8 @@ def _warn_alloc_conf(logf):
 
 _INTERVAL_PARAM_KEYS = ("save_every", "sample_interval")
 _INTERVAL_EPOCH_MODES = {
-    "save_every": frozenset(("krea2", "krea2_fz", "flux2", "flux2_fz", "qwen21_fz", "h3_fz")),
-    "sample_interval": frozenset(("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz")),
+    "save_every": frozenset(("krea2", "krea2_fz", "flux2", "flux2_fz", "qwen21_fz", "h3_fz", "anima_fz", "sdxl_fz")),
+    "sample_interval": frozenset(("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz", "anima_fz", "sdxl_fz")),
 }
 
 
@@ -9688,6 +9682,50 @@ def _resolve_save_every_epochs(params):
     except Exception:
         v = 1
     return max(1, v)
+
+
+def install_fizgig_engine(logf=print):
+    from kohya_core.fizgig_engine import install
+    return install(sys.modules[__name__], logf)
+
+
+def update_fizgig_engine(logf=print):
+    return install_fizgig_engine(logf)
+
+
+def rollback_fizgig_engine(logf=print):
+    from kohya_core.fizgig_engine import rollback
+    return rollback(sys.modules[__name__], logf)
+
+
+def train_fizgig_lora(logf=print, mode="krea2_fz", params=None, vram_gb=None, resume_from=None, progress=None):
+    from kohya_core.fizgig_engine import use_runtime, VERSION
+    from kohya_core.fizgig_adapter import train_lora
+    params = dict(params or {})
+    with use_runtime(sys.modules[__name__], params) as record:
+        if record.get("version") == VERSION:
+            return train_lora(sys.modules[__name__], record, logf, mode, params, vram_gb, resume_from, progress)
+        legacy = {"krea2_fz": _train_krea2_fizgig_legacy, "flux2_fz": _train_flux2_fizgig_legacy,
+                  "qwen21_fz": _train_qwen21_fizgig_legacy, "h3_fz": _train_h3_fizgig_legacy}.get(mode)
+        if legacy is None:
+            raise RuntimeError("这个模型需要 Fizgig v7.0.1，请先安装或更新引擎。")
+        return legacy(logf, mode, params, vram_gb, resume_from, progress)
+
+
+def train_krea2_fizgig(logf=print, mode="krea2_fz", params=None, vram_gb=None, resume_from=None, progress=None):
+    return train_fizgig_lora(logf, mode, params, vram_gb, resume_from, progress)
+
+
+def train_flux2_fizgig(logf=print, mode="flux2_fz", params=None, vram_gb=None, resume_from=None, progress=None):
+    return train_fizgig_lora(logf, mode, params, vram_gb, resume_from, progress)
+
+
+def train_qwen21_fizgig(logf=print, mode="qwen21_fz", params=None, vram_gb=None, resume_from=None, progress=None):
+    return train_fizgig_lora(logf, mode, params, vram_gb, resume_from, progress)
+
+
+def train_h3_fizgig(logf=print, mode="h3_fz", params=None, vram_gb=None, resume_from=None, progress=None):
+    return train_fizgig_lora(logf, mode, params, vram_gb, resume_from, progress)
 
 
 def preprocess_mode(mode, at_sub_mode=None):
@@ -10003,7 +10041,7 @@ def gpu_status_text():
 _CFG_PARAM_INT_KEYS = ("rank", "alpha", "repeats", "max_epochs", "resolution", "video_steps", "video_frames", "batch_size", "sample_interval", "sample_seed")
 _CFG_PARAM_FLOAT_KEYS = ("unet_lr", "te_lr")
 _CFG_PARAM_BOOL_KEYS = ("strong_bind", "clean_concept", "sample_preview", "compile", "keep_user_captions", "overwrite", "amd_mode")
-_CFG_PARAM_STR_KEYS = ("optimizer", "quant_mode", "blocks_to_swap", "save_every", "crop_ratio", "gc", "fizgig_qwen_preset", "wd14_model", "noise_offset", "min_snr_gamma", "caption_method", "caption_language", "caption_length")
+_CFG_PARAM_STR_KEYS = ("fizgig_version", "optimizer", "quant_mode", "blocks_to_swap", "save_every", "crop_ratio", "gc", "fizgig_qwen_preset", "wd14_model", "noise_offset", "min_snr_gamma", "caption_method", "caption_language", "caption_length")
 _CFG_PROMPT_KEYS = ("trigger", "style_caption", "sample_prompt", "global_pos", "global_neg")
 _CFG_AT_LABEL_TO_KEY = {v: k for k, v in AT_SUB_LABELS.items()}
 _CFG_AT_LABEL_TO_KEY.update({"画风": "style", "人物": "character", "风格": "style"})  # 兼容手写短标签
@@ -12254,7 +12292,7 @@ def find_latest_state(output_dir, output_name):
         final = os.path.join(output_dir, output_name + ".safetensors")
         if os.path.isfile(final):
             final_mtime = os.path.getmtime(final)
-            cands = [path for path in cands if os.path.getmtime(path) > final_mtime]
+            cands = [path for path in cands if os.path.getmtime(os.path.join(path, "training_state.json")) > final_mtime]
     except OSError:
         pass
     if not cands:
@@ -12289,12 +12327,12 @@ def find_musubi_state(output_dir, output_name):
         if os.path.isfile(final):
             final_mtime = os.path.getmtime(final)
             candidates = [(epoch, path) for epoch, path in candidates
-                          if os.path.getmtime(path) > final_mtime]
+                          if os.path.getmtime(os.path.join(path, "training_state.json")) > final_mtime]
     except OSError:
         pass
     return max(candidates)[1] if candidates else None
 
-def find_fizgig_state(output_dir, output_name):
+def find_fizgig_state(output_dir, output_name, version=None, family=None, epochs=None):
     """找 Fizgig 断点状态目录（{name}-NNNNNN-state，按 epoch 命名，内含 training_state.json）。
 
     完成判定（2026-09-08 修）：不能因为“存在最终 LoRA”就一刀切不提示——
@@ -12306,7 +12344,7 @@ def find_fizgig_state(output_dir, output_name):
         return None
     pat = re.compile(r"^" + re.escape(output_name) + r"-(\d{6})-state$")
     candidates = []
-    for _d in (output_dir, os.path.join(output_dir, "snapshots")):
+    for _d in (output_dir, os.path.join(output_dir, "snapshots"), os.path.join(output_dir, "snapshots", "fizgig-v7.0.1")):
         if not os.path.isdir(_d):
             continue
         for f in os.listdir(_d):
@@ -12316,13 +12354,27 @@ def find_fizgig_state(output_dir, output_name):
             p = os.path.join(_d, f)
             if not os.path.isdir(p) or not os.path.isfile(os.path.join(p, "training_state.json")):
                 continue
+            if version:
+                try:
+                    with open(os.path.join(p, "training_state.json"), encoding="utf-8") as stream:
+                        state_meta = json.load(stream)
+                    identity = state_meta.get("kohya_runtime") or {}
+                    if version == "v7.0.1":
+                        if identity.get("version") != version or (family and identity.get("family") != family):
+                            continue
+                        if state_meta.get("kohya_complete") and (epochs is None or int(state_meta.get("epoch", 0)) >= int(epochs)):
+                            continue
+                    elif identity.get("version") == "v7.0.1":
+                        continue
+                except (OSError, ValueError, AttributeError):
+                    continue
             candidates.append((int(m.group(1)), p))
     try:
         final = os.path.join(output_dir, output_name + ".safetensors")
-        if os.path.isfile(final):
+        if version != "v7.0.1" and os.path.isfile(final):
             final_mtime = os.path.getmtime(final)
             candidates = [(epoch, path) for epoch, path in candidates
-                          if os.path.getmtime(path) > final_mtime]
+                          if os.path.getmtime(os.path.join(path, "training_state.json")) > final_mtime]
     except OSError:
         pass
     return max(candidates)[1] if candidates else None
@@ -15942,3 +15994,41 @@ def _ensure_anima_components(logf=print):
     logf(f"[Anima] ✓ 文本编码器已就绪：{qwen3_path}")
     logf(f"[Anima] ✓ VAE 已就绪：{vae_file}")
     return qwen3_path, vae_file
+
+
+def anima_fz_models_dir():
+    return os.path.join(KIT_DIR, "models", "anima")
+
+
+def sdxl_fz_models_dir():
+    return base_models_dir()
+
+
+ANIMA_FZ_MODEL_LINKS = {
+    "dit": ("anima-base-v1.0.safetensors", "Anima 标准 28 层底模", ("https://modelscope.cn/models/circlestone-labs/Anima/resolve/master/split_files/diffusion_models/anima-base-v1.0.safetensors", "https://hf-mirror.com/circlestone-labs/Anima/resolve/main/split_files/diffusion_models/anima-base-v1.0.safetensors", "https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/diffusion_models/anima-base-v1.0.safetensors")),
+    "te": ("qwen_3_06b_base.safetensors", "Qwen3 0.6B 单文件文本编码器", ("https://modelscope.cn/models/circlestone-labs/Anima/resolve/master/split_files/text_encoders/qwen_3_06b_base.safetensors", "https://hf-mirror.com/circlestone-labs/Anima/resolve/main/split_files/text_encoders/qwen_3_06b_base.safetensors")),
+    "vae": ("qwen_image_vae.safetensors", "Qwen-Image VAE（可复用已有文件）", KREA2_MODEL_LINKS["vae"][2]),
+}
+SDXL_FZ_MODEL_LINKS = {
+    "dit": ("sd_xl_base_1.0.safetensors", "SDXL 完整底模（也可自行选择第三方底模）", "https://modelscope.cn/models/AI-ModelScope/stable-diffusion-xl-base-1.0/resolve/master/sd_xl_base_1.0.safetensors"),
+}
+
+
+def anima_fz_model_files():
+    from kohya_core.fizgig_adapter import models
+    return models(sys.modules[__name__], "anima")
+
+
+def sdxl_fz_model_files():
+    from kohya_core.fizgig_adapter import models
+    return models(sys.modules[__name__], "sdxl")
+
+
+def anima_fz_missing_models():
+    from kohya_core.fizgig_adapter import missing
+    return missing(sys.modules[__name__], "anima")
+
+
+def sdxl_fz_missing_models():
+    from kohya_core.fizgig_adapter import missing
+    return missing(sys.modules[__name__], "sdxl")
