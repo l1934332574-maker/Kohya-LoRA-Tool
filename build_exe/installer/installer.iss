@@ -5,7 +5,7 @@
 ; 默认安装到用户文档目录 {userdocs}\KohyaLoraTool，避开 Program Files 权限问题
 ; ============================================================
 #define MyAppName "KohyaLoraTool"
-#define MyAppVersion "0.19.0"
+#define MyAppVersion "0.19.1"
 #define MyAppExeName "Kohya一键工具.exe"
 #define MyAppDir "..\dist\Kohya一键工具"
 
@@ -53,6 +53,7 @@ Source: "{#MyAppDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdir
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: startmenu
+Name: "{group}\{#MyAppName}（经典界面）"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--ui classic"; Tasks: startmenu
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]

@@ -31,7 +31,7 @@ const emit = defineEmits<{
 const dirty = reactive(new Set<string>())
 const configuredParams = new Set<string>()
 const draft = reactive({
-  raw_dir: '', trigger: '', reg_dir: '', style_preset: '自定义', style_caption: '', at_sub_mode: 'character', concept_type: 'form',
+  base_model: '', fizgig_version: '', global_pos: '', global_neg: '', raw_dir: '', trigger: '', reg_dir: '', style_preset: '自定义', style_caption: '', at_sub_mode: 'character', concept_type: 'form',
   rank: '', alpha: '', unet_lr: '', te_lr: '', repeats: '', max_epochs: '', resolution: '',
   video_steps: '', video_frames: '', save_every: '', sample_interval: '', sample_seed: '1234', optimizer: 'auto',
   crop_ratio: '', sample_prompt: '', noise_offset: '', min_snr_gamma: '', quant_mode: 'auto',
@@ -42,8 +42,12 @@ const draft = reactive({
   strong_bind: true, clean_concept: true, compile: false, overwrite: false, keep_user_captions: false, amd_mode: false,
 })
 
-const supported = (key: string) => Boolean(props.details.supports?.[key])
-const quantModes = computed(() => props.details.quant_modes?.length ? props.details.quant_modes : ['auto', 'fp8', 'int8', 'nf4'])
+const isFizgig = computed(() => props.mode.endsWith('_fz'))
+const isV7 = computed(() => isFizgig.value && draft.fizgig_version === 'v7.0.1')
+const supported = (key: string) => isFizgig.value && ['optimizer','compile','global_pos','global_neg'].includes(key) ? isV7.value : Boolean(props.details.supports?.[key])
+const versions = computed(() => [...new Set([draft.fizgig_version, ...(props.details.fizgig_versions || []), 'v7.0.1'])].filter(v => v && (!['anima_fz','sdxl_fz'].includes(props.mode) || v === 'v7.0.1')))
+const legacyFizgigQuant: Record<string, string[]> = { krea2_fz:['auto','fp8','int8','nf4','bf16'], flux2_fz:['auto','fp8','int8','nf4'], qwen21_fz:['auto','bf16','int8','nf4'], h3_fz:['auto','int8','nf4','hqq'] }
+const quantModes = computed(() => isV7.value ? (props.mode === 'h3_fz' ? ['auto','int8','nf4','hqq'] : ['auto','bf16','int8','nf4']) : isFizgig.value ? legacyFizgigQuant[props.mode] || [] : props.details.quant_modes?.length ? props.details.quant_modes : ['auto', 'fp8', 'int8', 'nf4'])
 const defaults = computed(() => props.details.defaults ?? {})
 const isConcept = computed(() => draft.at_sub_mode === 'concept')
 const isStyle = computed(() => draft.at_sub_mode === 'style')
@@ -86,6 +90,10 @@ function value(value: unknown, fallback = ''): string {
 function hydrate(config?: ProjectConfig | null) {
   const params = config?.params && typeof config.params === 'object' ? config.params : {}
   const rootValue = (key: string, fallback = '') => value(config?.[key], fallback)
+  draft.base_model = rootValue('base_model', props.project.base_model || '')
+  draft.fizgig_version = value(params.fizgig_version, props.details.fizgig_version || 'v6.5.0')
+  draft.global_pos = rootValue('global_pos', value(params.global_pos))
+  draft.global_neg = rootValue('global_neg', value(params.global_neg))
   draft.raw_dir = rootValue('raw_dir', props.project.raw_dir || '')
   draft.trigger = rootValue('trigger')
   draft.reg_dir = rootValue('reg_dir')
@@ -155,10 +163,11 @@ const { profileUndo, profileDefaults, profileSupported, applyProfile, undoProfil
 
 function makePatch(): ProjectConfig {
   const patch: ProjectConfig = { mode: props.mode }
-  for (const key of ['raw_dir', 'trigger', 'reg_dir', 'style_preset', 'style_caption', 'at_sub_mode', 'concept_type', 'fast_tier'] as const) {
+  for (const key of ['base_model', 'global_pos', 'global_neg', 'raw_dir', 'trigger', 'reg_dir', 'style_preset', 'style_caption', 'at_sub_mode', 'concept_type', 'fast_tier'] as const) {
     if (dirty.has(key)) patch[key] = draft[key]
   }
   const params: Record<string, unknown> = {}
+  if (dirty.has('params.fizgig_version')) params.fizgig_version = draft.fizgig_version
   for (const key of ['caption_method', 'caption_language', 'caption_length'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
@@ -190,7 +199,19 @@ async function browseDataset() {
   if (path) { draft.raw_dir = path; markRoot('raw_dir') }
 }
 
+async function browseModel() {
+  if (!props.desktop) return emit('notify','浏览器预览不会调用文件选择器。')
+  const path = await props.choosePath('model', draft.base_model, 'base_model')
+  if (path) { draft.base_model=path; markRoot('base_model') }
+}
+function onVersionChange() {
+  markParam('fizgig_version')
+  if (!quantModes.value.includes(draft.quant_mode)) { draft.quant_mode='auto'; markParam('quant_mode') }
+  if (isV7.value && !['auto','adamw','adamw8bit'].includes(draft.optimizer)) { draft.optimizer='auto'; markParam('optimizer') }
+  emit('notify', '版本修改待保存；切换到 v7 会使用独立缓存，原版本快照请回原版本续训。')
+}
 async function guideAction(action: string): Promise<ProjectConfig | null> {
+  if (action === 'cmd_pick_model_type' && supported('base_model')) { await browseModel(); return makePatch() }
   if (action !== 'cmd_pick_raw') return null
   await browseDataset()
   return dirty.has('raw_dir') ? makePatch() : null
@@ -237,6 +258,15 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
 
     <div class="engine-scroll-area">
       <div class="engine-scroll-content">
+        <section v-if="isFizgig" class="engine-card runtime-card">
+          <div class="runtime-choice"><label class="engine-field"><span>此项目的训练引擎版本</span><select v-model="draft.fizgig_version" class="engine-select" @change="onVersionChange"><option v-for="v in versions" :key="v" :value="v">{{ v }}{{ details.fizgig_versions?.includes(v) ? ' · 已安装' : ' · 需安装 / 更新' }}</option></select></label><button v-if="desktop && !details.fizgig_versions?.includes('v7.0.1')" class="engine-button compact" type="button" @click="requestAction('fizgig_engine_update')">安装新版 Fizgig</button></div>
+          <p class="engine-hint">{{ isV7 ? '普通 LoRA · 文本编码器冻结 · 新版独立缓存。预览按轮数触发，开始时不额外采样，最后一轮只有满足间隔才采样。' : '旧版本项目继续使用原训练入口；升级软件不会自动迁移训练参数和续训快照。' }}</p>
+          <p v-if="['anima_fz','sdxl_fz'].includes(mode)" class="engine-hint">上游实验性入口。{{ mode==='anima_fz' ? '仅支持标准 28 层 Anima；2.9B / 40 层请选 Kohya。' : '支持完整 SDXL 同架构底模；不训练文本编码器。' }}</p>
+        </section>
+        <section v-if="supported('base_model')" class="engine-card">
+          <header class="engine-card-heading"><div><h2>训练底模</h2><small>可选择已有第三方底模；缺少组件再下载</small></div></header>
+          <div class="runtime-choice"><input v-model="draft.base_model" class="engine-input" placeholder="选择已有完整 safetensors 底模；留空使用模型目录的标准底模" @input="markRoot('base_model')" /><button class="engine-button compact" type="button" @click="browseModel">选择底模</button><button class="engine-button compact" type="button" @click="requestAction(mode==='anima_fz'?'cmd_dl_anima_fz_models':'cmd_dl_sdxl_fz_models')">下载模型 / 组件</button></div>
+        </section>
         <section class="engine-summary">
           <div class="summary-main">
             <span class="summary-label">{{ isH3Fizgig ? '混合媒体原始目录' : isVideo ? '视频数据目录' : '训练图片目录' }}</span>
@@ -306,10 +336,12 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
             <label class="engine-field" :title="legacyTooltips.samplePreview"><span>训练中采样预览</span><select v-model="draft.sample_preview_mode" class="engine-select" @change="markParam('sample_preview')"><option value="auto">按显存使用默认设置</option><option value="on">开启</option><option value="off">关闭（减少额外耗时）</option></select></label>
             <label class="engine-field" :title="intervalTooltip('save_every')"><span>模型保存间隔（{{ intervalUnit('save_every') }}）</span><input v-model="draft.save_every" class="engine-input" type="number" min="0" placeholder="使用默认" @input="markParam('save_every')" /></label>
             <label class="engine-field" :title="intervalTooltip('sample_interval')"><span>采样预览间隔（{{ intervalUnit('sample_interval') }}）</span><input v-model="draft.sample_interval" class="engine-input" type="number" min="0" placeholder="使用默认" @input="markParam('sample_interval')" /></label>
-            <label v-if="supported('optimizer')" class="engine-field" :title="legacyTooltips.optimizer"><span>优化器</span><select v-model="draft.optimizer" class="engine-select" @change="markParam('optimizer')"><option value="auto">自动</option><option value="adamw">AdamW</option><option value="adamw8bit">AdamW8bit</option><option value="lion">Lion</option></select></label>
+            <label v-if="supported('optimizer')" class="engine-field" :title="legacyTooltips.optimizer"><span>优化器</span><select v-model="draft.optimizer" class="engine-select" @change="markParam('optimizer')"><option value="auto">自动</option><option value="adamw">AdamW</option><option value="adamw8bit">AdamW8bit</option><option v-if="!isFizgig" value="lion">Lion</option></select></label>
             <label v-if="supported('batch_size')" class="engine-field" :title="legacyTooltips.batchSize"><span>批大小（留空 = 自动）</span><input v-model="draft.batch_size" class="engine-input" type="number" min="1" max="8" placeholder="自动（1）" @input="markParam('batch_size')" /></label>
             <label v-if="supported('gc')" class="engine-field" :title="legacyTooltips.gradientCheckpointing"><span>梯度检查点</span><select v-model="draft.gc" class="engine-select" @change="markParam('gc')"><option value="auto">自动（按显存）</option><option value="开启">开启（省显存，较慢）</option><option value="关闭">关闭（更快，更吃显存）</option></select></label>
-            <label v-if="supported('blocks_to_swap')" class="engine-field" :title="legacyTooltips.blocksToSwap"><span>块交换数（Krea2/FLUX.2）</span><select v-model="draft.blocks_to_swap" class="engine-select" @change="markParam('blocks_to_swap')"><option value="">自动</option><option v-for="count in [0, 2, 4, 6, 8, 10, 12]" :key="count" :value="String(count)">{{ count }}</option></select></label>
+            <label v-if="isV7" class="engine-field wide-field"><span>预览正向补充词</span><input v-model="draft.global_pos" class="engine-input" @input="markRoot('global_pos')" /></label>
+            <label v-if="isV7" class="engine-field wide-field"><span>预览负向词</span><input v-model="draft.global_neg" class="engine-input" @input="markRoot('global_neg')" /></label>
+            <label v-if="supported('blocks_to_swap')" class="engine-field" :title="legacyTooltips.blocksToSwap"><span>块交换数（NF4 下停用）</span><select v-model="draft.blocks_to_swap" class="engine-select" @change="markParam('blocks_to_swap')"><option value="">自动</option><option v-for="count in [0, 2, 4, 6, 8, 10, 12]" :key="count" :value="String(count)">{{ count }}</option></select></label>
             <label v-if="supported('sample_prompt')" class="engine-field wide-field" :title="legacyTooltips.samplePrompt"><span>采样预览提示词</span><input v-model="draft.sample_prompt" class="engine-input" placeholder="留空自动生成；填写后整句生效" @input="markParam('sample_prompt')" /></label>
               <label class="engine-field" title="各次采样使用同一个正整数种子，便于比较不同训练阶段。固定种子不保证不同引擎或不同提示词的图片可直接比较。"><span>固定采样种子</span><input v-model="draft.sample_seed" class="engine-input" type="number" min="1" max="4294967295" placeholder="默认 1234" @input="markParam('sample_seed')" /></label>
             <label v-if="supported('noise_offset')" class="engine-field" :title="legacyTooltips.noiseOffset"><span>Noise offset</span><input v-model="draft.noise_offset" class="engine-input" @input="markParam('noise_offset')" /></label>
@@ -351,6 +383,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
 .engine-scroll-area{flex:1;min-height:0;overflow:auto;scrollbar-color:var(--tone-4a4e56) transparent;scrollbar-width:thin}.engine-scroll-content{display:flex;flex-direction:column;gap:10px;padding:5px 25px 13px 24px}.engine-summary,.engine-card{min-width:0;border:1px solid var(--outline-subtle);border-radius:7px;background:var(--card)}.engine-summary{display:grid;grid-template-columns:minmax(0,1.2fr) auto minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px 12px}.summary-main,.asset-copy{display:grid;min-width:0;gap:4px}.summary-label,.engine-field>span{color:var(--hint);font-size:10px}.summary-main strong,.asset-copy strong{overflow:hidden;color:var(--tone-c5cad1);font-size:11px;font-weight:350;text-overflow:ellipsis;white-space:nowrap}.summary-main small,.asset-copy small{overflow:hidden;color:var(--tone-888e97);font-size:9px;line-height:1.4;text-overflow:ellipsis}.engine-card-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}.engine-card{padding:12px 13px 11px}.engine-card-heading{display:flex;align-items:center;gap:9px;min-height:25px;margin-bottom:10px}.engine-card-heading>span{color:var(--tone-8993a0);font-size:10px;letter-spacing:.04em}.engine-card-heading>div{display:grid;gap:2px}.engine-card-heading h2{margin:0;color:var(--tone-cbd0d7);font-size:13px;font-weight:400}.engine-card-heading small{color:var(--hint);font-size:9px}
 .engine-fields{display:grid;gap:9px}.engine-fields.two-columns{grid-template-columns:repeat(2,minmax(0,1fr))}.engine-fields.spaced{margin-top:9px}.engine-field{display:grid;min-width:0;gap:5px}.engine-input,.engine-select{width:100%;min-width:0;height:30px;padding:0 9px;border:1px solid var(--tone-3d414a);border-radius:5px;color:var(--tone-c6cbd3);background:var(--tone-22252c);font-size:11px;font-weight:350}.engine-select{padding-right:24px;cursor:pointer}.engine-select option{color:var(--tone-cbd0d7);background:var(--tone-252830)}.engine-input::placeholder{color:var(--tone-707680)}.engine-param-grid{display:grid;grid-template-columns:repeat(4,minmax(82px,1fr));gap:8px}.engine-hint{margin:8px 0 0;color:var(--tone-898f99);font-size:10px;line-height:1.45;white-space:pre-line}
 .engine-switch{display:flex;align-items:center;gap:8px;width:100%;margin-top:8px;padding:4px 0;border:0;color:inherit;background:transparent;text-align:left;cursor:pointer}.engine-switch>i{position:relative;width:27px;height:15px;flex:0 0 auto;border-radius:9px;background:var(--tone-454951);transition:background-color 150ms ease}.engine-switch>i:after{position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;background:var(--tone-adb3bc);transition:transform 160ms var(--ease-out);content:''}.engine-switch.active>i{background:var(--tone-626f81)}.engine-switch.active>i:after{transform:translateX(12px)}.engine-switch>span{display:grid;gap:2px}.engine-switch strong{color:var(--tone-bfc4cc);font-size:11px;font-weight:400}.engine-switch small{color:var(--hint);font-size:9px}.engine-check{display:inline-flex;align-items:center;gap:7px;min-height:28px;padding:2px 3px;border:0;color:var(--tone-a7adb7);background:transparent;font-size:10px;text-align:left;cursor:pointer}.engine-check>i{display:grid;width:14px;height:14px;flex:0 0 auto;place-items:center;border:1px solid var(--tone-646a75);border-radius:3px;background:var(--tone-22252c);transition:border-color 130ms ease,background-color 130ms ease}.engine-check.checked>i{border-color:var(--tone-687689);background:var(--tone-626f81)}.engine-check.checked>i:after{width:6px;height:3px;border-bottom:1.4px solid var(--tone-e2e5e9);border-left:1.4px solid var(--tone-e2e5e9);transform:translateY(-1px) rotate(-45deg);content:''}.engine-check:hover{color:var(--tone-d0d4da)}
+.runtime-choice{display:flex;align-items:end;gap:10px;flex-wrap:wrap}.runtime-choice .engine-field,.runtime-choice .engine-input{flex:1;min-width:180px}.runtime-card .engine-hint{margin-top:10px}
 .advanced-heading{margin-bottom:9px}.engine-advanced-grid{display:grid;grid-template-columns:repeat(4,minmax(100px,1fr));align-items:end;gap:9px}.wide-field{grid-column:span 2}.engine-utility-row{display:flex;flex-wrap:wrap;gap:7px}.engine-utility{min-height:29px;padding:0 10px;border:1px solid var(--border);border-radius:5px;color:var(--tone-afb5bf);background:var(--tone-252830);font-size:10px;cursor:pointer;transition:border-color 130ms ease,color 130ms ease,background-color 130ms ease,transform 110ms ease-out}.engine-utility:hover{border-color:var(--tone-505660);color:var(--tone-d0d4da);background:var(--tone-2b2e36)}.engine-utility:active{transform:scale(.985)}.engine-footer-note{display:flex;align-items:center;gap:7px;margin:-2px 1px 0;color:var(--tone-818792);font-size:10px}.engine-footer-note i{width:5px;height:5px;border-radius:50%;background:var(--tone-929baa)}
 @media(max-width:1180px){.engine-toolbar{align-items:flex-start;flex-direction:column}.engine-actions{flex-wrap:wrap}.engine-card-grid{grid-template-columns:1fr}.engine-param-grid{grid-template-columns:repeat(3,minmax(100px,1fr))}.engine-advanced-grid{grid-template-columns:repeat(3,minmax(100px,1fr))}.engine-summary{grid-template-columns:minmax(0,1fr) auto}.asset-copy{grid-column:1}}
 @media(prefers-reduced-motion:reduce){.engine-button,.engine-back,.engine-switch>i,.engine-switch>i:after{transition:none}}

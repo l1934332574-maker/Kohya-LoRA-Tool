@@ -26,6 +26,15 @@ defineProps<{
   guideSteps: GuideStep[]
 }>()
 const modeTips: Record<string, string> = {
+  'model:sd15': 'SD 1.5 LoRA：选择已有项目，或新建项目后设置底模。',
+  'model:sdxl': 'SDXL LoRA：按显卡推荐 Kohya / Fizgig，可在创建项目时查看并手动选择。',
+  'model:flux': 'FLUX.1 LoRA：沿用 Kohya 路径。',
+  'model:anima': 'Anima LoRA：先选标准 28 层 / 2.9B 40 层，再选择匹配的引擎。',
+  'model:krea2': 'Krea 2 RAW LoRA：可选 Musubi、AI Toolkit、Fizgig，工具按显卡推荐。',
+  'model:klein': 'FLUX.2 Klein LoRA：4B 与 9B 使用不同组件和训练入口，创建时明确选择。',
+  'model:qwen': 'Qwen-Image LoRA：区分 2512 与 2.1，使用匹配的组件和训练适配器。',
+  'model:h3': 'MiniMax H3 LoRA：Fizgig 可训练混合媒体；AI Toolkit 路径训练视频。',
+  'model:zimage': 'Z-Image LoRA：使用 AI Toolkit，AMD 使用原有兼容路径。',
   _kohya: '第一引擎（kohya）：选择一种训练类型后进入对应的 LoRA 工作区。',
   kohya_sd15: '第一引擎 · SD 1.5：512px 底模架构。选择后打开该架构项目，或按 SD1.5 模板新建。',
   kohya_sdxl: '第一引擎 · SDXL 1.0：1024px 底模架构。选择后打开该架构项目，或按 SDXL 模板新建。',
@@ -57,7 +66,7 @@ const modeTips: Record<string, string> = {
     </button>
     </div>
     <div class="sidebar-body">
-    <nav class="engine-nav" aria-label="训练引擎">
+    <nav class="engine-nav" aria-label="训练模型">
       <section v-for="group in groups" :key="group.label" class="engine-group">
         <h2>{{ group.label }}</h2>
         <div class="engine-buttons" :class="{ single: group.modes.length === 1 }">
@@ -75,6 +84,8 @@ const modeTips: Record<string, string> = {
       </section>
     </nav>
 
+    <button class="sidebar-action secondary" type="button" title="选择图片，独立生成关键词或中文 / 英文画面描述，不需要训练项目。" @click="emit('action', 'prompt_reverse')"><UiIcon name="image" /> 反推提示词</button>
+
     <div class="sidebar-spacer"></div>
     <section v-if="guideSteps.length" class="sidebar-guide-panel" aria-label="新手引导">
       <header class="sidebar-guide-heading">
@@ -82,7 +93,7 @@ const modeTips: Record<string, string> = {
         <span>{{ guideLabel }}</span>
       </header>
       <button
-        v-for="step in guideSteps"
+        v-for="step in guideSteps.filter(step => !step.done)"
         :key="step.id"
         class="guide-step"
         :class="{ done: step.done, pending: !step.done }"
@@ -95,8 +106,9 @@ const modeTips: Record<string, string> = {
         <span class="guide-step-check" :aria-label="step.done ? '已完成' : '未完成'">{{ step.done ? '✓' : '·' }}</span>
         <span class="guide-step-button">{{ step.button }}</span>
       </button>
+      <details v-if="guideSteps.some(step => step.done)" class="completed-guide"><summary>已完成 {{ guideSteps.filter(step => step.done).length }} 项准备</summary><button v-for="step in guideSteps.filter(step => step.done)" :key="step.id" class="guide-step done" type="button" :title="step.tip" @click="emit('guideAction',step)"><span class="guide-step-label">{{ step.label }}</span><span>✓</span></button></details>
     </section>
-    <p v-else class="sidebar-guide">新建项目并选择训练模式后，这里会显示对应的四步引导。</p>
+    <p v-else class="sidebar-guide">新建项目并选择模型后，这里会显示对应的四步引导。</p>
     <button class="sidebar-action secondary" type="button" title="Python / Git 不想装在系统盘？这里可以自己选文件夹，工具会识别并校验；放在别的盘或整合包文件夹里，重装系统后也能继续用。" @click="emit('action', 'env_locations')">
       <UiIcon name="settings" /> 环境位置（自带 Python / Git）
     </button>
@@ -114,6 +126,7 @@ const modeTips: Record<string, string> = {
 
 <style scoped>
 .sidebar { overflow:hidden; }
+.completed-guide{font-size:11px;color:var(--hint);margin:8px 0}.completed-guide summary{cursor:pointer;line-height:1.6}.completed-guide .guide-step{width:100%}
 .sidebar-top { flex:none; min-width:0; padding-bottom:15px; }
 .sidebar-top .brand-row { padding-bottom:10px; }
 .sidebar-body { flex:1; min-height:0; min-width:0; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; scrollbar-gutter:stable; }

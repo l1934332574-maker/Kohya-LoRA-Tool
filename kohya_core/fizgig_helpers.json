@@ -1,0 +1,142 @@
+{
+  "anima": {
+    "repo": "circlestone-labs/Anima-Base-v1.0-Diffusers",
+    "commit": "073c3a9db359c31ad0e8aa268d15775473c2176c",
+    "files": {
+      "tokenizer/tokenizer.json": {
+        "sha256": "476870a1f2fb6f6a2759a6ede2383bf9d5d738f17844563b65c91965b722ae09",
+        "bytes": 11422924
+      },
+      "tokenizer/tokenizer_config.json": {
+        "sha256": "6b589ccd67dac34cfd9e274864e34c819309cec98d99bb76aa1e13faf217d03e",
+        "bytes": 421
+      },
+      "t5_tokenizer/tokenizer.json": {
+        "sha256": "2432e8aa83414a69884a5cbd54a68f528c042d1f30780affbefcbb85091f022e",
+        "bytes": 2424069
+      }
+    }
+  },
+  "sdxl": {
+    "repo": "stabilityai/stable-diffusion-xl-base-1.0",
+    "commit": "462165984030d82259a11f4367a4eed129e94a7b",
+    "files": {
+      "model_index.json": {
+        "sha256": "6d7b93508390ab91ac5bfbe4aeb4dc2d83f7bb1b05fb069d714b5b0c75f70d44",
+        "bytes": 609
+      },
+      "scheduler/scheduler_config.json": {
+        "sha256": "af3e45a949aff8b8341ab8b811429ec03fee857a700a1d9477363e4fff9666e2",
+        "bytes": 479
+      },
+      "text_encoder/config.json": {
+        "sha256": "39b8b2e4b1949e36969caa425b6c81c68bace99198dd9078ce05d16ad401fe7f",
+        "bytes": 565
+      },
+      "text_encoder_2/config.json": {
+        "sha256": "a892d1c3a69a7e9247a24de2bc1d5891e3109a54696e53be20093af671072c34",
+        "bytes": 575
+      },
+      "unet/config.json": {
+        "sha256": "30ebc70750223e59006f7f2b4e1e6c102570aa19a9c4ae3e1fbe7591332dbae6",
+        "bytes": 1680
+      },
+      "vae/config.json": {
+        "sha256": "0b331c8ac22ded5f9997a144a575c1d113d6169aff262c353f39015bd24a6264",
+        "bytes": 642
+      },
+      "tokenizer/merges.txt": {
+        "sha256": "9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a",
+        "bytes": 524619
+      },
+      "tokenizer/special_tokens_map.json": {
+        "sha256": "c4864a9376a8401918425bed71fc14fc0e81f9b59ec45c1cf96cccb2df508eac",
+        "bytes": 472
+      },
+      "tokenizer/tokenizer_config.json": {
+        "sha256": "19d7b034cb0cc3ce9766c2231373ab8aa8991fc72e2c8f76558bfaae3de0d563",
+        "bytes": 737
+      },
+      "tokenizer/vocab.json": {
+        "sha256": "e089ad92ba36837a0d31433e555c8f45fe601ab5c221d4f607ded32d9f7a4349",
+        "bytes": 1059962
+      },
+      "tokenizer_2/merges.txt": {
+        "sha256": "9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a",
+        "bytes": 524619
+      },
+      "tokenizer_2/special_tokens_map.json": {
+        "sha256": "f118ab3a983206e4f32583448de6bd6aae4ee21869135cef1f5848a753cdaab6",
+        "bytes": 460
+      },
+      "tokenizer_2/tokenizer_config.json": {
+        "sha256": "c9d23941f76a41cbd50eda9290f57be7828f0a7a677939e9ef181f7e12bd1bdf",
+        "bytes": 725
+      },
+      "tokenizer_2/vocab.json": {
+        "sha256": "e089ad92ba36837a0d31433e555c8f45fe601ab5c221d4f607ded32d9f7a4349",
+        "bytes": 1059962
+      }
+    }
+  },
+  "klein": {
+    "repo": "Qwen/Qwen3-8B",
+    "commit": "b968826d9c46dd6066d109eabc6255188de91218",
+    "files": {
+      "config.json": {
+        "sha256": "f7c4eadfbbf522470667b797a3c89be2524832d2d599797248dc304fff447c30",
+        "bytes": 728
+      },
+      "merges.txt": {
+        "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+        "bytes": 1671853
+      },
+      "tokenizer.json": {
+        "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "bytes": 11422654
+      },
+      "tokenizer_config.json": {
+        "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101",
+        "bytes": 9732
+      },
+      "vocab.json": {
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+        "bytes": 2776833
+      }
+    }
+  },
+  "krea2": {
+    "repo": "Qwen/Qwen3-VL-4B-Instruct",
+    "commit": "ebb281ec70b05090aa6165b016eac8ec08e71b17",
+    "files": {
+      "chat_template.json": {
+        "sha256": "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4",
+        "bytes": 5502
+      },
+      "config.json": {
+        "sha256": "edac7703329133edfc53e46ac0081835144c99d7eebf28b71c732694d435224d",
+        "bytes": 1505
+      },
+      "merges.txt": {
+        "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+        "bytes": 1671839
+      },
+      "preprocessor_config.json": {
+        "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+        "bytes": 390
+      },
+      "tokenizer.json": {
+        "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+        "bytes": 7032403
+      },
+      "tokenizer_config.json": {
+        "sha256": "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399",
+        "bytes": 10868
+      },
+      "vocab.json": {
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+        "bytes": 2776833
+      }
+    }
+  }
+}

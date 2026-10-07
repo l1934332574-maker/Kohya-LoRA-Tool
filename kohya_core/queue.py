@@ -74,7 +74,9 @@ def run_queue_item(name, logf=print):
                      concept_mode=K.is_concept_mode(mode, p.get("at_sub_mode")),
                      style_target=K.style_target_code(p.get("style_preset")))
         logf("[队列] 预处理完成，开始训练…")
-    if mode == "qwen21_fz":
+    if mode in ("anima_fz", "sdxl_fz"):
+        K.train_fizgig_lora(logf, mode=mode, params=p, vram_gb=vram)
+    elif mode == "qwen21_fz":
         K.train_qwen21_fizgig(logf, mode=mode, params=p, vram_gb=vram, resume_from=None, progress=None)
     elif mode == "h3_fz":
         K.train_h3_fizgig(logf, mode=mode, params=p, vram_gb=vram, resume_from=None, progress=None)

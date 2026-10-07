@@ -221,9 +221,9 @@ def _image_data(image):
     return base64.b64encode(buffer.getvalue()).decode('ascii')
 
 
-def describe_image(config, image, language, length, stop):
+def describe_image(config, image, language, length, stop, prompt=None):
     image_data = _image_data(image)
-    prompt = _prompt(language, length)
+    prompt = prompt or _prompt(language, length)
     if config['provider'] == 'ollama':
         payload = {'model': config['model'], 'stream': False, 'keep_alive': '5m',
                    'messages': [{'role': 'user', 'content': prompt, 'images': [image_data]}],

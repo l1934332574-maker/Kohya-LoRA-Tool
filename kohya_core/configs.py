@@ -11,6 +11,8 @@ MODE_LABELS = {
     "concept": "🦄 概念LoRA模式",
     "krea2": "🖼 Krea 2 图像LoRA",
     "krea2_at": "🖼 Krea2 图像LoRA（AI-Toolkit 引擎）",
+    "anima_fz": "Anima LoRA（Fizgig）",
+    "sdxl_fz": "SDXL LoRA（Fizgig）",
     "krea2_fz": "🖼 Krea2 图像LoRA（Fizgig 引擎）",
     "qwen21_fz": "🖼 Fizgig Qwen-Image-2.1",
     "h3_fz": "🎬 MiniMax H3 全模态（Fizgig 引擎）",
@@ -20,7 +22,7 @@ MODE_LABELS = {
     "qwen_image": "🖼 Qwen-Image LoRA",
     "zimage": "🖼 Z-Image LoRA",
 }
-MODE_KEYS = ["style", "character", "concept", "krea2", "krea2_at", "krea2_fz", "qwen21_fz", "h3_fz", "flux2", "flux2_fz", "video", "qwen_image", "zimage"]
+MODE_KEYS = ["style", "character", "concept", "krea2", "krea2_at", "krea2_fz", "qwen21_fz", "h3_fz", "flux2", "flux2_fz", "video", "qwen_image", "zimage", "anima_fz", "sdxl_fz"]
 
 # Qwen-Image / Z-Image 的画风/人物子模式（训练类型切换）
 AT_SUB_LABELS = {
@@ -155,6 +157,8 @@ _PRESET_BASE = {
     "character": {"rank": "24", "alpha": "12", "unet_lr": "1.5e-4", "te_lr": "8e-5", "repeats": "3", "max_epochs": "6", "resolution": "512"},
     "concept": {"rank": "32", "alpha": "16", "unet_lr": "1e-4", "te_lr": "5e-5", "repeats": "3", "max_epochs": "8", "resolution": "512"},
     "krea2": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "512"},
+    "anima_fz": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "0", "repeats": "2", "max_epochs": "16", "resolution": "512"},
+    "sdxl_fz": {"rank": "16", "alpha": "16", "unet_lr": "1e-4", "te_lr": "0", "repeats": "2", "max_epochs": "16", "resolution": "512"},
     "krea2_fz": {"rank": "32", "alpha": "32", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "2", "max_epochs": "16", "resolution": "512"},
     "qwen21_fz": {"rank": "8", "alpha": "8", "unet_lr": "1e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "30", "resolution": "512", "fizgig_qwen_preset": "auto"},
     "h3_fz": {"rank": "8", "alpha": "8", "unet_lr": "2e-4", "te_lr": "1e-4", "repeats": "1", "max_epochs": "50", "resolution": "512", "video_frames": "56", "sample_interval": "5"},
@@ -221,6 +225,8 @@ PRESET_VERSION = 4
 
 RESOLUTIONS = {k: v["resolution"] for k, v in ARCH_INFO.items()}
 QUANT_MODE_OPTIONS = {
+    "anima_fz": ("auto", "bf16", "int8", "nf4"),
+    "sdxl_fz": ("auto", "bf16", "int8", "nf4"),
     "krea2": ("auto", "fp8", "int8", "nf4"),
     "flux2": ("auto", "fp8", "int8", "nf4"),
     "krea2_fz": ("auto", "fp8", "int8", "nf4", "bf16"),
@@ -228,7 +234,7 @@ QUANT_MODE_OPTIONS = {
     "qwen21_fz": ("auto", "bf16", "int8", "nf4"),
     "h3_fz": ("auto", "int8", "nf4", "hqq"),
 }
-MIN_IMAGES = {"style": 20, "character": 15, "concept": 15, "krea2": 15, "krea2_at": 15, "krea2_fz": 15, "qwen21_fz": 5, "h3_fz": 1, "flux2": 15, "flux2_fz": 15, "video": 3, "qwen_image": 15, "zimage": 15}   # 一键训练最少可用图片/视频数
+MIN_IMAGES = {"anima_fz": 15, "sdxl_fz": 15, "style": 20, "character": 15, "concept": 15, "krea2": 15, "krea2_at": 15, "krea2_fz": 15, "qwen21_fz": 5, "h3_fz": 1, "flux2": 15, "flux2_fz": 15, "video": 3, "qwen_image": 15, "zimage": 15}   # 一键训练最少可用图片/视频数
 MAX_AUTO_STEPS = 12000                          # 一键训练自动约束的最大总步数（防过拟合）
 
 PARAM_LABELS = {
@@ -277,20 +283,20 @@ PARAM_SCOPE = {
     # 第一引擎 kohya + 第三引擎 AI Toolkit AMD 后端会读取兼容模式开关。
     "te_lr": ("style", "character", "concept"),
     "train_text_encoder": ("style", "character", "concept"),
-    "global_pos": ("style", "character", "concept"),
-    "global_neg": ("style", "character", "concept"),
+    "global_pos": ("anima_fz", "sdxl_fz", "style", "character", "concept"),
+    "global_neg": ("anima_fz", "sdxl_fz", "style", "character", "concept"),
     "amd_mode": ("style", "character", "concept", "krea2_at", "qwen_image", "zimage"),
     "style_preset": ("style", "character", "concept"),
     "noise_offset": ("style", "character", "concept"),
     "min_snr_gamma": ("style", "character", "concept"),
     "reg_dir": ("style", "character", "concept"),
-    "base_model": ("style", "character", "concept"),
+    "base_model": ("anima_fz", "sdxl_fz", "style", "character", "concept"),
     # 仅视频 / AI 图像（这两个引擎按「总步数」训练，不用 epoch）
     "fizgig_qwen_preset": ("qwen21_fz",),
     "video_steps": ("video", "qwen_image", "zimage"),
     "video_frames": ("video", "h3_fz"),
     # 量化适用于 Krea2 / FLUX.2 系及 Fizgig Qwen 2.1 / H3；块交换仅适用于前两系。
-    "quant_mode": ("krea2", "krea2_fz", "flux2", "flux2_fz", "qwen21_fz", "h3_fz"),
+    "quant_mode": ("anima_fz", "sdxl_fz", "krea2", "krea2_fz", "flux2", "flux2_fz", "qwen21_fz", "h3_fz"),
     "blocks_to_swap": ("krea2", "krea2_fz", "flux2", "flux2_fz"),
     # ★ 2026-09-27 新增（用户诉求：训练器能改 bs 与梯度检查点）✗
     #   batch_size：留空 = 自动 1 ✓
@@ -303,14 +309,14 @@ PARAM_SCOPE = {
     #     · Fizgig（第四引擎）走 yaml 且固定开启 ✗ → 本参数对它不生效 ✓
     "gc": ("style", "character", "concept", "krea2", "flux2"),
     # 优化器：两个 Fizgig 引擎不读（用引擎自己的默认）
-    "optimizer": ("style", "character", "concept", "krea2", "flux2",
+    "optimizer": ("anima_fz", "sdxl_fz", "style", "character", "concept", "krea2", "flux2",
                   "krea2_at", "video", "qwen_image", "zimage"),
     # compile：仅第一引擎 + Krea2 / FLUX.2 / Krea2(Fizgig)
-    "compile": ("style", "character", "concept", "krea2", "flux2", "krea2_fz"),
+    "compile": ("anima_fz", "sdxl_fz", "style", "character", "concept", "krea2", "flux2", "krea2_fz"),
     # repeats / max_epochs：视频与 AI 图像按步数训练，不用这两个
-    "repeats": ("style", "character", "concept", "krea2", "krea2_at",
+    "repeats": ("anima_fz", "sdxl_fz", "style", "character", "concept", "krea2", "krea2_at",
                 "krea2_fz", "qwen21_fz", "h3_fz", "flux2", "flux2_fz"),
-    "max_epochs": ("style", "character", "concept", "krea2", "krea2_at",
+    "max_epochs": ("anima_fz", "sdxl_fz", "style", "character", "concept", "krea2", "krea2_at",
                    "krea2_fz", "qwen21_fz", "h3_fz", "flux2", "flux2_fz"),
 }
 
@@ -374,6 +380,8 @@ TRIGGER_HINT_AT = ("💡提示：填一个网上很少见到的英文单词（�
                    "训练后输入这个单词，就能召唤这个角色/风格。\n"
                    "不填也可以正常训练（但召唤效果弱）。")
 DATASET_TIPS = {
+    "anima_fz": "建议 15~30 张多角度、不同背景的图片。Fizgig 只接标准 28 层 Anima；2.9B / 40 层请选 Kohya。新项目默认 512px。",
+    "sdxl_fz": "建议 15~30 张图片。使用完整 SDXL safetensors 底模，支持同架构第三方底模；这里只训练 UNet LoRA，文本编码器冻结。新项目默认 512px。",
     "style": "📌 数据集提示：建议 20~60 张图片，尽量多不同人物、不同姿态，避免五官固化。画风模式自动过滤强人物五官标签；可填画风专属触发词，不需要正则图。",
     "character": "📌 数据集提示：建议 15~30 张同一人物，多角度、不同服装，推荐设置唯一 trigger 触发词；可配合正则数据集防过拟合。",
     "concept": "📌 数据集提示：15~40 张「同一个概念」的图——形态/种族、同款服装、同一物品、同一身体部位都算；刻意混不同画风/人脸/姿势/背景，只有这个概念保持一致；trigger 是唯一共同元素，描述只写每张的变体。",
@@ -389,7 +397,7 @@ DATASET_TIPS = {
     "zimage": "📌 数据集提示：15~30 张同一人物/风格图片。Z-Image 是 8B 轻量模型：8G 可用（自动开快跑档）、12G 起步、16G 舒服；首次训练自动下载模型约 16GB（国内镜像）。",
 }
 
-OUTPUT_NAMES = {"style": "anime_style_lora", "character": "character_lora", "concept": "concept_lora", "krea2": "krea2_lora", "krea2_at": "krea2_at_lora", "krea2_fz": "krea2_fizgig_lora", "qwen21_fz": "qwen21_fizgig_lora", "h3_fz": "h3_fizgig_lora", "flux2": "flux2_lora", "flux2_fz": "flux2_fizgig_lora", "video": "h3_video_lora", "qwen_image": "qwen_image_lora", "zimage": "zimage_lora"}
+OUTPUT_NAMES = {"anima_fz": "anima_fizgig_lora", "sdxl_fz": "sdxl_fizgig_lora", "style": "anime_style_lora", "character": "character_lora", "concept": "concept_lora", "krea2": "krea2_lora", "krea2_at": "krea2_at_lora", "krea2_fz": "krea2_fizgig_lora", "qwen21_fz": "qwen21_fizgig_lora", "h3_fz": "h3_fizgig_lora", "flux2": "flux2_lora", "flux2_fz": "flux2_fizgig_lora", "video": "h3_video_lora", "qwen_image": "qwen_image_lora", "zimage": "zimage_lora"}
 # ---------- 新手引导步骤（数据驱动，按模式渲染） ----------
 # 每步：id(唯一) / label(显示文案) / btn(按钮文字) / check(完成判定类型) / act(GUI 动作方法名) / tip(悬停提示)
 # check 类型：
@@ -604,3 +612,12 @@ PROJECT_TEMPLATES = {
         "visible": False,
     },
 }
+
+# v7 ordinary-LoRA setup flow (shared by the modern workspace and Agent).
+for _mode, _name in (("anima_fz", "Anima"), ("sdxl_fz", "SDXL")):
+    GUIDE_STEPS[_mode] = [
+        {"id": "env", "label": "① 环境准备", "btn": "去准备", "check": "env", "act": "cmd_env", "tip": "准备 Python / Git。"},
+        {"id": "fizgig", "label": "② 安装 Fizgig v7", "btn": "去安装", "check": "fizgig", "act": "cmd_install_fizgig", "tip": "国内镜像优先；保留旧版本环境。"},
+        {"id": "base", "label": "③ 选择底模 / 组件", "btn": "去设置", "check": "fizgig_new_models", "act": "cmd_pick_model_type", "tip": "选择已有底模；缺少的组件可在模型下载中准备。"},
+        {"id": "raw", "label": "④ 选择图片文件夹", "btn": "去选择", "check": "raw", "act": "cmd_pick_raw", "tip": "选择训练图片文件夹。"},
+    ]

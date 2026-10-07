@@ -39,7 +39,7 @@ export const legacyTooltips = {
   videoFrames: '第三引擎 H3 视频帧数需符合 17n+5；H3 Fizgig 的帧数设置只影响预览采样，不会裁剪训练视频。',
   fizgigQwenPreset: 'Fizgig 官方 Qwen-Image-2.1 预设固定 rank、alpha 和学习率；Fast 的学习率会在 2e-4~4e-4 内自适应。Auto 按画风/人物/概念类型选择预设。',
   fastTier: 'Z-Image 自动档在显存低于 10GB 时启用；Qwen-Image 需手动开启。该省显存档会量化文本编码器、启用层交换，自动档会关闭训练采样；手动开启可覆盖采样策略。该档可能让每步更慢，训练分辨率仍按你填写的值。',
-  optimizer: '自动=按环境预检选 AdamW8bit 或降级；若报 bitsandbytes 崩溃，改选 AdamW/Lion。第四引擎目前由训练入口指定优化器，页面不提供无效的手动选择。',
+  optimizer: '自动按当前引擎选择优化器。Fizgig v7 接入支持 AdamW / AdamW8bit：Qwen 自动使用 AdamW8bit，其他家族使用 AdamW。旧 Fizgig 项目沿用原入口默认值。bitsandbytes 异常可尝试 AdamW。',
   quantMode: '按当前训练引擎选择支持的底模精度；bf16 通常更吃显存。',
   blocksToSwap: '自动=按显存档位；0=全部驻留显存；块越少越快但越吃显存。',
   batchSize: '每步同时训练的图片数。留空 = 自动（1）。调大后每轮步数会相应减少（每轮步数 = repeats × 图片数 ÷ 批大小），显存占用上升；显存吃紧请保持 1。',
