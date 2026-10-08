@@ -16,6 +16,9 @@ BOOL_PARAM_KEYS = frozenset(('strong_bind', 'clean_concept', 'sample_preview',
 
 
 def training_params(core, config, project_name):
+    if config.get('training_kind') == 'slider':
+        from .slider_project import parameters
+        return parameters(config, project_name)
     mode = str(config.get('mode') or 'character')
     base_type = str(config.get('base_type') or 'sdxl')
     stored = config.get('params') if isinstance(config.get('params'), dict) else {}

@@ -24,12 +24,13 @@ TOOLS = [
     ('environment', '刷新软件版本、系统、显卡、安装状态、模式能力与当前项目。', {}),
     ('projects', '列出项目和创建模板，不读取其他项目图集。', {}),
     ('bind_project', '首页开始时绑定用户明确选择的已有项目；本次绑定后不切换到其他项目。', {'name': 'projects 返回的项目名'}),
-    ('create_project', '创建新项目并绑定给本次 Agent；不能覆盖已有项目。', {'name': '项目名', 'template': 'projects 返回的模板名'}),
+    ('create_project', '创建新项目并绑定给本次 Agent；不能覆盖已有项目。', {'name': '项目名', 'template': 'projects 返回的模板名', 'training_type': 'character / style / concept / slider；slider 只使用 SDXL / Anima Fizgig 模板'}),
     ('select_dataset', '用户先明确选择或粘贴目录，再保存为当前项目训练数据。', {'path': '可选：当前会话中用户明确授权的完整目录路径；省略时打开文件夹选择器'}),
     ('select_base_model', 'Kohya 或 Fizgig 的 SDXL / Anima：用户明确选择的 safetensors 底模会识别架构并保存。其他模型使用专用模型设置。', {'path': '可选：当前会话中用户明确授权的 safetensors 完整文件路径；省略时打开模型选择器'}),
     ('project', '刷新当前项目的已保存和默认合成参数、缺少的信息。', {}),
     ('inspect_data', '只检查当前项目图集；图片统计不等于视觉质量判断。', {}),
     ('configure', '自动保存经过校验的参数。遵守用户约束，每次返回真实变更差异与备份记录。', {'params': 'project.allowed 中的键值对象', 'reason': '修改依据'}),
+    ('configure_slider', '保存滑块目标、文字两端、试训或正式训练与高级设置。图片目录仅使用用户明确选择的路径；不做普通打标。', {'settings': 'project.slider 中字段的修改对象', 'reason': '修改依据'}),
     ('configure_goal', '设置人物／画风／概念训练类型、触发词及适用模式的 AMD 兼容或文本编码器开关。', {'training_type': 'character / style / concept（可选）', 'trigger': '可选触发词', 'amd_mode': '可选布尔值', 'unet_only': '可选布尔值', 'reason': '修改依据'}),
     ('mode_help', '读取当前模式的参数说明、适用范围、图集提示、最少样本数及准备步骤。', {}),
     ('configure_labels', '保存图片描述方式与触发词。没有字幕的自然语言模式不能直接训练。', {'method': 'wd14 / natural / existing', 'language': 'zh / en', 'trigger': '可选触发词'}),
@@ -54,7 +55,7 @@ TOOLS = [
 ]
 TITLES = {'environment': '熟悉工具环境', 'projects': '查看项目与模式', 'bind_project': '绑定已有项目', 'create_project': '创建项目',
           'select_dataset': '选择图集', 'select_base_model': '选择底模', 'project': '读取项目',
-          'inspect_data': '检查训练数据', 'configure': '调整训练参数', 'configure_goal': '设置训练目标', 'mode_help': '读取模式说明', 'configure_labels': '设置图片描述',
+          'inspect_data': '检查训练数据', 'configure': '调整训练参数', 'configure_slider': '设置概念滑块', 'configure_goal': '设置训练目标', 'mode_help': '读取模式说明', 'configure_labels': '设置图片描述',
           'undo_configuration': '撤销配置', 'prepare_data': '准备训练数据', 'describe_images': '生成图片描述',
           'check_training': '检查训练条件', 'train': '训练并监控', 'model_files': '检查模型文件',
           'select_managed_model': '选择受管模型', 'download_model': '下载模型',
@@ -73,7 +74,7 @@ def public_data(value, limit=16000):
                 lowered = str(key).lower()
                 if any(word in lowered for word in ('api_key', 'protected_key', 'authorization', 'password', 'token', 'data_url')):
                     continue
-                if lowered in ('raw_dir', 'base_model', 'python_path', 'asset_dir', 'path', 'resume_path', 'dataset_directory', 'directory', 'kohya_dir', 'train_env'):
+                if lowered in ('raw_dir', 'positive_dir', 'negative_dir', 'base_model', 'python_path', 'asset_dir', 'path', 'resume_path', 'dataset_directory', 'directory', 'kohya_dir', 'train_env'):
                     output[key + '_selected'] = bool(candidate)
                 else:
                     output[key] = clean(candidate)
@@ -344,6 +345,15 @@ class TrainingAgent:
             for key in ('rank', 'alpha', 'unet_lr'):
                 allowed.pop(key, None)
         stored = config.get('params') or {}
+        if config.get('training_kind') == 'slider':
+            from kohya_core.slider_project import normalize
+            slider = normalize(config.get('slider'))
+            # Filesystem selections remain local; the model gets semantic settings / availability.
+            return {'name': name, 'mode': mode, 'base_type': config.get('base_type'), 'training_kind': 'slider',
+                    'base_model_selected': bool(config.get('base_model')), 'allowed': {}, 'quant_modes': quant,
+                    'slider': {k: v for k, v in slider.items() if k not in ('positive_dir', 'negative_dir', 'pairs')},
+                    'pair_directories_selected': bool(slider['positive_dir'] and slider['negative_dir']),
+                    'engine_note': '使用 configure_slider 设置目标。文字模式无需图集；图片对模式由软件自动配对。只允许 SDXL 或标准 28 层 Anima。0 为 LoRA 关闭；先试训，结果需用户查看对照，不能称质量达标。'}
         return {'name': name, 'mode': mode, 'base_type': config.get('base_type'), 'fizgig_version': params.get('fizgig_version'),
                 'dataset_selected': bool(config.get('raw_dir')), 'base_model_selected': bool(config.get('base_model')),
                 'caption_method': stored.get('caption_method', 'wd14'), 'trigger': config.get('trigger', ''),
@@ -820,7 +830,7 @@ class TrainingAgent:
         data_label = source_plan.get('data_label', '样本')
         data_unit = source_plan.get('data_unit', '个')
         fields.append({'key': 'dataset', 'label': '训练数据', 'value': '%s %s%s' % (data_count, data_unit, data_label) if data_count is not None else ('已设置' if config.get('raw_dir') else '未设置')})
-        fields.append({'key': 'captions', 'label': '描述文件', 'value': 'WD14' if details.get('caption_method') == 'wd14' else str(details.get('caption_method') or '未配置')})
+        fields.append({'key': 'captions', 'label': '训练依据' if config.get('training_kind') == 'slider' else '描述文件', 'value': ('文字指导' if (config.get('slider') or {}).get('source') == 'text' else '整对对照图片') if config.get('training_kind') == 'slider' else 'WD14' if details.get('caption_method') == 'wd14' else str(details.get('caption_method') or '未配置')})
         if mode in ('character', 'style', 'concept'):
             fields.append({'key': 'base_model', 'label': '底模', 'value': source_plan.get('model_label') or ('已设置' if config.get('base_model') else '未设置')})
         elif source_plan.get('model_label'):
@@ -831,7 +841,7 @@ class TrainingAgent:
         effective = source_plan.get('config_summary') or details.get('effective_params') or {}
         allowed = details.get('allowed') or {}
         for key in ('resolution', 'batch_size', 'max_epochs', 'repeats', 'video_steps', 'rank', 'alpha', 'unet_lr', 'te_lr', 'steps', 'trigger'):
-            if key in allowed and effective.get(key) is not None:
+            if (key in allowed or config.get('training_kind') == 'slider') and effective.get(key) is not None:
                 fields.append({'key': key, 'label': LABELS.get(key, key), 'value': effective[key]})
             elif key == 'steps' and source_plan.get(key):
                 fields.append({'key': key, 'label': '计划步数', 'value': source_plan[key]})
@@ -892,7 +902,7 @@ class TrainingAgent:
             if template not in {item['name'] for item in bootstrap.get('templates', [])}:
                 raise CaptionError('请使用 projects 返回的真实模板名称。')
             self._check_stop()
-            result = bridge.create_project(str(args.get('name') or ''), template)
+            result = bridge.create_project(str(args.get('name') or ''), template, training_type=str(args.get('training_type') or 'character'))
             if result.get('ok'):
                 project_name = result.get('project', {}).get('name') or str(args.get('name') or '')
                 self.expected = copy.deepcopy(bridge.core.load_project(project_name))
@@ -955,6 +965,8 @@ class TrainingAgent:
         mode = str(config.get('mode') or 'character')
         if name == 'project':
             return self.project_context()
+        if config.get('training_kind') == 'slider' and name in ('select_dataset', 'configure_labels', 'describe_images'):
+            raise CaptionError('滑块不使用普通图集打标。文字模式无需图片；图片对请在滑块页选择并核对两个方向。')
         if name in ('select_dataset', 'select_base_model'):
             if name == 'select_base_model' and mode not in ('character', 'style', 'concept', 'anima_fz', 'sdxl_fz'):
                 return {'ok': False, 'error': '此模式使用独立模型管理，请先查看 environment / model_files，或让用户在对应模型面板设置。'}
@@ -989,6 +1001,16 @@ class TrainingAgent:
                 from kohya_core.fizgig_adapter import validate_base
                 validate_base(bridge.core, expected, selected_path)
             return self._save({'base_model': selected_path, 'base_type': detected}, '用户明确选择并识别 safetensors 底模')
+        if name == 'configure_slider':
+            if config.get('training_kind') != 'slider': raise CaptionError('请先创建概念滑块项目，不能把普通训练项目静默改成滑块。')
+            from kohya_core.slider_project import normalize
+            updates = args.get('settings')
+            if not isinstance(updates, dict) or not str(args.get('reason') or '').strip(): raise CaptionError('需要滑块设置与修改依据。')
+            if any(key in updates for key in ('positive_dir', 'negative_dir', 'pairs')):
+                raise CaptionError('图片目录与配对请在滑块页选择；Agent 不能猜测图片位置或配对关系。')
+            try: settings = normalize({**normalize(config.get('slider')), **updates})
+            except ValueError as exc: raise CaptionError(str(exc)) from exc
+            return self._save({'slider': settings}, str(args['reason'])[:2000])
         if name == 'configure':
             context = self.project_context()
             params = validate_patch(args.get('params'), context['allowed'], context['quant_modes'])
@@ -997,6 +1019,7 @@ class TrainingAgent:
                 raise CaptionError('修改参数需要给出依据。')
             return self._save({'params': params}, reason[:2000])
         if name == 'mode_help':
+            if config.get('training_kind') == 'slider': return self.project_context()
             supports = self.bridge.core.param_supports
             return public_data({'mode': mode, 'base_type': config.get('base_type'),
                                 'minimum_samples': getattr(bridge.core, 'MIN_IMAGES', {}).get(mode),
@@ -1005,6 +1028,7 @@ class TrainingAgent:
                                 'guide': getattr(bridge.core, 'GUIDE_STEPS', {}).get(mode, ()),
                                 'note': '原有提示可能有概括或过时文字，以工具真实预检和执行结果为准。'}, 18000)
         if name == 'configure_goal':
+            if config.get('training_kind') == 'slider': raise CaptionError('滑块请使用 configure_slider；没有普通人物 / 画风训练类型或触发词。')
             reason = str(args.get('reason') or '').strip()
             if not reason:
                 raise CaptionError('设置训练目标需要说明依据。')
@@ -1052,6 +1076,15 @@ class TrainingAgent:
                 self.last_change = None
             return result
         if name == 'inspect_data':
+            if config.get('training_kind') == 'slider':
+                from kohya_core.slider_project import normalize
+                from kohya_core.slider_dataset import scan
+                settings = normalize(config.get('slider'))
+                if settings['source'] == 'text': return {'ok': True, 'message': '文字滑块无需图片；底模生成练习画面。'}
+                try:
+                    report = scan(settings)
+                    return {'ok': True, 'training_pairs': len(report['train']), 'holdout_pairs': len(report['holdout']), 'warnings': report['warnings']}
+                except (ValueError, OSError) as exc: return {'ok': False, 'error': str(exc)}
             raw = config.get('raw_dir') or ''
             if not raw:
                 return {'ok': False, 'error': '没有数据目录，请调用 select_dataset 或向用户提问。'}
@@ -1064,7 +1097,7 @@ class TrainingAgent:
         if name == 'check_training':
             return public_data(bridge.prepare_training(project_name))
         if name == 'prepare_data':
-            if (config.get('params') or {}).get('caption_method', 'wd14') == 'wd14' and not (config.get('params') or {}).get('keep_user_captions') and not self._permission('allow_download', 'WD14 阶段可能下载打标模型。本次是否允许下载？'):
+            if config.get('training_kind') != 'slider' and (config.get('params') or {}).get('caption_method', 'wd14') == 'wd14' and not (config.get('params') or {}).get('keep_user_captions') and not self._permission('allow_download', 'WD14 阶段可能下载打标模型。本次是否允许下载？'):
                 return {'ok': False, 'error': 'WD14 可能下载打标模型，需开启允许下载；或使用已有文本／自然语言描述。'}
             return self._wait_task(bridge.start_preprocess_task(project_name))
         if name == 'describe_images':

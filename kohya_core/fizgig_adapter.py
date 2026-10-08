@@ -43,7 +43,9 @@ def models(core, family, params=None):
     if te and Path(te).is_dir():
         single = Path(te) / "model.safetensors"
         te = str(single) if single.is_file() else None
-    vae = core.anima_get_component("vae")
+    # Reuse the component dialog resolver, including Anima_vae in current/legacy data roots.
+    # anima_get_component() only reads manual overrides; it does not discover installed files.
+    vae = core.anima_component_status()["vae"]["path"]
     for base in [folder, Path(core.base_models_dir()), *map(Path, core._anima_bases())]:
         if not vae and (base / "qwen_image_vae.safetensors").is_file():
             vae = str(base / "qwen_image_vae.safetensors")

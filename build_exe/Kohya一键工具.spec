@@ -44,6 +44,7 @@ a = Analysis(
     pathex=['..'],
     binaries=[],
     datas=[
+        (os.path.join(os.path.dirname(SPEC), '..', 'training_backends', 'sliders'), 'training_backends/sliders'),
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "model_catalog.json"), "kohya_core"),
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "fizgig_helpers.json"), "kohya_core"),
         ('..\\preprocess.py', '.'),
@@ -69,6 +70,8 @@ a = Analysis(
         'kohya_core.agent_computer',
         'kohya_core.lora_naming',
         'kohya_core.queue',
+        'kohya_core.slider_project', 'kohya_core.slider_dataset',
+        'kohya_core.slider_training', 'kohya_core.slider_task',
         'kohya_core.fizgig_engine', 'kohya_core.fizgig_adapter', 'kohya_core.model_catalog',
         'gui.queue_window',
         'gui.modern_host',

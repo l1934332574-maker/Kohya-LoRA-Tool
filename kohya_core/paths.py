@@ -312,6 +312,7 @@ def list_projects():
                 "base_type": data.get("base_type", "sd15"),
                 "raw_dir": data.get("raw_dir", ""),
                 "base_model": data.get("base_model", ""),
+                "training_kind": data.get("training_kind", "standard"),
             })
     out.sort(key=lambda x: x.get("updated", ""), reverse=True)
     return out

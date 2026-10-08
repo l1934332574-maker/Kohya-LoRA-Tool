@@ -11,6 +11,7 @@ import UiIcon from './components/UiIcon.vue'
 import ModernQwenWorkspace from './components/ModernQwenWorkspace.vue'
 import ModernKohyaWorkspace from './components/ModernKohyaWorkspace.vue'
 import ModernEngineWorkspace from './components/ModernEngineWorkspace.vue'
+import SliderWorkspace from './components/SliderWorkspace.vue'
 import ModernTaskDialog from './components/ModernTaskDialog.vue'
 import ModernTrainingDialog from './components/ModernTrainingDialog.vue'
 import TrainingHistoryDialog from './components/TrainingHistoryDialog.vue'
@@ -66,7 +67,7 @@ const firstEngineBaseLabels: Record<FirstEngineBaseType, string> = {
 const selectedMode = ref(firstEngineSidebarModes.sdxl)
 const projectModeFilter = ref<string | null>(null)
 const workspaceOpen = ref(false)
-const workspaceKind = ref<'qwen' | 'kohya' | 'engine'>('qwen')
+const workspaceKind = ref<'qwen' | 'kohya' | 'engine' | 'slider'>('qwen')
 const workspaceProject = ref<ProjectCard | null>(null)
 const workspaceConfig = ref<ProjectConfig | null>(null)
 const assistantOpen = ref(false)
@@ -204,7 +205,15 @@ const topActions = [
   { key: 'queue', icon: 'queue', label: '训练队列', tip: '选择多个项目，按顺序执行数据预处理和训练。' },
 ] as const
 const trainActionLabel = computed(() => workspaceOpen.value ? '一键开始训练' : '打开新版训练页')
-const guideSteps = computed(() => modeWorkspace.value?.guide_steps ?? [])
+const guideSteps = computed(() => {
+  if (workspaceKind.value !== 'slider' || !workspaceOpen.value) return modeWorkspace.value?.guide_steps ?? []
+  const settings = workspaceConfig.value?.slider
+  return [
+    {id:'fizgig', label:'① 训练环境', button:'配置', action:'cmd_install_fizgig', check:'fizgig', tip:'Fizgig v7.0.1。', done:Boolean(modeWorkspace.value?.engine_ready)},
+    {id:'base', label:'② 选择底模', button:'选择', action:'cmd_pick_model_type', check:'base', tip:'SDXL / 标准 28 层 Anima。', done:Boolean(workspaceConfig.value?.base_model)},
+    {id:'goal', label:'③ 训练目标', button:'设置', action:'cmd_pick_raw', check:'goal', tip:'设置目标与数据来源。', done:Boolean(settings?.name && settings?.neutral)},
+  ]
+})
 const guideLabel = computed(() => workspaceProject.value?.mode_label || modeWorkspace.value?.label || '')
 const selectedGuideMode = computed(() => selectedMode.value.startsWith('model:') ? preferredModeForModel(selectedMode.value.slice(6)) : selectedMode.value === '_kohya'
   ? (projects.value.find(isKohyaProject)?.mode || 'character')
@@ -509,8 +518,8 @@ async function saveDialog() {
         }
         const template = templates.value.find((item) => item.name === templateName.value)
         const imported = importedConfigPreview.value
-        const mode = String(imported?.mode ?? (modeOverrideForSelectedTemplate() || template?.mode || 'character'))
-        const baseType = String(imported?.base_type ?? template?.base_type ?? (mode === 'qwen_image' ? 'qwen_image' : 'sdxl'))
+        const mode = String(imported?.mode ?? (createGoal.value === 'slider' ? `${createChoice.value?.model || 'sdxl'}_fz` : modeOverrideForSelectedTemplate() || template?.mode || 'character'))
+        const baseType = String(imported?.base_type ?? (createGoal.value === 'slider' ? createChoice.value?.model || 'sdxl' : template?.base_type ?? (mode === 'qwen_image' ? 'qwen_image' : 'sdxl')))
         const matchingTemplate = templates.value.find((item) => item.mode === mode && (!item.base_type || item.base_type === baseType))
           ?? templates.value.find((item) => item.mode === mode)
           ?? template
@@ -521,7 +530,8 @@ async function saveDialog() {
           name,
           updated: new Date().toISOString().replace('T', ' ').slice(0, 19),
           mode,
-          mode_label: firstEngineLabel ?? matchingTemplate?.mode_label ?? mode,
+          training_kind: createGoal.value === 'slider' ? 'slider' : 'standard',
+          mode_label: createGoal.value === 'slider' ? '概念滑块 LoRA' : firstEngineLabel ?? matchingTemplate?.mode_label ?? mode,
           base_type: baseType,
           base_type_label: qwenTemplate ? (mode === 'zimage' ? 'Z-Image' : 'Qwen-Image') : baseTypeLabel ?? baseType,
           raw_dir: '',
@@ -529,6 +539,7 @@ async function saveDialog() {
         }
         previewConfigs.value = { ...previewConfigs.value, [name]: imported ?? {
           mode, base_type: baseType, at_sub_mode: createGoal.value, model_choice: createChoice.value,
+          training_kind: createGoal.value === 'slider' ? 'slider' : 'standard',
           params: mode.endsWith('_fz') ? { fizgig_version: 'v7.0.1' } : {},
         } }
         data.value!.projects = [project, ...projects.value]
@@ -583,7 +594,11 @@ async function openProject(project: ProjectCard) {
     qwenModelSetup.value = null
     modeWorkspace.value = null
     workspaceOpen.value = true
-    if (isQwenProject(project)) {
+    if (project.training_kind === 'slider' || workspaceConfig.value?.training_kind === 'slider') {
+      workspaceKind.value = 'slider'
+      selectedMode.value = project.mode
+      modeWorkspace.value = demoModeWorkspace(project.mode)
+    } else if (isQwenProject(project)) {
       workspaceKind.value = 'qwen'
       selectedMode.value = project.mode
       modeWorkspace.value = demoModeWorkspace(project.mode)
@@ -612,7 +627,7 @@ async function openProject(project: ProjectCard) {
       showToast(loaded.error ?? '读取项目配置失败。')
       return
     }
-    let nextKind: 'qwen' | 'kohya' | 'engine'
+    let nextKind: 'qwen' | 'kohya' | 'engine' | 'slider'
     let nextDetails: ModeWorkspaceData | null = null
     let nextModelSetup: QwenModelSetup | null = null
     if (isQwenProject(project)) {
@@ -637,7 +652,7 @@ async function openProject(project: ProjectCard) {
         showToast(details.error ?? '读取训练模式信息失败。')
         return
       }
-      nextKind = isKohyaProject(project) ? 'kohya' : 'engine'
+      nextKind = loaded.config.training_kind === 'slider' ? 'slider' : isKohyaProject(project) ? 'kohya' : 'engine'
       nextDetails = details
     }
     workspaceProject.value = project
@@ -1184,7 +1199,7 @@ async function loadAppearanceSettings() {
 }
 
 async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
-  if (action === 'fizgig_engine_update' || action === 'fizgig_engine_rollback') {
+  if (action === 'cmd_install_fizgig' || action === 'fizgig_engine_update' || action === 'fizgig_engine_rollback') {
     if (patch && Object.keys(patch).length && (await saveKohyaConfig(patch)) === false) return
     setupAction.value = action
     agentTaskTitle.value = ''
@@ -1365,8 +1380,14 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
     <main class="right-shell" :aria-busy="agentBusy">
       <div class="right-content">
       <Transition name="view" mode="out-in">
+      <SliderWorkspace
+        v-if="!loading && !loadError && workspaceOpen && workspaceProject && workspaceKind === 'slider'"
+        :key="`slider-workspace-${workspaceProject.name}`" :project="workspaceProject" :config="workspaceConfig"
+        :details="modeWorkspace" :desktop="!preview" :choose-path="chooseWorkspacePath" :ref="setActiveWorkspace"
+        @back="returnWorkspace" @notify="showToast" @save="saveKohyaConfig" @train="startModernTraining" @classic-action="runWorkspaceAction"
+      />
       <ModernQwenWorkspace
-        v-if="!loading && !loadError && workspaceOpen && workspaceProject && workspaceKind === 'qwen'"
+        v-else-if="!loading && !loadError && workspaceOpen && workspaceProject && workspaceKind === 'qwen'"
         :key="`workspace-${workspaceProject.name}`"
         :project="workspaceProject"
         :mode="workspaceProject.mode === 'zimage' ? 'zimage' : 'qwen_image'"

@@ -11,7 +11,8 @@ const expanded = ref(false)
 const model = computed(() => props.catalog.models.find(m => m.key === modelKey.value) || props.catalog.models[0])
 const variant = computed(() => model.value?.variants.find(v => v.key === variantKey.value) || model.value?.variants[0])
 const engine = computed(() => variant.value?.engines.find(e => e.key === engineKey.value))
-function available(e: { vendors: string[]; supported?: boolean }) {
+function available(e: { vendors: string[]; supported?: boolean; mode?: string }) {
+  if (goal.value === 'slider' && !['sdxl_fz', 'anima_fz'].includes(e.mode || '')) return false
   return e.supported ?? (props.catalog.gpu_vendor === 'unknown' || e.vendors.includes(props.catalog.gpu_vendor))
 }
 function chooseEngine() {
@@ -23,7 +24,7 @@ watch(modelKey, () => {
   const variants = model.value?.variants || []
   variantKey.value = (variants.find(v => v.engines.some(available)) || variants[0])?.key || ''
 }, { immediate: true })
-watch(variantKey, chooseEngine, { immediate: true })
+watch([variantKey, goal], chooseEngine, { immediate: true })
 watch(() => props.catalog, chooseEngine)
 watch([modelKey, variantKey, engineKey, goal], () => {
   emit('valid', Boolean(engine.value))
@@ -39,16 +40,16 @@ watch([modelKey, variantKey, engineKey, goal], () => {
       <label><span>模型版本</span><select v-model="variantKey"><option v-for="v in model?.variants" :key="v.key" :value="v.key">{{ v.label }}</option></select></label>
     </div>
     <p class="variant-note">{{ variant?.note }}</p>
-    <fieldset class="purpose"><legend>训练目的</legend><label v-for="item in [{key:'character',label:'人物'}, {key:'style',label:'画风'}, {key:'concept',label:'概念 / 物品'}]" :key="item.key" :class="{selected:goal===item.key}"><input v-model="goal" type="radio" name="create-goal" :value="item.key" />{{ item.label }}</label></fieldset>
+    <fieldset class="purpose"><legend>训练目的</legend><label v-for="item in [{key:'character',label:'人物'}, {key:'style',label:'画风'}, {key:'concept',label:'概念 / 物品'}, {key:'slider',label:'概念滑块'}]" :key="item.key" :class="{selected:goal===item.key}"><input v-model="goal" type="radio" name="create-goal" :value="item.key" />{{ item.label }}</label></fieldset>
     <div v-if="engine" class="recommendation">
       <header><strong>{{ engine.label }}</strong><span>{{ engine.status || '创建后检查安装状态' }}</span></header>
-      <p>{{ engine.reason }}</p>
+      <p>{{ goal === 'slider' ? '通过文字或图片对训练可调节属性的 LoRA。实验性功能。' : engine.reason }}</p>
       <span v-if="engine.experimental" class="experimental">实验性入口 · 需观察实际训练效果</span>
     </div>
-    <p v-else class="unavailable" role="status">这个模型版本尚未接入当前显卡的训练路径，请选择其他版本。</p>
+    <p v-else class="unavailable" role="status">{{ goal === 'slider' ? '支持 SDXL 与标准 28 层 Anima；Anima 2.9B / 40 层暂不支持滑块训练。' : '这个模型版本尚未接入当前显卡的训练路径，请选择其他版本。' }}</p>
     <button v-if="variant && variant.engines.length > 1" class="compare" type="button" :aria-expanded="expanded" @click="expanded=!expanded">{{ expanded ? '收起引擎选择' : '查看其他引擎 / 手动选择' }}</button>
     <div v-if="expanded && variant" class="engine-options">
-      <label v-for="e in variant.engines" :key="e.key" :class="{selected:engineKey===e.key, unavailable:!available(e)}"><input v-model="engineKey" type="radio" name="create-engine" :value="e.key" :disabled="!available(e)" /><div><strong>{{ e.label }}</strong><small>{{ e.reason }} {{ !available(e) ? '当前显卡路径未接入。' : '' }}</small></div></label>
+      <label v-for="e in variant.engines" :key="e.key" :class="{selected:engineKey===e.key, unavailable:!available(e)}"><input v-model="engineKey" type="radio" name="create-engine" :value="e.key" :disabled="!available(e)" /><div><strong>{{ e.label }}</strong><small>{{ e.reason }} {{ !available(e) ? goal === 'slider' && !['sdxl_fz', 'anima_fz'].includes(e.mode) ? '当前引擎未接入滑块训练。' : '当前显卡路径未接入。' : '' }}</small></div></label>
     </div>
   </div>
 </template>

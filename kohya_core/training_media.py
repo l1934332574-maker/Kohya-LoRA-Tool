@@ -42,7 +42,7 @@ def sample_files(output_dir, started):
     return sorted(files, key=lambda item: (item["modified"], item["name"]), reverse=True)
 
 
-def image_preview(root, name, full=False):
+def image_preview(root, name, full=False, max_size=None):
     root = Path(root).resolve()
     relative = Path(name)
     if relative.is_absolute() or ".." in relative.parts:
@@ -57,7 +57,7 @@ def image_preview(root, name, full=False):
         width, height = source.size
         if width * height > 80_000_000:
             raise ValueError("图片尺寸过大")
-        source.thumbnail((1400, 1400) if full else (520, 520))
+        source.thumbnail(max_size or ((1400, 1400) if full else (520, 520)))
         image = source.convert("RGB")
     buffer = io.BytesIO()
     image.save(buffer, format="WEBP", quality=86, method=4)

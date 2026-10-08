@@ -4,6 +4,7 @@ export interface ModelVariant { key: string; label: string; note: string; prefer
 export interface ModelCatalogData { models: Array<{ key: string; label: string; variants: ModelVariant[] }>; gpu_vendor: string; gpu: string }
 
 export interface ProjectCard {
+  training_kind?: 'standard' | 'slider'
   name: string
   updated: string
   mode: string
@@ -50,6 +51,8 @@ export interface CreateProjectResult {
 export interface ProjectConfig {
   [key: string]: unknown
   params?: Record<string, unknown>
+  training_kind?: 'standard' | 'slider'
+  slider?: SliderSettings
 }
 
 export interface QwenModelChoice {
@@ -192,6 +195,11 @@ export interface DesktopApi {
   list_training_runs(project_name?: string): Promise<{ ok: boolean; runs?: TrainingRunSummary[]; error?: string }>
   get_training_run(run_id: string): Promise<{ ok: boolean; run?: TrainingRun; error?: string }>
   restore_training_run(run_id: string, project_name: string): Promise<{ ok: boolean; error?: string }>
+  inspect_slider_pairs(project_name: string, settings: SliderSettings): Promise<{ok: boolean; error?: string; pairs?: Array<{positive: string; negative: string}>; positive_files?: string[]; negative_files?: string[]; train_count?: number; holdout_count?: number; warnings?: string[]}>
+  get_slider_results(project_name: string, run_id?: string): Promise<SliderResults>
+  export_slider_checkpoint(project_name: string, run_id: string, checkpoint: string): Promise<{ok: boolean; error?: string; message?: string}>
+  get_slider_sample(project_name: string, run_id: string, name: string): Promise<{ok: boolean; error?: string; data_url?: string}>
+  review_slider_result(project_name: string, run_id: string, review: SliderReview): Promise<{ok: boolean; error?: string}>
   inspect_dataset(directory: string): Promise<DatasetSummary>
   inspect_task_dataset(task_id: string): Promise<DatasetSummary>
   list_dataset_preview(token: string, offset?: number): Promise<{ ok: boolean; images?: string[]; next_offset?: number | null; error?: string }>
@@ -332,6 +340,7 @@ export interface ModernTaskStatus {
 }
 
 export interface TrainingPlan {
+  training_kind?: 'standard' | 'slider'
   config_supports?: Record<string, boolean>
   save_interval_unit?: string
   save_interval_effective?: number
@@ -538,4 +547,22 @@ export async function loadBootstrap(): Promise<{ data: BootstrapData; preview: b
       ],
     },
   }
+}
+
+
+export interface SliderSettings {
+  schema_version: number; purpose: 'bidirectional' | 'reduce' | 'enhance'; source: 'text' | 'pairs'; name: string;
+  neutral: string; positive: string; negative: string; effect: string; positive_dir: string; negative_dir: string;
+  pairs: Array<{positive: string; negative: string}>; preset: 'trial' | 'formal' | 'custom'; steps: number;
+  rank: number; alpha: number; learning_rate: number; resolution: number; seed: number; guidance: number;
+  diff_weight: number; precision: 'auto' | 'bf16' | 'int8' | 'nf4'; validation_prompts: string; sample_steps: number; cfg: number;
+}
+export interface SliderComparison {
+  name: string; epoch: number; seed: number; prompt: string; role: string; multipliers: number[];
+  resolution: number; steps: number; cfg: number; checkpoint: string;
+}
+export interface SliderReview {checkpoint: string; direction_ok: boolean; preservation_ok: boolean; generalization_ok: boolean; quality?: string}
+export interface SliderResults {
+  ok: boolean; error?: string; runs?: string[]; run_id?: string; checkpoints?: string[]; review?: SliderReview | null;
+  result?: { status: string; error?: string; quality: string; checkpoint: string; comparisons: SliderComparison[]; preview_status?: string; message?: string; pair_validation?: Array<{epoch: number; pairs: number; baseline_loss: number; slider_loss: number}>; holdout_validation_error?: string } | null;
 }

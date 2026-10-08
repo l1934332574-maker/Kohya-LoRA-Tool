@@ -7495,6 +7495,9 @@ class App:
             self.q.put("__DONE__")
 
     def cmd_train(self):
+        if self.current_project and (core.load_project(self.current_project) or {}).get("training_kind") == "slider":
+            messagebox.showinfo(core.APP_NAME, "滑块训练请在新版训练页打开项目；不会进入普通 LoRA 预处理与训练流程。")
+            return
         params = self._collect_params()
         if params.get("mode") in ("qwen_image", "zimage"):
             if not self._ensure_at_image_ready():
@@ -7631,6 +7634,9 @@ class App:
             self.q.put("__DONE__")
 
     def cmd_one_click_train(self):
+        if self.current_project and (core.load_project(self.current_project) or {}).get("training_kind") == "slider":
+            messagebox.showinfo(core.APP_NAME, "滑块训练请在新版训练页打开项目；不会进入普通 LoRA 预处理与训练流程。")
+            return
         params = self._collect_params()
         if not params["raw_dir"]:
             messagebox.showwarning(core.APP_NAME, "请先选择原始图片/视频文件夹（步骤④）。")

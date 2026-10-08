@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
-import type { ModernTaskStatus, TrainingPlan } from '../bridge'
+import type { ModernTaskStatus, TrainingPlan, SliderSettings } from '../bridge'
 import TrainingMetrics from './TrainingMetrics.vue'
 import TrainingSampleGallery from './TrainingSampleGallery.vue'
 import DatasetImageBrowser from './DatasetImageBrowser.vue'
@@ -73,6 +73,7 @@ const sampleEmptyText = computed(() => {
   if (state.value?.status === 'completed' || state.value?.status === 'failed' || state.value?.status === 'cancelled') {
     return '本次没有生成采样图。请检查采样间隔和下方日志。'
   }
+  if (props.plan?.training_kind === 'slider') return `等待采样：${props.plan?.sampling_rule?.cadence || '按训练配置执行'}。`
   return `等待本次首张采样图。计划：${props.plan?.sampling_rule?.cadence || '由引擎决定'}；引擎可能在训练开始时额外采样，不保证第一个间隔就成功出图。`
 })
 const logEntries = computed(() => lines.value.map((text, index) => ({
@@ -86,7 +87,7 @@ const settingSummary = computed(() => {
   const supports = props.plan?.config_supports || {}
   const rawMedia = ['video', 'h3_fz'].includes(props.plan?.mode || '')
   const rows = [
-    ['标签处理', rawMedia ? '读取媒体同名字幕' : config.keep_user_captions ? '保留已有标签，不自动打标' : '按当前设置预处理与打标'],
+    [props.plan?.training_kind === 'slider' ? '训练依据' : '标签处理', props.plan?.training_kind === 'slider' ? '文字指导或配对图像' : rawMedia ? '读取媒体同名字幕' : config.keep_user_captions ? '保留已有标签，不自动打标' : '按当前设置预处理与打标'],
     ['训练采样', props.plan?.sampling_rule ? `${props.plan.sampling_rule.enabled ? '开启' : '关闭'}（${props.plan.sampling_rule.reason}）` : config.sample_preview === false ? '关闭' : config.sample_preview === true ? '开启' : '按显存自动选择'],
     ['采样种子', String(config.sample_seed || 1234)],
     ['采样间隔', props.plan?.sampling_rule?.cadence || '训练时确定'],
@@ -105,8 +106,10 @@ const effectiveSummary = computed(() => {
 })
 const hasResume = computed(() => Boolean(props.plan?.resume_path))
 const isRawMediaMode = computed(() => ['video', 'h3_fz'].includes(props.plan?.mode || ''))
-const trainingTypeLabel = computed(() => props.plan?.mode === 'h3_fz' ? '混合媒体' : props.plan?.mode === 'video' ? '视频' : props.plan?.training_type === 'style' ? '画风' : props.plan?.training_type === 'concept' ? '概念' : '人物')
-const engineDescription = computed(() => props.plan?.training_engine === 'kohya'
+const trainingTypeLabel = computed(() => props.plan?.training_kind === 'slider' ? '概念滑块' : props.plan?.mode === 'h3_fz' ? '混合媒体' : props.plan?.mode === 'video' ? '视频' : props.plan?.training_type === 'style' ? '画风' : props.plan?.training_type === 'concept' ? '概念' : '人物')
+const engineDescription = computed(() => props.plan?.training_kind === 'slider'
+  ? '使用文字或图片对训练滑块 LoRA；底模与文本编码器冻结。'
+  : props.plan?.training_engine === 'kohya'
   ? '开始后先按当前设置预处理图集；你可以检查和修改自动标签，确认后直接调用现有 Kohya / sd-scripts 训练入口。'
   : props.plan?.mode === 'video'
     ? '先检查视频和字幕；确认后直接调用现有 MiniMax H3 训练入口。'
@@ -401,6 +404,7 @@ onUnmounted(stopPolling)
           <DatasetImageBrowser v-if="awaitingReview && !isRawMediaMode" :task-id="taskId" :directory="plan?.raw_dir" :desktop="true" />
           <details v-if="effectiveSummary.length" class="train-effective"><summary>引擎启动后记录的生效参数</summary><div v-for="row in effectiveSummary" :key="row.label"><span>{{ row.label }}</span><strong>{{ row.value }}</strong></div><p>这里记录工具已解析的设置；引擎内部再次调整以日志为准。学习率不是保证不变的实时值。</p></details>
           <section v-if="!awaitingReview" class="train-sample" aria-label="训练采样预览">
+            <p v-if="plan?.training_kind === 'slider'">权重从左到右：{{ (plan.config_summary?.slider as SliderSettings | undefined)?.purpose === 'bidirectional' ? '−1 / −0.5 / 0 / +0.5 / +1' : '0 / +0.25 / +0.5 / +0.75 / +1' }}。0 为底模基线。完整对照见滑块页。</p>
             <div class="train-sample-heading"><strong>采样预览</strong><span v-if="sampleName">{{ sampleName }}</span><button class="train-button" type="button" @click="openOutputDirectory">打开输出目录</button><button v-if="sampleData" class="train-button" type="button" @click="expandSample">查看大图</button></div>
             <button v-if="sampleData" class="train-sample-image-button" type="button" aria-label="查看采样预览大图" @click="expandSample"><img class="train-sample-image" :src="sampleData" :alt="`当前训练采样：${sampleName}`"></button>
             <p v-else class="train-sample-empty">{{ sampleEmptyText }}</p>

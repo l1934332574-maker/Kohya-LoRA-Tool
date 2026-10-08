@@ -33,6 +33,11 @@ def run_queue_item(name, logf=print):
     import Kohya一键工具 as K
     p = params_from_project(name)
     mode = p["mode"]
+    if p.get("training_kind") == "slider":
+        from kohya_core.slider_training import train
+        K.reset_stop()
+        train(K, K.load_project(name), name, logf)
+        return True, "产物已生成，待查看效果"
     if mode == "video":
         return False, "第三引擎视频(H3)模式暂不支持入队"
     K.reset_stop()

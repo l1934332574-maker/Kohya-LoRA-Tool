@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.1"
+APP_VERSION = "0.19.2"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -307,6 +307,15 @@ class TrainMonitor:
             # 否则训练走满 100% 后的收尾采样超过 grace 会被当卡死误杀（2026-09 AMD 用户仍复现）。
             with self._lock:
                 self.last_activity = time.time()
+            # The slider child emits explicit stages: a finished step counter does not mean sampling is done.
+            stage = re.match(r"\[滑块阶段\]\s*(sample|train|finish)\s*:\s*(.*)", s)
+            if stage:
+                with self._lock:
+                    self.phase = stage.group(1)
+                    self.phase_label = stage.group(2).strip() or None
+                    if self.phase != "train":
+                        self.eta = None
+                return True
             if any(_m in low for _m in self._SAMPLE_MARKERS):
                 return True
             # 缓存阶段检测
@@ -3205,8 +3214,8 @@ def _start_train_stuck_watchdog(progress, logf, grace=150):
     """训练进度达 100% 后，若进程仍卡住（不退出、无新步数）→ 自动停止。
 
     AMD ROCm 收尾（保存/清理）偶发卡死：步数走满 100% 但进程不退出，需手动点停止。
-    看门狗：达到 100% 后开始计时，进程还活着且无新步数超过 grace 秒 →
-    stop_active_process()（与手动停止一致）；正常完成（进程已退出）不会触发。"""
+    看门狗：达到 100% 后，仅在训练 / 保存阶段无日志活动超过 grace 秒时停止。
+    显式采样阶段不按训练收尾超时处理；正常完成（进程已退出）不会触发。"""
     fired = {"v": False}
 
     def _watch():
@@ -3216,7 +3225,7 @@ def _start_train_stuck_watchdog(progress, logf, grace=150):
                 snap = progress.snapshot()
                 if not snap.get("running"):
                     return
-                if snap.get("phase") != "train":
+                if snap.get("phase") not in ("train", "finish"):
                     continue
                 total = snap.get("total") or 0
                 step = snap.get("step") or 0
@@ -3231,6 +3240,11 @@ def _start_train_stuck_watchdog(progress, logf, grace=150):
                     if not s2.get("running"):
                         return
                     st = s2.get("step", last_step)
+                    if s2.get("phase") not in ("train", "finish"):
+                        # Sampling can legitimately run longer than the finish timeout without new training steps.
+                        last_step = st
+                        stalled = time.time()
+                        continue
                     la = s2.get("last_activity") or 0
                     if st > last_step or (la and la > stalled):
                         # 有新步，或有新的日志活动（如收尾采样/预览在逐行输出）→ 不算卡死，重置计时
@@ -9702,6 +9716,11 @@ def train_fizgig_lora(logf=print, mode="krea2_fz", params=None, vram_gb=None, re
     from kohya_core.fizgig_engine import use_runtime, VERSION
     from kohya_core.fizgig_adapter import train_lora
     params = dict(params or {})
+    if params.get("training_kind") == "slider":
+        from kohya_core.slider_training import train as train_slider
+        if resume_from: raise ValueError("滑块首版尚未开放续训，请从头训练。")
+        config = load_project(params.get("project"))
+        return train_slider(sys.modules[__name__], config, params.get("project"), logf, progress)
     with use_runtime(sys.modules[__name__], params) as record:
         if record.get("version") == VERSION:
             return train_lora(sys.modules[__name__], record, logf, mode, params, vram_gb, resume_from, progress)
@@ -10084,6 +10103,14 @@ def export_config_json(params, include_prompts=False):
         if k in params and params[k] not in (None, ""):
             prm[k] = params[k]
     cfg["params"] = prm
+    if params.get("training_kind") == "slider":
+        from kohya_core.slider_project import normalize
+        settings = normalize(params.get("slider"))
+        settings.update(positive_dir="", negative_dir="", pairs=[])
+        if not include_prompts:
+            for key in ("name", "neutral", "positive", "negative", "effect", "validation_prompts"): settings[key] = ""
+        cfg.update(training_kind="slider", slider=settings, unet_only=True)
+        cfg["params"] = {"fizgig_version": "v7.0.1"}
     if include_prompts:
         for k in _CFG_PROMPT_KEYS:
             v = params.get(k)
@@ -10152,6 +10179,13 @@ def parse_config_json(text):
         if isinstance(v, str) and v.strip():
             cfg[k] = v.strip()
             summary["applied"] += 1
+    if raw.get("training_kind") == "slider":
+        from kohya_core.slider_project import normalize
+        settings = normalize(raw.get("slider"))
+        settings.update(positive_dir="", negative_dir="", pairs=[])
+        cfg.update(training_kind="slider", slider=settings, unet_only=True)
+        cfg["params"]["fizgig_version"] = "v7.0.1"
+        summary["applied"] += 2
     return cfg, summary
 
 

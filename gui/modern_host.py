@@ -850,6 +850,8 @@ class ModernUIBridge:
 
     def start_caption_task(self, project_name, options):
         from kohya_core.captioning import CaptionError, caption_options, generate_captions, service_identity
+        if (self.core.load_project(str(project_name or "")) or {}).get("training_kind") == "slider":
+            return {"ok": False, "error": "滑块使用共有描述与图片配对；请在滑块页操作，不做普通逐图打标。"}
         project_name = str(project_name or "").strip()
         config = self.core.load_project(project_name)
         if not isinstance(config, dict) or not isinstance(options, dict):
@@ -942,6 +944,8 @@ class ModernUIBridge:
         config = self.core.load_project(project_name) if project_name else None
         if not isinstance(config, dict):
             return {"ok": False, "error": "项目不存在或配置文件已损坏。"}
+        if config.get("training_kind") == "slider":
+            return {"ok": False, "error": "滑块训练会自动准备文字练习画面或同步处理图片对；无需普通预处理。"}
         raw_dir = str(config.get("raw_dir") or "").strip()
         if not raw_dir or not os.path.isdir(raw_dir):
             return {"ok": False, "error": "请先在新版训练页选择有效的数据文件夹。"}
@@ -1081,6 +1085,122 @@ class ModernUIBridge:
             raise ValueError("新版训练页直连训练目前只接入 Qwen-Image / Z-Image。")
         return training_params(self.core, config, project_name)
 
+    def inspect_slider_pairs(self, project_name, settings):
+        if not isinstance(self.core.load_project(str(project_name or "")), dict):
+            return {"ok": False, "error": "项目不存在。"}
+        try:
+            from kohya_core.slider_project import normalize
+            from kohya_core.slider_dataset import scan
+            report = scan(normalize(settings))
+            return {"ok": True, "pairs": [{k: row[k] for k in ("positive", "negative")} for row in report["pairs"]],
+                    "positive_files": report["positive_files"], "negative_files": report["negative_files"],
+                    "train_count": len(report["train"]), "holdout_count": len(report["holdout"]), "warnings": report["warnings"]}
+        except (ValueError, OSError) as exc:
+            files = {}
+            try:
+                from kohya_core.slider_dataset import _images
+                for side in ("positive", "negative"):
+                    _, paths = _images(str(settings.get(side + "_dir") or ""))
+                    files[side + "_files"] = [path.name for path in paths]
+            except (ValueError, OSError, AttributeError):
+                pass
+            return {"ok": False, "error": str(exc), **files}
+
+    def _slider_run_dir(self, project_name, run_id):
+        if not self._valid_project_name(str(project_name or "")):
+            raise ValueError("项目名称无效。")
+        if not isinstance(self.core.load_project(str(project_name or "")), dict):
+            raise ValueError("项目不存在。")
+        if not isinstance(run_id, str) or not re.fullmatch(r"\d{8}_\d{6}_[a-f0-9]{8}", run_id):
+            raise ValueError("滑块训练记录无效。")
+        root = Path(self.core.data_sub("output", str(project_name), "slider_runs"))
+        target = root / run_id
+        if root.is_symlink() or target.is_symlink() or not target.is_dir():
+            raise ValueError("滑块训练记录不存在。")
+        return target
+
+    def get_slider_results(self, project_name, run_id=""):
+        try:
+            if not self._valid_project_name(str(project_name or "")): raise ValueError("项目名称无效。")
+            if not isinstance(self.core.load_project(str(project_name or "")), dict):
+                raise ValueError("项目不存在。")
+            root = Path(self.core.data_sub("output", str(project_name), "slider_runs"))
+            runs = sorted((p.name for p in root.iterdir() if p.is_dir() and not p.is_symlink()
+                           and re.fullmatch(r"\d{8}_\d{6}_[a-f0-9]{8}", p.name)), reverse=True)[:50] if root.is_dir() else []
+            if not runs: return {"ok": True, "runs": [], "result": None}
+            chosen = str(run_id or runs[0])
+            folder = self._slider_run_dir(project_name, chosen)
+            path = folder / "result.json"
+            result = json.loads(path.read_text(encoding="utf-8")) if path.is_file() and path.stat().st_size <= 2_000_000 else None
+            checkpoints = [p.name for p in sorted(folder.glob("*.safetensors")) if p.is_file() and not p.is_symlink()]
+            review = folder / "user_review.json"
+            return {"ok": True, "runs": runs, "run_id": chosen, "result": result, "checkpoints": checkpoints,
+                    "review": json.loads(review.read_text(encoding="utf-8")) if review.is_file() and review.stat().st_size < 10_000 else None}
+        except (ValueError, OSError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def get_slider_sample(self, project_name, run_id, name):
+        try:
+            folder = self._slider_run_dir(project_name, run_id)
+            report = self.get_slider_results(project_name, run_id)
+            allowed = {row["name"] for row in (report.get("result") or {}).get("comparisons", [])}
+            if name not in allowed: raise ValueError("该图片不在本次权重对照清单中。")
+            return {"ok": True, **image_preview(folder, name, full=True, max_size=(6000, 1600))}
+        except (ValueError, OSError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def review_slider_result(self, project_name, run_id, review):
+        guard = self._agent_guard()
+        if guard: return guard
+        try:
+            folder = self._slider_run_dir(project_name, run_id)
+            keys = {"checkpoint", "direction_ok", "preservation_ok", "generalization_ok"}
+            if not isinstance(review, dict) or set(review) != keys or any(not isinstance(review[k], bool) for k in keys - {"checkpoint"}):
+                raise ValueError("效果核对内容无效。")
+            report = self.get_slider_results(project_name, run_id)
+            if review["checkpoint"] not in report.get("checkpoints", []) or not self.core._safetensors_complete(str(folder / review["checkpoint"])):
+                raise ValueError("所选检查点不存在或文件不完整。")
+            from kohya_core.fizgig_engine import _write
+            _write(folder / "user_review.json", {**review, "reviewed": time.time(), "quality": "user_confirmed" if all(review[k] for k in keys - {"checkpoint"}) else "needs_review"})
+            return {"ok": True}
+        except (ValueError, OSError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def export_slider_checkpoint(self, project_name, run_id, checkpoint):
+        guard = self._agent_guard()
+        if guard: return guard
+        staged = None
+        try:
+            folder = self._slider_run_dir(project_name, run_id)
+            report = self.get_slider_results(project_name, run_id)
+            if not isinstance(checkpoint, str) or checkpoint not in report.get("checkpoints", []):
+                raise ValueError("所选检查点不在本次训练记录中。")
+            source = folder / checkpoint
+            if not self.core._safetensors_complete(str(source)):
+                raise ValueError("所选检查点尚未写完或文件不完整，请稍后再导出。")
+            if self._window is None: raise ValueError("请在桌面程序中导出 LoRA。")
+            import webview
+            selected = self._window.create_file_dialog(webview.FileDialog.SAVE, save_filename=checkpoint,
+                                                      file_types=("LoRA (*.safetensors)",))
+            if not selected: return {"ok": True, "message": "已取消 LoRA 导出。"}
+            target = Path(selected[0] if isinstance(selected, (list, tuple)) else selected)
+            if target.suffix.lower() != ".safetensors": target = target.with_name(target.name + ".safetensors")
+            if target.resolve() == source.resolve(): return {"ok": True, "message": "所选位置就是原始检查点。"}
+            import shutil
+            import tempfile
+            with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".slider_export_", suffix=".tmp", delete=False) as stream:
+                staged = Path(stream.name)
+            shutil.copyfile(source, staged)
+            staged.replace(target)
+            staged = None
+            return {"ok": True, "message": "所选滑块 LoRA 已导出；原始检查点保留。"}
+        except (ValueError, OSError, RuntimeError) as exc:
+            return {"ok": False, "error": "滑块 LoRA 导出失败：%s" % exc}
+        finally:
+            if staged is not None:
+                try: staged.unlink(missing_ok=True)
+                except OSError: pass
+
     def prepare_training(self, project_name):
         """Run read-only preflight for a modern workspace's directly supported path."""
         guard = self._agent_guard()
@@ -1093,6 +1213,12 @@ class ModernUIBridge:
         config = self.core.load_project(project_name) if project_name else None
         if not isinstance(config, dict):
             return {"ok": False, "error": "项目不存在或配置文件已损坏。"}
+        if config.get("training_kind") == "slider":
+            try:
+                from kohya_core.slider_training import prepare
+                return prepare(self.core, config, project_name)
+            except (ValueError, RuntimeError, OSError) as exc:
+                return {"ok": False, "error": str(exc)}
         mode = str(config.get("mode") or "")
         if mode in ("qwen_image", "zimage"):
             result = self._prepare_qwen_training(project_name)
@@ -1716,11 +1842,23 @@ class ModernUIBridge:
                 return {"ok": False, "error": "当前模式或底模类型已变化，不能直接恢复这条记录。"}
             for key in ("raw_dir", "reg_dir", "base_model", "train_env"):
                 patch.pop(key, None)
+            if current.get("training_kind") == "slider":
+                if patch.get("training_kind") != "slider":
+                    return {"ok": False, "error": "这条记录不是滑块训练，不能替换当前滑块目标。"}
+                from kohya_core.slider_project import normalize
+                restored = normalize(patch.get("slider"))
+                present = normalize(current.get("slider"))
+                for key in ("positive_dir", "negative_dir", "pairs"):
+                    restored[key] = present[key]
+                patch["slider"] = restored
             return self.save_project_config(project_name, patch)
 
     def start_training(self, project_name, use_resume=False):
         """Run an existing engine pipeline without opening the classic Tk workspace."""
         project_name = str(project_name or "").strip()
+        if (self.core.load_project(project_name) or {}).get("training_kind") == "slider":
+            from kohya_core.slider_task import start
+            return start(self, project_name, use_resume)
         preflight = self.prepare_training(project_name)
         if not preflight.get("ok"):
             return preflight
@@ -2151,7 +2289,8 @@ class ModernUIBridge:
                 "name": str(item.get("name", "")),
                 "updated": str(item.get("updated", "")),
                 "mode": mode,
-                "mode_label": self._plain_mode_label(labels.get(mode, mode)),
+                "training_kind": item.get("training_kind", "standard"),
+                "mode_label": "概念滑块 LoRA" if item.get("training_kind") == "slider" else self._plain_mode_label(labels.get(mode, mode)),
                 "base_type": str(item.get("base_type", "")),
                 "base_type_label": base_labels.get(item.get("base_type", ""), str(item.get("base_type", ""))),
                 "raw_dir": str(item.get("raw_dir", "")),
@@ -2353,14 +2492,22 @@ class ModernUIBridge:
             return {"ok": False, "error": "项目不存在或配置文件已损坏。"}
 
         config = dict(config)
+        if patch.get("training_kind", config.get("training_kind", "standard")) not in ("standard", "slider"):
+            return {"ok": False, "error": "训练任务类型无效。"}
+        if "slider" in patch:
+            try:
+                from kohya_core.slider_project import normalize
+                config["slider"] = normalize(patch["slider"])
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
         root_string_fields = {
             "mode", "base_type", "base_model", "raw_dir", "trigger", "reg_dir",
             "style_preset", "style_caption", "at_sub_mode", "concept_type", "fast_tier",
-            "global_pos", "global_neg", "train_env",
+            "global_pos", "global_neg", "train_env", "training_kind",
         }
         root_bool_fields = {"unet_only"}
         param_fields = set(WORKSPACE_PARAM_KEYS)
-        allowed_root_fields = root_string_fields | root_bool_fields | {"params"}
+        allowed_root_fields = root_string_fields | root_bool_fields | {"params", "slider"}
         unknown_root_fields = set(patch) - allowed_root_fields
         if unknown_root_fields:
             return {"ok": False, "error": "未知的项目配置字段：%s" % ", ".join(sorted(unknown_root_fields))}
@@ -2432,6 +2579,12 @@ class ModernUIBridge:
             if (params.get("quant_mode") or "auto") not in allowed_quant:
                 return {"ok": False, "error": "所选引擎版本不支持已保存的量化精度，请同时改为自动或此版本支持的精度。"}
         config["params"] = params
+        if config.get("training_kind") == "slider":
+            try:
+                from kohya_core.slider_project import parameters
+                parameters(config, name)
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
 
         if not self.core.save_project(name, config):
             return {"ok": False, "error": "项目保存失败，请检查磁盘空间和写入权限。"}
@@ -3259,6 +3412,11 @@ class ModernUIBridge:
                 import json as _json
 
                 raw_config = _json.loads(config_json.lstrip("\ufeff"))
+                if raw_config.get("training_kind") == "slider":
+                    from kohya_core.slider_project import normalize
+                    settings = normalize(raw_config.get("slider"))
+                    settings.update(positive_dir="", negative_dir="", pairs=[])
+                    imported_config.update(training_kind="slider", slider=settings)
                 raw_params = raw_config.get("params", {}) if isinstance(raw_config, dict) else {}
                 if isinstance(raw_params, dict):
                     params = dict(imported_config.get("params") or {})
@@ -3298,8 +3456,10 @@ class ModernUIBridge:
             try:
                 choice = resolve_choice(model_choice)
                 template_name = choice["template"]
-                if training_type not in ("character", "style", "concept"):
+                if training_type not in ("character", "style", "concept", "slider"):
                     raise ValueError("训练目的无效。")
+                if training_type == "slider" and choice["mode"] not in ("anima_fz", "sdxl_fz"):
+                    raise ValueError("滑块请选择 SDXL / 标准 28 层 Anima 的 Fizgig v7.0.1 入口。")
                 if choice["mode"] == "character": mode_override = training_type
                 vendor = self.core.detect_gpu_vendor()
                 if vendor and vendor != "unknown" and vendor not in choice["vendors"]:
@@ -3331,6 +3491,11 @@ class ModernUIBridge:
             "params": {},
         }
         if not imported_config:
+            if training_type == "slider":
+                if mode not in ("anima_fz", "sdxl_fz"):
+                    return {"ok": False, "error": "滑块入口尚未接入所选模型。"}
+                from kohya_core.slider_project import normalize
+                data.update(training_kind="slider", slider=normalize({}), unet_only=True)
             data["at_sub_mode"] = training_type
             if model_choice: data["model_choice"] = {k: model_choice[k] for k in ("model", "variant", "engine")}
             if mode in FIZGIG_FAMILIES: data["params"]["fizgig_version"] = FIZGIG_TARGET
@@ -3360,6 +3525,13 @@ class ModernUIBridge:
                 "unet_only": bool(imported_config.get("unet_only", False)),
                 "params": params,
             })
+            if imported_config.get("training_kind") == "slider":
+                from kohya_core.slider_project import parameters
+                data.update(training_kind="slider", slider=imported_config["slider"], unet_only=True)
+                try:
+                    parameters(data, name)
+                except ValueError as exc:
+                    return {"ok": False, "error": str(exc)}
             template_options = dict(templates)
             template_options.update(_MODERN_PROJECT_TEMPLATES)
             matching_template = next((
@@ -3505,6 +3677,20 @@ class ModernUIBridge:
                 return guard
         if action.startswith("mode:") or action == "train":
             return {"ok": False, "error": "训练模式与训练任务由新版训练页直接承接。"}
+        if action == "export_config" and (self.core.load_project(str(project_name or "")) or {}).get("training_kind") == "slider":
+            if self._window is None: return {"ok": False, "error": "文件选择器尚未就绪。"}
+            try:
+                import webview
+                config = self.core.load_project(project_name)
+                payload = self.core.export_config_json(training_params(self.core, config, project_name), include_prompts=True)
+                selected = self._window.create_file_dialog(webview.FileDialog.SAVE, save_filename=project_name + "_滑块配置.json", file_types=("JSON (*.json)",))
+                if not selected: return {"ok": True, "message": "已取消配置导出。"}
+                path = selected[0] if isinstance(selected, (list, tuple)) else selected
+                from kohya_core.fizgig_engine import _write
+                _write(Path(path), payload)
+                return {"ok": True, "message": "滑块配置已导出；不包含图片目录、配对路径或 API 设置。"}
+            except Exception as exc:
+                return {"ok": False, "error": "滑块配置导出失败：%s" % exc}
         if action == "preprocess":
             # Keep every caller on the modern task/review workflow. The classic
             # command remains available for the classic UI, but must not be
