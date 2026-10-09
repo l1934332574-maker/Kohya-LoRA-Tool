@@ -3257,7 +3257,8 @@ class ModernUIBridge:
             engine_ready = Path(record["python"]).is_file() and bool(fizgig_source_version(record["source"]))
         supports = {
             key: bool(core.param_supports(key, mode))
-            for key in _WORKSPACE_PARAM_KEYS
+            # base_model is stored on the project root, but also controls the model picker UI.
+            for key in (*_WORKSPACE_PARAM_KEYS, "base_model")
         }
         if mode in FIZGIG_FAMILIES and version == FIZGIG_TARGET:
             for key in ("optimizer", "compile", "global_pos", "global_neg"):
@@ -3700,6 +3701,8 @@ class ModernUIBridge:
         if action.startswith("open_models:"):
             mode = action.split(":", 1)[1]
             model_dirs = {
+                "sdxl_fz": self.core.sdxl_fz_models_dir,
+                "anima_fz": self.core.anima_fz_models_dir,
                 "krea2": self.core.krea2_models_dir,
                 "krea2_at": self.core.krea2_at_models_dir,
                 "krea2_fz": self.core.krea2_models_dir,

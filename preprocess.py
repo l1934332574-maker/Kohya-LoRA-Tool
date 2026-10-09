@@ -2278,6 +2278,8 @@ def main():
         print(f"[INFO] 重复次数 num_repeats: {args.repeats}")
         if not args.no_wd14 and find_wd14_tagger():
             print(f"[INFO] WD14 自动打标: 开（找不到 .txt 的图片会自动打标）")
+        elif _keep_user_caps:
+            print("[INFO] WD14 自动打标: 关（只读取原图同名非空 .txt，缺失时停止；不写兜底）")
         else:
             print("[INFO] WD14 自动打标: 关（保留原图自带 .txt 或使用兜底 caption）")
     print()
@@ -2292,6 +2294,8 @@ def main():
     seen_hashes = {}
     def sync_preserved_caption(source_image, destination_text):
         raw_txt = os.path.splitext(source_image)[0] + ".txt"
+        if not os.path.isfile(raw_txt):
+            raise ValueError("缺少原图同名文本：%s；保留已有标签模式不会自动打标，请补齐或改用自动打标。" % raw_txt)
         if os.path.islink(raw_txt) or os.path.islink(destination_text):
             raise ValueError("同名文本不读取或覆盖符号链接")
         with open(raw_txt, "rb") as handle:

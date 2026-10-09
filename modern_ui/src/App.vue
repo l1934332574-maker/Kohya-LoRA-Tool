@@ -311,6 +311,7 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
   const stepBased = ['video', 'qwen_image', 'zimage'].includes(mode)
   const usesEpochs = ['krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz'].includes(mode)
   const supports: Record<string, boolean> = {
+    base_model: ['anima_fz', 'sdxl_fz', 'style', 'character', 'concept'].includes(mode),
     rank: true, alpha: true, unet_lr: true, te_lr: false, repeats: !stepBased,
     max_epochs: !stepBased, resolution: true, save_every: true, sample_interval: true,
     video_steps: stepBased, video_frames: ['video', 'h3_fz'].includes(mode), optimizer: !['krea2_fz', 'flux2_fz', 'qwen21_fz', 'h3_fz', 'anima_fz', 'sdxl_fz'].includes(mode),

@@ -211,7 +211,14 @@ function onVersionChange() {
   emit('notify', '版本修改待保存；切换到 v7 会使用独立缓存，原版本快照请回原版本续训。')
 }
 async function guideAction(action: string): Promise<ProjectConfig | null> {
-  if (action === 'cmd_pick_model_type' && supported('base_model')) { await browseModel(); return makePatch() }
+  if (action === 'cmd_pick_model_type') {
+    if (!supported('base_model')) {
+      emit('notify', '当前模式的模型由引擎管理，请使用对应的模型下载入口。')
+      return null
+    }
+    await browseModel()
+    return makePatch()
+  }
   if (action !== 'cmd_pick_raw') return null
   await browseDataset()
   return dirty.has('raw_dir') ? makePatch() : null

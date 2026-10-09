@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.2"
+APP_VERSION = "0.19.3"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -9229,7 +9229,7 @@ def _diagnose_preprocess_failure(vpy, cmd, logf=print):
     控制台是行缓冲，同一条命令手工跑就能看到报错（这正是"日志为空"的对症解法）。
     """
     logf("[预处理] " + "-" * 44)
-    logf("[预处理] 自动自检：子进程没有任何输出就退出了，先定位是环境哪一环坏")
+    logf("[预处理] 正在检查启动环境与预处理依赖，结果仅用于定位。")
 
     def _probe(label, code):
         try:
@@ -9267,7 +9267,7 @@ def _diagnose_preprocess_failure(vpy, cmd, logf=print):
                      "shutil.py", "subprocess.py", "argparse.py", "traceback.py", "sys.py")
                     if os.path.exists(os.path.join(_sd, _n))]
             if _bad:
-                logf("[预处理] ⚠ 检测到会顶掉正常模块的残留文件/文件夹，请删除后重试：")
+                logf("[预处理] 以下同名路径需要核对导入来源；可能是安装包组件，请勿直接删除：")
                 for _b in _bad:
                     logf("        " + _b)
     except Exception:
@@ -10480,25 +10480,41 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         cmd += ["--blur-threshold", str(blur_threshold)]
     if report:
         cmd += ["--report", report]
-    rc = run_stream(cmd, logf=logf)
-    if rc != 0 and caption_method == "natural":
-        raise RuntimeError("自然语言描述预处理失败：请查看具体图片的描述错误，补齐或重试后再训练；不会写入兜底文本。")
-    if rc != 0:
-        # 自愈：父进程自检通过、但子进程仍报缺依赖（半损坏 venv / -c 校验与脚本环境不一致），
-        # 这里强制补装一轮（不依赖快速校验，内置 wheel 覆盖 cp310/311/312）并自动重试一次，
-        # 避免卡在 preprocess.py 的原始报错。
+    # 收集实际错误；数据/标签问题不应触发依赖重装或“无输出”诊断。
+    _preprocess_lines = []
+    rc = run_stream(cmd, logf=logf, collect=_preprocess_lines)
+    _output = "\n".join(line for line in _preprocess_lines if not line.startswith("$ "))
+    _dependency_error = any(marker in _output.lower() for marker in (
+        "import pillow 失败", "import numpy 失败", "no module named 'pil'",
+        'no module named "pil"', "no module named 'numpy'", 'no module named "numpy"',
+        "numpy.core.multiarray failed to import", "_multiarray_umath",
+    ))
+    if rc != 0 and "同名文本未齐全" in _output:
+        _reason = next((line.strip() for line in reversed(_preprocess_lines)
+                        if "同名文本未齐全" in line and "raise RuntimeError" not in line), "同名文本未齐全")
+        _reason = _reason.removeprefix("RuntimeError: ")
+        if caption_method == "natural":
+            _action = "请先批量生成或补齐原图同名自然语言描述，再重新预处理。"
+        else:
+            _action = ("若已有标签，请在原始图片文件夹补齐非空同名 .txt；"
+                       "若只有图片，请取消‘保留已有标签’，选择自动打标后重新预处理。")
+        logf("[预处理] 标签检查失败；不重装训练依赖。" + _action)
+        raise RuntimeError(_reason + " " + _action)
+    if rc != 0 and _dependency_error:
         if not _ensure_preprocess_deps(vpy, get_kohya_dir(), logf, force=True):
-            raise RuntimeError("预处理失败：训练环境自愈后仍不可用，请查看上方日志（若提示 ctypes/Anaconda 基础环境异常，请安装官方独立 Python 后重跑【② 安装训练内核】重建训练环境）")
-        logf("[预处理] 已补装依赖（强制），自动重试预处理…")
-        rc = run_stream(cmd, logf=logf)
+            raise RuntimeError("预处理依赖修复失败，请查看上方导入错误与环境检查结果。")
+        logf("[预处理] 已修复预处理依赖，自动重试一次…")
+        _preprocess_lines = []
+        rc = run_stream(cmd, logf=logf, collect=_preprocess_lines)
     if rc != 0:
-        # 「请查看上方日志」在上方为空时是零信息量的（2026-09-15 qionglora 用户就卡在这）。
-        # 先跑一次主动自检，再报错 —— 报错必须自带下一步。
-        _diagnose_preprocess_failure(vpy, cmd, logf)
-        raise RuntimeError(
-            "预处理失败（退出码 %s）：请把上方【自动自检】结果发给作者；"
-            "同时建议用其中给出的命令在 cmd 窗口手工执行一次 —— 真实报错会直接显示在屏幕上。"
-            % rc)
+        _errors = [line.strip() for line in _preprocess_lines
+                   if line.strip() and not line.startswith("$ ")]
+        if not _errors or _dependency_error:
+            _diagnose_preprocess_failure(vpy, cmd, logf)
+        _detail = next((line for line in reversed(_errors)
+                        if "Error:" in line or "[ERROR]" in line or "[FAIL]" in line), "")
+        raise RuntimeError("预处理失败（退出码 %s）：%s" % (
+            rc, _detail or "请查看上方日志与环境检查结果。"))
     logf("[预处理] 完成。configs/dataset_config.toml 已自动更新。")
 
 

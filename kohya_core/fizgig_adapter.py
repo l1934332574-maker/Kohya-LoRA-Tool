@@ -56,6 +56,14 @@ def models(core, family, params=None):
 
 def missing(core, family, params=None):
     files = models(core, family, params)
+    if family == "sdxl":
+        # A complete SDXL checkpoint contains the UNet, both text encoders and VAE.
+        checkpoint = files.get("dit")
+        if not checkpoint:
+            return ["请选择完整的 SDXL 底模文件"]
+        if not Path(checkpoint).is_file():
+            return ["SDXL 底模文件不存在，请重新选择"]
+        return []
     return ["缺少%s" % title for key, title in (("dit", "训练底模"), ("te", "文本编码器"), ("vae", "VAE"))
             if not files.get(key) or not Path(files[key]).is_file()]
 

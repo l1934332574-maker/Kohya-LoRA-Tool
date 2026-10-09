@@ -162,6 +162,18 @@
         "label": "Krea 2 RAW",
         "engines": [
           {
+            "key": "fizgig",
+            "label": "Fizgig v7.0.1",
+            "mode": "krea2_fz",
+            "template": "Krea2 图像 LoRA（Fizgig）",
+            "vendors": [
+              "nvidia",
+              "amd"
+            ],
+            "reason": "新项目默认入口；提供 NVIDIA / AMD 训练路径，复用本地 Krea 2 模型。",
+            "experimental": false
+          },
+          {
             "key": "musubi",
             "label": "Musubi",
             "mode": "krea2",
@@ -169,7 +181,7 @@
             "vendors": [
               "nvidia"
             ],
-            "reason": "适合沿用 Musubi 参数；本工具当前按 NVIDIA 路径接入。",
+            "reason": "适合继续使用已有 Musubi 项目和参数；当前接入 NVIDIA 路径。",
             "experimental": false
           },
           {
@@ -183,24 +195,13 @@
             ],
             "reason": "按总步数训练；沿用 AI Toolkit 项目。",
             "experimental": false
-          },
-          {
-            "key": "fizgig",
-            "label": "Fizgig v7.0.1",
-            "mode": "krea2_fz",
-            "template": "Krea2 图像 LoRA（Fizgig）",
-            "vendors": [
-              "nvidia",
-              "amd"
-            ],
-            "reason": "提供 CUDA / ROCm 路径；当前只接入普通 LoRA。",
-            "experimental": false
           }
         ],
-        "note": "三个入口训练同一类 RAW 模型，可复用本地模型文件。",
+        "note": "新项目默认使用 Fizgig；已有 Musubi / AI Toolkit 项目可继续训练，模型文件共用。",
         "preferred": {
-          "nvidia": "musubi",
-          "amd": "fizgig"
+          "nvidia": "fizgig",
+          "amd": "fizgig",
+          "unknown": "fizgig"
         }
       }
     ]
