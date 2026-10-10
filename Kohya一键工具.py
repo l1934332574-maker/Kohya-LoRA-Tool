@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.3"
+APP_VERSION = "0.19.4"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -3868,8 +3868,8 @@ H3_MODEL_LINKS = {
                   "https://modelscope.cn/models/Comfy-Org/minimax-H3/resolve/master/vae/minimax_h3_audio_vae_fp32.safetensors"),
 }
 
-# Fizgig v6.5.0 uses the official int8 H3 base. The third engine's Abiray
-# NVFP4 checkpoint is intentionally excluded from this family.
+# Fizgig recommends the official int8 H3 base; v7 also loads full floating H3.
+# The third engine's Abiray NVFP4 checkpoint is not supported by this loader.
 H3_FZ_MODEL_LINKS = {
     **{key: H3_MODEL_LINKS[key] for key in ("dit", "te", "video_vae", "audio_vae")},
     "training_adapter": (
@@ -4085,24 +4085,15 @@ def h3_fz_models_dir():
     return h3_models_dir()
 
 
-def h3_fz_model_files():
-    """Fourth-engine H3 requires the official int8 base; optional files are additive."""
-    existing = h3_model_files()
-    folder = h3_fz_models_dir()
-    result = {key: (existing.get(key) if _safetensors_complete(existing.get(key)) else None)
-              for key in ("dit", "te", "video_vae", "audio_vae")}
-    for key in ("training_adapter", "turbo_lora"):
-        path = os.path.join(folder, H3_FZ_MODEL_LINKS[key][0])
-        result[key] = path if os.path.isfile(path) and _safetensors_complete(path) else None
-    return result
+def h3_fz_model_files(model_settings=None):
+    """Resolve project overrides or the existing shared H3 directory."""
+    from kohya_core.h3_models import files
+    return files(sys.modules[__name__], model_settings)
 
 
-def h3_fz_missing_models(require_audio=False):
-    files = h3_fz_model_files()
-    required = ("dit", "te", "video_vae", "audio_vae") if require_audio else ("dit", "te", "video_vae")
-    return [f"· {description}\n  文件: {name}\n  下载: {url}"
-            for key, (name, description, url) in H3_FZ_MODEL_LINKS.items()
-            if key in required and not files[key]]
+def h3_fz_missing_models(require_audio=False, model_settings=None):
+    from kohya_core.h3_models import missing
+    return missing(sys.modules[__name__], model_settings, require_audio)
 
 
 FIZGIG_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".avif"}
@@ -6588,10 +6579,18 @@ def _train_h3_fizgig_legacy(logf=print, mode="h3_fz", params=None, vram_gb=None,
     # Voice-only rows require an audio VAE. Clips may train their picture without
     # one; if it is present, their sound becomes a training target as well.
     need_audio = dataset["audio"] > 0
-    files = h3_fz_model_files()
-    missing = h3_fz_missing_models(require_audio=need_audio)
+    selection = params.get("h3_models")
+    if selection is None and params.get("project"):
+        from kohya_core.h3_models import settings
+        selection = settings(load_project(params["project"]))
+    from kohya_core.h3_models import validate_selected
+    validate_selected(sys.modules[__name__], selection)
+    files = h3_fz_model_files(selection)
+    missing = h3_fz_missing_models(require_audio=need_audio, model_settings=selection)
     if missing:
         raise RuntimeError("MiniMax H3 缺少 Fizgig 所需模型，请下载到 models/minimax_h3/：\n\n" + "\n".join(missing))
+    from kohya_core.h3_models import training_precision
+    quant_mode = training_precision(files["dit"], quant_mode)
     if dataset["videos"] and not files["audio_vae"]:
         logf("[MiniMax H3(Fizgig)] ⚠ 未安装音频 VAE：MP4 仍可训练画面，但片段声音会被忽略。")
     proj = _sanitize_dirname(params.get("project")) or "h3_fz"
@@ -7774,13 +7773,13 @@ AT_IMAGE_MODELS = {
         "hint": "Qwen-Image 是 20B 大模型：16G 显存起步、24G 舒服（推荐）。首次训练按需下载模型（约 40GB，ModelScope 国内直链）。",
     },
     "zimage": {
-        "label": "Z-Image（8B）",
+        "label": "Z-Image",
         "arch": "zimage",
         "model_id": "Tongyi-MAI/Z-Image",
         "min_vram": 12, "rec_vram": 16,
         "resident_vram": 14,   # 关闭 low_vram（模型全驻留）所需显存（fp8 8G + 激活 + 余量）
-        "size": "约 16GB",
-        "hint": "Z-Image 是 8B 轻量模型：12G 显存起步、16G 舒服。首次训练按需下载模型（约 16GB，ModelScope 国内直链）。训练用基础版，出图可配合 Turbo 加速。",
+        "size": "约 20GB",
+        "hint": "Z-Image 基础版：建议 12G 显存起步、16G 及以上。完整模型与组件约 20GB，可复用本机底模、文本编码器和 VAE。",
     },
 }
 
@@ -7806,7 +7805,7 @@ AT_IMAGE_MODEL_CHOICES = {
         {
             "key": "zimage", "label": "Z-Image（默认）",
             "model_id": "Tongyi-MAI/Z-Image", "arch": "zimage",
-            "size": "约 16GB", "min_vram": 12, "rec_vram": 16, "resident_vram": 14,
+            "size": "约 20GB", "min_vram": 12, "rec_vram": 16, "resident_vram": 14,
             "hint": "Z-Image：12G 显存起步、16G 舒服。",
             "default": True,
         },
@@ -7842,7 +7841,7 @@ def at_image_model_choices(mode):
     return choices
 
 
-def at_image_local_dir(mode):
+def at_image_local_dir(mode, model_settings=None):
     """AI Toolkit 图像模型预下载目录（数据目录，整仓 snapshot_download，hf-mirror 国内直连）。
 
     ★ 2026-09-22 扩展：**自定义模型时用独立目录** ✓ ——
@@ -7851,7 +7850,7 @@ def at_image_local_dir(mode):
       改用 `models/at_image/<mode>__<模型名>` ✓ —— 否则会把官方那个 34~40G 覆盖掉 ✗，
       想切回来又得重下 ✓
     """
-    c = at_image_custom_get(mode)
+    c = at_image_custom_get(mode, model_settings)
     if c.get("local_dir"):
         # 用户直接指定了本地目录（手动放好的模型）→ 就用它，跳过下载 ✓
         return c["local_dir"]
@@ -7880,8 +7879,10 @@ _AT_CUSTOM_FIELDS = ("model_id", "arch", "label", "size", "hint",
                      "text_encoder_path", "vae_path")
 
 
-def at_image_custom_get(mode):
+def at_image_custom_get(mode, model_settings=None):
     """读该模式的自定义模型设置（没设置过 / 读失败 → 返回 {} ✓）。"""
+    if isinstance(model_settings, dict):
+        return {k: model_settings[k] for k in _AT_CUSTOM_FIELDS if model_settings.get(k) not in (None, "")}
     try:
         d = _load_app_settings() or {}
         c = (d.get(_AT_CUSTOM_KEY) or {}).get(mode) or {}
@@ -7914,7 +7915,7 @@ def at_image_custom_set(mode, values):
         return False
 
 
-def at_image_info(mode):
+def at_image_info(mode, model_settings=None):
     """取该模式**当前生效**的模型信息：**用户自定义优先** ✓，否则用官方钉的 ✓。
 
     ⚠️ 所有需要 label / model_id / arch / 显存档位的地方都应走这里 ✓
@@ -7923,7 +7924,7 @@ def at_image_info(mode):
     base = dict(AT_IMAGE_MODELS.get(mode) or {})
     if not base:
         return base
-    custom = at_image_custom_get(mode)
+    custom = at_image_custom_get(mode, model_settings)
     for k, v in custom.items():
         if v not in (None, ""):
             base[k] = v
@@ -7979,17 +7980,21 @@ def _at_image_download_complete(local):
     return True
 
 
-def at_image_model_ready(mode):
+def at_image_model_ready(mode, model_settings=None):
     """检查 AI Toolkit 图像模型是否已下载（仅本地预下载目录完整才算就绪）。
 
     不能把「HF 缓存目录存在」也算就绪：那样本地目录仍残缺时训练会指向残缺目录
     报 no config.json（D 盘用户 v0.10.12 复现）。本地不完整时重新 snapshot_download
     （会自动复用 HF 缓存文件，不重复下载 16GB）。
     """
-    info = at_image_info(mode)
+    info = at_image_info(mode, model_settings)
     if not info:
         return False
-    return at_image_model_dir_ready(at_image_local_dir(mode), info.get("arch"))
+    local = at_image_local_dir(mode, model_settings)
+    if mode == "zimage" and os.path.isfile(local):
+        from kohya_core.zimage_models import missing
+        return not missing(sys.modules[__name__], at_image_custom_get(mode, model_settings))
+    return at_image_model_dir_ready(local, info.get("arch"))
 
 
 def _at_image_qwen21_checkpoint_ready(path):
@@ -8008,6 +8013,19 @@ def at_image_model_dir_ready(local_dir, arch=None):
     """检查本地 AI Toolkit Diffusers 模型；Qwen-Image-2.1 也支持 Comfy 单文件权重。"""
     if not local_dir:
         return False
+    if arch == "zimage":
+        from kohya_core.zimage_models import validate
+        try:
+            if os.path.isdir(local_dir):
+                if not os.path.isfile(os.path.join(local_dir, "model_index.json")):
+                    return False
+                for kind in ("transformer", "text_encoder", "vae"):
+                    validate(local_dir, kind)
+            else:
+                validate(local_dir, "transformer")
+            return True
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
     if arch == "qwen_image_2" and os.path.isfile(local_dir):
         return _at_image_qwen21_checkpoint_ready(local_dir)
     return _at_image_download_complete(local_dir)
@@ -8262,7 +8280,8 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
         + _at8g_train_yaml
         + "      model:\n"
         "        name_or_path: " + _yq(info["model_id"]) + "\n"
-        "        arch: '" + info["arch"] + "'\n"
+        + ("        extras_name_or_path: " + _yq(info["extras_name_or_path"]) + "\n" if info.get("extras_name_or_path") else "")
+        + "        arch: '" + info["arch"] + "'\n"
         "        quantize: true\n"
         "        qtype: \"qfloat8\"\n"
         "        low_vram: " + ("true" if _low_vram else "false") + "\n"
@@ -8356,19 +8375,19 @@ def _parse_at_image_ms_files(d):
     return out
 
 
-def _at_image_ms_download(mode, logf):
+def _at_image_ms_download(mode, logf, model_settings=None):
     """AT_IMAGE（Z-Image / Qwen-Image）底模从魔搭直链下载到 models/at_image/<mode>/（保持目录结构）。
 
     每个文件 curl 断点续传（可手动停止/中断后续传）；已存在的完整文件跳过。
     返回 True=下载完整（at_image_model_ready 通过）；False=失败（调用方回退在线加载）。
     """
-    info = at_image_info(mode)
+    info = at_image_info(mode, model_settings)
     if not info:
         return False
     # ★ 2026-09-22：自定义模型时，**魔搭仓库名与 HF 同名** ✓
     #   （见 AT_IMAGE_MS_REPOS 上方的注释：Z-Image / Qwen-Image-2512 都是同名 ✓）
     #   例：自定义成 `Qwen/Qwen-Image-2.1` → modelscope.cn/models/Qwen/Qwen-Image-2.1 ✓
-    _custom_repo = at_image_custom_get(mode).get("model_id")
+    _custom_repo = at_image_custom_get(mode, model_settings).get("model_id")
     repo = _custom_repo or AT_IMAGE_MS_REPOS.get(mode)
     if not repo:
         logf(f"[{info['label']}] 魔搭仓库未配置，无法直连下载")
@@ -8379,7 +8398,7 @@ def _at_image_ms_download(mode, logf):
     if not files:
         logf(f"[{info['label']}] 魔搭文件清单获取失败，稍后重试或手动下载")
         return False
-    local = at_image_local_dir(mode)
+    local = at_image_local_dir(mode, model_settings)
     os.makedirs(local, exist_ok=True)
     logf(f"[{info['label']}] 从魔搭下载 {info['model_id']}（{len(files)} 个文件，国内直连 + 断点续传）…")
     for idx, path in enumerate(files, 1):
@@ -8400,7 +8419,7 @@ def _at_image_ms_download(mode, logf):
         if not _download_with_resume(url, dest, logf, direct=True):
             logf(f"[{info['label']}] ⚠ 文件下载失败：{path}（可重试，断点续传）")
             return False
-    return at_image_model_ready(mode)
+    return at_image_model_ready(mode, model_settings)
 
 
 def _at_image_qwen21_assets_cache_dir():
@@ -9057,7 +9076,11 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     _log_tail = deque(maxlen=400)   # 训练失败时做关键字诊断（如 bitsandbytes 8-bit 崩溃）
     logf = _attach_train_monitor(logf, progress, lr=params.get("unet_lr", 1e-4))
     _check_at_train_driver(logf)
-    info = at_image_info(mode)
+    _model_settings = params.get("at_model") if mode == "zimage" else None
+    if mode == "zimage" and "at_model" not in params:
+        from kohya_core.zimage_models import settings
+        _model_settings = settings(sys.modules[__name__], load_project(params.get("project")) if params.get("project") else None)
+    info = at_image_info(mode, _model_settings)
     if not info:
         raise RuntimeError(f"未知模式: {mode}")
     ok, detail, vpy = ai_toolkit_engine_status()
@@ -9099,8 +9122,15 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     # 五十五：底模预下载到本地（hf-mirror 国内直连 + 断点续传 + 可手动停止），
     # 避免训练时 huggingface_hub 在线拉取 16~40GB（Xet 401/超时/卡 0.00B）。
     # 下载完成或已存在时，训练 yaml 的 name_or_path 指向本地目录，离线加载。
-    _custom_model = at_image_custom_get(mode)
+    _custom_model = at_image_custom_get(mode, _model_settings)
     _is_local_model = bool(_custom_model.get("local_dir"))
+    _zimage_assets, _zimage_components = None, {}
+    _zimage_split = mode == "zimage" and _is_local_model and os.path.isfile(_custom_model["local_dir"])
+    if _zimage_split:
+        from kohya_core.zimage_models import prepare, patch_engine
+        patch_engine(at_dir, logf)
+        _zimage_assets, _zimage_components = prepare(sys.modules[__name__], _custom_model, logf)
+        info["extras_name_or_path"] = _zimage_assets.replace("\\", "/")
     _qwen21_components = {}
     if info.get("arch") == "qwen_image_2":
         if _is_local_model:
@@ -9124,7 +9154,7 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
                 "AI Toolkit 的 Qwen-Image-2.1 本地组件/processor 补丁未能应用。\n"
                 "请更新第三引擎后重试；为避免错误下载，本次训练已停止。"
             )
-    _model_ok = at_image_model_ready(mode)
+    _model_ok = _zimage_split or at_image_model_ready(mode, _model_settings)
     if _is_local_model and not _model_ok:
         raise RuntimeError(
             "指定的本地模型目录不完整或不是 AI Toolkit 所需的 diffusers 格式：\n"
@@ -9134,7 +9164,7 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     _qwen21_assets_path = None
     if info.get("arch") == "qwen_image_2":
         _assets_model_root = (_custom_model.get("local_dir") if _is_local_model else
-                              (at_image_local_dir(mode) if _model_ok else None))
+                              (at_image_local_dir(mode, _model_settings) if _model_ok else None))
         if (_assets_model_root and
                 _at_image_qwen21_assets_folder_ready(_assets_model_root)):
             _qwen21_assets_path = _assets_model_root
@@ -9144,24 +9174,24 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     if not _model_ok:
         logf(f"[{info['label']}] 底模未下载，开始预下载 {info['model_id']}（约 {info['size']}，魔搭国内直连 + 断点续传，可随时停止）…")
         try:
-            _model_ok = _at_image_ms_download(mode, logf)
+            _model_ok = _at_image_ms_download(mode, logf, _model_settings)
             if _model_ok:
-                logf(f"[{info['label']}] 底模预下载完成：{at_image_local_dir(mode)}")
+                logf(f"[{info['label']}] 底模预下载完成：{at_image_local_dir(mode, _model_settings)}")
             else:
                 logf(f"[{info['label']}] ⚠ 底模仍不完整（可能上次下载中断留下半截缓存）；"
-                     f"如持续失败请删除 {at_image_local_dir(mode)} 后重试，本次将尝试在线加载")
+                     f"如持续失败请删除 {at_image_local_dir(mode, _model_settings)} 后重试，本次将尝试在线加载")
         except Exception as e:
             logf(f"[{info['label']}] ⚠ 底模预下载失败（{e}），将尝试训练时在线加载")
     if _model_ok:
         info = dict(info)
-        info["model_id"] = at_image_local_dir(mode).replace("\\", "/")
+        info["model_id"] = at_image_local_dir(mode, _model_settings).replace("\\", "/")
 
     cfg_path = os.path.join(KIT_DIR, "configs", mode + "_train.yaml")
     write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=vpy, logf=logf, vram_gb=vram_gb)
     steps = int(params.get("video_steps", 2000))
     logf(f"[{info['label']}] 数据集: {train_dir}（{count_images(train_dir)} 张）")
     if _is_local_model:
-        logf(f"[{info['label']}] 模型: 使用指定的本地模型目录 {info['model_id']}")
+        logf(f"[{info['label']}] 模型: 使用指定的本地模型 {info['model_id']}")
     elif _model_ok:
         logf(f"[{info['label']}] 模型: 使用本机已就绪的模型目录 {info['model_id']}")
     else:
@@ -9171,6 +9201,15 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
     if params.get("amd_mode"):
         logf("[第三引擎] AMD ROCm 运行时 DLL 路径与训练环境已设置")
     env["HF_ENDPOINT"] = "https://hf-mirror.com"
+    # A new worker gets only this project's split paths; never mutate app-wide settings.
+    for _key in ("KOHYA_ZIMAGE_ASSETS", "KOHYA_ZIMAGE_TEXT_ENCODER", "KOHYA_ZIMAGE_VAE"):
+        env.pop(_key, None)
+    if _zimage_assets:
+        env["KOHYA_ZIMAGE_ASSETS"] = _zimage_assets
+        env["KOHYA_ZIMAGE_TEXT_ENCODER"] = _zimage_components["text_encoder_path"]
+        env["KOHYA_ZIMAGE_VAE"] = _zimage_components["vae_path"]
+        for _label, _path in _zimage_components.items():
+            logf("[Z-Image] 使用本机组件 %s：%s" % (_label, _path))
     if _qwen21_assets_path:
         env["AI_TOOLKIT_QWEN21_ASSETS_PATH"] = _qwen21_assets_path
         logf("[Qwen-Image-2.1] 使用本机 processor/分词器和配置：%s" %
@@ -9716,6 +9755,9 @@ def train_fizgig_lora(logf=print, mode="krea2_fz", params=None, vram_gb=None, re
     from kohya_core.fizgig_engine import use_runtime, VERSION
     from kohya_core.fizgig_adapter import train_lora
     params = dict(params or {})
+    if mode == "h3_fz" and "h3_models" not in params:
+        from kohya_core.h3_models import settings
+        params["h3_models"] = settings(load_project(params.get("project")) if params.get("project") else None)
     if params.get("training_kind") == "slider":
         from kohya_core.slider_training import train as train_slider
         if resume_from: raise ValueError("滑块首版尚未开放续训，请从头训练。")

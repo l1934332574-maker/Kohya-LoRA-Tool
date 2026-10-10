@@ -34,7 +34,7 @@ const demoChoices: QwenModelChoice[] = [
   { key: 'qwen_21', label: 'Qwen-Image-2.1', model_id: 'Qwen/Qwen-Image-2.1', arch: 'qwen_image_2', size: '约 40GB' },
 ]
 const demoZimageChoices: QwenModelChoice[] = [
-  { key: 'zimage', label: 'Z-Image（默认）', model_id: 'Tongyi-MAI/Z-Image', arch: 'zimage', size: '约 16GB', default: true },
+  { key: 'zimage', label: 'Z-Image（默认）', model_id: 'Tongyi-MAI/Z-Image', arch: 'zimage', size: '约 20GB', default: true },
 ]
 const modelChoices = computed(() => props.modelSetup?.choices?.length ? props.modelSetup.choices : props.mode === 'zimage' ? demoZimageChoices : demoChoices)
 const workspaceLabel = computed(() => props.mode === 'zimage' ? 'Z-Image' : 'Qwen-Image')
@@ -43,6 +43,8 @@ const advancedOpen = ref(false)
 const selectedModel = ref(props.mode === 'zimage' ? 'Z-Image' : 'Qwen-Image-2.1')
 const selectedModelKey = ref(props.mode === 'zimage' ? 'zimage' : 'qwen_21')
 const modelSource = ref<'local' | 'download'>('local')
+const draftLocalKind = ref<'directory' | 'file'>('directory')
+const savingModel = ref(false)
 const modelLocalPath = ref(props.desktop ? '' : props.mode === 'zimage' ? 'D:\\AI\\models\\Z-Image' : 'D:\\AI\\ComfyUI\\models\\unet\\qwen_image_2.1_bf16.safetensors')
 const textEncoderPath = ref('')
 const vaePath = ref('')
@@ -125,6 +127,7 @@ function applySetup(setup?: QwenModelSetup | null) {
   draftModel.value = selectedModel.value
   draftSource.value = modelSource.value
   draftLocalPath.value = modelLocalPath.value
+  draftLocalKind.value = modelLocalPath.value.toLowerCase().endsWith('.safetensors') ? 'file' : 'directory'
   draftTextEncoderPath.value = textEncoderPath.value
   draftVaePath.value = vaePath.value
 }
@@ -144,7 +147,7 @@ const draftIsStyle = computed(() => trainingDraft.at_sub_mode === 'style')
 const usesFastTier = computed(() => selectedChoice.value?.arch === 'qwen_image' || selectedChoice.value?.arch === 'zimage')
 const isAmdGpu = computed(() => [props.modelSetup?.gpu_vendor, props.details?.gpu_vendor]
   .some((vendor) => String(vendor || '').toLowerCase() === 'amd'))
-const canSetComponents = computed(() => draftChoice.value?.arch === 'qwen_image_2' && draftSource.value === 'local' && draftLocalPath.value.toLowerCase().endsWith('.safetensors'))
+const canSetComponents = computed(() => draftSource.value === 'local' && (props.mode === 'zimage' ? draftLocalKind.value === 'file' || draftLocalPath.value.toLowerCase().endsWith('.safetensors') : draftChoice.value?.arch === 'qwen_image_2' && draftLocalPath.value.toLowerCase().endsWith('.safetensors')))
 const presetParamKeys = ['rank', 'alpha', 'unet_lr', 'resolution', 'video_steps', 'save_every', 'sample_interval'] as const
 function presetFor(): Record<string, unknown> {
   const key = props.mode === 'zimage' ? 'zimage' : 'qwen_image'
@@ -283,17 +286,21 @@ async function browseRegDirectory() {
 
 async function applyModelChoice() {
   if (props.desktop) {
-    const result = await props.saveModel({
-      mode: props.mode || 'qwen_image',
-      key: draftModelKey.value,
-      source: draftSource.value,
-      local_dir: draftLocalPath.value,
-      text_encoder_path: draftTextEncoderPath.value,
-      vae_path: draftVaePath.value,
-    })
-    if (!result.ok) return
-    if (result.setup) applySetup(result.setup)
-    modelDialogOpen.value = false
+    if (savingModel.value) return
+    savingModel.value = true
+    try {
+      const result = await props.saveModel({
+        mode: props.mode || 'qwen_image',
+        key: draftModelKey.value,
+        source: draftSource.value,
+        local_dir: draftLocalPath.value,
+        text_encoder_path: draftTextEncoderPath.value,
+        vae_path: draftVaePath.value,
+      })
+      if (!result.ok) return
+      if (result.setup) applySetup(result.setup)
+      modelDialogOpen.value = false
+    } finally { savingModel.value = false }
     return
   }
   selectedModel.value = draftModel.value
@@ -306,11 +313,18 @@ async function applyModelChoice() {
   emit('notify', `预览已应用 ${selectedModel.value}；此操作不会修改项目配置。`)
 }
 
-function setModelSource(source: 'local' | 'download') {
+function setModelSource(source: 'local' | 'download', kind?: 'directory' | 'file') {
+  if (savingModel.value) return
+  if (kind && kind !== draftLocalKind.value) {
+    draftLocalPath.value = ''
+    draftTextEncoderPath.value = ''
+    draftVaePath.value = ''
+  }
+  if (kind) draftLocalKind.value = kind
   draftSource.value = source
   if (!props.desktop && source === 'local' && !draftLocalPath.value) {
     draftLocalPath.value = props.mode === 'zimage'
-      ? 'D:\AI\models\Z-Image'
+      ? 'D:\\AI\\models\\Z-Image'
       : draftModel.value === 'Qwen-Image-2.1'
       ? 'D:\\AI\\ComfyUI\\models\\unet\\qwen_image_2.1_bf16.safetensors'
       : 'D:\\AI\\ComfyUI\\models\\diffusion_models\\qwen_image_2512_bf16.safetensors'
@@ -322,6 +336,7 @@ function openModelDialog() {
   draftModelKey.value = selectedModelKey.value
   draftSource.value = modelSource.value
   draftLocalPath.value = modelLocalPath.value
+  draftLocalKind.value = modelLocalPath.value.toLowerCase().endsWith('.safetensors') ? 'file' : 'directory'
   draftTextEncoderPath.value = textEncoderPath.value
   draftVaePath.value = vaePath.value
   modelDialogOpen.value = true
@@ -334,11 +349,11 @@ function selectModel(key: string) {
   draftModel.value = modelName(choice)
   if (draftSource.value === 'local') {
     draftLocalPath.value = props.desktop ? '' : props.mode === 'zimage'
-      ? 'D:\AI\models\Z-Image'
+      ? 'D:\\AI\\models\\Z-Image'
       : choice.arch === 'qwen_image_2'
       ? 'D:\\AI\\ComfyUI\\models\\unet\\qwen_image_2.1_bf16.safetensors'
       : 'D:\\AI\\ComfyUI\\models\\diffusion_models\\qwen_image_2512_bf16.safetensors'
-    if (choice.arch !== 'qwen_image_2') {
+    if (choice.arch !== 'qwen_image_2' && choice.arch !== 'zimage') {
       draftTextEncoderPath.value = ''
       draftVaePath.value = ''
     }
@@ -347,13 +362,16 @@ function selectModel(key: string) {
 
 async function browseModel(kind: 'folder' | 'model') {
   if (!props.desktop) return previewOnly('浏览本地模型')
-  const path = await props.choosePath(kind, draftLocalPath.value, 'qwen_local_model')
-  if (path) draftLocalPath.value = path
+  const path = await props.choosePath(kind, draftLocalPath.value, `${props.mode || 'qwen_image'}_local_model`)
+  if (path) {
+    draftLocalPath.value = path
+    draftLocalKind.value = kind === 'model' ? 'file' : 'directory'
+  }
 }
 
-async function browseComponent(kind: 'text_encoder_path' | 'vae_path') {
+async function browseComponent(kind: 'text_encoder_path' | 'vae_path', pathKind: 'model' | 'folder' = 'model') {
   if (!props.desktop) return previewOnly(kind === 'text_encoder_path' ? '浏览文本编码器' : '浏览 VAE')
-  const path = await props.choosePath('model', kind === 'text_encoder_path' ? draftTextEncoderPath.value : draftVaePath.value, kind)
+  const path = await props.choosePath(pathKind, kind === 'text_encoder_path' ? draftTextEncoderPath.value : draftVaePath.value, `${props.mode || 'qwen_image'}_${kind}`)
   if (path) {
     if (kind === 'text_encoder_path') draftTextEncoderPath.value = path
     else draftVaePath.value = path
@@ -518,12 +536,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           <p class="dialog-description">选择{{ workspaceLabel }}模型来源。下载会在开始训练时按需进行；本地模型可沿用已有权重及配套组件。</p>
           <div class="model-options">
             <button v-for="choice in modelChoices" :key="choice.key" class="model-option" :title="choice.hint || legacyTooltips.modelPath" :class="{ chosen: draftModelKey === choice.key }" type="button" @click="selectModel(choice.key)">
-              <span class="option-radio"></span><span class="option-copy"><strong>{{ choice.label }}</strong><small>{{ choice.arch === 'qwen_image_2' ? '支持指定本地权重、文本编码器与 VAE' : `${choice.size || 'Qwen-Image'} · 官方架构` }}</small></span>
+              <span class="option-radio"></span><span class="option-copy"><strong>{{ choice.label }}</strong><small>{{ ['qwen_image_2', 'zimage'].includes(choice.arch) ? '支持完整目录或独立权重与组件' : `${choice.size || 'Qwen-Image'} · 官方架构` }}</small></span>
             </button>
           </div>
           <div class="model-source-switch" role="tablist" aria-label="模型来源">
             <button :class="{ selected: draftSource === 'download' }" type="button" role="tab" :aria-selected="draftSource === 'download'" @click="setModelSource('download')">下载模型</button>
-            <button :class="{ selected: draftSource === 'local' }" type="button" role="tab" :aria-selected="draftSource === 'local'" @click="setModelSource('local')">使用本地模型</button>
+            <button :class="{ selected: draftSource === 'local' && (mode !== 'zimage' || draftLocalKind === 'directory') }" type="button" role="tab" :aria-selected="draftSource === 'local' && (mode !== 'zimage' || draftLocalKind === 'directory')" @click="setModelSource('local', mode === 'zimage' ? 'directory' : undefined)">{{ mode === 'zimage' ? '完整模型目录' : '使用本地模型' }}</button>
+            <button v-if="mode === 'zimage'" :class="{ selected: draftSource === 'local' && draftLocalKind === 'file' }" type="button" role="tab" :aria-selected="draftSource === 'local' && draftLocalKind === 'file'" @click="setModelSource('local', 'file')">分别选择组件</button>
           </div>
           <div v-if="draftSource === 'download'" class="source-detail">
             <span class="field-caption">下载仓库</span>
@@ -531,15 +550,15 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             <p>这里只保存模型选择；模型文件在经典训练流程中按需准备，本机已缓存的文件会复用。</p>
           </div>
           <div v-else class="source-detail local-source-detail">
-            <label class="qwen-field" :title="legacyTooltips.modelPath"><span class="field-caption">本地 Diffusers 目录或权重文件</span><span class="path-input-row"><input v-model="draftLocalPath" class="qwen-input" type="text" placeholder="粘贴路径，或选择本机目录 / 文件" /><button class="qwen-button compact" type="button" @click="browseModel('folder')">选目录…</button><button v-if="draftChoice?.arch === 'qwen_image_2'" class="qwen-button compact" type="button" @click="browseModel('model')">选权重…</button></span></label>
+            <label class="qwen-field" :title="legacyTooltips.modelPath"><span class="field-caption">{{ mode === 'zimage' ? draftLocalKind === 'file' ? 'Z-Image 底模（BF16 / FP16）' : '完整 Diffusers 模型目录' : '本地 Diffusers 目录或权重文件' }}</span><span class="path-input-row"><input v-model="draftLocalPath" class="qwen-input" type="text" placeholder="粘贴路径，或选择本机目录 / 文件" /><button v-if="mode !== 'zimage' || draftLocalKind === 'directory'" class="qwen-button compact" type="button" @click="browseModel('folder')">选目录…</button><button v-if="draftChoice?.arch === 'qwen_image_2' || (mode === 'zimage' && draftLocalKind === 'file')" class="qwen-button compact" type="button" @click="browseModel('model')">选权重…</button></span></label>
             <div v-if="canSetComponents" class="component-paths">
-              <label class="qwen-field" :title="legacyTooltips.textEncoderPath"><span class="field-caption">文本编码器（可选）</span><span class="path-input-row"><input v-model="draftTextEncoderPath" class="qwen-input" type="text" placeholder="留空自动查找，或指定现有文件" /><button class="qwen-button compact" type="button" @click="browseComponent('text_encoder_path')">浏览…</button><button class="qwen-button compact" type="button" @click="draftTextEncoderPath = ''">自动</button></span></label>
-              <label class="qwen-field" :title="legacyTooltips.vaePath"><span class="field-caption">VAE（可选）</span><span class="path-input-row"><input v-model="draftVaePath" class="qwen-input" type="text" placeholder="留空自动查找，或指定现有文件" /><button class="qwen-button compact" type="button" @click="browseComponent('vae_path')">浏览…</button><button class="qwen-button compact" type="button" @click="draftVaePath = ''">自动</button></span></label>
-              <p>文本编码器和 VAE 路径会在保存时校验；留空优先自动查找本机已有组件，只准备缺失组件。</p>
+              <label class="qwen-field" :title="mode === 'zimage' ? 'Qwen3-4B 原始 safetensors 文件或完整组件目录；不支持 Qwen3-VL。' : legacyTooltips.textEncoderPath"><span class="field-caption">{{ mode === 'zimage' ? 'Qwen3-4B 文本编码器' : '文本编码器（可选）' }}</span><span class="path-input-row"><input v-model="draftTextEncoderPath" class="qwen-input" type="text" placeholder="留空自动查找，或指定现有文件" /><button class="qwen-button compact" type="button" @click="browseComponent('text_encoder_path')">选文件…</button><button v-if="mode === 'zimage'" class="qwen-button compact" type="button" @click="browseComponent('text_encoder_path', 'folder')">选目录…</button><button class="qwen-button compact" type="button" @click="draftTextEncoderPath = ''">自动</button></span></label>
+              <label class="qwen-field" :title="mode === 'zimage' ? 'FLUX.1 兼容的 16 通道 VAE 文件或组件目录；不能使用 SDXL 或 Qwen-Image VAE。' : legacyTooltips.vaePath"><span class="field-caption">{{ mode === 'zimage' ? '16 通道 VAE（FLUX.1 兼容）' : 'VAE（可选）' }}</span><span class="path-input-row"><input v-model="draftVaePath" class="qwen-input" type="text" placeholder="留空自动查找，或指定现有文件" /><button class="qwen-button compact" type="button" @click="browseComponent('vae_path')">选文件…</button><button v-if="mode === 'zimage'" class="qwen-button compact" type="button" @click="browseComponent('vae_path', 'folder')">选目录…</button><button class="qwen-button compact" type="button" @click="draftVaePath = ''">自动</button></span></label>
+              <p>留空自动查找本机组件；缺少时仅下载对应组件。{{ mode === 'zimage' ? '文本编码器约 8 GB，VAE 约 160 MB；tokenizer 与配置由工具准备。不支持预量化文件。' : '保存时校验组件路径。' }}</p>
             </div>
           </div>
-          <div class="model-dialog-note"><UiIcon name="folder" /><span>{{ desktop ? '保存时会检查本地模型和组件文件；不会下载模型。' : '预览不扫描磁盘、不校验路径，也不会写入模型设置。' }}</span></div>
-          <footer><button class="qwen-button compact" type="button" @click="modelDialogOpen = false">取消</button><button v-if="desktop" class="qwen-button compact" type="button" @click="resetModelChoice">恢复官方默认</button><button class="qwen-button primary compact" type="button" @click="applyModelChoice">{{ desktop ? '保存模型设置' : '使用所选模型' }}</button></footer>
+          <div class="model-dialog-note"><UiIcon name="folder" /><span>{{ desktop ? mode === 'zimage' ? '模型选择保存到当前项目；保存时不下载文件。' : '保存时会检查本地模型和组件文件；不会下载模型。' : '预览不扫描磁盘、不校验路径，也不会写入模型设置。' }}</span></div>
+          <footer><button class="qwen-button compact" type="button" @click="modelDialogOpen = false">取消</button><button v-if="desktop" class="qwen-button compact" type="button" @click="resetModelChoice">恢复官方默认</button><button class="qwen-button primary compact" type="button" :disabled="savingModel" @click="applyModelChoice">{{ savingModel ? '正在保存…' : desktop ? '保存模型设置' : '使用所选模型' }}</button></footer>
         </section>
       </div>
     </Transition>
@@ -665,7 +684,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 .qwen-bottom-hint { display: flex; align-items: center; gap: 7px; margin: -3px 1px 0; color: var(--tone-818792); font-size: 10px; }
 .hint-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--tone-929baa); }
 .model-dialog-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 22px; background: rgb(10 12 16 / 48%); }
-.model-dialog { width: min(100%, 470px); padding: 18px; border: 1px solid var(--tone-41464f); border-radius: 8px; background: var(--tone-272a32); box-shadow: 0 16px 42px rgb(0 0 0 / 30%); }
+.model-dialog { width: min(100%, 680px); max-height: calc(100dvh - 44px); overflow-y: auto; overscroll-behavior: contain; padding: 18px; border: 1px solid var(--tone-41464f); border-radius: 8px; background: var(--tone-272a32); box-shadow: 0 16px 42px rgb(0 0 0 / 30%); }
 .model-dialog-header { display: flex; align-items: flex-start; justify-content: space-between; }
 .model-dialog-header h2 { margin: 4px 0 0; color: var(--tone-d0d4da); font-size: 17px; font-weight: 350; }
 .dialog-close { display: grid; width: 29px; height: 29px; place-items: center; border: 0; border-radius: 5px; color: var(--tone-aab0b9); background: transparent; font-size: 21px; cursor: pointer; }
@@ -683,7 +702,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 .option-state { color: var(--tone-8f9c91); font-size: 10px; white-space: nowrap; }
 .model-dialog-note { display: flex; align-items: center; gap: 7px; margin: 12px 0; color: var(--tone-858b95); font-size: 10px; }
 .model-dialog-note :deep(.ui-icon) { width: 13px; height: 13px; }
-.model-source-switch { display: inline-flex; gap: 3px; margin: 13px 0 9px; padding: 3px; border: 1px solid var(--tone-3b4049); border-radius: 6px; background: var(--tone-22252c); }
+.model-source-switch { display: inline-flex; flex-wrap: wrap; gap: 3px; margin: 13px 0 9px; padding: 3px; border: 1px solid var(--tone-3b4049); border-radius: 6px; background: var(--tone-22252c); }
 .model-source-switch button { min-height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: 4px; color: var(--tone-a3a9b3); background: transparent; font-size: 10px; cursor: pointer; transition: background-color 130ms ease, color 130ms ease, border-color 130ms ease; }
 .model-source-switch button:hover { color: var(--tone-d0d4da); }
 .model-source-switch button.selected { border-color: var(--tone-424853); color: var(--tone-d2d6dd); background: var(--tone-30343d); }
@@ -693,7 +712,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 .local-source-detail { gap: 10px; }
 .path-input-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .path-input-row .qwen-input { flex: 1; }
-.component-paths { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; padding-top: 9px; border-top: 1px solid var(--tone-373b44); }
+.component-paths { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px 10px; padding-top: 9px; border-top: 1px solid var(--tone-373b44); }
 .component-paths > p { grid-column: 1 / -1; }
 .model-dialog footer { display: flex; justify-content: flex-end; gap: 7px; padding-top: 8px; border-top: 1px solid var(--tone-373b44); }
 .model-dialog-enter-active, .model-dialog-leave-active { transition: opacity 150ms ease; }

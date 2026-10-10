@@ -82,6 +82,7 @@ export interface QwenModelSetup {
 
 export interface QwenModelSelection {
   mode?: 'qwen_image' | 'zimage'
+  project_name?: string
   key: string
   source: 'local' | 'download'
   local_dir?: string
@@ -237,7 +238,7 @@ export interface DesktopApi {
   ): Promise<{ ok: boolean; settings?: AppearanceSettings; error?: string }>
   get_appearance_background(): Promise<{ ok: boolean; data_url?: string; error?: string }>
   get_appearance_image_preview(path: string, thumbnail?: boolean): Promise<{ ok: boolean; data_url?: string; error?: string }>
-  get_qwen_model_setup(mode?: 'qwen_image' | 'zimage'): Promise<QwenModelSetup>
+  get_qwen_model_setup(mode?: 'qwen_image' | 'zimage', project_name?: string): Promise<QwenModelSetup>
   save_qwen_model_setup(selection: QwenModelSelection): Promise<QwenModelSetup>
   prepare_training(project_name: string): Promise<{ ok: boolean; error?: string; plan?: TrainingPlan }>
   start_training(project_name: string, use_resume?: boolean): Promise<{ ok: boolean; task_id?: string; error?: string }>
@@ -251,8 +252,9 @@ export interface DesktopApi {
   list_task_samples(task_id: string, offset?: number): Promise<{ ok: boolean; samples?: TrainingSampleEntry[]; total?: number; next_offset?: number | null; error?: string }>
   get_task_sample(task_id: string, after?: string, full?: boolean, name?: string): Promise<ModernTaskSample>
   cancel_task(task_id: string): Promise<{ ok: boolean; error?: string }>
-  get_model_downloads(mode: string): Promise<ModelDownloadList>
-  start_model_download(mode: string, key: string): Promise<{ ok: boolean; task_id?: string; error?: string }>
+  select_h3_component(project_name: string, key: string, action?: "select" | "default" | "disable"): Promise<{ ok: boolean; cancelled?: boolean; path?: string; message?: string; error?: string }>
+  get_model_downloads(mode: string, project_name?: string): Promise<ModelDownloadList>
+  start_model_download(mode: string, key: string, project_name?: string): Promise<{ ok: boolean; task_id?: string; error?: string }>
   get_env_locations(): Promise<EnvLocations>
   set_env_location(kind: 'python' | 'git', directory: string): Promise<EnvLocations>
   reset_env_locations(): Promise<EnvLocations>
@@ -390,6 +392,11 @@ export interface ModelDownloadItem {
   required_group: string
   optional: boolean
   part_size: number
+  local_select?: boolean
+  manual?: boolean
+  disabled?: boolean
+  validation_error?: string
+  detail?: string
 }
 
 export interface ModelDownloadList {

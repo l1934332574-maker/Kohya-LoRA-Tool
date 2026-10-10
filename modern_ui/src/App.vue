@@ -633,7 +633,7 @@ async function openProject(project: ProjectCard) {
     let nextModelSetup: QwenModelSetup | null = null
     if (isQwenProject(project)) {
       const [modelSetup, details] = await Promise.all([
-        window.pywebview.api.get_qwen_model_setup(project.mode === 'zimage' ? 'zimage' : 'qwen_image'),
+        window.pywebview.api.get_qwen_model_setup(project.mode === 'zimage' ? 'zimage' : 'qwen_image', project.name),
         window.pywebview.api.get_mode_workspace(project.mode, project.name),
       ])
       if (!modelSetup.ok) {
@@ -682,7 +682,7 @@ async function refreshAssistantProject(name: string) {
   if (data.value) data.value.projects = await window.pywebview.api.list_projects()
   const project = projects.value.find(item => item.name === name)
   if (!project || !workspaceOpen.value || workspaceProject.value?.name !== name || !assistantCanUseProject()) return
-  const [loaded, details, modelSetup] = await Promise.all([window.pywebview.api.load_project_config(name), window.pywebview.api.get_mode_workspace(project.mode, name), isQwenProject(project) ? window.pywebview.api.get_qwen_model_setup(project.mode === 'zimage' ? 'zimage' : 'qwen_image') : Promise.resolve(null)])
+  const [loaded, details, modelSetup] = await Promise.all([window.pywebview.api.load_project_config(name), window.pywebview.api.get_mode_workspace(project.mode, name), isQwenProject(project) ? window.pywebview.api.get_qwen_model_setup(project.mode === 'zimage' ? 'zimage' : 'qwen_image', project.name) : Promise.resolve(null)])
   if (workspaceProject.value?.name !== name || !assistantCanUseProject()) return
   if (loaded.ok && loaded.config) { workspaceProject.value = project; workspaceConfig.value = loaded.config }
   if (details.ok) modeWorkspace.value = details
@@ -804,18 +804,26 @@ async function saveKohyaConfig(patch: ProjectConfig) {
 async function saveQwenModel(selection: QwenModelSelection): Promise<QwenModelSaveResult> {
   if (!window.pywebview?.api) return { ok: false, error: '本机模型设置接口不可用。' }
   try {
-    const result = await window.pywebview.api.save_qwen_model_setup(selection)
+    const project = workspaceProject.value
+    const label = selection.mode === 'zimage' ? 'Z-Image' : 'Qwen-Image'
+    const result = await window.pywebview.api.save_qwen_model_setup({ ...selection, project_name: project?.name })
     if (!result.ok) {
-      showToast(result.error ?? '保存 Qwen-Image 模型设置失败。')
+      showToast(result.error ?? `保存 ${label} 模型设置失败。`)
       return { ok: false, error: result.error }
     }
-    qwenModelSetup.value = result
-    await refreshGuideState()
-    appendLog('[模型] 已保存 Qwen-Image 模型设置。')
-    showToast('Qwen-Image 模型设置已保存')
+    if (workspaceProject.value?.name === project?.name) {
+      qwenModelSetup.value = result
+      if (project) {
+        const details = await window.pywebview.api.get_mode_workspace(project.mode, project.name)
+        if (details.ok && workspaceProject.value?.name === project.name) modeWorkspace.value = details
+      }
+      await refreshGuideState()
+    }
+    appendLog(`[模型] 已保存 ${label} 模型设置。`)
+    showToast(`${label} 模型设置已保存`)
     return { ok: true, setup: result }
   } catch (error) {
-    const message = error instanceof Error ? error.message : '保存 Qwen-Image 模型设置失败。'
+    const message = error instanceof Error ? error.message : '保存模型设置失败。'
     showToast(message)
     return { ok: false, error: message }
   }
@@ -1532,6 +1540,7 @@ watch(() => appearance.value.idle_fade_enabled, scheduleUiIdleFade)
     <ModelDownloadDialog
       :open="modelDialogOpen"
       :mode="workspaceProject?.mode ?? selectedGuideMode"
+      :project-name="workspaceProject?.name || ''"
       @close="modelDialogOpen = false"
       @changed="refreshGuideState"
       @notify="showToast"

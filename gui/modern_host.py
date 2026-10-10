@@ -24,6 +24,8 @@ from kohya_core.training_media import sample_files, image_preview, is_sample
 from kohya_core.model_catalog import catalog as model_catalog, resolve_choice
 from kohya_core.fizgig_engine import runtime as fizgig_runtime, source_version as fizgig_source_version, VERSION as FIZGIG_TARGET
 from kohya_core.fizgig_adapter import FAMILIES as FIZGIG_FAMILIES, models as fizgig_models, missing as fizgig_missing, _validate as validate_fizgig_models
+from kohya_core.h3_models import settings as h3_settings, rows as h3_rows, validate as validate_h3_component, validate_selected as validate_h3_selected, training_precision as h3_training_precision
+from kohya_core.zimage_models import settings as zimage_settings, discover as zimage_components, validate_selection as validate_zimage_selection, missing as zimage_missing
 from kohya_core.project_config import WORKSPACE_PARAM_KEYS, BOOL_PARAM_KEYS, training_params, caption_summary, dataset_images, read_caption
 
 try:
@@ -577,39 +579,52 @@ class ModernUIBridge:
             "flux2": ("FLUX.2 模型", "FLUX.2 4B 训练文件", "FLUX2_MODEL_LINKS", "flux2_models_dir", "flux2_model_files", {"dit", "te", "vae"}),
             "flux2_fz": ("Klein 9B 模型", "FLUX.2 Klein 9B 训练文件", "FLUX2FZ_MODEL_LINKS", "flux2_models_dir", "flux2_fz_model_files", {"dit", "te", "vae"}),
             "qwen21_fz": ("Qwen-Image-2.1 模型", "Qwen-Image-2.1 Fizgig 训练文件", "QWEN21_FZ_MODEL_LINKS", "qwen21_fz_models_dir", "qwen21_fz_model_files", {"dit", "vae", "te", "training_adapter"}),
-            "h3_fz": ("H3 Fizgig 模型", "MiniMax H3 图片 / 视频 / 音频混合训练文件", "H3_FZ_MODEL_LINKS", "h3_fz_models_dir", "h3_fz_model_files", {"dit", "te", "video_vae"}),
+            "h3_fz": ("H3 训练组件", "MiniMax H3 · 本地文件与按需下载", "H3_FZ_MODEL_LINKS", "h3_fz_models_dir", "h3_fz_model_files", {"dit", "te", "video_vae"}),
             "video": ("H3 模型", "MiniMax H3 视频训练文件", "H3_MODEL_LINKS", "h3_models_dir", "h3_model_files", {"te", "video_vae"}),
         }
         return specs.get(mode)
 
-    def get_model_downloads(self, mode):
+    def get_model_downloads(self, mode, project_name=""):
         spec = self._model_download_spec(mode)
         if not spec:
             return {"ok": False, "error": "该模式没有可在新版训练页管理的模型下载列表。"}
         title, description, links_name, dir_name, files_name, required = spec
         links = getattr(self.core, links_name, {})
         asset_dir = str(getattr(self.core, dir_name)())
-        existing = getattr(self.core, files_name)()
-        partial_sizes = {}
+        config = self.core.load_project(str(project_name or "")) if project_name else {}
+        selection = h3_settings(config) if mode == "h3_fz" else None
+        state = h3_rows(self.core, selection) if mode == "h3_fz" else {}
+        existing = self.core.h3_fz_model_files(selection) if mode == "h3_fz" else getattr(self.core, files_name)()
+        required = set(required)
+        if mode == "h3_fz" and config and config.get("raw_dir"):
+            try:
+                if self.core.scan_fizgig_h3_dataset(config["raw_dir"]).get("audio", 0):
+                    required.add("audio_vae")
+            except OSError:
+                pass
         items = []
         for key, value in links.items():
             filename, label = value[0], value[1]
             urls = self.core.model_url_list(value)
             url = urls[0] if urls else ""
             present = bool(existing.get(key))
-            path = str(existing.get(key) or os.path.join(asset_dir, filename))
+            row = state.get(key, {})
+            path = str(row.get("path") if state else existing.get(key) or os.path.join(asset_dir, filename))
             try:
                 part_size = os.path.getsize(path + ".part") if os.path.isfile(path + ".part") else 0
             except OSError:
                 part_size = 0
             main_choice = mode == "video" and key in ("dit", "dit_nvfp4")
             items.append({
-                "key": key, "filename": filename, "label": self._plain_ui_text(label),
+                "key": key, "filename": filename, "label": ("H3 主模型（必需）" if mode == "h3_fz" and key == "dit" else self._plain_ui_text(label)),
                 "url": url, "path": path, "present": present,
                 "required": key in required,
                 "required_group": "主模型（二选一）" if main_choice else "",
                 "optional": key not in required and not main_choice,
                 "part_size": part_size,
+                "local_select": mode == "h3_fz" and bool(project_name),
+                "manual": bool(row.get("manual")), "disabled": bool(row.get("disabled")),
+                "validation_error": row.get("error", ""), "detail": row.get("detail", ""),
             })
         note = ""
         if mode == "krea2_at":
@@ -619,7 +634,7 @@ class ModernUIBridge:
         elif mode == "qwen21_fz":
             note = "DiT、VAE、文本编码器和训练适配器为训练必需；speed LoRA 仅供预览，可选。"
         elif mode == "h3_fz":
-            note = "官方 int8 DiT、文本编码器和视频 VAE 为必需；音频 VAE 在训练音频或带声音视频时必需，训练适配器和 Turbo LoRA 可选。"
+            note = "支持本地组件，无需复制或改名。主模型推荐 pruned int8 ConvRot，也支持完整浮点版本（训练时 NF4）；图片训练需要视频 VAE。音频 VAE 按需准备，训练适配器推荐，Turbo LoRA 可选。"
         else:
             note = "下载支持断点续传；取消或中断后再次点击同一文件即可接着下载。"
         params = {
@@ -628,7 +643,55 @@ class ModernUIBridge:
         }
         return params
 
-    def start_model_download(self, mode, key):
+    def select_h3_component(self, project_name, key, action="select"):
+        """Pick, disable or reset one project component; never copy user weights."""
+        guard = self._agent_guard()
+        if guard:
+            return guard
+        if key not in self.core.H3_FZ_MODEL_LINKS or action not in ("select", "default", "disable"):
+            return {"ok": False, "error": "组件或操作无效。"}
+        project_name = str(project_name or "").strip()
+        config = self.core.load_project(project_name) if project_name else None
+        if not config or config.get("mode") != "h3_fz":
+            return {"ok": False, "error": "请在 H3 Fizgig 项目内选择组件。"}
+        with self._task_lock:
+            if self._task and self._task.get("status") in ("running", "awaiting_review"):
+                return {"ok": False, "error": "请等当前任务结束后再修改模型组件。"}
+        if action == "disable" and key in ("dit", "te", "video_vae"):
+            return {"ok": False, "error": "训练必需组件不能停用。"}
+        path = ""
+        if action == "select":
+            state = h3_rows(self.core, h3_settings(config))[key]
+            chosen = self.choose_path("model", state["path"], "h3_component_" + key)
+            if not chosen.get("ok") or chosen.get("cancelled"):
+                return chosen
+            path = os.path.abspath(os.path.expanduser(str(chosen.get("path") or "").strip().strip('"')))
+            try:
+                validate_h3_component(path, key)
+            except (ValueError, OSError) as exc:
+                return {"ok": False, "error": str(exc)}
+        guard = self._agent_guard()
+        if guard:
+            return guard
+        with self._task_lock:
+            if self._task and self._task.get("status") in ("running", "awaiting_review"):
+                return {"ok": False, "error": "任务已经启动，请结束后再修改组件。"}
+        # Re-read after the native picker so other project fields are preserved.
+        config = self.core.load_project(project_name)
+        if not config or config.get("mode") != "h3_fz":
+            return {"ok": False, "error": "项目已变化，请重新打开模型设置。"}
+        values = h3_settings(config)
+        if action == "default":
+            values.pop(key, None)
+        else:
+            values[key] = path
+        config["h3_models"] = values
+        if not self.core.save_project(project_name, config):
+            return {"ok": False, "error": "组件设置保存失败，请重试。"}
+        self.core.clear_status_cache()
+        return {"ok": True, "message": "组件设置已保存。", "path": path}
+
+    def start_model_download(self, mode, key, project_name=""):
         spec = self._model_download_spec(mode)
         if not spec:
             return {"ok": False, "error": "该模式没有模型下载入口。"}
@@ -647,7 +710,9 @@ class ModernUIBridge:
         asset_dir = str(getattr(self.core, dir_name)())
         os.makedirs(asset_dir, exist_ok=True)
         dest = os.path.join(asset_dir, os.path.basename(filename))
-        existing = getattr(self.core, files_name)()
+        config = self.core.load_project(str(project_name or "")) if project_name else {}
+        selected_before = h3_settings(config) if mode == "h3_fz" else {}
+        existing = self.core.h3_fz_model_files(selected_before) if mode == "h3_fz" else getattr(self.core, files_name)()
         if existing.get(key) and os.path.isfile(existing[key]):
             return {"ok": False, "error": "该模型文件已存在，无需重复下载。"}
         task_id = self._begin_task("下载模型文件", "download", mode=mode, key=key)
@@ -664,11 +729,28 @@ class ModernUIBridge:
                     self._task.update(progress=pct, detail=message, message=message)
 
         def done(ok, path):
+            failure = ""
+            if ok and mode == "h3_fz":
+                try:
+                    validate_h3_component(path, key)
+                    # Replace an invalid manual override only after a valid download.
+                    if project_name and key in selected_before:
+                        current = self.core.load_project(project_name)
+                        if current and current.get("mode") == mode and h3_settings(current).get(key) == selected_before[key]:
+                            values = h3_settings(current)
+                            values.pop(key, None)
+                            current["h3_models"] = values
+                            if not self.core.save_project(project_name, current):
+                                raise OSError("模型已下载，但项目路径保存失败；请重新选择这个文件。")
+                except (ValueError, OSError) as exc:
+                    ok, failure = False, str(exc)
+            if failure:
+                self._task_log(task_id, "[模型检查] " + failure)
             with self._task_lock:
                 if self._task and self._task.get("id") == task_id:
                     self._task.update(
                         status="completed" if ok else "failed",
-                        message="下载完成。" if ok else "下载失败；已保留可续传的部分文件。",
+                        message="下载完成。" if ok else failure or "下载失败；已保留可续传的部分文件。",
                         progress=1.0 if ok else self._task.get("progress"), detail=str(path),
                     )
             self._task_log(task_id, "[下载完成] %s" % path if ok else "[下载失败] %s" % path)
@@ -1342,6 +1424,14 @@ class ModernUIBridge:
             return {"ok": False, "error": "当前模式的必需模型文件尚未齐全：\n%s\n\n模型目录：%s" % (
                 "\n".join(str(item) for item in missing), details.get("asset_dir") or "未指定")}
 
+        if mode == "h3_fz":
+            try:
+                validate_h3_selected(self.core, params.get("h3_models"))
+                h3_files = self.core.h3_fz_model_files(params.get("h3_models"))
+                if h3_files.get("dit"):
+                    params["quant_mode"] = h3_training_precision(h3_files["dit"], str(params.get("quant_mode") or "auto"))
+            except (ValueError, OSError) as exc:
+                return {"ok": False, "error": str(exc)}
         if mode in FIZGIG_FAMILIES and params.get("fizgig_version") == FIZGIG_TARGET:
             try:
                 validate_fizgig_models(self.core, FIZGIG_FAMILIES[mode], fizgig_models(self.core, FIZGIG_FAMILIES[mode], params))
@@ -1368,7 +1458,7 @@ class ModernUIBridge:
             has_video = int(media_summary.get("videos", 0) or 0) > 0
             if has_audio:
                 try:
-                    audio_missing = list(self.core.h3_fz_missing_models(require_audio=True))
+                    audio_missing = list(self.core.h3_fz_missing_models(require_audio=True, model_settings=params.get("h3_models")))
                 except Exception as exc:
                     return {"ok": False, "error": "无法检查 H3 音频模型：%s" % exc}
                 if audio_missing:
@@ -1376,7 +1466,7 @@ class ModernUIBridge:
                         "\n".join(str(item) for item in audio_missing), details.get("asset_dir") or "未指定")}
             elif has_video:
                 try:
-                    audio_vae_ready = bool(self.core.h3_fz_model_files().get("audio_vae"))
+                    audio_vae_ready = bool(self.core.h3_fz_model_files(params.get("h3_models")).get("audio_vae"))
                 except Exception:
                     audio_vae_ready = False
                 if not audio_vae_ready:
@@ -1545,14 +1635,21 @@ class ModernUIBridge:
         if not engine_ok:
             return {"ok": False, "error": "AI Toolkit 第三引擎尚未就绪：\n%s" % engine_detail}
 
-        info = self.core.at_image_info(params["mode"])
+        model_settings = params.get("at_model") if params["mode"] == "zimage" else None
+        info = self.core.at_image_info(params["mode"], model_settings)
         if not info:
             return {"ok": False, "error": "无法读取当前训练模型设置。"}
-        custom = self.core.at_image_custom_get(params["mode"])
+        custom = self.core.at_image_custom_get(params["mode"], model_settings)
         if custom.get("local_dir") and not self.core.at_image_model_dir_ready(
             custom["local_dir"], arch=info.get("arch")
         ):
             return {"ok": False, "error": "指定的本地模型不完整或与所选模型架构不匹配，请重新选择模型。"}
+        split = params["mode"] == "zimage" and bool(custom.get("local_dir")) and os.path.isfile(custom["local_dir"])
+        if split:
+            try:
+                validate_zimage_selection(custom)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                return {"ok": False, "error": str(exc)}
         if info.get("arch") == "qwen_image_2":
             for key, label in (("text_encoder_path", "文本编码器"), ("vae_path", "VAE")):
                 path = str(custom.get(key) or "").strip()
@@ -1560,7 +1657,7 @@ class ModernUIBridge:
                     return {"ok": False, "error": "指定的 Qwen-Image-2.1 %s 文件已不存在或不完整：\n%s" % (label, path)}
 
         try:
-            model_ready = bool(self.core.at_image_model_ready(params["mode"]))
+            model_ready = bool(self.core.at_image_model_ready(params["mode"], model_settings))
         except Exception:
             model_ready = False
         try:
@@ -1592,7 +1689,12 @@ class ModernUIBridge:
         if vram_gb is not None and vram_gb < need_vram:
             warnings.append("当前显存约 %.1f GB，低于模型建议的 %d GB；训练可能较慢或显存不足。" % (vram_gb, need_vram))
         if not model_ready:
-            warnings.append("训练模型尚未完整保存在本机；开始后 AI Toolkit 会按需准备约 %s 的模型文件。" % (info.get("size") or "大体积"))
+            if split:
+                items = zimage_missing(self.core, custom)
+                download_note = "（文本编码器约 8 GB）" if "缺少 Qwen3-4B 文本编码器" in items else ""
+                warnings.append("底模已指定；开始后只准备缺项：" + "、".join(items) + download_note + "。")
+            else:
+                warnings.append("训练模型尚未完整保存在本机；开始后 AI Toolkit 会按需准备约 %s 的模型文件。" % (info.get("size") or "大体积"))
 
         resume_path = self._resume_path(project_name, params["mode"], params)
         return {
@@ -1603,9 +1705,9 @@ class ModernUIBridge:
                 "mode_label": self.core.MODE_LABELS.get(params["mode"], params["mode"]),
                 "training_engine": "ai_toolkit",
                 "model_label": info.get("label") or info.get("model_id") or "当前模型",
-                "model_path": str(custom.get("local_dir") or self.core.at_image_local_dir(params["mode"])),
+                "model_path": str(custom.get("local_dir") or self.core.at_image_local_dir(params["mode"], model_settings)),
                 "model_download_required": not model_ready,
-                "model_size": str(info.get("size") or ""),
+                "model_size": "仅缺失组件与配置" if split else str(info.get("size") or ""),
                 "raw_dir": raw_dir,
                 "image_count": image_count,
                 "min_images": min_images,
@@ -1840,7 +1942,7 @@ class ModernUIBridge:
             # are reused without silently selecting another dataset or engine.
             if patch.get("mode") != current.get("mode") or patch.get("base_type") != current.get("base_type"):
                 return {"ok": False, "error": "当前模式或底模类型已变化，不能直接恢复这条记录。"}
-            for key in ("raw_dir", "reg_dir", "base_model", "train_env"):
+            for key in ("raw_dir", "reg_dir", "base_model", "train_env", "h3_models", "at_model"):
                 patch.pop(key, None)
             if current.get("training_kind") == "slider":
                 if patch.get("training_kind") != "slider":
@@ -1889,7 +1991,7 @@ class ModernUIBridge:
         getattr(self.core, "reset_effective", lambda: None)()
         root_keys = ("mode", "base_type", "at_sub_mode", "concept_type", "fast_tier", "trigger",
                      "raw_dir", "reg_dir", "base_model", "style_preset", "style_caption",
-                     "train_env", "unet_only", "global_pos", "global_neg")
+                     "train_env", "unet_only", "global_pos", "global_neg", "at_model")
         record_config = {key: config[key] for key in root_keys if key in config}
         stored_params = config.get("params") if isinstance(config.get("params"), dict) else {}
         record_config["params"] = {key: value for key, value in stored_params.items() if key in WORKSPACE_PARAM_KEYS}
@@ -3093,13 +3195,16 @@ class ModernUIBridge:
             base_type = ""
         return {"ok": True, "base_type": str(base_type or "")}
 
-    def get_qwen_model_setup(self, mode="qwen_image"):
+    def get_qwen_model_setup(self, mode="qwen_image", project_name=""):
         mode = str(mode or "qwen_image")
         if mode not in ("qwen_image", "zimage"):
             return {"ok": False, "error": "该 AI Toolkit 模型模式暂不支持新版训练页设置。"}
         choices = self.core.at_image_model_choices(mode)
-        custom = self.core.at_image_custom_get(mode)
-        info = self.core.at_image_info(mode)
+        config = self.core.load_project(str(project_name or "").strip()) if project_name else None
+        if mode == "zimage" and project_name and (not isinstance(config, dict) or config.get("mode") != mode):
+            return {"ok": False, "error": "当前 Z-Image 项目不存在或模式不匹配。"}
+        custom = zimage_settings(self.core, config) if mode == "zimage" else self.core.at_image_custom_get(mode)
+        info = self.core.at_image_info(mode, custom)
         if custom.get("local_dir"):
             selected = next((item for item in choices if item.get("arch") == custom.get("arch")), None)
             source = "local"
@@ -3116,6 +3221,11 @@ class ModernUIBridge:
             try:
                 auto_components = self.core.at_image_qwen21_local_components(local_dir)
             except Exception:
+                auto_components = {}
+        if mode == "zimage" and local_dir and os.path.isfile(local_dir):
+            try:
+                auto_components = zimage_components(self.core, custom)
+            except (OSError, ValueError, KeyError, TypeError):
                 auto_components = {}
         public_choices = [{
             key: item.get(key) for key in (
@@ -3143,6 +3253,10 @@ class ModernUIBridge:
         mode = str(selection.get("mode") or "qwen_image")
         if mode not in ("qwen_image", "zimage"):
             return {"ok": False, "error": "该 AI Toolkit 模型模式暂不支持新版训练页设置。"}
+        project_name = str(selection.get("project_name") or "").strip()
+        config = self.core.load_project(project_name) if project_name else None
+        if mode == "zimage" and (not isinstance(config, dict) or config.get("mode") != mode):
+            return {"ok": False, "error": "请先打开需要保存模型设置的 Z-Image 项目。"}
         choices = self.core.at_image_model_choices(mode)
         key = str(selection.get("key") or "")
         choice = next((item for item in choices if item.get("key") == key), None)
@@ -3151,12 +3265,27 @@ class ModernUIBridge:
         source = str(selection.get("source") or "download")
         if source not in ("local", "download"):
             return {"ok": False, "error": "模型来源无效。"}
+        if mode == "zimage" and source == "local":
+            selection = dict(selection)
+            for field in ("local_dir", "text_encoder_path", "vae_path"):
+                value = selection.get(field) or ""
+                if not isinstance(value, str) or len(value) > 32768:
+                    return {"ok": False, "error": "模型路径格式无效。"}
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                    value = value[1:-1]
+                selection[field] = os.path.abspath(os.path.expanduser(value)) if value else ""
 
         if source == "local":
             path = str(selection.get("local_dir") or "").strip()
             arch = choice.get("arch") or ""
+            if arch == "zimage" and path and os.path.isfile(path):
+                try:
+                    validate_zimage_selection(selection)
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    return {"ok": False, "error": str(exc)}
             if not path or not self.core.at_image_model_dir_ready(path, arch=arch):
-                extra = "或有效的 Qwen-Image-2.1 safetensors 权重文件" if arch == "qwen_image_2" else "完整的 Diffusers 模型目录"
+                extra = "完整的 Diffusers 模型目录或兼容的 Z-Image BF16 / FP16 safetensors 文件" if arch == "zimage" else "或有效的 Qwen-Image-2.1 safetensors 权重文件" if arch == "qwen_image_2" else "完整的 Diffusers 模型目录"
                 return {"ok": False, "error": "请选择%s。" % extra}
             settings = {
                 "local_dir": path,
@@ -3167,6 +3296,10 @@ class ModernUIBridge:
                 "min_vram": choice.get("min_vram"), "rec_vram": choice.get("rec_vram"),
                 "resident_vram": choice.get("resident_vram"),
             }
+            if arch == "zimage" and os.path.isfile(path):
+                for key_name in ("text_encoder_path", "vae_path"):
+                    if selection.get(key_name):
+                        settings[key_name] = str(selection[key_name]).strip()
             if arch == "qwen_image_2" and os.path.isfile(path):
                 for key_name, label in (("text_encoder_path", "文本编码器"), ("vae_path", "VAE")):
                     component_path = str(selection.get(key_name) or "").strip()
@@ -3181,10 +3314,16 @@ class ModernUIBridge:
                 "model_id", "arch", "label", "size", "hint", "min_vram", "rec_vram", "resident_vram",
             ) if choice.get(key_name) not in (None, "")}
 
-        if not self.core.at_image_custom_set(mode, settings):
+        if mode == "zimage":
+            config = dict(config)
+            config["at_model"] = settings
+            saved = self.core.save_project(project_name, config)
+        else:
+            saved = self.core.at_image_custom_set(mode, settings)
+        if not saved:
             return {"ok": False, "error": "保存模型设置失败。"}
         self._log("[模型] 已保存 %s 模型设置：%s" % (mode, choice.get("model_id") or choice.get("label", key)))
-        return self.get_qwen_model_setup(mode)
+        return self.get_qwen_model_setup(mode, project_name)
 
     def get_model_catalog(self):
         return model_catalog(self.core)
@@ -3239,15 +3378,19 @@ class ModernUIBridge:
                 missing = list(core.qwen21_fz_missing_models())
                 asset_dir = core.qwen21_fz_models_dir()
             elif mode == "h3_fz":
-                missing = list(core.h3_fz_missing_models())
+                missing = list(core.h3_fz_missing_models(model_settings=h3_settings(project_config)))
                 asset_dir = core.h3_fz_models_dir()
             elif mode == "video":
                 missing = list(core.h3_missing_models())
                 asset_dir = core.h3_models_dir()
             elif mode in ("qwen_image", "zimage"):
-                if not core.at_image_model_ready(mode):
+                selection = zimage_settings(core, project_config) if mode == "zimage" else None
+                local = core.at_image_local_dir(mode, selection)
+                if mode == "zimage" and os.path.isfile(local):
+                    missing = zimage_missing(core, selection)
+                elif not core.at_image_model_ready(mode, selection):
                     missing = ["训练模型尚未准备（可选择已有本地模型或按需下载）"]
-                asset_dir = core.at_image_local_dir(mode)
+                asset_dir = str(Path(local).parent) if os.path.isfile(local) else local
         except Exception as exc:
             missing = ["无法读取模型状态：%s" % exc]
         version_info = core.fizgig_engine_update_status() if mode in FIZGIG_FAMILIES else {}

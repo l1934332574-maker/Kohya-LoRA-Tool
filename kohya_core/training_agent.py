@@ -39,7 +39,7 @@ TOOLS = [
     ('describe_images', '切换当前项目到自然语言模式，并用已配置的视觉服务补齐描述；不覆盖非空文本，在线图片发送另需授权。', {'language': 'zh / en'}),
     ('check_training', '调用当前模式真实训练预检，读取缺项、警告和续训快照状态。', {}),
     ('train', '启动完整的一键训练并等待结束；已包含预处理，不必先重复 prepare_data。', {'resume': '布尔值：是否使用已有快照续训'}),
-    ('select_managed_model', 'Qwen/Z-Image：按 model_files 返回的 key 选择受管模型；该模型设置对同模式项目共享。', {'key': '真实模型 key', 'source': 'download / local'}),
+    ('select_managed_model', 'Qwen/Z-Image：按 model_files 返回的 key 选择模型。Z-Image 设置保存在当前项目；Qwen 设置仍对同模式项目共享。', {'key': '真实模型 key', 'source': 'download / local', 'local_kind': 'Z-Image 本地来源可选 directory / file；省略则询问用户'}),
     ('model_files', '列出当前模式软件提供的模型文件、缺失状态和下载 key。', {}),
     ('download_model', '下载 model_files 返回的文件 key；仅在允许下载时执行。', {'key': '文件 key'}),
     ('repair_environment', '调用软件既有环境／当前引擎安装流程；不执行任意命令或编辑任意源码。', {'target': 'prerequisites / engine'}),
@@ -74,7 +74,10 @@ def public_data(value, limit=16000):
                 lowered = str(key).lower()
                 if any(word in lowered for word in ('api_key', 'protected_key', 'authorization', 'password', 'token', 'data_url')):
                     continue
-                if lowered in ('raw_dir', 'positive_dir', 'negative_dir', 'base_model', 'python_path', 'asset_dir', 'path', 'resume_path', 'dataset_directory', 'directory', 'kohya_dir', 'train_env'):
+                if lowered == "h3_models" and isinstance(candidate, dict):
+                    output[key] = {component: bool(path) for component, path in candidate.items()}
+                    continue
+                if lowered in ('raw_dir', 'positive_dir', 'negative_dir', 'base_model', 'local_dir', 'text_encoder_path', 'vae_path', 'python_path', 'asset_dir', 'path', 'resume_path', 'dataset_directory', 'directory', 'kohya_dir', 'train_env'):
                     output[key + '_selected'] = bool(candidate)
                 else:
                     output[key] = clean(candidate)
@@ -1128,6 +1131,8 @@ class TrainingAgent:
             if not preflight.get('ok'):
                 return {'ok': False, 'preflight': public_data(preflight, 16000), 'plan': plan,
                         'error': '真实训练预检没有通过；请先补齐缺项或解决警告。'}
+            if (preflight.get('plan') or {}).get('model_download_required') and not self._permission('allow_download', '模型或配套组件尚未齐全，训练流程会仅下载缺项。允许下载吗？'):
+                return {'ok': False, 'error': '用户未允许准备缺失模型组件，训练尚未启动。'}
             if not self.state.get('allow_auto_train'):
                 answer = self._ask_user('训练计划已就绪。请核对项目、模式、底模、图集、适用参数和预检结果。确认后才会启动训练。',
                                         ['开始训练', '修改方案', '暂不训练'], kind='plan')
@@ -1156,16 +1161,20 @@ class TrainingAgent:
             if mode not in ('qwen_image', 'zimage'):
                 return {'ok': False, 'error': '只有 Qwen/Z-Image 使用此模型设置工具。'}
             key, source = args.get('key'), args.get('source')
-            setup = bridge.get_qwen_model_setup(mode)
+            setup = bridge.get_qwen_model_setup(mode, project_name)
             choice = next((item for item in setup.get('choices', []) if item.get('key') == key), None)
             if not choice or source not in ('download', 'local'):
                 raise CaptionError('受管模型选项无效。')
-            selection = {'mode': mode, 'key': key, 'source': source}
+            selection = {'mode': mode, 'key': key, 'source': source, 'project_name': project_name}
             if source == 'download':
                 if not self._permission('allow_download', '此模型将在训练时按需下载。本次是否允许模型下载？'):
                     return {'ok': False, 'error': '用户未允许模型下载。'}
             else:
-                single = choice.get('arch') == 'qwen_image_2'
+                local_kind = args.get('local_kind')
+                if mode == 'zimage' and local_kind not in ('directory', 'file'):
+                    answer = self._ask_user('Z-Image 模型保存在什么格式中？', ['独立模型文件', '完整 Diffusers 目录'], kind='question')
+                    local_kind = 'file' if answer == '独立模型文件' else 'directory'
+                single = choice.get('arch') == 'qwen_image_2' or mode == 'zimage' and local_kind == 'file'
                 selected = bridge.choose_path('model' if single else 'folder', memory_key='agent_managed_model')
                 if not selected.get('ok') or selected.get('cancelled'):
                     return {'ok': False, 'error': '用户没有选择本地完整模型目录或有效底模文件。'}
@@ -1173,26 +1182,28 @@ class TrainingAgent:
                 if single and os.path.isfile(selected['path']):
                     for component, title in (('text_encoder_path', '文本编码器'), ('vae_path', 'VAE')):
                         self._check_stop()
-                        self._update(detail='请选择 Qwen 2.1 ' + title + '文件；取消可尝试自动识别同目录组件')
+                        self._update(detail='请选择 ' + ('Z-Image ' if mode == 'zimage' else 'Qwen 2.1 ') + title + '文件；取消可尝试自动识别同目录组件')
                         picked = bridge.choose_path('model', memory_key='agent_' + component)
                         if picked.get('ok') and not picked.get('cancelled'):
                             selection[component] = picked['path']
             self._check_stop()
-            model_backup = {'mode': mode, 'before': bridge.core.at_image_custom_get(mode), 'selection': selection, 'status': 'pending'}
+            model_backup = {'mode': mode, 'project_name': project_name if mode == 'zimage' else '', 'before': setup.get('settings', {}), 'selection': selection, 'status': 'pending'}
             backup_path = self.directory / ('model_' + self.state['id'] + '_' + str(self.state['revision']) + '.json')
             _atomic_bytes(backup_path, json.dumps(model_backup, ensure_ascii=False, indent=2).encode('utf-8'))
             result = bridge.save_qwen_model_setup(selection)
             if result.get('ok'):
-                model_backup.update(status='applied', after=bridge.core.at_image_custom_get(mode))
+                model_backup.update(status='applied', after=result.get('settings', {}))
+                if mode == 'zimage':
+                    self.expected = copy.deepcopy(bridge.core.load_project(project_name))
                 _atomic_bytes(backup_path, json.dumps(model_backup, ensure_ascii=False, indent=2).encode('utf-8'))
             if result.get('ok'):
                 self._update(revision=self.state['revision'] + 1)
             return public_data(result)
         if name == 'model_files':
-            return public_data(bridge.get_qwen_model_setup(mode) if mode in ('qwen_image', 'zimage') else bridge.get_model_downloads(mode))
+            return public_data(bridge.get_qwen_model_setup(mode, project_name) if mode in ('qwen_image', 'zimage') else bridge.get_model_downloads(mode, project_name))
         if name == 'download_model':
             key = str(args.get('key') or '')
-            setup = bridge.get_model_downloads(mode)
+            setup = bridge.get_model_downloads(mode, project_name)
             file_info = next((item for item in setup.get('items', []) if item.get('key') == key), None)
             if not file_info:
                 raise CaptionError('此文件不在当前模式的真实模型下载清单中。')
@@ -1206,7 +1217,10 @@ class TrainingAgent:
                     return {'ok': False, 'error': '用户未允许本次下载。'}
             else:
                 self._chat('assistant', notice, kind='download')
-            return self._wait_task(bridge.start_model_download(mode, key))
+            result = self._wait_task(bridge.start_model_download(mode, key, project_name))
+            if mode == "h3_fz" and result.get("ok"):
+                self.expected = copy.deepcopy(bridge.core.load_project(project_name))
+            return result
         if name == 'repair_environment':
             target = args.get('target')
             actions = {'character': 'cmd_install', 'style': 'cmd_install', 'concept': 'cmd_install',

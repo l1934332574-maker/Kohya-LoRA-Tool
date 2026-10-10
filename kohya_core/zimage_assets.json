@@ -1,0 +1,67 @@
+{
+  "repo": "Tongyi-MAI/Z-Image",
+  "files": {
+    "vae/config.json": {
+      "size": 820,
+      "sha256": "ad6f0acb584ceb3d136d1e32b684dec65db24bffe9223df2bac0b45539d4e6b5"
+    },
+    "text_encoder/config.json": {
+      "size": 726,
+      "sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a"
+    },
+    "transformer/config.json": {
+      "size": 500,
+      "sha256": "2cf1166cbc4a597de70c8f6ee9bc5e792a43a3eceb0ec0a2a3cd30591142443c"
+    },
+    "vae/diffusion_pytorch_model.safetensors": {
+      "size": 167666902,
+      "sha256": "f5b59a26851551b67ae1fe58d32e76486e1e812def4696a4bea97f16604d40a3"
+    },
+    "text_encoder/generation_config.json": {
+      "size": 239,
+      "sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2"
+    },
+    "tokenizer/merges.txt": {
+      "size": 1671853,
+      "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+    },
+    "text_encoder/model-00001-of-00003.safetensors": {
+      "size": 3957900840,
+      "sha256": "328a91d3122359d5547f9d79521205bc0a46e1f79a792dfe650e99fc2d651223"
+    },
+    "text_encoder/model-00002-of-00003.safetensors": {
+      "size": 3987450520,
+      "sha256": "6cd087b316306a68c562436b5492edbcf6e16c6dba3a1308279caa5a58e21ca5"
+    },
+    "text_encoder/model-00003-of-00003.safetensors": {
+      "size": 99630640,
+      "sha256": "7ca841ee75b9c61267c0c6148fd8d096d3d21b6d3e161256a9b878154f91fc52"
+    },
+    "text_encoder/model.safetensors.index.json": {
+      "size": 32819,
+      "sha256": "6dc0981b8829fead746441f68f38f24c5ca4a3a66351f652c26c6df0efc43ab2"
+    },
+    "model_index.json": {
+      "size": 467,
+      "sha256": "1dbd162955866394e55e1964aee83b367aaaf9304e0591bbb9c9e58c4ddfce32"
+    },
+    "scheduler/scheduler_config.json": {
+      "size": 173,
+      "sha256": "79bd98cddf1a60d365f3072d713ffad832239f57c837bba0e9da3cff40bfafc5"
+    },
+    "tokenizer/tokenizer.json": {
+      "size": 11422654,
+      "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+    },
+    "tokenizer/tokenizer_config.json": {
+      "size": 9732,
+      "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+    },
+    "tokenizer/vocab.json": {
+      "size": 2776833,
+      "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+    }
+  },
+  "metadata_source": "ModelScope official Tongyi-MAI/Z-Image repository",
+  "recorded_at": "2026-10-10"
+}

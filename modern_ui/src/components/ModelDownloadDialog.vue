@@ -3,7 +3,7 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import UiIcon from './UiIcon.vue'
 import type { ModelDownloadItem, ModelDownloadList, ModernTaskStatus } from '../bridge'
 
-const props = defineProps<{ open: boolean; mode: string }>()
+const props = defineProps<{ open: boolean; mode: string; projectName?: string }>()
 const emit = defineEmits<{
   close: []
   changed: []
@@ -17,11 +17,17 @@ const taskKey = ref('')
 const task = ref<ModernTaskStatus | null>(null)
 const offset = ref(0)
 const error = ref('')
+const selecting = ref(false)
+const starting = ref(false)
+const queue = ref<string[]>([])
+let polling = false
 let timer = 0
 
 const running = computed(() => task.value?.status === 'running')
 const logs = computed(() => task.value?.logs ?? [])
-const canClose = computed(() => !running.value)
+const busy = computed(() => running.value || loading.value || selecting.value || starting.value || queue.value.length > 0)
+const canClose = computed(() => !busy.value)
+const missingRequired = computed(() => (list.value?.items ?? []).filter(item => item.required && !item.present))
 
 function stopPolling() {
   if (timer) window.clearInterval(timer)
@@ -34,7 +40,7 @@ async function loadList() {
   loading.value = true
   error.value = ''
   try {
-    const result = await api.get_model_downloads(props.mode)
+    const result = await api.get_model_downloads(props.mode, props.projectName || '')
     if (!result?.ok) error.value = result?.error ?? '读取模型清单失败，请重试。'
     else list.value = result
   } catch (exception) {
@@ -46,42 +52,92 @@ async function loadList() {
 
 async function poll() {
   const api = window.pywebview?.api
-  if (!api || !taskId.value) return
-  const result = await api.get_task_status(taskId.value, offset.value)
-  if (!result.ok) {
-    stopPolling()
-    error.value = result.error ?? '读取下载进度失败。'
-    return
-  }
-  task.value = result
-  offset.value = result.next_offset ?? offset.value
-  if (result.status && result.status !== 'running') {
-    stopPolling()
-    emit('changed')
-    await loadList()
+  if (!api || !taskId.value || polling) return
+  polling = true
+  try {
+    const result = await api.get_task_status(taskId.value, offset.value)
+    if (!result.ok) throw new Error(result.error || '读取下载进度失败。')
+    task.value = result
+    offset.value = result.next_offset ?? offset.value
+    if (result.status && result.status !== 'running') {
+      stopPolling()
+      emit('changed')
+      await loadList()
+      if (result.status !== 'completed' || error.value) queue.value = []
+      while (queue.value.length) {
+        const key = queue.value.shift()
+        const next = list.value?.items?.find(item => item.key === key && !item.present)
+        if (next) { await download(next); break }
+      }
+    }
+  } catch (exception) {
+    error.value = exception instanceof Error ? exception.message : '读取下载进度失败。'
+    queue.value = []
+  } finally {
+    polling = false
   }
 }
 
 async function download(item: ModelDownloadItem) {
-  if (running.value) return
+  if (running.value || starting.value) return
   const api = window.pywebview?.api
-  if (!api) { error.value = '模型下载需要在桌面版运行。'; return }
+  if (!api) { error.value = '模型下载需要在桌面版运行。'; queue.value = []; return }
+  starting.value = true
   error.value = ''
-  const result = await api.start_model_download(props.mode, item.key)
-  if (!result.ok || !result.task_id) {
-    error.value = result.error ?? '无法启动模型下载。'
-    await loadList()
-    return
+  try {
+    const result = await api.start_model_download(props.mode, item.key, props.projectName || '')
+    if (!result.ok || !result.task_id) {
+      queue.value = []
+      await loadList()
+      error.value = result.error ?? '无法启动模型下载。'
+      return
+    }
+    taskId.value = result.task_id
+    taskKey.value = item.key
+    task.value = { ok: true, status: 'running', message: '正在连接下载源…', logs: [] }
+    offset.value = 0
+    starting.value = false
+    await poll()
+    if (task.value?.status === 'running' && !timer) timer = window.setInterval(() => { void poll() }, 600)
+  } catch (exception) {
+    error.value = exception instanceof Error ? exception.message : '无法启动模型下载。'
+    queue.value = []
+  } finally {
+    starting.value = false
   }
-  taskId.value = result.task_id
-  taskKey.value = item.key
-  task.value = { ok: true, status: 'running', message: '正在连接下载源…', logs: [] }
-  offset.value = 0
-  await poll()
-  if (task.value?.status === 'running') timer = window.setInterval(() => { void poll() }, 600)
+}
+
+async function downloadRequired() {
+  if (busy.value) return
+  await loadList()
+  if (error.value) return
+  queue.value = missingRequired.value.map(item => item.key)
+  const first = queue.value.shift()
+  const item = list.value?.items?.find(item => item.key === first)
+  if (item) await download(item)
+}
+
+async function selectLocal(item: ModelDownloadItem, action: 'select' | 'default' | 'disable' = 'select') {
+  const api = window.pywebview?.api
+  if (busy.value || !api || !props.projectName) return
+  selecting.value = true
+  error.value = ''
+  try {
+    const result = await api.select_h3_component(props.projectName, item.key, action)
+    if (!result.ok) { error.value = result.error || '组件设置失败。'; return }
+    if (result.cancelled) return
+    await loadList()
+    emit('changed')
+    emit('notify', result.message || '组件设置已保存。')
+  } catch (exception) {
+    error.value = exception instanceof Error ? exception.message : '组件设置失败。'
+  } finally {
+    selecting.value = false
+  }
 }
 
 async function cancel() {
+  queue.value = []
   const api = window.pywebview?.api
   if (!api || !taskId.value) return
   const result = await api.cancel_task(taskId.value)
@@ -101,8 +157,10 @@ function close() {
   emit('close')
 }
 
-watch(() => [props.open, props.mode] as const, ([open]) => {
+watch(() => [props.open, props.mode, props.projectName] as const, ([open]) => {
   if (open) {
+    stopPolling()
+    queue.value = []
     list.value = null
     taskId.value = ''
     taskKey.value = ''
@@ -132,18 +190,27 @@ onUnmounted(stopPolling)
             <span class="asset-state" :class="{ ready: item.present }">{{ item.present ? '✓' : '·' }}</span>
             <div class="asset-copy">
               <strong>{{ item.label }}</strong>
-              <span>{{ item.filename }}<template v-if="item.required_group"> · {{ item.required_group }}</template><template v-else-if="item.optional"> · 可选</template></span>
+              <span :title="item.path">{{ item.manual && item.path ? item.path.split(/[\\/]/).pop() : item.filename }}<template v-if="item.required_group"> · {{ item.required_group }}</template><template v-else-if="item.optional"> · 可选</template></span>
+              <small v-if="item.local_select && !item.validation_error" class="asset-validation">{{ item.disabled ? '已停用' : item.present ? item.detail : '未准备' }}<template v-if="item.manual && item.path"> · 本地文件</template></small>
+              <small v-if="item.validation_error" class="asset-invalid">{{ item.validation_error }}</small>
+              <div v-if="item.local_select" class="asset-links">
+                <button v-if="item.manual" type="button" :disabled="busy" @click="selectLocal(item, 'default')">恢复默认</button>
+                <button v-if="item.optional && item.present" type="button" :disabled="busy" @click="selectLocal(item, 'disable')">不使用</button>
+              </div>
               <small v-if="item.part_size">发现未完成的下载（{{ (item.part_size / 1048576).toFixed(1) }} MB），继续时会尝试续传。</small>
             </div>
-            <button class="asset-download" type="button" :disabled="item.present || running" :title="item.present ? '该文件已存在' : item.url" @click="download(item)">
+            <div class="asset-actions">
+            <button v-if="item.local_select" class="asset-download" type="button" :disabled="busy" @click="selectLocal(item)">选择本地文件</button>
+            <button class="asset-download" type="button" :disabled="item.present || busy" :title="item.present ? '该文件已存在' : item.url" @click="download(item)">
               {{ item.present ? '已就绪' : running && taskKey === item.key ? '下载中…' : item.part_size ? '继续下载' : '下载' }}
             </button>
+            </div>
           </article>
         </div>
         <div v-if="error" class="assets-error"><span>{{ error }}</span><button v-if="!loading && !running" type="button" @click="loadList">重试</button></div>
         <template v-if="taskId">
           <div class="download-status" :class="task?.status">
-            <span>{{ task?.message || '正在下载…' }}</span>
+            <span>{{ task?.message || '正在下载…' }}<template v-if="queue.length"> · 待下载 {{ queue.length }} 项</template></span>
             <span v-if="task?.progress != null">{{ Math.floor(task.progress * 100) }}%</span>
           </div>
           <div class="download-track"><span :class="{ indeterminate: task?.progress == null && running }" :style="task?.progress != null ? { width: `${Math.floor(task.progress * 100)}%` } : undefined"></span></div>
@@ -151,6 +218,7 @@ onUnmounted(stopPolling)
           <pre v-if="logs.length" class="download-log">{{ logs.join('\n') }}</pre>
         </template>
         <footer class="assets-footer">
+          <button v-if="mode === 'h3_fz' && missingRequired.length && !running" class="asset-secondary" type="button" :disabled="busy || loading" @click="downloadRequired">下载缺失必需组件（{{ missingRequired.length }}）</button>
           <button v-if="running" class="asset-secondary" type="button" @click="cancel">取消下载</button>
           <button class="asset-primary" type="button" :disabled="!canClose" @click="close">{{ running ? '下载进行中…' : '关闭' }}</button>
         </footer>
@@ -161,13 +229,20 @@ onUnmounted(stopPolling)
 
 <style scoped>
 .assets-backdrop { position: fixed; inset: 0; z-index: 31; display: grid; place-items: center; padding: 18px; background: rgb(10 12 16 / 52%); }
-.assets-dialog { display: flex; width: min(100%, 700px); max-height: min(84vh, 780px); flex-direction: column; padding: 17px; border: 1px solid var(--tone-41464f); border-radius: 8px; background: var(--tone-272a32); box-shadow: 0 16px 44px rgb(0 0 0 / 32%); }
+.assets-dialog { display: flex; width: min(100%, 800px); max-height: min(84vh, 780px); flex-direction: column; padding: 17px; border: 1px solid var(--tone-41464f); border-radius: 8px; background: var(--tone-272a32); box-shadow: 0 16px 44px rgb(0 0 0 / 32%); }
 .assets-header { display: flex; justify-content: space-between; gap: 12px; }
 .assets-kicker { color: var(--tone-858a93); font-size: 10px; }
 .assets-header h2 { margin: 3px 0 0; color: var(--tone-cbd0d7); font-size: 17px; font-weight: 350; }
 .assets-close { width: 29px; height: 29px; border: 0; border-radius: 5px; color: var(--tone-999da6); background: transparent; font-size: 22px; cursor: pointer; }
 .assets-close:hover:not(:disabled) { color: var(--tone-d0d3d9); background: var(--tone-32363e); }
 .assets-close:disabled { opacity: .45; cursor: wait; }
+.asset-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.asset-links { display: flex; gap: 10px; }
+.asset-links button { padding: 0; border: 0; background: transparent; color: var(--tone-9ea4ae); font-size: 10px; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.asset-links button:disabled { opacity: .5; cursor: wait; }
+.asset-copy .asset-invalid { color: var(--tone-c69da1); overflow-wrap: anywhere; }
+.asset-copy .asset-validation { color: var(--tone-9ea4ae); }
+@media (max-width: 640px) { .asset-row { flex-wrap: wrap; } .asset-copy { flex-basis: calc(100% - 28px); } .asset-actions { margin-left: 20px; } }
 .assets-description { margin: 10px 0; color: var(--tone-9ea4ae); font-size: 11px; line-height: 1.5; }
 .assets-location { display: flex; align-items: center; gap: 7px; min-width: 0; margin-bottom: 8px; color: var(--tone-9097a2); font-size: 10px; }
 .assets-location span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

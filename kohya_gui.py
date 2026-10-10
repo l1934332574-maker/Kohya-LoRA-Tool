@@ -1868,11 +1868,11 @@ class App:
             if check == "qwen21_fz_models":
                 return not core.qwen21_fz_missing_models()
             if check == "h3_fz_models":
-                return not core.h3_fz_missing_models()
+                return not core.h3_fz_missing_models(model_settings=self._collect_params().get("h3_models"))
             if check == "h3_models":
                 return not core.h3_missing_models()
             if check == "at_model":
-                return core.at_image_model_ready(self.mode)
+                return core.at_image_model_ready(self.mode, self._at_project_model_settings())
             if check == "base":
                 return bool(self.base_model_var.get())
             if check == "raw":
@@ -2421,6 +2421,8 @@ class App:
         params = self._collect_params()
         self._capture_interval_values(self.mode)
         return {
+            **({"at_model": params["at_model"]} if "at_model" in params else {}),
+            **({"h3_models": params["h3_models"]} if "h3_models" in params else {}),
             "name": self.current_project or "",
             "template": template,
             "mode": params.get("mode", self.mode),
@@ -3891,7 +3893,7 @@ class App:
                 if _fr is not None:
                     _fast_tier_supported = (self.mode == "zimage" or
                                              (self.mode == "qwen_image" and
-                                              core.at_image_info(self.mode).get("arch") == "qwen_image"))
+                                              core.at_image_info(self.mode, self._at_project_model_settings()).get("arch") == "qwen_image"))
                     if _fast_tier_supported:
                         _fr.pack(fill="x", padx=22, pady=(0, 6))
                     else:
@@ -6334,6 +6336,8 @@ class App:
                 return default
         return {
             **getattr(self, "_caption_options", {}),
+            **({"at_model": _saved_project["at_model"]} if self.mode == "zimage" and isinstance((_saved_project or {}).get("at_model"), dict) else {}),
+            **({"h3_models": _saved_project["h3_models"]} if self.mode == "h3_fz" and isinstance((_saved_project or {}).get("h3_models"), dict) else {}),
             "mode": self.mode,
             "fizgig_version": _fizgig_version,
             "base_type": self.base_type,
@@ -6819,16 +6823,30 @@ class App:
         finally:
             self.q.put("__DONE__")
 
+    def _at_project_model_settings(self):
+        if self.mode != "zimage" or not self.current_project:
+            return None
+        config = core.load_project(self.current_project) or {}
+        return config.get("at_model") if isinstance(config.get("at_model"), dict) else None
+
+    def _save_at_model_selection(self, mode, values):
+        if mode == "zimage" and self.current_project:
+            config = core.load_project(self.current_project)
+            if isinstance(config, dict):
+                config["at_model"] = values
+                return core.save_project(self.current_project, config)
+        return core.at_image_custom_set(mode, values)
+
     def _refresh_at_status(self):
         try:
-            info = core.at_image_info(self.mode)
+            info = core.at_image_info(self.mode, self._at_project_model_settings())
             # 秒级 marker 检查：不要在这里跑权威 import（ai_toolkit_engine_status 慢 10s+，
             # 会卡主线程；权威校验只在真正开始训练前做）。2026-09 用户反馈“点哪都卡”。
             ok_e = core._at_marker_ok()
-            ok_m = core.at_image_model_ready(self.mode)
+            ok_m = core.at_image_model_ready(self.mode, self._at_project_model_settings())
             label = info.get("label", "")
             # 目录下拉中的模型版本是正式选项，不要误标成「自定义」；仅标注旧版自由输入仓库。
-            _custom = core.at_image_custom_get(self.mode)
+            _custom = core.at_image_custom_get(self.mode, self._at_project_model_settings())
             if _custom.get("local_dir"):
                 if not label.endswith("（本地）"):
                     label += "（本地）"
@@ -6848,7 +6866,7 @@ class App:
     def cmd_at_custom_model(self):
         """选择一个已适配的下载模型，或直接浏览现有模型目录。"""
         mode = self.mode if self.mode in ("qwen_image", "zimage") else "qwen_image"
-        cur = core.at_image_custom_get(mode)
+        cur = core.at_image_custom_get(mode, self._at_project_model_settings())
         choices = core.at_image_model_choices(mode)
         if not choices:
             return
@@ -7125,23 +7143,27 @@ class App:
                             return
                         if component_path:
                             d[key] = component_path
-                core.at_image_custom_set(mode, d)
+                if mode == "zimage" and os.path.isfile(path) and path == cur.get("local_dir"):
+                    for component_key in ("text_encoder_path", "vae_path"):
+                        if cur.get(component_key):
+                            d[component_key] = cur[component_key]
+                self._save_at_model_selection(mode, d)
                 self._log("[模型] 已指定本地模型：%s（跳过下载）" % path)
             elif c.get("default"):
-                core.at_image_custom_set(mode, {})
+                self._save_at_model_selection(mode, {})
                 self._log("[模型] 使用默认模型：%s" % c.get("model_id", ""))
             else:
                 d = {k: c.get(k) for k in (
                     "model_id", "arch", "label", "size", "hint",
                     "min_vram", "rec_vram", "resident_vram") if c.get(k) not in (None, "")}
-                core.at_image_custom_set(mode, d)
+                self._save_at_model_selection(mode, d)
                 self._log("[模型] 已选择下载模型：%s" % c.get("model_id", ""))
             self._refresh_at_status()
             self._update_mode_ui()
             w.destroy()
 
         def _reset():
-            core.at_image_custom_set(mode, {})
+            self._save_at_model_selection(mode, {})
             self._log("[模型] 已恢复官方默认模型：%s"
                       % (core.AT_IMAGE_MODELS.get(mode, {}).get("model_id", "")))
             self._refresh_at_status()
@@ -7162,7 +7184,7 @@ class App:
 
     def cmd_at_model_help(self):
         """Qwen-Image / Z-Image 模型与操作步骤说明。"""
-        info = core.at_image_info(self.mode)
+        info = core.at_image_info(self.mode, self._at_project_model_settings())
         if self.mode == "qwen_image":
             msg = (
                 "📖 Qwen-Image LoRA · 操作步骤\n\n"
@@ -7294,7 +7316,7 @@ class App:
             return False
         has_audio = int(summary.get("audio", 0) or 0) > 0
         try:
-            missing = core.h3_fz_missing_models(require_audio=has_audio)
+            missing = core.h3_fz_missing_models(require_audio=has_audio, model_settings=self._collect_params().get("h3_models"))
         except TypeError:
             missing = core.h3_fz_missing_models()
         if missing:
@@ -7304,7 +7326,7 @@ class App:
         self._log("[预检] H3 Fizgig：图片 %d、视频 %d、音频 %d，字幕齐全。" % (
             int(summary.get("images", 0) or 0), int(summary.get("videos", 0) or 0),
             int(summary.get("audio", 0) or 0)))
-        if int(summary.get("videos", 0) or 0) and not core.h3_fz_model_files().get("audio_vae"):
+        if int(summary.get("videos", 0) or 0) and not core.h3_fz_model_files(self._collect_params().get("h3_models")).get("audio_vae"):
             self._log("[预检] 未准备 audio VAE；视频音轨会被忽略，只训练画面。")
         return True
 
@@ -7344,8 +7366,9 @@ class App:
     def _refresh_h3_fz_status(self):
         try:
             engine_ok, _detail, _vpy, _backend = core.fizgig_engine_status()
-            files = core.h3_fz_model_files()
-            missing = list(core.h3_fz_missing_models())
+            selection = self._collect_params().get("h3_models")
+            files = core.h3_fz_model_files(selection)
+            missing = list(core.h3_fz_missing_models(model_settings=selection))
             if missing:
                 text = "H3 必需模型缺 %d 项（点下载查看）" % len(missing)
             else:
@@ -8668,7 +8691,7 @@ class App:
                 + ("\nAMD ROCm：实验性路径，训练兼容性尚未验证。" if params.get("amd_mode") else "")
             )
         elif params.get("mode") == "h3_fz":
-            _files = core.h3_fz_model_files()
+            _files = core.h3_fz_model_files(params.get("h3_models"))
             try:
                 _summary = core.scan_fizgig_h3_dataset(params.get("raw_dir") or "")
                 _counts = "图片 %s / 视频 %s / 音频 %s / 总计 %s" % (

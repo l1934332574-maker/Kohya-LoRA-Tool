@@ -29,7 +29,7 @@ def models(core, family, params=None):
         return f
     if family == "qwen_image21": return core.qwen21_fz_model_files()
     if family == "minimax":
-        f = core.h3_fz_model_files()
+        f = core.h3_fz_model_files(params.get("h3_models"))
         return dict(f, vae=f.get("video_vae"), speed_lora=f.get("turbo_lora"))
     folder = Path(models_dir(core, family))
     if family == "sdxl":
@@ -112,6 +112,9 @@ def _validate(core, family, files):
 def validate_base(core, family, checkpoint):
     if not core._safetensors_complete(checkpoint):
         raise RuntimeError("模型文件不完整或损坏，请重新下载。")
+    if family == "minimax":
+        from .h3_models import validate
+        validate(checkpoint, "dit")
     if family == "anima":
         if core.detect_base_type(checkpoint) != "anima":
             raise RuntimeError("所选文件不是可识别的 Anima 底模；文本编码器不能作为底模。")
@@ -141,6 +144,9 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
     if source_version(record["source"]) != VERSION or not Path(record["python"]).is_file():
         raise RuntimeError("此项目选择 Fizgig v7.0.1，请先安装或更新引擎。")
     family = FAMILIES[mode]
+    if family == "minimax":
+        from .h3_models import validate_selected
+        validate_selected(core, params.get("h3_models"))
     files = models(core, family, params)
     _validate(core, family, files)
     if family == "anima":
@@ -154,6 +160,9 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         precision = "bf16"
         logf("[Fizgig] Klein 的 fp8 保存在底模文件中；新版使用原底模精度，不二次量化。")
     allowed = ("auto", "int8", "nf4", "hqq") if family == "minimax" else ("auto", "bf16", "int8", "nf4")
+    if family == "minimax":
+        from .h3_models import training_precision
+        precision = training_precision(files["dit"], precision)
     if precision not in allowed:
         raise ValueError("新版 %s 支持 %s；当前精度 %s 不受支持，请重新选择。" % (family, "/".join(allowed), precision))
     train_dir = (params.get("train_data_dir") or params.get("raw_dir")) if family == "minimax" else core.dataset_train_dir("character", params.get("project"))

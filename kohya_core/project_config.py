@@ -96,6 +96,12 @@ def training_params(core, config, project_name):
     params['save_every'] = save_every if save_every > 0 else None
     for key in ('global_pos', 'global_neg'):
         params[key] = str(config.get(key) or stored.get(key) or '').strip()
+    if mode == "zimage":
+        from kohya_core.zimage_models import settings
+        params["at_model"] = settings(core, config)
+    if mode == "h3_fz":
+        from .h3_models import settings
+        params["h3_models"] = settings(config)
     return params
 
 
