@@ -84,10 +84,9 @@ def _header(path, size, modified, changed):
             stream.seek(8 + length + a)
             try:
                 descriptor = json.loads(stream.read(b - a))
-                fmt = descriptor["format"]
-                if not isinstance(fmt, str):
+                if not isinstance(descriptor, dict) or not isinstance(descriptor.get("format"), str):
                     raise ValueError("量化格式无效。")
-                formats[key[:-12]] = fmt
+                formats[key[:-len(".comfy_quant")]] = descriptor
             except (ValueError, KeyError, TypeError, UnicodeError) as exc:
                 raise ValueError("量化信息无法识别：" + key) from exc
         return header, formats
@@ -142,23 +141,46 @@ def _validate_cached(path, kind, size, modified, changed):
         pruned = "adaln_t_table" in header
         _check_shapes(header, schemas["dit" if pruned else "full"])
         if pruned:
-            if not formats or any(v != "int8_convrot" for v in formats.values()):
-                raise ValueError("当前支持 pruned int8 ConvRot 或完整 BF16 H3；此主模型量化格式不受支持。")
-            for module in formats:
-                if header.get(module + ".weight", {}).get("dtype") != "I8" or module + ".weight_scale" not in header:
-                    raise ValueError("H3 int8 量化权重不完整：" + module)
+            # ConvRot is a flag on int8_tensorwise, not a format named int8_convrot.
+            # Keep the complete descriptor: the loader also needs its rotation group.
+            if not formats or any(v["format"] != "int8_tensorwise" for v in formats.values()):
+                actual = ", ".join(sorted({v["format"] for v in formats.values()})) or "未找到量化信息"
+                raise ValueError("此 H3 主模型量化格式不受支持（检测到：" + actual
+                                 + "）；请选择 int8 Tensorwise / ConvRot 或完整浮点 H3。")
+            for module, descriptor in formats.items():
+                weight = header.get(module + ".weight", {})
+                scale = header.get(module + ".weight_scale", {})
+                shape = weight.get("shape", [])
+                if (weight.get("dtype") != "I8" or len(shape) != 2
+                        or scale.get("dtype") not in _FLOATS
+                        or scale.get("shape") not in ([], [1], [1, 1], [shape[0]], [shape[0], 1])):
+                    raise ValueError("H3 int8 量化权重或 scale 不完整：" + module)
+                if "convrot" in descriptor and type(descriptor["convrot"]) is not bool:
+                    raise ValueError("H3 ConvRot 标记无效：" + module)
+                if descriptor.get("convrot"):
+                    group = descriptor.get("convrot_groupsize", 256)
+                    if type(group) is not int or group < 1 or shape[1] % group:
+                        raise ValueError("H3 ConvRot 分组与权重维度不兼容：" + module)
+                    power = group
+                    while power > 1 and power % 4 == 0:
+                        power //= 4
+                    if power != 1:
+                        raise ValueError("H3 ConvRot 分组必须为 4 的整数次幂：" + module)
             # All 50 blocks carry these four quantized matmuls in the supported pruned file.
             for block in range(50):
                 for suffix in ("attn.qkv_proj", "attn.out_proj", "mlp.fc1", "mlp.fc2"):
-                    if formats.get(f"blocks.{block}.{suffix}") != "int8_convrot":
+                    if formats.get(f"blocks.{block}.{suffix}", {}).get("format") != "int8_tensorwise":
                         raise ValueError("H3 int8 主模型缺少量化信息。")
-            return "H3 pruned int8 ConvRot"
+            return "H3 pruned int8 ConvRot" if any(v.get("convrot") for v in formats.values()) else "H3 pruned int8 Tensorwise"
         if formats or any(header[key]["dtype"] not in _FLOATS for key in schemas["full"]):
             raise ValueError("完整 H3 主模型需要浮点权重；此预量化格式不受支持。")
         return "H3 完整浮点主模型 · 训练时使用 NF4"
     if kind == "te":
         _check_shapes(header, schemas["te"], packed=True)
-        for module, fmt in formats.items():
+        for module, descriptor in formats.items():
+            fmt = descriptor["format"]
+            if descriptor.get("convrot"):
+                raise ValueError("H3 文本编码器不支持 ConvRot 旋转权重；请选择 nvfp4 AWQ 或完整浮点版本。")
             weight = header.get(module + ".weight", {})
             if module + ".weight_scale" not in header:
                 raise ValueError("文本编码器量化信息缺少 scale：" + module)
@@ -166,7 +188,7 @@ def _validate_cached(path, kind, size, modified, changed):
                 raise ValueError("文本编码器 nvfp4 权重不完整：" + module)
             if fmt == "int8_tensorwise" and weight.get("dtype") != "I8":
                 raise ValueError("文本编码器 int8 权重不完整：" + module)
-        if any(v not in ("nvfp4", "int8_tensorwise") for v in formats.values()):
+        if any(v["format"] not in ("nvfp4", "int8_tensorwise") for v in formats.values()):
             raise ValueError("H3 文本编码器支持 nvfp4 AWQ 或完整浮点版本，不支持 int8 ConvRot 版本。")
         for key in schemas["te"]:
             item = header[key]

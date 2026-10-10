@@ -568,7 +568,7 @@ class ModernUIBridge:
         threading.Thread(target=worker, name="ModernSetupTask", daemon=True).start()
         return {"ok": True, "task_id": task_id}
 
-    def _model_download_spec(self, mode):
+    def _model_download_spec(self, mode, project_name=""):
         mode = str(mode or "")
         specs = {
             "anima_fz": ("Anima 模型", "Fizgig 标准 28 层 Anima 组件", "ANIMA_FZ_MODEL_LINKS", "anima_fz_models_dir", "anima_fz_model_files", {"dit", "te", "vae"}),
@@ -582,10 +582,17 @@ class ModernUIBridge:
             "h3_fz": ("H3 训练组件", "MiniMax H3 · 本地文件与按需下载", "H3_FZ_MODEL_LINKS", "h3_fz_models_dir", "h3_fz_model_files", {"dit", "te", "video_vae"}),
             "video": ("H3 模型", "MiniMax H3 视频训练文件", "H3_MODEL_LINKS", "h3_models_dir", "h3_model_files", {"te", "video_vae"}),
         }
+        if mode == "krea2_fz":
+            config = self.core.load_project(str(project_name or "")) if project_name else {}
+            version = str(((config or {}).get("params") or {}).get("fizgig_version")
+                          or ("v6.5.0" if project_name else FIZGIG_TARGET))
+            if version == FIZGIG_TARGET:
+                return ("Krea 2 模型", "Krea 2 Fizgig v7 训练文件", "KREA2_FZ_MODEL_LINKS",
+                        "krea2_models_dir", "krea2_fz_model_files", {"raw", "vae"})
         return specs.get(mode)
 
     def get_model_downloads(self, mode, project_name=""):
-        spec = self._model_download_spec(mode)
+        spec = self._model_download_spec(mode, project_name)
         if not spec:
             return {"ok": False, "error": "该模式没有可在新版训练页管理的模型下载列表。"}
         title, description, links_name, dir_name, files_name, required = spec
@@ -596,6 +603,8 @@ class ModernUIBridge:
         state = h3_rows(self.core, selection) if mode == "h3_fz" else {}
         existing = self.core.h3_fz_model_files(selection) if mode == "h3_fz" else getattr(self.core, files_name)()
         required = set(required)
+        if links_name == "KREA2_FZ_MODEL_LINKS":
+            required.add("te_fp8" if existing.get("te_fp8") or not existing.get("te") else "te")
         if mode == "h3_fz" and config and config.get("raw_dir"):
             try:
                 if self.core.scan_fizgig_h3_dataset(config["raw_dir"]).get("audio", 0):
@@ -615,12 +624,13 @@ class ModernUIBridge:
             except OSError:
                 part_size = 0
             main_choice = mode == "video" and key in ("dit", "dit_nvfp4")
+            encoder_choice = links_name == "KREA2_FZ_MODEL_LINKS" and key in ("te", "te_fp8")
             items.append({
                 "key": key, "filename": filename, "label": ("H3 主模型（必需）" if mode == "h3_fz" and key == "dit" else self._plain_ui_text(label)),
                 "url": url, "path": path, "present": present,
                 "required": key in required,
-                "required_group": "主模型（二选一）" if main_choice else "",
-                "optional": key not in required and not main_choice,
+                "required_group": "主模型（二选一）" if main_choice else "文本编码器（二选一）" if encoder_choice else "",
+                "optional": key not in required and not main_choice and not encoder_choice,
                 "part_size": part_size,
                 "local_select": mode == "h3_fz" and bool(project_name),
                 "manual": bool(row.get("manual")), "disabled": bool(row.get("disabled")),
@@ -629,6 +639,8 @@ class ModernUIBridge:
         note = ""
         if mode == "krea2_at":
             note = "AI Toolkit 的文本编码器会在首次训练时按需准备；RAW 底模和 VAE 可在此提前下载。"
+        elif mode == "krea2_fz" and links_name == "KREA2_FZ_MODEL_LINKS":
+            note = "文本编码器可用 BF16 或 FP8 scaled；Fizgig v7 优先使用已准备的 FP8 文件，8GB 显卡推荐 FP8。"
         elif mode == "video":
             note = "主模型可选 int8 或 nvfp4 其中一个；文本编码器和视频 VAE 需要准备，音频 VAE 可选。"
         elif mode == "qwen21_fz":
@@ -692,7 +704,7 @@ class ModernUIBridge:
         return {"ok": True, "message": "组件设置已保存。", "path": path}
 
     def start_model_download(self, mode, key, project_name=""):
-        spec = self._model_download_spec(mode)
+        spec = self._model_download_spec(mode, project_name)
         if not spec:
             return {"ok": False, "error": "该模式没有模型下载入口。"}
         if ModelDownloader is None:
@@ -1028,6 +1040,13 @@ class ModernUIBridge:
             return {"ok": False, "error": "项目不存在或配置文件已损坏。"}
         if config.get("training_kind") == "slider":
             return {"ok": False, "error": "滑块训练会自动准备文字练习画面或同步处理图片对；无需普通预处理。"}
+        if config.get("training_kind") == "multi_character":
+            try:
+                multi_params = training_params(self.core, config, project_name)
+                self._training_image_count(multi_params)
+            except (ValueError, OSError) as exc:
+                return {"ok": False, "error": str(exc)}
+            config = dict(config, raw_dir=multi_params["raw_dir"])
         raw_dir = str(config.get("raw_dir") or "").strip()
         if not raw_dir or not os.path.isdir(raw_dir):
             return {"ok": False, "error": "请先在新版训练页选择有效的数据文件夹。"}
@@ -1115,6 +1134,7 @@ class ModernUIBridge:
                     }
                     if mode == "style" and config.get("base_type") == "anima":
                         args["dataset_mode"] = None
+                    if config.get("training_kind") == "multi_character": args["multi_character"] = config.get("multi_character", {})
                     self.core.preprocess(lambda line: self._task_log(task_id, line), **args)
                     stats = {}
                     if os.path.isfile(report_path):
@@ -1330,6 +1350,19 @@ class ModernUIBridge:
             except (ValueError, TypeError) as exc:
                 return {"ok": False, "error": str(exc)}
             result["plan"]["execution_summary"] = self._execution_summary(mode, params, result["plan"])
+            if config.get("training_kind") == "multi_character":
+                from kohya_core.multi_character import scan
+                try:
+                    scanned = scan(config.get("multi_character", {}))
+                except (ValueError, OSError) as exc:
+                    return {"ok": False, "error": str(exc)}
+                result["plan"].update(training_kind="multi_character", training_type="multi_character", mode_label="多角色 LoRA",
+                                      multi_character={k: scanned[k] for k in ("roles", "images", "training_images", "validation")})
+                result["plan"]["trigger"] = ", ".join(r["trigger"] for r in scanned["settings"]["roles"])
+                result["plan"]["warnings"].extend(scanned["warnings"])
+                result["plan"]["warnings"].append("多角色当前使用新训练任务，不自动续训；先分别验证角色，再验证目标组合。")
+                result["plan"]["execution_summary"].append({"label": "均衡后样本", "value": "%d 个；步数按均衡后的数据集计算。" % scanned["training_images"]})
+                result["plan"]["execution_summary"].append({"label": "身份标注", "value": "按角色触发词训练；保留完整构图，最多 3 倍均衡采样。"})
         return result
 
     def _execution_summary(self, mode, params, plan):
@@ -1497,7 +1530,7 @@ class ModernUIBridge:
             schedule_value = "%d 步 · %d 帧" % (steps, aligned_frames)
         else:
             try:
-                image_count = self._count_preprocessable_images(raw_dir)
+                image_count = self._training_image_count(params)
             except Exception as exc:
                 return {"ok": False, "error": "无法读取图集：%s" % exc}
             if image_count < min_count:
@@ -1562,6 +1595,21 @@ class ModernUIBridge:
         }
         return {"ok": True, "plan": plan}
 
+    def inspect_multi_character(self, project_name, settings):
+        if not self.core.load_project(str(project_name or "")):
+            return {"ok": False, "error": "项目不存在。"}
+        try:
+            from kohya_core.multi_character import public_scan
+            return {"ok": True, **public_scan(settings)}
+        except (ValueError, OSError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _training_image_count(self, params):
+        if params.get("training_kind") == "multi_character":
+            from kohya_core.multi_character import scan
+            return scan(params["multi_character"])["images"]
+        return self._count_preprocessable_images(params["raw_dir"])
+
     def _safe_vram(self):
         try:
             return self.core.detect_vram_gb()
@@ -1583,6 +1631,8 @@ class ModernUIBridge:
                 "video": "AI Toolkit", "krea2_at": "AI Toolkit", "qwen_image": "AI Toolkit", "zimage": "AI Toolkit"}.get(mode, "训练引擎")
 
     def _resume_path(self, project_name, mode, params):
+        if params.get("training_kind") == "multi_character":
+            return None  # First implementation requires a fresh run when identities or sources change.
         if mode in ("video", "krea2_at", "qwen_image", "zimage"):
             return None  # AI Toolkit trainers do not consume resume_from.
         try:
@@ -1620,7 +1670,7 @@ class ModernUIBridge:
         if not raw_dir or not os.path.isdir(raw_dir):
             return {"ok": False, "error": "请先在新版训练页选择一个有效的原始图片文件夹。"}
         try:
-            image_count = self._count_preprocessable_images(raw_dir)
+            image_count = self._training_image_count(params)
         except Exception as exc:
             return {"ok": False, "error": "无法读取图集：%s" % exc}
         min_images = int(getattr(self.core, "MIN_IMAGES", {}).get(params["mode"], 15))
@@ -1772,7 +1822,7 @@ class ModernUIBridge:
             label = getattr(self.core, "BASE_TYPE_LABELS", {}).get(detected_type, detected_type)
             return {"ok": False, "error": "选中的底模识别为 %s，与当前 %s 架构不匹配。请更换底模或切换架构。" % (label, base_label)}
         try:
-            image_count = self._count_preprocessable_images(params["raw_dir"])
+            image_count = self._training_image_count(params)
         except Exception as exc:
             return {"ok": False, "error": "无法读取图集：%s" % exc}
         min_images = int(getattr(self.core, "MIN_IMAGES", {}).get(params["mode"], 15))
@@ -1953,6 +2003,9 @@ class ModernUIBridge:
                 for key in ("positive_dir", "negative_dir", "pairs"):
                     restored[key] = present[key]
                 patch["slider"] = restored
+            if current.get("training_kind") == "multi_character":
+                if patch.get("training_kind") != "multi_character": return {"ok": False, "error": "这条记录不是多角色训练。"}
+                patch["multi_character"] = current.get("multi_character", {})
             return self.save_project_config(project_name, patch)
 
     def start_training(self, project_name, use_resume=False):
@@ -1991,7 +2044,7 @@ class ModernUIBridge:
         getattr(self.core, "reset_effective", lambda: None)()
         root_keys = ("mode", "base_type", "at_sub_mode", "concept_type", "fast_tier", "trigger",
                      "raw_dir", "reg_dir", "base_model", "style_preset", "style_caption",
-                     "train_env", "unet_only", "global_pos", "global_neg", "at_model")
+                     "train_env", "unet_only", "global_pos", "global_neg", "at_model", "training_kind", "multi_character")
         record_config = {key: config[key] for key in root_keys if key in config}
         stored_params = config.get("params") if isinstance(config.get("params"), dict) else {}
         record_config["params"] = {key: value for key, value in stored_params.items() if key in WORKSPACE_PARAM_KEYS}
@@ -2062,6 +2115,7 @@ class ModernUIBridge:
                         "keep_user_captions": params["keep_user_captions"],
                         "caption_method": params.get("caption_method", "wd14"),
                     }
+                    if params.get("training_kind") == "multi_character": preprocess_args["multi_character"] = params["multi_character"]
                     self.core.preprocess(lambda line: self._task_log(task_id, line), **preprocess_args)
                     stats = {}
                     if os.path.isfile(report_path):
@@ -2392,7 +2446,7 @@ class ModernUIBridge:
                 "updated": str(item.get("updated", "")),
                 "mode": mode,
                 "training_kind": item.get("training_kind", "standard"),
-                "mode_label": "概念滑块 LoRA" if item.get("training_kind") == "slider" else self._plain_mode_label(labels.get(mode, mode)),
+                "mode_label": "多角色 LoRA" if item.get("training_kind") == "multi_character" else "概念滑块 LoRA" if item.get("training_kind") == "slider" else self._plain_mode_label(labels.get(mode, mode)),
                 "base_type": str(item.get("base_type", "")),
                 "base_type_label": base_labels.get(item.get("base_type", ""), str(item.get("base_type", ""))),
                 "raw_dir": str(item.get("raw_dir", "")),
@@ -2594,12 +2648,18 @@ class ModernUIBridge:
             return {"ok": False, "error": "项目不存在或配置文件已损坏。"}
 
         config = dict(config)
-        if patch.get("training_kind", config.get("training_kind", "standard")) not in ("standard", "slider"):
+        if patch.get("training_kind", config.get("training_kind", "standard")) not in ("standard", "slider", "multi_character"):
             return {"ok": False, "error": "训练任务类型无效。"}
         if "slider" in patch:
             try:
                 from kohya_core.slider_project import normalize
                 config["slider"] = normalize(patch["slider"])
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+        if "multi_character" in patch:
+            try:
+                from kohya_core.multi_character import normalize
+                config["multi_character"] = normalize(patch["multi_character"])
             except ValueError as exc:
                 return {"ok": False, "error": str(exc)}
         root_string_fields = {
@@ -2609,7 +2669,7 @@ class ModernUIBridge:
         }
         root_bool_fields = {"unet_only"}
         param_fields = set(WORKSPACE_PARAM_KEYS)
-        allowed_root_fields = root_string_fields | root_bool_fields | {"params", "slider"}
+        allowed_root_fields = root_string_fields | root_bool_fields | {"params", "slider", "multi_character"}
         unknown_root_fields = set(patch) - allowed_root_fields
         if unknown_root_fields:
             return {"ok": False, "error": "未知的项目配置字段：%s" % ", ".join(sorted(unknown_root_fields))}
@@ -2688,6 +2748,11 @@ class ModernUIBridge:
             except ValueError as exc:
                 return {"ok": False, "error": str(exc)}
 
+        if config.get("training_kind") == "multi_character":
+            from kohya_core.multi_character import IMAGE_MODES
+            if config.get("mode") not in IMAGE_MODES: return {"ok": False, "error": "多角色模式请选择图像人物 LoRA 入口。"}
+            config.update(trigger="", at_sub_mode="character")
+            params.update(strong_bind=False, clean_concept=False, keep_user_captions=True, caption_method="existing", crop_ratio="")
         if not self.core.save_project(name, config):
             return {"ok": False, "error": "项目保存失败，请检查磁盘空间和写入权限。"}
         self._log("[项目] 已保存「%s」的训练配置。" % name)
@@ -3362,6 +3427,9 @@ class ModernUIBridge:
             if mode in ("anima_fz", "sdxl_fz"):
                 missing = fizgig_missing(core, FIZGIG_FAMILIES[mode], project_config)
                 asset_dir = core.anima_fz_models_dir() if mode == "anima_fz" else core.sdxl_fz_models_dir()
+            elif mode == "krea2_fz" and (project_config.get("params") or {}).get("fizgig_version") == FIZGIG_TARGET:
+                missing = fizgig_missing(core, "krea2", project_config)
+                asset_dir = core.krea2_models_dir()
             elif mode in ("krea2", "krea2_fz"):
                 missing = list(core.krea2_missing_models())
                 asset_dir = core.krea2_models_dir()
@@ -3458,7 +3526,7 @@ class ModernUIBridge:
             "at": bool(status.get("at_ok")),
             "fizgig": engine_ready if mode in FIZGIG_FAMILIES else bool(status.get("fizgig_ok")),
             "base": bool(project_config.get("base_model")),
-            "raw": bool(project_config.get("raw_dir")),
+            "raw": len((project_config.get("multi_character") or {}).get("roles", [])) >= 2 and all(r.get("directory") and r.get("trigger") for r in (project_config.get("multi_character") or {}).get("roles", [])) if project_config.get("training_kind") == "multi_character" else bool(project_config.get("raw_dir")),
         }
         model_checks = {
             "krea2_models", "krea2_at_models", "flux2_models", "flux2_fz_models", "h3_models", "qwen21_fz_models", "h3_fz_models", "at_model", "fizgig_new_models",
@@ -3481,6 +3549,10 @@ class ModernUIBridge:
             }
             for step in getattr(core, "GUIDE_STEPS", {}).get(mode, ())
         ]
+        if project_config.get("training_kind") == "multi_character":
+            for step in guide_steps:
+                if step["check"] == "raw":
+                    step.update(label="配置角色素材", button="去配置", tip="分别选择角色单人目录，再添加同框素材及目标组合。")
         return {
             "ok": True,
             "mode": mode,
@@ -3561,6 +3633,9 @@ class ModernUIBridge:
                     settings = normalize(raw_config.get("slider"))
                     settings.update(positive_dir="", negative_dir="", pairs=[])
                     imported_config.update(training_kind="slider", slider=settings)
+                if raw_config.get("training_kind") == "multi_character":
+                    from kohya_core.multi_character import normalize, export_settings
+                    imported_config.update(training_kind="multi_character", multi_character=export_settings(normalize(raw_config.get("multi_character", {}))))
                 raw_params = raw_config.get("params", {}) if isinstance(raw_config, dict) else {}
                 if isinstance(raw_params, dict):
                     params = dict(imported_config.get("params") or {})
@@ -3600,11 +3675,14 @@ class ModernUIBridge:
             try:
                 choice = resolve_choice(model_choice)
                 template_name = choice["template"]
-                if training_type not in ("character", "style", "concept", "slider"):
+                if training_type not in ("character", "style", "concept", "slider", "multi_character"):
                     raise ValueError("训练目的无效。")
                 if training_type == "slider" and choice["mode"] not in ("anima_fz", "sdxl_fz"):
                     raise ValueError("滑块请选择 SDXL / 标准 28 层 Anima 的 Fizgig v7.0.1 入口。")
-                if choice["mode"] == "character": mode_override = training_type
+                if training_type == "multi_character":
+                    from kohya_core.multi_character import IMAGE_MODES
+                    if choice["mode"] not in IMAGE_MODES: raise ValueError("多角色模式需要图像 LoRA 训练入口。")
+                if choice["mode"] == "character": mode_override = "character" if training_type == "multi_character" else training_type
                 vendor = self.core.detect_gpu_vendor()
                 if vendor and vendor != "unknown" and vendor not in choice["vendors"]:
                     raise ValueError("这个模型版本尚未接入当前显卡的训练路径。")
@@ -3640,7 +3718,12 @@ class ModernUIBridge:
                     return {"ok": False, "error": "滑块入口尚未接入所选模型。"}
                 from kohya_core.slider_project import normalize
                 data.update(training_kind="slider", slider=normalize({}), unet_only=True)
-            data["at_sub_mode"] = training_type
+            if training_type == "multi_character":
+                from kohya_core.multi_character import IMAGE_MODES
+                if mode not in IMAGE_MODES: return {"ok": False, "error": "多角色模式请选择图像人物 LoRA 入口。"}
+                data.update(training_kind="multi_character", multi_character={"roles": [], "groups": [], "targets": [], "balance": True})
+                data["params"].update(strong_bind=False, clean_concept=False, keep_user_captions=True, caption_method="existing")
+            data["at_sub_mode"] = "character" if training_type == "multi_character" else training_type
             if model_choice: data["model_choice"] = {k: model_choice[k] for k in ("model", "variant", "engine")}
             if mode in FIZGIG_FAMILIES: data["params"]["fizgig_version"] = FIZGIG_TARGET
         if imported_config:
@@ -3676,6 +3759,11 @@ class ModernUIBridge:
                     parameters(data, name)
                 except ValueError as exc:
                     return {"ok": False, "error": str(exc)}
+            if imported_config.get("training_kind") == "multi_character":
+                from kohya_core.multi_character import IMAGE_MODES
+                if mode not in IMAGE_MODES: return {"ok": False, "error": "导入的多角色训练入口无效。"}
+                data.update(training_kind="multi_character", multi_character=imported_config["multi_character"], trigger="", at_sub_mode="character")
+                data["params"].update(strong_bind=False, clean_concept=False, keep_user_captions=True, caption_method="existing")
             template_options = dict(templates)
             template_options.update(_MODERN_PROJECT_TEMPLATES)
             matching_template = next((
@@ -3821,20 +3909,20 @@ class ModernUIBridge:
                 return guard
         if action.startswith("mode:") or action == "train":
             return {"ok": False, "error": "训练模式与训练任务由新版训练页直接承接。"}
-        if action == "export_config" and (self.core.load_project(str(project_name or "")) or {}).get("training_kind") == "slider":
+        if action == "export_config" and (self.core.load_project(str(project_name or "")) or {}).get("training_kind") in ("slider", "multi_character"):
             if self._window is None: return {"ok": False, "error": "文件选择器尚未就绪。"}
             try:
                 import webview
                 config = self.core.load_project(project_name)
                 payload = self.core.export_config_json(training_params(self.core, config, project_name), include_prompts=True)
-                selected = self._window.create_file_dialog(webview.FileDialog.SAVE, save_filename=project_name + "_滑块配置.json", file_types=("JSON (*.json)",))
+                selected = self._window.create_file_dialog(webview.FileDialog.SAVE, save_filename=project_name + "_训练配置.json", file_types=("JSON (*.json)",))
                 if not selected: return {"ok": True, "message": "已取消配置导出。"}
                 path = selected[0] if isinstance(selected, (list, tuple)) else selected
                 from kohya_core.fizgig_engine import _write
                 _write(Path(path), payload)
-                return {"ok": True, "message": "滑块配置已导出；不包含图片目录、配对路径或 API 设置。"}
+                return {"ok": True, "message": "训练配置已导出；不包含素材目录或 API 设置。"}
             except Exception as exc:
-                return {"ok": False, "error": "滑块配置导出失败：%s" % exc}
+                return {"ok": False, "error": "训练配置导出失败：%s" % exc}
         if action == "preprocess":
             # Keep every caller on the modern task/review workflow. The classic
             # command remains available for the classic UI, but must not be

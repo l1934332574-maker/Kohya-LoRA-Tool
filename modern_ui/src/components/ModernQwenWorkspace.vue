@@ -2,6 +2,8 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import type { ModeWorkspaceData, ProjectCard, ProjectConfig, QwenModelChoice, QwenModelSaveResult, QwenModelSelection, QwenModelSetup } from '../bridge'
 import UiIcon from './UiIcon.vue'
+import MultiCharacterPanel from './MultiCharacterPanel.vue'
+import { useMultiCharacter } from '../useMultiCharacter'
 import CropRatioField from './CropRatioField.vue'
 import DatasetInspection from './DatasetInspection.vue'
 import CaptionControls from './CaptionControls.vue'
@@ -231,6 +233,8 @@ const { profileUndo, profileDefaults, profileSupported, applyProfile, undoProfil
   (message) => emit('notify', message), () => [props.config, props.mode, selectedModelKey.value],
 )
 
+const { isMulti, multiSettings, updateMulti, multiPatch } = useMultiCharacter(() => props.config, dirty)
+
 function makePatch(): ProjectConfig {
   const patch: ProjectConfig = {}
   for (const key of ['at_sub_mode', 'concept_type', 'fast_tier', 'raw_dir', 'trigger', 'reg_dir', 'style_preset', 'style_caption'] as const) {
@@ -248,7 +252,7 @@ function makePatch(): ProjectConfig {
   }
   if (dirty.has('params.sample_preview')) params.sample_preview = trainingDraft.sample_preview_mode === 'auto' ? null : trainingDraft.sample_preview_mode === 'on'
   if (Object.keys(params).length) patch.params = params
-  return patch
+  return multiPatch(patch)
 }
 
 function saveConfig() {
@@ -271,6 +275,11 @@ async function browseDataset() {
 }
 
 async function guideAction(action: string): Promise<ProjectConfig | null> {
+  if (isMulti.value && action === 'cmd_pick_raw') {
+    document.querySelector('.multi-panel')?.scrollIntoView({ block: 'start' })
+    emit('notify', '请在角色库中分别选择素材目录。')
+    return null
+  }
   if (action !== 'cmd_pick_raw') return null
   await browseDataset()
   return dirty.has('raw_dir') ? makePatch() : null
@@ -414,13 +423,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       <div class="qwen-heading">
         <button class="qwen-back" type="button" @click="emit('back', makePatch())"><UiIcon name="back" /> 返回项目</button>
         <div class="qwen-heading-copy">
-          <h1>{{ workspaceLabel }} LoRA 训练</h1>
+          <h1>{{ isMulti ? '多角色 LoRA' : workspaceLabel + ' LoRA 训练' }}</h1>
           <span>项目：{{ project.name }}</span>
         </div>
       </div>
       <div class="qwen-toolbar-actions">
         <button v-if="desktop && details?.engine_update_available" class="qwen-engine-update" type="button" :title="legacyTooltips.engineUpdate" @click="requestAction('at_engine_update')"><span class="update-arrow">↗</span> 引擎更新可用</button>
-        <button class="qwen-button subtle" type="button" :title="legacyTooltips.modelHelp" @click="requestAction('at_model_help')">模型 / 显存说明</button>
+        <button class="qwen-button subtle" type="button" :title="legacyTooltips.modelHelp" @click="requestAction('at_model_help')">{{ mode === 'zimage' ? '模型 / 出图说明' : '模型 / 显存说明' }}</button>
         <button class="qwen-button" type="button" :title="legacyTooltips.modelPath" @click="openModelDialog">{{ desktop ? '模型设置' : '选择训练模型' }}</button>
         <button v-if="desktop" class="qwen-button" type="button" @click="saveConfig">{{ dirty.size ? '保存修改 · 未保存' : '设置已保存' }}</button>
         <button v-else class="qwen-button" type="button" @click="saveConfig">保存预览设置</button>
@@ -442,6 +451,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
     <div class="qwen-scroll-area">
       <div class="qwen-scroll-content">
+        <MultiCharacterPanel v-if="isMulti" :model-value="multiSettings" :project-name="project.name" :desktop="desktop" :choose-path="choosePath" @update:model-value="updateMulti" @notify="emit('notify',$event)" />
         <section class="qwen-model-card">
           <div class="model-mark"><UiIcon name="model" /></div>
           <div class="model-copy">
@@ -456,7 +466,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           <button class="qwen-button compact" type="button" :title="legacyTooltips.modelPath" @click="openModelDialog">更换模型</button>
         </section>
 
-        <section class="qwen-card qwen-editor-card">
+        <section v-if="!isMulti" class="qwen-card qwen-editor-card">
             <header class="qwen-card-header"><div><span class="section-index">01</span><h2>图集与训练方式</h2></div><span class="card-note">修改后可保存到当前项目</span></header>
             <div class="dataset-path-row">
               <div class="path-mark"><UiIcon name="folder" /></div>
@@ -491,6 +501,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
           <section class="qwen-card parameter-card">
             <header class="qwen-card-header parameter-header"><div><span class="section-index">02</span><h2>训练参数</h2><span class="parameters-summary">空白沿用项目预设</span></div><button class="advanced-trigger" type="button" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起高级参数' : '高级参数' }}<span class="chevron" :class="{ open: advancedOpen }">⌄</span></button></header>
+            <label v-if="isMulti" class="qwen-field"><span>训练中采样预览</span><select v-model="trainingDraft.sample_preview_mode" class="qwen-select" @change="markParam('sample_preview')"><option value="auto">按显存使用默认设置</option><option value="on">开启</option><option value="off">关闭</option></select></label>
             <TrainingProfileControl :draft="trainingDraft" :mode="mode || 'qwen_image'" :defaults="profileDefaults" :supported="profileSupported" :can-undo="Boolean(profileUndo)" @apply="applyProfile" @undo="undoProfile" />
             <div class="parameter-grid qwen-project-params">
               <label class="qwen-field parameter-field" :title="legacyTooltips.rank"><span class="field-caption">LoRA rank</span><input v-model="trainingDraft.rank" class="qwen-input" type="number" min="1" placeholder="16" @input="markParam('rank')" /></label>

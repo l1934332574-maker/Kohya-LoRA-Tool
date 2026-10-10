@@ -106,7 +106,7 @@ const effectiveSummary = computed(() => {
 })
 const hasResume = computed(() => Boolean(props.plan?.resume_path))
 const isRawMediaMode = computed(() => ['video', 'h3_fz'].includes(props.plan?.mode || ''))
-const trainingTypeLabel = computed(() => props.plan?.training_kind === 'slider' ? '概念滑块' : props.plan?.mode === 'h3_fz' ? '混合媒体' : props.plan?.mode === 'video' ? '视频' : props.plan?.training_type === 'style' ? '画风' : props.plan?.training_type === 'concept' ? '概念' : '人物')
+const trainingTypeLabel = computed(() => props.plan?.training_kind === 'multi_character' ? '多角色' : props.plan?.training_kind === 'slider' ? '概念滑块' : props.plan?.mode === 'h3_fz' ? '混合媒体' : props.plan?.mode === 'video' ? '视频' : props.plan?.training_type === 'style' ? '画风' : props.plan?.training_type === 'concept' ? '概念' : '人物')
 const engineDescription = computed(() => props.plan?.training_kind === 'slider'
   ? '使用文字或图片对训练滑块 LoRA；底模与文本编码器冻结。'
   : props.plan?.training_engine === 'kohya'
@@ -370,16 +370,17 @@ onUnmounted(stopPolling)
           <p class="train-description">{{ engineDescription }}</p>
           <div class="train-summary">
             <div><span>训练模型</span><strong>{{ plan.model_label }}</strong><small>{{ plan.model_path }}</small></div>
-            <div><span>{{ plan.data_label || '图集' }}</span><strong>{{ plan.data_count ?? plan.image_count }} {{ plan.data_unit || '张' }}（至少 {{ plan.min_images }}）</strong><small>{{ plan.raw_dir }}</small></div>
+            <div><span>{{ plan.data_label || '图集' }}</span><strong>{{ plan.data_count ?? plan.image_count }} {{ plan.data_unit || '张' }}（至少 {{ plan.min_images }}）</strong><small>{{ plan.training_kind === 'multi_character' ? '按角色与同框组汇总' : plan.raw_dir }}</small></div>
             <div><span>训练参数</span><strong>rank / alpha {{ plan.rank }} / {{ plan.alpha }} · 学习率 {{ plan.learning_rate }}</strong><small>{{ plan.resolution }} px · {{ plan.schedule_value || `${plan.steps} 步` }} · {{ trainingTypeLabel }}<template v-if="plan.training_target"> · {{ plan.training_target }}</template></small></div>
-            <div><span>显卡</span><strong>{{ plan.gpu_vendor }}<template v-if="plan.vram_gb != null"> · {{ plan.vram_gb.toFixed(1) }} GB</template></strong><small>Trigger：{{ plan.trigger || '未填写' }}</small></div>
+            <div><span>显卡</span><strong>{{ plan.gpu_vendor }}<template v-if="plan.vram_gb != null"> · {{ plan.vram_gb.toFixed(1) }} GB</template></strong><small>{{ plan.training_kind === 'multi_character' ? '角色触发词' : 'Trigger' }}：{{ plan.trigger || '未填写' }}</small></div>
             <div v-if="plan.sampling_rule"><span>采样预览</span><strong>{{ plan.sampling_rule.enabled ? '开启' : '关闭' }} · {{ plan.sampling_rule.reason }}</strong><small>{{ plan.sampling_rule.cadence }}</small></div>
           </div>
+          <div v-if="plan.multi_character" class="train-warning"><strong>{{ plan.multi_character.roles.filter(r => !r.group).length }} 个角色 · 均衡后 {{ plan.multi_character.training_images }} 个样本</strong><span v-for="row in plan.multi_character.roles" :key="row.id">{{ row.name }}：{{ row.images }} 张 · 采样 ×{{ row.sampling_copies }}</span></div>
           <details v-if="plan.config_summary" class="train-config-summary"><summary>查看本次训练设置</summary><dl><template v-for="[label, value] in settingSummary" :key="label"><dt>{{ label }}</dt><dd>{{ value }}</dd></template></dl><p>自动项会由训练引擎按模型和显存确定，实际结果以训练日志为准。</p></details>
           <div v-if="plan.model_download_required" class="train-warning"><strong>本机尚未准备好训练模型</strong><span>开始后可能会下载约 {{ plan.model_size || '较大体积' }} 的模型文件；下载由训练引擎执行，日志会显示进度。</span></div>
           <div v-for="warning in plan.warnings" :key="warning" class="train-warning"><span>{{ warning }}</span></div>
           <label v-if="hasResume" class="resume-choice"><input v-model="useResume" type="checkbox"><span><strong>发现可续训快照，默认从断点继续</strong><small>取消勾选即可从头训练 · {{ plan.resume_path }}</small></span></label>
-          <div class="train-note">预处理完成后会先暂停，供你查看、修改自动标签并二次确认。{{ plan.training_engine === 'ai_toolkit' ? '当前 AI Toolkit 模式暂不支持从训练状态快照续训。' : '训练产生保存快照后，才有可续训的断点。' }}</div>
+          <div class="train-note">预处理完成后会先暂停，供你查看、修改自动标签并二次确认。{{ plan.training_kind === 'multi_character' ? '多角色当前从头训练，不自动续训。' : plan.training_engine === 'ai_toolkit' ? '当前 AI Toolkit 模式暂不支持从训练状态快照续训。' : '训练产生保存快照后，才有可续训的断点。' }}</div>
           <footer class="train-actions">
             <button class="train-button" type="button" @click="close">返回检查设置</button>
             <button class="train-button primary" type="button" :disabled="starting" @click="start">{{ starting ? '正在启动…' : '确认并开始训练' }}</button>

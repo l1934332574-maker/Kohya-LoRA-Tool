@@ -20,7 +20,10 @@ def models_dir(core, family):
 def models(core, family, params=None):
     params = params or {}
     if family == "krea2":
-        f = core.krea2_model_files()
+        f = core.krea2_fz_model_files()
+        fp8 = f.pop("te_fp8", None)
+        if fp8:
+            f["te"] = fp8
         return dict(f, dit=f.get("raw"), preview_checkpoint=f.get("turbo"))
     if family == "klein":
         f = core.flux2_fz_model_files()

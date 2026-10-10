@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.4"
+APP_VERSION = "0.19.5"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2063,6 +2063,18 @@ KREA2_MODEL_LINKS = {
 }
 
 
+# Fizgig v7 keeps the FP8-scaled encoder quantized during text caching.
+# Other engines and existing BF16 files keep their original lookup.
+KREA2_FZ_MODEL_LINKS = {
+    **KREA2_MODEL_LINKS,
+    "te_fp8": (
+        "qwen3vl_4b_fp8_scaled.safetensors", "Qwen3-VL-4B FP8 scaled（约 5.2GB，8GB 显卡推荐）",
+        ("https://modelscope.cn/models/Comfy-Org/Krea-2/resolve/master/text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+         "https://hf-mirror.com/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+         "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors")),
+}
+
+
 def krea2_models_dir():
     return os.path.join(KIT_DIR, "models", "krea2")
 
@@ -2086,6 +2098,14 @@ def krea2_model_files():
             elif low == "qwen3vl_4b_bf16.safetensors":
                 out["te"] = p
     return out
+
+
+def krea2_fz_model_files():
+    """Expose both encoders; the v7 adapter prefers FP8, legacy paths still use BF16."""
+    files = krea2_model_files()
+    fp8 = os.path.join(krea2_models_dir(), "qwen3vl_4b_fp8_scaled.safetensors")
+    files["te_fp8"] = fp8 if os.path.isfile(fp8) else None
+    return files
 
 
 def krea2_missing_models():
@@ -7553,8 +7573,8 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
         "        num_frames: " + str(frames) + "\n"
         "        fps: 24\n"
         "        prompts:\n"
-        "          - " + _yq(sample_prompt) + "\n"
-        "        seed: " + str(_sample_seed(params)) + "\n"
+        + "".join("          - " + _yq(line.strip()) + "\n" for line in sample_prompt.splitlines() if line.strip())
+        + "        seed: " + str(_sample_seed(params)) + "\n"
         "        walk_seed: false\n"
         "        guidance_scale: 1.0\n"
         "        sample_steps: 20\n"
@@ -8259,7 +8279,7 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
         "      datasets:\n"
         "        - folder_path: " + _yq(train_dir) + "\n"
         "          caption_ext: \"txt\"\n"
-        "          caption_dropout_rate: 0.05\n"
+        "          caption_dropout_rate: " + ("0.0" if params.get("training_kind") == "multi_character" else "0.05") + "\n"
         "          num_frames: 1\n"
         "          resolution: [" + str(reso) + ", " + str(reso) + "]\n"
         "      train:\n"
@@ -8293,8 +8313,8 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
         "        height: " + str(reso) + "\n"
         "        num_frames: 1\n"
         "        prompts:\n"
-        "          - " + _yq(sample_prompt) + "\n"
-        "        seed: " + str(_sample_seed(params)) + "\n"
+        + "".join("          - " + _yq(line.strip()) + "\n" for line in sample_prompt.splitlines() if line.strip())
+        + "        seed: " + str(_sample_seed(params)) + "\n"
         "        walk_seed: false\n"
         "        guidance_scale: 4.0\n"
         "        sample_steps: 20\n"
@@ -8841,7 +8861,7 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
         "      datasets:\n"
         "        - folder_path: " + _yq(train_dir) + "\n"
         "          caption_ext: \"txt\"\n"
-        "          caption_dropout_rate: 0.05\n"
+        "          caption_dropout_rate: " + ("0.0" if params.get("training_kind") == "multi_character" else "0.05") + "\n"
         "          num_frames: 1\n"
         "          cache_latents_to_disk: true\n"
         "          resolution: [" + str(reso) + ", " + str(reso) + "]\n"
@@ -8878,8 +8898,8 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
             "        height: " + str(_sp_res) + "\n"
             "        num_frames: 1\n"
             "        prompts:\n"
-            "          - " + _yq(sample_prompt) + "\n"
-            "        negative_prompt: " + _yq("lowres, bad anatomy, worst quality, low quality, blurry, jpeg artifacts, signature, watermark") + "\n"
+            + "".join("          - " + _yq(line.strip()) + "\n" for line in sample_prompt.splitlines() if line.strip())
+            + "        negative_prompt: " + _yq("lowres, bad anatomy, worst quality, low quality, blurry, jpeg artifacts, signature, watermark") + "\n"
             "        seed: " + str(_sample_seed(params)) + "\n"
             "        walk_seed: false\n"
             "        guidance_scale: 4.0\n"
@@ -10153,6 +10173,9 @@ def export_config_json(params, include_prompts=False):
             for key in ("name", "neutral", "positive", "negative", "effect", "validation_prompts"): settings[key] = ""
         cfg.update(training_kind="slider", slider=settings, unet_only=True)
         cfg["params"] = {"fizgig_version": "v7.0.1"}
+    if params.get("training_kind") == "multi_character":
+        from kohya_core.multi_character import export_settings
+        cfg.update(training_kind="multi_character", multi_character=export_settings(params.get("multi_character", {})))
     if include_prompts:
         for k in _CFG_PROMPT_KEYS:
             v = params.get(k)
@@ -10227,6 +10250,12 @@ def parse_config_json(text):
         settings.update(positive_dir="", negative_dir="", pairs=[])
         cfg.update(training_kind="slider", slider=settings, unet_only=True)
         cfg["params"]["fizgig_version"] = "v7.0.1"
+        summary["applied"] += 2
+    if raw.get("training_kind") == "multi_character":
+        from kohya_core.multi_character import export_settings, IMAGE_MODES
+        if cfg.get("mode") not in IMAGE_MODES: raise ValueError("多角色配置请选择图像人物 LoRA 入口。")
+        cfg.update(training_kind="multi_character", multi_character=export_settings(raw.get("multi_character", {})), trigger="", at_sub_mode="character")
+        cfg["params"].update(strong_bind=False, clean_concept=False, keep_user_captions=True, caption_method="existing", crop_ratio="")
         summary["applied"] += 2
     return cfg, summary
 
@@ -10364,7 +10393,7 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
                square_crop=False, crop_ratio=None, min_size=0, blur_threshold=0.0, report=None,
                keep_tokens=None, project=None, style_caption="", dataset_mode=None,
                strong_bind=True, concept_type="", clean_concept=True, concept_mode=False,
-               style_target="anime", overwrite=False, keep_user_captions=False, caption_method=None):
+               style_target="anime", overwrite=False, keep_user_captions=False, caption_method=None, multi_character=None):
     """keep_user_captions：图片自带同名 .txt 时，原样保留、全程不改写 ✓
 
     ★ 2026-10-02（用户反馈：已手动打标好的用户没有可用入口 ✓）：
@@ -10387,6 +10416,10 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
     concept_mode：是否为「概念」模式（用 is_concept_mode() 判定）。只有概念模式才清洗概念标签；
     人物/画风模式即使带了 concept_type 也绝不删标签（否则 horns / animal ears 等人物特征会被误删）。
     """
+    _multi_config = load_project(project) if project else None
+    if multi_character is not None or (_multi_config or {}).get("training_kind") == "multi_character":
+        from kohya_core.multi_character import prepare
+        return prepare(sys.modules[__name__], project, multi_character if multi_character is not None else _multi_config.get("multi_character", {}), size, logf, report)
     vpy = _pick_preprocess_python()
     if not vpy:
         raise RuntimeError("尚未安装任何训练引擎（Kohya / 第二引擎 / 第三引擎）。\n"
@@ -12650,6 +12683,7 @@ def get_effective():
 def _mode_display(mode, params=None):
     """训练模式显示名；AI 图像模式带上子模式（人物 / 画风 / 概念）。"""
     lab = MODE_LABELS.get(mode, mode)
+    if (params or {}).get("training_kind") == "multi_character": return "%s · 多角色" % lab
     sub = (params or {}).get("at_sub_mode")
     if sub and sub in ("character", "style", "concept"):
         return "%s · %s" % (lab, AT_SUB_LABELS.get(sub, sub))
@@ -12749,6 +12783,11 @@ def write_params_report(mode, params, output_name, extra=None, out_dir=None):
         lines.append("概念类型        : %s" % _CONCEPT_CN.get(_ct, _ct))
     if mode == "character":
         lines.append("正则数据集      : %s" % (params.get("reg_dir") or "（未使用）"))
+    if params.get("training_kind") == "multi_character":
+        settings = params.get("multi_character") or {}
+        lines += ["", "角色触发词："] + ["  %s: %s" % (r["name"], r["trigger"]) for r in settings.get("roles", [])]
+        lines.append("同框素材组      : %d" % len(settings.get("groups", [])))
+        lines.append("角色采样均衡    : %s（最多 3 倍）" % _fmt_onoff(settings.get("balance", True)))
     if extra:
         lines.append("")
         lines.append("运行备注：")
@@ -12814,6 +12853,7 @@ def write_usage_template(mode, params, output_name, out_dir=None, train_dir=None
         _title = "【概念（%s）LoRA 使用模板】" % _CONCEPT_CN.get(_ct, _ct)
     else:
         _title = "【%s LoRA 使用模板】" % _label
+    if params.get("training_kind") == "multi_character": _title = "【多角色 LoRA 使用模板】"
     base = params.get("base_type", "sd15")
     trig = ", ".join(split_triggers(params.get("trigger")))
     cap = _usage_sample_caption(mode, params, train_dir)
@@ -12831,7 +12871,13 @@ def write_usage_template(mode, params, output_name, out_dir=None, train_dir=None
     lines += ["", "使用建议："]
 
     tips = []
-    if mode == "style":
+    if params.get("training_kind") == "multi_character":
+        settings = params.get("multi_character") or {}
+        lines[2] = "角色触发词：" + "; ".join("%s = %s" % (r["name"], r["trigger"]) for r in settings.get("roles", []))
+        tips += ["使用训练时相同底模，先以权重 1 分别验证各角色，再验证同框组合。",
+                 "同框提示词应分别描述每个触发词对应的位置、外观和动作。",
+                 "完整单人及组合提示词见同目录《多角色验证提示词.txt》。检查身份、人数和服装归属。"]
+    elif mode == "style":
         if trig:
             tips.append("正向提示词以触发词开头，并**带上训练时的画风标签**一起输入 —— "
                         "画风信息分散在标签里，只写触发词召唤效果较弱。")
@@ -12850,7 +12896,8 @@ def write_usage_template(mode, params, output_name, out_dir=None, train_dir=None
         tips.append("正向提示词以触发词开头即可（该模型系列不通用 SD/SDXL 的提示词习惯）。")
     if gpos:
         tips.append("把你设置的全局正向提示词也一起带上：%s" % gpos)
-    tips.append("推荐 LoRA 权重 %s：想弱化就调低，想强化就调高。" % _weight)
+    if params.get("training_kind") != "multi_character":
+        tips.append("推荐 LoRA 权重 %s：想弱化就调低，想强化就调高。" % _weight)
     tips.append("负面提示词建议：%s" % neg)
     if mode == "concept":
         tips.append("⚠ 训练集混了多种画风时，触发词只绑概念、不绑画风；"
@@ -13804,6 +13851,18 @@ def _write_sample_prompts(output_name, params, mode, resolution=None, engine="ko
                 _parts.append("detailed close-up portrait" if _nl else "portrait")
             _parts += ["masterpiece", "best quality"]
             prompt = ", ".join(x for x in _parts if x)
+    if params.get("training_kind") == "multi_character":
+        suffix = f" --d {_sample_seed(params)}"
+        if resolution: suffix += f" --w {int(resolution)} --h {int(resolution)}"
+        if engine == "musubi": suffix += " --s 20"
+        if cfg_scale: suffix += f" --l {cfg_scale}"
+        lines = [line.strip() + suffix for line in prompt.splitlines() if line.strip()]
+        d = data_sub("cache", "sample_prompts")
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, (output_name or "sample") + "_prompts.txt")
+        with open(p, "w", encoding="utf-8") as stream: stream.write("\n".join(lines) + "\n")
+        _record_effective(sample_enabled=True, sample_prompt=prompt, sample_prompt_file=p, sample_seed=_sample_seed(params))
+        return p
     if engine == "musubi":
         res = int(resolution or 512)
         prompt += f" --w {res} --h {res} --s 20"

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import ModelTrainingChooser from './components/ModelTrainingChooser.vue'
+import { importedMultiSettings } from './useMultiCharacter'
 import catalogData from '../../kohya_core/model_catalog.json'
 import TrainingAssistant from './components/TrainingAssistant.vue'
 import EngineSidebar from './components/EngineSidebar.vue'
@@ -382,6 +383,7 @@ function normalizeImportedConfig(raw: unknown): ProjectConfig {
     ? { ...(source.params as Record<string, unknown>) }
     : {}
   if (typeof source.sample_prompt === 'string' && source.sample_prompt.trim()) params.sample_prompt = source.sample_prompt
+  if (source.training_kind === 'multi_character' && ['video', 'h3_fz', 'style', 'concept'].includes(mode)) throw new Error('多角色配置请选择图像人物 LoRA 入口。')
   return {
     mode,
     base_type: baseTypes.has(requestedBaseType) ? requestedBaseType : 'sdxl',
@@ -393,6 +395,8 @@ function normalizeImportedConfig(raw: unknown): ProjectConfig {
     global_neg: typeof source.global_neg === 'string' ? source.global_neg : '',
     style_caption: typeof source.style_caption === 'string' ? source.style_caption : '',
     unet_only: typeof source.unet_only === 'boolean' ? source.unet_only : false,
+    training_kind: source.training_kind === 'multi_character' ? 'multi_character' : 'standard',
+    multi_character: source.training_kind === 'multi_character' ? importedMultiSettings(source.multi_character) : undefined,
     params,
   }
 }
@@ -531,16 +535,16 @@ async function saveDialog() {
           name,
           updated: new Date().toISOString().replace('T', ' ').slice(0, 19),
           mode,
-          training_kind: createGoal.value === 'slider' ? 'slider' : 'standard',
-          mode_label: createGoal.value === 'slider' ? '概念滑块 LoRA' : firstEngineLabel ?? matchingTemplate?.mode_label ?? mode,
+          training_kind: imported?.training_kind ?? (createGoal.value === 'multi_character' ? 'multi_character' : createGoal.value === 'slider' ? 'slider' : 'standard'),
+          mode_label: createGoal.value === 'multi_character' || imported?.training_kind === 'multi_character' ? '多角色 LoRA' : createGoal.value === 'slider' ? '概念滑块 LoRA' : firstEngineLabel ?? matchingTemplate?.mode_label ?? mode,
           base_type: baseType,
           base_type_label: qwenTemplate ? (mode === 'zimage' ? 'Z-Image' : 'Qwen-Image') : baseTypeLabel ?? baseType,
           raw_dir: '',
           base_model: String(imported?.base_model ?? ''),
         }
         previewConfigs.value = { ...previewConfigs.value, [name]: imported ?? {
-          mode, base_type: baseType, at_sub_mode: createGoal.value, model_choice: createChoice.value,
-          training_kind: createGoal.value === 'slider' ? 'slider' : 'standard',
+          mode, base_type: baseType, at_sub_mode: createGoal.value === 'multi_character' ? 'character' : createGoal.value, model_choice: createChoice.value,
+          training_kind: createGoal.value === 'multi_character' ? 'multi_character' : createGoal.value === 'slider' ? 'slider' : 'standard',
           params: mode.endsWith('_fz') ? { fizgig_version: 'v7.0.1' } : {},
         } }
         data.value!.projects = [project, ...projects.value]
@@ -769,7 +773,8 @@ async function saveKohyaConfig(patch: ProjectConfig) {
       updated: new Date().toISOString().replace('T', ' ').slice(0, 19),
     }
     const updatedModeLabel = ({ character: '人物 LoRA', style: '画风 LoRA', concept: '概念 LoRA' } as Record<string, string>)[updatedProject.mode]
-    if (updatedModeLabel) updatedProject.mode_label = updatedModeLabel
+    if (next.training_kind === 'multi_character') updatedProject.mode_label = '多角色 LoRA'
+    else if (updatedModeLabel) updatedProject.mode_label = updatedModeLabel
     if (firstEngineBaseTypes.includes(updatedProject.base_type as FirstEngineBaseType)) {
       updatedProject.base_type_label = firstEngineBaseLabels[updatedProject.base_type as FirstEngineBaseType]
     }

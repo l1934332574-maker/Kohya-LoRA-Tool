@@ -4,7 +4,7 @@ export interface ModelVariant { key: string; label: string; note: string; prefer
 export interface ModelCatalogData { models: Array<{ key: string; label: string; variants: ModelVariant[] }>; gpu_vendor: string; gpu: string }
 
 export interface ProjectCard {
-  training_kind?: 'standard' | 'slider'
+  training_kind?: 'standard' | 'slider' | 'multi_character'
   name: string
   updated: string
   mode: string
@@ -51,7 +51,8 @@ export interface CreateProjectResult {
 export interface ProjectConfig {
   [key: string]: unknown
   params?: Record<string, unknown>
-  training_kind?: 'standard' | 'slider'
+  training_kind?: 'standard' | 'slider' | 'multi_character'
+  multi_character?: MultiCharacterSettings
   slider?: SliderSettings
 }
 
@@ -220,6 +221,7 @@ export interface DesktopApi {
   open_project(name: string): Promise<{ ok: boolean; error?: string }>
   load_project_config(name: string): Promise<{ ok: boolean; error?: string; config?: ProjectConfig }>
   save_project_config(name: string, patch: ProjectConfig): Promise<{ ok: boolean; error?: string; project?: ProjectCard | null }>
+  inspect_multi_character(project_name: string, settings: MultiCharacterSettings): Promise<MultiCharacterScan>
   choose_path(kind: 'folder' | 'model' | 'image', current_path?: string, memory_key?: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean; path?: string }>
   get_appearance_settings(): Promise<{ ok: boolean; settings?: AppearanceSettings; error?: string }>
   get_appearance_presets(): Promise<{ ok: boolean; presets?: AppearancePreset[]; hidden_builtin_ids?: string[]; error?: string }>
@@ -342,7 +344,8 @@ export interface ModernTaskStatus {
 }
 
 export interface TrainingPlan {
-  training_kind?: 'standard' | 'slider'
+  training_kind?: 'standard' | 'slider' | 'multi_character'
+  multi_character?: Pick<MultiCharacterScan, 'roles' | 'images' | 'training_images' | 'validation'>
   config_supports?: Record<string, boolean>
   save_interval_unit?: string
   save_interval_effective?: number
@@ -572,4 +575,16 @@ export interface SliderReview {checkpoint: string; direction_ok: boolean; preser
 export interface SliderResults {
   ok: boolean; error?: string; runs?: string[]; run_id?: string; checkpoints?: string[]; review?: SliderReview | null;
   result?: { status: string; error?: string; quality: string; checkpoint: string; comparisons: SliderComparison[]; preview_status?: string; message?: string; pair_validation?: Array<{epoch: number; pairs: number; baseline_loss: number; slider_loss: number}>; holdout_validation_error?: string } | null;
+}
+
+export interface MultiCharacterSettings {
+  roles: Array<{ id: string; name: string; trigger: string; directory: string; description: string }>
+  groups: Array<{ id: string; name: string; directory: string; members: Array<{ role_id: string; position: string }>; caption: string; reviewed: boolean }>
+  targets: Array<{ role_ids: string[]; prompt: string }>
+  balance: boolean
+}
+export interface MultiCharacterScan {
+  ok: boolean; error?: string; images: number; training_images: number; warnings: string[]
+  roles: Array<{ id: string; name: string; group: boolean; images: number; existing_captions: number; generated_captions: number; sampling_copies: number }>
+  validation: Array<{ kind: string; roles: string[]; prompt: string }>
 }

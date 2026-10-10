@@ -2,6 +2,8 @@
 import { computed, reactive, ref, watch } from 'vue'
 import type { ModeWorkspaceData, ProjectCard, ProjectConfig } from '../bridge'
 import UiIcon from './UiIcon.vue'
+import MultiCharacterPanel from './MultiCharacterPanel.vue'
+import { useMultiCharacter } from '../useMultiCharacter'
 import CropRatioField from './CropRatioField.vue'
 import DatasetInspection from './DatasetInspection.vue'
 import CaptionControls from './CaptionControls.vue'
@@ -182,6 +184,8 @@ const conceptOptions = [
   { key: 'bodypart', label: '身体部位（异色瞳/翅膀）' },
 ]
 
+const { isMulti, multiSettings, updateMulti, multiPatch } = useMultiCharacter(() => props.config, dirty)
+
 function makePatch(): ProjectConfig {
   const patch: ProjectConfig = {}
   for (const key of ['mode', 'base_type', 'base_model', 'raw_dir', 'trigger', 'reg_dir', 'style_preset', 'style_caption', 'concept_type', 'global_pos', 'global_neg', 'train_env'] as const) {
@@ -205,7 +209,7 @@ function makePatch(): ProjectConfig {
   if (dirty.has('params.overwrite')) params.overwrite = draft.overwrite
   if (dirty.has('params.amd_mode')) params.amd_mode = draft.amd_mode
   if (Object.keys(params).length) patch.params = params
-  return patch
+  return multiPatch(patch)
 }
 
 function save() {
@@ -228,6 +232,11 @@ async function browse(target: 'raw_dir' | 'base_model' | 'reg_dir') {
 }
 
 async function guideAction(action: string): Promise<ProjectConfig | null> {
+  if (isMulti.value && action === 'cmd_pick_raw') {
+    document.querySelector('.multi-panel')?.scrollIntoView({ block: 'start' })
+    emit('notify', '请在角色库中分别选择素材目录。')
+    return null
+  }
   if (action === 'cmd_pick_raw') {
     await browse('raw_dir')
     return dirty.has('raw_dir') ? makePatch() : null
@@ -282,7 +291,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.size > 0, startTraining, guideActi
     <header class="kohya-toolbar">
       <div class="kohya-heading">
         <button class="kohya-back" type="button" @click="emit('back', makePatch())"><UiIcon name="back" /> 返回项目</button>
-      <div class="kohya-heading-copy"><h1>Kohya LoRA 训练</h1><span>项目：{{ props.project.name }}</span></div>
+      <div class="kohya-heading-copy"><h1>{{ isMulti ? '多角色 LoRA · Kohya' : 'Kohya LoRA 训练' }}</h1><span>项目：{{ props.project.name }}</span></div>
       </div>
       <div class="kohya-toolbar-actions">
         <button class="kohya-button" type="button" :title="legacyTooltips.readme" @click="emit('classicAction', 'readme')">训练说明</button>
@@ -304,6 +313,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.size > 0, startTraining, guideActi
 
     <div class="kohya-scroll-area">
       <div class="kohya-scroll-content">
+        <MultiCharacterPanel v-if="isMulti" :model-value="multiSettings" :project-name="project.name" :desktop="desktop" :choose-path="choosePath" @update:model-value="updateMulti" @notify="emit('notify',$event)" />
         <section class="base-summary">
           <span class="base-mark"><UiIcon name="model" /></span>
           <div class="base-copy"><span>当前底模架构</span><select v-model="draft.base_type" class="kohya-select base-type-select" :title="legacyTooltips.baseModel" @change="onBaseTypeChange"><option v-for="item in baseTypeOptions" :key="item.key" :value="item.key">{{ item.label }}</option></select><small :title="draft.base_model || undefined">{{ draft.base_model || '未指定模型文件' }}</small></div>
@@ -320,9 +330,9 @@ defineExpose({ hasUnsavedChanges: () => dirty.size > 0, startTraining, guideActi
         <button class="kohya-button compact save-button" type="button" @click="save">{{ desktop ? '保存修改' : '保存预览设置' }}</button>
         </section>
 
-        <div class="kohya-columns">
+        <div class="kohya-columns" :class="{multi: isMulti}">
           <div class="kohya-column">
-          <section class="kohya-card kohya-dataset-card">
+          <section v-if="!isMulti" class="kohya-card kohya-dataset-card">
             <header class="card-heading"><span class="step-number">01</span><div><h2>准备图片数据</h2><small>数据集与自动打标</small></div></header>
             <div class="folder-row">
               <UiIcon name="folder" />
@@ -346,6 +356,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.size > 0, startTraining, guideActi
 
               <button class="kohya-button compact" type="button" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起高级参数' : '高级参数' }}<span class="chevron" :class="{ open: advancedOpen }">⌄</span></button>
             </header>
+            <label v-if="isMulti" class="kohya-field"><span>训练中采样预览</span><select v-model="draft.sample_preview_mode" class="kohya-select" @change="markParam('sample_preview')"><option value="auto">按显存使用默认设置</option><option value="on">开启</option><option value="off">关闭</option></select></label>
             <TrainingProfileControl :draft="draft" :mode="currentModeKey" :defaults="profileDefaults" :supported="profileSupported" :can-undo="Boolean(profileUndo)" @apply="applyProfile" @undo="undoProfile" />
             <div class="parameter-grid">
               <label class="kohya-field" :title="legacyTooltips.rank"><span>LoRA rank</span><input v-model="draft.rank" class="kohya-input" type="number" min="1" @input="markParam('rank')" /></label>
@@ -379,7 +390,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.size > 0, startTraining, guideActi
           </section>
           </div>
 
-          <div class="kohya-column">
+          <div v-if="!isMulti" class="kohya-column">
           <section class="kohya-card kohya-training-card">
             <header class="card-heading"><span class="step-number">02</span><div><h2>训练方式</h2><small>按类型显示适用设置</small></div></header>
             <div class="field-row equal-columns">
@@ -444,4 +455,5 @@ defineExpose({ hasUnsavedChanges: () => dirty.size > 0, startTraining, guideActi
 @media(max-width:1120px) { .kohya-heading-copy { display:grid; gap:2px; }.kohya-columns,.kohya-column { display:contents; }.kohya-dataset-card { order:1; }.kohya-training-card { order:2; }.parameter-card { order:3; }.utility-row { order:4; }.preview-note { order:5; }.advanced-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.base-summary { flex-wrap:wrap; }.output-name { flex:1 0 100%; width:100%; } }
 @media(prefers-reduced-motion:reduce) { .kohya-accordion-enter-active,.kohya-accordion-leave-active { transition-duration:.01ms; } }
 .field-row.dataset-options-row { display:grid; grid-template-columns:1fr; gap:10px; }
+.kohya-columns.multi { grid-template-columns:minmax(0,1fr); }
 </style>

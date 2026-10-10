@@ -2,6 +2,8 @@
 import { computed, reactive, ref, watch } from 'vue'
 import type { ModeWorkspaceData, ProjectCard, ProjectConfig } from '../bridge'
 import UiIcon from './UiIcon.vue'
+import MultiCharacterPanel from './MultiCharacterPanel.vue'
+import { useMultiCharacter } from '../useMultiCharacter'
 import CropRatioField from './CropRatioField.vue'
 import DatasetInspection from './DatasetInspection.vue'
 import CaptionControls from './CaptionControls.vue'
@@ -45,7 +47,7 @@ const draft = reactive({
 const isFizgig = computed(() => props.mode.endsWith('_fz'))
 const isV7 = computed(() => isFizgig.value && draft.fizgig_version === 'v7.0.1')
 const supported = (key: string) => isFizgig.value && ['optimizer','compile','global_pos','global_neg'].includes(key) ? isV7.value : Boolean(props.details.supports?.[key])
-const versions = computed(() => [...new Set([draft.fizgig_version, ...(props.details.fizgig_versions || []), 'v7.0.1'])].filter(v => v && (!['anima_fz','sdxl_fz'].includes(props.mode) || v === 'v7.0.1')))
+const versions = computed(() => [...new Set([draft.fizgig_version, ...(props.details.fizgig_versions || []), 'v7.0.1'])].filter(v => v && (!(isMulti.value || ['anima_fz','sdxl_fz'].includes(props.mode)) || v === 'v7.0.1')))
 const legacyFizgigQuant: Record<string, string[]> = { krea2_fz:['auto','fp8','int8','nf4','bf16'], flux2_fz:['auto','fp8','int8','nf4'], qwen21_fz:['auto','bf16','int8','nf4'], h3_fz:['auto','int8','nf4','hqq'] }
 const quantModes = computed(() => isV7.value ? (props.mode === 'h3_fz' ? ['auto','int8','nf4','hqq'] : ['auto','bf16','int8','nf4']) : isFizgig.value ? legacyFizgigQuant[props.mode] || [] : props.details.quant_modes?.length ? props.details.quant_modes : ['auto', 'fp8', 'int8', 'nf4'])
 const defaults = computed(() => props.details.defaults ?? {})
@@ -161,6 +163,8 @@ const { profileUndo, profileDefaults, profileSupported, applyProfile, undoProfil
   (message) => emit('notify', message), () => [props.config, props.mode, props.details],
 )
 
+const { isMulti, multiSettings, updateMulti, multiPatch } = useMultiCharacter(() => props.config, dirty)
+
 function makePatch(): ProjectConfig {
   const patch: ProjectConfig = { mode: props.mode }
   for (const key of ['base_model', 'global_pos', 'global_neg', 'raw_dir', 'trigger', 'reg_dir', 'style_preset', 'style_caption', 'at_sub_mode', 'concept_type', 'fast_tier'] as const) {
@@ -179,7 +183,7 @@ function makePatch(): ProjectConfig {
   }
   if (dirty.has('params.sample_preview')) params.sample_preview = draft.sample_preview_mode === 'auto' ? null : draft.sample_preview_mode === 'on'
   if (Object.keys(params).length) patch.params = params
-  return patch
+  return multiPatch(patch)
 }
 
 function save() {
@@ -211,6 +215,11 @@ function onVersionChange() {
   emit('notify', '版本修改待保存；切换到 v7 会使用独立缓存，原版本快照请回原版本续训。')
 }
 async function guideAction(action: string): Promise<ProjectConfig | null> {
+  if (isMulti.value && action === 'cmd_pick_raw') {
+    document.querySelector('.multi-panel')?.scrollIntoView({ block: 'start' })
+    emit('notify', '请在角色库中分别选择素材目录。')
+    return null
+  }
   if (action === 'cmd_pick_model_type') {
     if (!supported('base_model')) {
       emit('notify', '当前模式的模型由引擎管理，请使用对应的模型下载入口。')
@@ -239,7 +248,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
     <header class="engine-toolbar">
       <div class="engine-heading">
         <button class="engine-back" type="button" @click="emit('back', makePatch())"><UiIcon name="back" /> 返回项目</button>
-      <div class="engine-heading-copy"><h1>{{ details.label }}训练</h1><span>项目：{{ project.name }}</span></div>
+      <div class="engine-heading-copy"><h1>{{ isMulti ? '多角色 LoRA · ' + details.label : details.label + '训练' }}</h1><span>项目：{{ project.name }}</span></div>
       </div>
       <div class="engine-actions">
         <button v-if="desktop && details.engine_update_available" class="engine-update-button" type="button" :title="legacyTooltips.engineUpdate" @click="requestAction(engineUpdateAction)"><span class="update-arrow">↗</span> 引擎更新可用</button>
@@ -265,6 +274,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
 
     <div class="engine-scroll-area">
       <div class="engine-scroll-content">
+        <MultiCharacterPanel v-if="isMulti" :model-value="multiSettings" :project-name="project.name" :desktop="desktop" :choose-path="choosePath" @update:model-value="updateMulti" @notify="emit('notify',$event)" />
         <section v-if="isFizgig" class="engine-card runtime-card">
           <div class="runtime-choice"><label class="engine-field"><span>此项目的训练引擎版本</span><select v-model="draft.fizgig_version" class="engine-select" @change="onVersionChange"><option v-for="v in versions" :key="v" :value="v">{{ v }}{{ details.fizgig_versions?.includes(v) ? ' · 已安装' : ' · 需安装 / 更新' }}</option></select></label><button v-if="desktop && !details.fizgig_versions?.includes('v7.0.1')" class="engine-button compact" type="button" @click="requestAction('fizgig_engine_update')">安装新版 Fizgig</button></div>
           <p class="engine-hint">{{ isV7 ? '普通 LoRA · 文本编码器冻结 · 新版独立缓存。预览按轮数触发，开始时不额外采样，最后一轮只有满足间隔才采样。' : '旧版本项目继续使用原训练入口；升级软件不会自动迁移训练参数和续训快照。' }}</p>
@@ -274,7 +284,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
           <header class="engine-card-heading"><div><h2>训练底模</h2><small>可选择已有第三方底模；缺少组件再下载</small></div></header>
           <div class="runtime-choice"><input v-model="draft.base_model" class="engine-input" placeholder="选择已有完整 safetensors 底模；留空使用模型目录的标准底模" @input="markRoot('base_model')" /><button class="engine-button compact" type="button" @click="browseModel">选择底模</button><button class="engine-button compact" type="button" @click="requestAction(mode==='anima_fz'?'cmd_dl_anima_fz_models':'cmd_dl_sdxl_fz_models')">下载模型 / 组件</button></div>
         </section>
-        <section class="engine-summary">
+        <section v-if="!isMulti" class="engine-summary">
           <div class="summary-main">
             <span class="summary-label">{{ isH3Fizgig ? '混合媒体原始目录' : isVideo ? '视频数据目录' : '训练图片目录' }}</span>
             <strong :title="draft.raw_dir || undefined">{{ draft.raw_dir || (desktop ? '尚未选择数据目录' : '预览中：桌面模式会显示项目数据目录') }}</strong>
@@ -289,8 +299,8 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
           <button class="engine-button compact" type="button" @click="requestAction(modelAction)">打开模型目录</button>
         </section>
 
-        <div class="engine-card-grid">
-          <section class="engine-card">
+        <div class="engine-card-grid" :class="{multi:isMulti}">
+          <section v-if="!isMulti" class="engine-card">
             <header class="engine-card-heading"><span>01</span><div><h2>数据与训练方式</h2><small>按当前模式显示适用项目</small></div></header>
             <div v-if="details.has_training_submode" class="engine-fields two-columns">
               <label class="engine-field" :title="legacyTooltips.atSubMode"><span>训练类型</span><select v-model="draft.at_sub_mode" class="engine-select" @change="markRoot('at_sub_mode')"><option value="character">人物（保留全部标签）</option><option value="style">画风（过滤人物标签）</option><option value="concept">概念</option></select></label>
@@ -317,6 +327,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
 
           <section class="engine-card">
             <header class="engine-card-heading"><span>02</span><div><h2>常用训练参数</h2><small>空白项沿用当前引擎预设</small></div></header>
+            <label v-if="isMulti" class="engine-field"><span>训练中采样预览</span><select v-model="draft.sample_preview_mode" class="engine-select" @change="markParam('sample_preview')"><option value="auto">按显存使用默认设置</option><option value="on">开启</option><option value="off">关闭</option></select></label>
             <TrainingProfileControl :draft="draft" :mode="mode" :defaults="profileDefaults" :supported="profileSupported" :can-undo="Boolean(profileUndo)" @apply="applyProfile" @undo="undoProfile" />
             <div class="engine-param-grid">
               <label v-if="mode !== 'qwen21_fz'" class="engine-field" :title="legacyTooltips.rank"><span>LoRA rank</span><input v-model="draft.rank" :disabled="officialQwenPreset" class="engine-input" type="number" min="1" placeholder="按模式预设" @input="markParam('rank')" /></label>
@@ -394,4 +405,5 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
 .advanced-heading{margin-bottom:9px}.engine-advanced-grid{display:grid;grid-template-columns:repeat(4,minmax(100px,1fr));align-items:end;gap:9px}.wide-field{grid-column:span 2}.engine-utility-row{display:flex;flex-wrap:wrap;gap:7px}.engine-utility{min-height:29px;padding:0 10px;border:1px solid var(--border);border-radius:5px;color:var(--tone-afb5bf);background:var(--tone-252830);font-size:10px;cursor:pointer;transition:border-color 130ms ease,color 130ms ease,background-color 130ms ease,transform 110ms ease-out}.engine-utility:hover{border-color:var(--tone-505660);color:var(--tone-d0d4da);background:var(--tone-2b2e36)}.engine-utility:active{transform:scale(.985)}.engine-footer-note{display:flex;align-items:center;gap:7px;margin:-2px 1px 0;color:var(--tone-818792);font-size:10px}.engine-footer-note i{width:5px;height:5px;border-radius:50%;background:var(--tone-929baa)}
 @media(max-width:1180px){.engine-toolbar{align-items:flex-start;flex-direction:column}.engine-actions{flex-wrap:wrap}.engine-card-grid{grid-template-columns:1fr}.engine-param-grid{grid-template-columns:repeat(3,minmax(100px,1fr))}.engine-advanced-grid{grid-template-columns:repeat(3,minmax(100px,1fr))}.engine-summary{grid-template-columns:minmax(0,1fr) auto}.asset-copy{grid-column:1}}
 @media(prefers-reduced-motion:reduce){.engine-button,.engine-back,.engine-switch>i,.engine-switch>i:after{transition:none}}
+.engine-card-grid.multi { grid-template-columns:minmax(0,1fr); }
 </style>

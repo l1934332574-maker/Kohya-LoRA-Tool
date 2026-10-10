@@ -76,7 +76,7 @@ a = Analysis(
         'kohya_core.slider_project', 'kohya_core.slider_dataset',
         'kohya_core.slider_training', 'kohya_core.slider_task',
         'kohya_core.fizgig_engine', 'kohya_core.fizgig_adapter', 'kohya_core.model_catalog',
-        'kohya_core.h3_models',
+        'kohya_core.h3_models', 'kohya_core.multi_character',
         'gui.queue_window',
         'gui.modern_host',
     ],

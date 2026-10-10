@@ -66,7 +66,9 @@ const sections = computed(() => {
       '模型与组件选择在工作区的「选择训练模型」窗口中完成；本说明不会改动项目设置。',
     ],
     zimage: [
-      'Z-Image 是第三引擎的图像训练模式。可使用默认模型，也可选择已存在的 Diffusers 模型目录。',
+      '默认训练底模为 Tongyi-MAI/Z-Image（Base 原版）。可使用完整 Diffusers 目录，也可分别指定底模、Qwen3-4B 文本编码器和 16 通道 VAE。',
+      '默认模型目录中的 transformer 是主模型分片，text_encoder 与 vae 是配套组件。单个分片不等于完整底模；ComfyUI 单文件加载请使用 Comfy-Org/z_image 的 z_image_bf16.safetensors，搭配 qwen_3_4b.safetensors 与 ae.safetensors。',
+      '先用 Z-Image Base 工作流验证 LoRA，保持底模、提示词、种子和采样设置一致，再对比不同权重。第三方 Turbo 版本的效果需要单独验证；不应仅凭权重大小判断训练质量。',
       '建议准备至少 15 张清晰图片。8G 显存可用快跑预设，12G 起步、16G 更舒适。模型按需下载到本机数据目录。',
     ],
   }
@@ -94,6 +96,10 @@ const sections = computed(() => {
             <p>{{ section.body }}</p>
           </section>
         </div>
+        <nav v-if="kind === 'mode' && mode === 'zimage'" class="reference-links" aria-label="Z-Image 出图资源">
+          <a href="https://huggingface.co/Comfy-Org/z_image/tree/main/split_files" target="_blank" rel="noopener noreferrer">官方 ComfyUI 模型与组件 ↗</a>
+          <a href="https://docs.comfy.org/tutorials/image/z-image/z-image" target="_blank" rel="noopener noreferrer">Base 出图工作流 ↗</a>
+        </nav>
         <footer><button class="help-done" type="button" @click="emit('close')">知道了</button></footer>
       </section>
     </div>
@@ -119,4 +125,5 @@ const sections = computed(() => {
 .dialog-enter-active .help-dialog, .dialog-leave-active .help-dialog { transition: opacity 140ms ease, transform 170ms var(--ease-out); }
 .dialog-enter-from, .dialog-leave-to { opacity: 0; }
 .dialog-enter-from .help-dialog, .dialog-leave-to .help-dialog { opacity: 0; transform: translateY(5px) scale(.99); }
+.reference-links{display:flex;flex-wrap:wrap;gap:8px 16px;padding:12px 2px;font-size:11px}.reference-links a{color:var(--tone-b8bec8);text-underline-offset:3px}
 </style>

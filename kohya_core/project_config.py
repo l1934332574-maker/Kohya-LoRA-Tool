@@ -102,6 +102,9 @@ def training_params(core, config, project_name):
     if mode == "h3_fz":
         from .h3_models import settings
         params["h3_models"] = settings(config)
+    if config.get('training_kind') == 'multi_character':
+        from .multi_character import parameters
+        params = parameters(core, config, params)
     return params
 
 
