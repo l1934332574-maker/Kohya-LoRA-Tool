@@ -212,12 +212,12 @@ def _post(url, payload, key, stop, timeout=90):
 
 
 def _image_data(image):
-    from PIL import Image, ImageOps
-    with Image.open(image) as original:
-        frame = ImageOps.exif_transpose(original).convert('RGB')
-        frame.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
-        buffer = io.BytesIO()
-        frame.save(buffer, format='JPEG', quality=90)
+    from PIL import Image
+    from .image_io import read_image
+    frame = read_image(image, alpha_background=(255, 255, 255))
+    frame.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+    buffer = io.BytesIO()
+    frame.save(buffer, format='JPEG', quality=90)
     return base64.b64encode(buffer.getvalue()).decode('ascii')
 
 
@@ -353,7 +353,9 @@ def generate_captions(config, directory, language='zh', length='brief', replace=
                 log('[描述失败] %s：%s' % (name, exc))
             except (OSError, ValueError) as exc:
                 report['failed'] += 1
-                item = {'name': name, 'status': 'failed', 'error': '无法处理图片或文本（%s）' % type(exc).__name__}
+                from .image_io import ImageDecodeError, ImageEnvironmentError
+                message = str(exc)[:300] if isinstance(exc, (ImageDecodeError, ImageEnvironmentError)) else '无法处理图片或文本（%s）' % type(exc).__name__
+                item = {'name': name, 'status': 'failed', 'error': message}
                 log('[描述失败] %s：%s' % (name, item['error']))
             report['items'].append(item)
             if progress:

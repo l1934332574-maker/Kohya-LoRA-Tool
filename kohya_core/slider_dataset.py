@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 from PIL import Image, ImageOps
+from .image_io import read_image
 
 EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
@@ -49,11 +50,10 @@ def scan(settings, check_stop=lambda: None):
         sizes, identities = {}, {}
         for side, path in selected.items():
             try:
-                with Image.open(path) as image:
-                    image.load()
-                    sizes[side] = ImageOps.exif_transpose(image).size
+                image = read_image(path)
+                sizes[side] = image.size
                 identities[side] = _hash(path, check_stop)
-            except (OSError, ValueError) as exc: raise ValueError("图片对无法读取：%s；请更换这一整对。" % path.name) from exc
+            except (OSError, ValueError) as exc: raise ValueError("图片对无法读取：%s；%s" % (path.name, exc)) from exc
         if identities["positive"] == identities["negative"]: raise ValueError("这对图片完全相同，无法学习变化：%s" % pair["positive"])
         ratios = [w / h for w, h in sizes.values()]
         if abs(ratios[0] / ratios[1] - 1) > .02:
@@ -116,12 +116,11 @@ def materialize(settings, scanned, cache, check_stop):
             for side, dest in targets.items():
                 source = Path(settings[side + "_dir"]) / pair[side]
                 if _hash(source, check_stop) != pair["identity"][side]: raise ValueError("检查后图片已变化，请重新检查：" + source.name)
-                with Image.open(source) as image:
-                    image = ImageOps.exif_transpose(image).convert("RGB")
-                    image = ImageOps.fit(image, (settings["resolution"], settings["resolution"]), Image.Resampling.LANCZOS, centering=(.5, .5))
-                    target = dest / filename
-                    staged = target.with_suffix(".tmp.png")
-                    image.save(staged); staged.replace(target)
+                image = read_image(source)
+                image = ImageOps.fit(image, (settings["resolution"], settings["resolution"]), Image.Resampling.LANCZOS, centering=(.5, .5))
+                target = dest / filename
+                staged = target.with_suffix(".tmp.png")
+                image.save(staged); staged.replace(target)
                 (dest / ("%05d.txt" % i)).write_text(settings["neutral"] + "\n", encoding="utf-8")
     (root / "pairs.json").write_text(json.dumps(identity, ensure_ascii=False, indent=2), encoding="utf-8")
     return root, pos, neg

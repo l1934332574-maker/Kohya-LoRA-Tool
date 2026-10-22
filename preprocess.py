@@ -1243,15 +1243,7 @@ def _run_wd14_onnx(output_dir, logf=print, threshold=0.35, model_key=None):
         return False
 
     def _prep(path):
-        image = Image.open(path)
-        if image.mode in ("RGBA", "LA") or "transparency" in image.info:
-            image = image.convert("RGBA")
-        elif image.mode != "RGB":
-            image = image.convert("RGB")
-        if image.mode == "RGBA":
-            bg = Image.new("RGB", image.size, (255, 255, 255))
-            bg.paste(image, mask=image.split()[3])
-            image = bg
+        image = load_image(path)
         arr = np.array(image)[:, :, ::-1].astype(np.float32)  # RGB->BGR
         size = max(arr.shape[0:2])
         pad_x, pad_y = size - arr.shape[1], size - arr.shape[0]
@@ -1834,22 +1826,9 @@ def normalize_caption(text: str) -> str:
 
 
 def load_image(path):
-    """读取图片：EXIF 方向校正，透明通道平铺到白底，转 RGB。"""
-    from PIL import Image, ImageOps
-
-    with Image.open(path) as im:
-        im.load()  # 立即校验像素完整性（PIL 懒加载，损坏/截断的 PNG 在此刻抛错）
-        im = ImageOps.exif_transpose(im)
-        if im.mode in ("RGBA", "LA", "PA") or (
-            im.mode == "P" and "transparency" in im.info
-        ):
-            rgba = im.convert("RGBA")
-            bg = Image.new("RGB", rgba.size, (255, 255, 255))
-            bg.paste(rgba, mask=rgba.split()[-1])
-            im = bg
-        else:
-            im = im.convert("RGB")
-        return im
+    """完整解码并规范 EXIF 方向；透明像素按训练规则合成到白底。"""
+    from kohya_core.image_io import read_image
+    return read_image(path, alpha_background=(255, 255, 255))
 
 
 def crop_black_borders(img, threshold=12, margin=2):

@@ -80,6 +80,13 @@ def main():
             if len(text) > 8192:
                 raise ValueError('关键词超过导出长度，请提高阈值后重试。')
             item.update(status='generated', caption=text, image_signature=before)
+        except ModuleNotFoundError as exc:
+            missing = str(getattr(exc, 'name', '') or '')
+            message = ('当前 Python 运行环境缺少标准库 fractions；这是环境问题，不是图片损坏。'
+                       if missing == 'fractions' else '图片解码环境缺少模块：' + (missing or '未知模块'))
+            item.update(status='failed', error=message)
+        except ImportError as exc:
+            item.update(status='failed', error='图片解码环境无法加载依赖：' + str(exc)[:220])
         except (OSError, ValueError) as exc:
             item.update(status='failed', error=str(exc)[:300])
         print('[RAM_RESULT] ' + json.dumps(item, ensure_ascii=False), flush=True)

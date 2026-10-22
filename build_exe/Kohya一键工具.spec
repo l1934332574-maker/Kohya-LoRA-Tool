@@ -66,6 +66,8 @@ a = Analysis(
         ('..\\THIRD_PARTY_NOTICES.md', '.'),
     ] + ctk_datas + dd_datas + modern_ui_datas + webview_datas,
     hiddenimports=ctk_hidden + webview_hidden + [
+        # Pillow 会动态加载 TIFF/EXIF 插件；它依赖的 fractions 不会被常规入口分析可靠发现。
+        'fractions', 'PIL.TiffImagePlugin',
         # 标签管理 v1：中英词典/翻译/补全（kohya_gui 内惰性 import，显式声明防漏收集）
         'gui.tag_tools',
         'kohya_core.tagging', 'kohya_core.tagging.dictionary',
@@ -89,6 +91,7 @@ a = Analysis(
         'kohya_core.fizgig_engine', 'kohya_core.fizgig_adapter', 'kohya_core.model_catalog',
         'kohya_core.training_resume',
         'kohya_core.h3_models', 'kohya_core.h3_dataset', 'kohya_core.multi_character',
+        'kohya_core.image_io',
         'kohya_core.moss_models', 'kohya_core.moss_multi_character',
         'gui.queue_window',
         'gui.modern_host', 'gui.lora_workbench_bridge',

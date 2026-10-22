@@ -52,13 +52,10 @@ def image_preview(root, name, full=False, max_size=None):
         raise ValueError("不读取链接指向的图片")
     if not path.resolve().is_relative_to(root):
         raise ValueError("图片不在当前目录中")
-    from PIL import Image
-    with Image.open(path) as source:
-        width, height = source.size
-        if width * height > 80_000_000:
-            raise ValueError("图片尺寸过大")
-        source.thumbnail(max_size or ((1400, 1400) if full else (520, 520)))
-        image = source.convert("RGB")
+    from .image_io import read_image
+    image = read_image(path, preserve_alpha=True, max_pixels=80_000_000)
+    width, height = image.size
+    image.thumbnail(max_size or ((1400, 1400) if full else (520, 520)))
     buffer = io.BytesIO()
     image.save(buffer, format="WEBP", quality=86, method=4)
     return {"data_url": "data:image/webp;base64," + base64.b64encode(buffer.getvalue()).decode("ascii"),

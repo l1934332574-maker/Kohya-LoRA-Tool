@@ -220,7 +220,8 @@ def public_scan(value, *, mode=None, resolution=512):
 
 def prepare(core, project, settings, resolution, logf=print, report=None, *, mode=None):
     """Build a complete new flat dataset, then replace only the managed project directory."""
-    from PIL import Image, ImageOps
+    from PIL import Image
+    from .image_io import read_image
     check_stop = core.check_stop
     result = scan(settings, check_stop, mode=mode, resolution=resolution)
     resolution = int(resolution)
@@ -243,24 +244,23 @@ def prepare(core, project, settings, resolution, logf=print, report=None, *, mod
             path = row["path"]
             source_stat = path.stat()
             identity = hashlib.sha256(json.dumps([row["group_id"], str(path.resolve()), source_stat.st_size, source_stat.st_mtime_ns, row["caption"], resolution], ensure_ascii=False).encode()).hexdigest()[:24]
-            with Image.open(path) as opened:
-                image = ImageOps.exif_transpose(opened).convert("RGB")
-                width, height = image.size
-                scale = min(1.0, resolution / max(width, height))
-                size = (max(8, int(width * scale) // 8 * 8), max(8, int(height * scale) // 8 * 8))
-                if min(width, height) < 64: raise ValueError(f"图片尺寸过小，请检查：{path.name}。")
-                image = image.resize(size, Image.Resampling.LANCZOS)
-                copies = factors[row["group_id"]]
-                for index in range(copies):
-                    check_stop()
-                    filename = f"multi_{identity}_{index}.png"
-                    image.save(stage / filename)
-                    (stage / Path(filename).with_suffix(".txt")).write_text(row["caption"], encoding="utf-8")
-                    written += 1
-                if written % 10 == 0 or len(manifest) + 1 == len(result["entries"]):
-                    logf(f"[多角色] 整理素材 {len(manifest) + 1}/{len(result['entries'])}，已写入 {written} 个样本。")
-                manifest.append({"name": f"multi_{identity}_0.png", "group_id": row["group_id"],
-                                 "roles": row["roles"], "sampling_copies": copies, "original_size": [width, height], "size": list(size)})
+            image = read_image(path)
+            width, height = image.size
+            scale = min(1.0, resolution / max(width, height))
+            size = (max(8, int(width * scale) // 8 * 8), max(8, int(height * scale) // 8 * 8))
+            if min(width, height) < 64: raise ValueError(f"图片尺寸过小，请检查：{path.name}。")
+            image = image.resize(size, Image.Resampling.LANCZOS)
+            copies = factors[row["group_id"]]
+            for index in range(copies):
+                check_stop()
+                filename = f"multi_{identity}_{index}.png"
+                image.save(stage / filename)
+                (stage / Path(filename).with_suffix(".txt")).write_text(row["caption"], encoding="utf-8")
+                written += 1
+            if written % 10 == 0 or len(manifest) + 1 == len(result["entries"]):
+                logf(f"[多角色] 整理素材 {len(manifest) + 1}/{len(result['entries'])}，已写入 {written} 个样本。")
+            manifest.append({"name": f"multi_{identity}_0.png", "group_id": row["group_id"],
+                             "roles": row["roles"], "sampling_copies": copies, "original_size": [width, height], "size": list(size)})
         check_stop()
         (stage / "multi_manifest.json").write_text(json.dumps({"images": manifest, "roles": result["roles"]}, ensure_ascii=False, indent=2), encoding="utf-8")
         backup = None

@@ -3728,16 +3728,14 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         """Send a compact display image through pywebview, not a multi-MB source PNG."""
         import base64
         from io import BytesIO
-        from PIL import Image, ImageOps
+        from PIL import Image
+        from kohya_core.image_io import read_image
 
-        with Image.open(path) as source:
-            image = ImageOps.exif_transpose(source)
-            resampling = getattr(Image, "Resampling", Image)
-            image.thumbnail((3840, 3840), resampling.LANCZOS)
-            has_alpha = "A" in image.getbands() or "transparency" in image.info
-            image = image.convert("RGBA" if has_alpha else "RGB")
-            buffer = BytesIO()
-            image.save(buffer, format="WEBP", quality=84, method=4)
+        image = read_image(path, preserve_alpha=True)
+        resampling = getattr(Image, "Resampling", Image)
+        image.thumbnail((3840, 3840), resampling.LANCZOS)
+        buffer = BytesIO()
+        image.save(buffer, format="WEBP", quality=84, method=4)
         return "data:image/webp;base64,%s" % base64.b64encode(buffer.getvalue()).decode("ascii")
 
     def get_appearance_background(self):
@@ -3761,14 +3759,14 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         try:
             if thumbnail:
                 from PIL import Image, ImageOps
+                from kohya_core.image_io import read_image
 
-                with Image.open(path) as source:
-                    source.load()
-                    resampling = getattr(Image, "Resampling", Image)
-                    image = ImageOps.fit(source.convert("RGB"), (144, 144), method=resampling.LANCZOS)
-                    buffer = BytesIO()
-                    image.save(buffer, format="WEBP", quality=74, method=4)
-                    content = buffer.getvalue()
+                source = read_image(path, alpha_background=(255, 255, 255), max_pixels=80_000_000)
+                resampling = getattr(Image, "Resampling", Image)
+                image = ImageOps.fit(source, (144, 144), method=resampling.LANCZOS)
+                buffer = BytesIO()
+                image.save(buffer, format="WEBP", quality=74, method=4)
+                content = buffer.getvalue()
                 data_url = "data:image/webp;base64,%s" % base64.b64encode(content).decode("ascii")
             else:
                 data_url = self._appearance_display_data_url(path)

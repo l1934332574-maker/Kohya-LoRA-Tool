@@ -129,6 +129,15 @@ def run(job):
                     raise ValueError('打标期间标签已被修改，请重新处理。')
                 atomic_caption(target, caption)
             emit({'index': index, 'status': 'generated', 'caption': caption, 'image_signature': signature})
+        except ModuleNotFoundError as exc:
+            failed += 1
+            missing = str(getattr(exc, 'name', '') or '')
+            message = ('当前 Python 运行环境缺少标准库 fractions；这是环境问题，不是图片损坏。'
+                       if missing == 'fractions' else '图片解码环境缺少模块：' + (missing or '未知模块'))
+            emit({'index': index, 'status': 'failed', 'error': message, 'image_signature': signature})
+        except ImportError as exc:
+            failed += 1
+            emit({'index': index, 'status': 'failed', 'error': '图片解码环境无法加载依赖：' + str(exc)[:220], 'image_signature': signature})
         except (OSError, ValueError) as exc:
             failed += 1
             emit({'index': index, 'status': 'failed', 'error': str(exc)[:300], 'image_signature': signature})

@@ -111,12 +111,11 @@ def _keywords(core, selection, log, progress):
             stage = '读取原图'
             try:
                 signatures[image] = [image.stat().st_size, image.stat().st_mtime_ns]
-                with Image.open(image) as original:
-                    original.load()
-                    stage = '处理图片'
-                    frame = ImageOps.exif_transpose(original)
-                    if frame.mode != 'RGBA': frame = frame.convert('RGBA')
-                    frame.thumbnail((1536, 1536), Image.Resampling.LANCZOS)
+                from .image_io import read_image
+                frame = read_image(image, preserve_alpha=True)
+                if frame.mode != 'RGBA': frame = frame.convert('RGBA')
+                stage = '处理图片'
+                frame.thumbnail((1536, 1536), Image.Resampling.LANCZOS)
                 stage = '写入临时图片'
                 target = root / ('%06d.png' % index)
                 frame.save(target)
@@ -190,8 +189,10 @@ def generate(core, selection, service, report, log, progress, publish):
             except CaptionError as exc:
                 item.update(status='failed', error=str(exc))
                 if isinstance(exc, CaptionServiceError): consecutive_failures += 1
-            except (OSError, ValueError):
-                item.update(status='failed', error='无法读取这张图片，请检查文件。')
+            except (OSError, ValueError) as exc:
+                from .image_io import ImageDecodeError, ImageEnvironmentError
+                message = str(exc)[:300] if isinstance(exc, (ImageDecodeError, ImageEnvironmentError)) else '无法读取这张图片，请检查文件。'
+                item.update(status='failed', error=message)
             item['image_signature'] = signature
             report['items'].append(item)
             report['failed' if item['status'] == 'failed' else 'generated'] += 1
