@@ -55,6 +55,7 @@ a = Analysis(
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "qwen21_diffusers_compat.py"), "kohya_core"),
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "pixai_assets.json"), "kohya_core"),
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "pixai_worker.py"), "kohya_core"),
+        (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "image_io.py"), "kohya_core"),
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "ram_assets.json"), "kohya_core"),
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "qwen_vl_assets.json"), "kohya_core"),
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "ram_worker.py"), "kohya_core"),

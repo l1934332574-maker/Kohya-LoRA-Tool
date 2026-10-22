@@ -1524,10 +1524,8 @@ def _sd_scripts_root(script=None):
 
 
 def _quarantine_corrupt_images(output_dir, logf=print):
-    """打标前校验输出图片完整性：损坏/截断的移到 <输出目录>_corrupt。
-
-    避免一张坏图导致整批 WD14 打标中断；下次预处理会从原图自动重新生成。
-    """
+    """只隔离明确损坏的图片；运行环境异常必须停止，不能误移素材。"""
+    from kohya_core.image_io import ImageDecodeError, ImageEnvironmentError
     moved = 0
     corrupt_dir = output_dir.rstrip("\\/") + "_corrupt"
     for f in sorted(os.listdir(output_dir)):
@@ -1537,7 +1535,9 @@ def _quarantine_corrupt_images(output_dir, logf=print):
         try:
             with load_image(p):
                 pass
-        except Exception:
+        except ImageEnvironmentError as e:
+            raise RuntimeError(f"[WD14] 图片读取环境异常，未隔离图片：{e}") from e
+        except ImageDecodeError as e:
             try:
                 os.makedirs(corrupt_dir, exist_ok=True)
                 shutil.move(p, os.path.join(corrupt_dir, f))
@@ -1545,21 +1545,19 @@ def _quarantine_corrupt_images(output_dir, logf=print):
                 if os.path.isfile(t):
                     shutil.move(t, os.path.join(corrupt_dir, os.path.basename(t)))
                 moved += 1
-                logf(f"[WD14] 隔离损坏图片: {f}")
-            except Exception:
-                pass
+                logf(f"[WD14] 隔离损坏图片: {f}（{e}）")
+            except OSError as move_error:
+                logf(f"[WD14] 图片确认为损坏，但隔离失败，原文件仍保留：{f}（{move_error}）")
+        except Exception as e:
+            raise RuntimeError(f"[WD14] 图片检查异常，未隔离图片：{e}") from e
     if moved:
-        logf(f"[WD14] 已隔离 {moved} 张损坏图片到 {corrupt_dir}（下次预处理会从原图重新生成）")
+        logf(f"[WD14] 已隔离 {moved} 张损坏图片到 {corrupt_dir}（下次预处理会从原图自动重新生成）")
     return moved
 
 
-
 def _quarantine_input_corrupt(input_dir, files, logf=print):
-    """预处理前扫描输入图片，损坏/截断的提前隔离到 <输入目录>_corrupt。
-
-    返回被隔离的文件名列表（相对路径）。避免坏图在打标/处理阶段才暴露裸 PIL
-    traceback；同时让用户一眼看到是哪张图坏了（对应待办：预处理前提前扫描隔离）。
-    """
+    """只隔离明确损坏的输入图片；环境或程序异常时保留全部源文件并停止。"""
+    from kohya_core.image_io import ImageDecodeError, ImageEnvironmentError
     moved = []
     corrupt_dir = input_dir.rstrip("\\/") + "_corrupt"
     for name in files:
@@ -1567,7 +1565,9 @@ def _quarantine_input_corrupt(input_dir, files, logf=print):
         try:
             with load_image(p):
                 pass
-        except Exception as e:
+        except ImageEnvironmentError as e:
+            raise RuntimeError(f"图片读取环境异常，未隔离任何图片：{e}") from e
+        except ImageDecodeError as e:
             try:
                 os.makedirs(corrupt_dir, exist_ok=True)
                 _flat = name.replace("/", "__").replace("\\", "__")
@@ -1577,10 +1577,12 @@ def _quarantine_input_corrupt(input_dir, files, logf=print):
                     shutil.move(_t, os.path.join(corrupt_dir, os.path.splitext(_flat)[0] + ".txt"))
                 moved.append(name)
                 logf(f"[隔离损坏图片] {name}（{e}）→ {corrupt_dir}")
-            except Exception:
-                pass
+            except OSError as move_error:
+                logf(f"[ERROR] 图片确认为损坏，但隔离失败，原文件仍保留：{name}（{move_error}）")
+        except Exception as e:
+            raise RuntimeError(f"检查图片时遇到非图片解码异常，未隔离任何图片：{e}") from e
     if moved:
-        logf(f"[INFO] 已隔离 {len(moved)} 张损坏图片到 {corrupt_dir}（可从原图重新下载/修复后再放回）")
+        logf(f"[INFO] 已隔离 {len(moved)} 张确认损坏的图片到 {corrupt_dir}（可从原图重新下载/修复后再放回）")
     return moved
 
 def _probe_wd14_deps(py):

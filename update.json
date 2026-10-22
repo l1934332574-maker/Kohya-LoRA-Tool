@@ -1,7 +1,7 @@
 {
-  "version": "v0.19.15",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.19.15/Setup.exe",
+  "version": "v0.19.16",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.19.16/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "setup_sha256": "2a25c5f4844d2b22020ee2fc1f61b8798c7c78d63127f7f321a44c1d3b2bf22c",
-  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.19.15 · 图片读取修复（2026-10-22）\n- 修复安装包缺少图片解码依赖，导致部分 JPG / PNG 读取失败的问题。\n- 改进图集预览、多角色与滑块素材的图片读取及错误提示。"
+  "setup_sha256": "0abbc7e259d210353a5a8183c41f8612dd5ac68cf988072bf7098237c7c1e612",
+  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.19.16 · 图集预处理修复（2026-10-22）\n- 修复安装包遗漏图片读取模块，避免正常图片被误判损坏、移出图集。\n- 图片检查遇到运行环境异常时停止处理并保留原文件；只隔离确认损坏的图片。"
 }
