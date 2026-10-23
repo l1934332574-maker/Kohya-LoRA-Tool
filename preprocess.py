@@ -53,6 +53,7 @@ if any(_glob2.glob(_os.path.join(_HERE, _p))
                     if _os.path.normcase(_os.path.abspath(p or _os.getcwd())) != _os.path.normcase(_HERE)]
 
 import argparse
+from functools import lru_cache
 import json
 import os
 import re
@@ -1525,7 +1526,7 @@ def _sd_scripts_root(script=None):
 
 def _quarantine_corrupt_images(output_dir, logf=print):
     """只隔离明确损坏的图片；运行环境异常必须停止，不能误移素材。"""
-    from kohya_core.image_io import ImageDecodeError, ImageEnvironmentError
+    image_io = _load_image_io()
     moved = 0
     corrupt_dir = output_dir.rstrip("\\/") + "_corrupt"
     for f in sorted(os.listdir(output_dir)):
@@ -1535,9 +1536,9 @@ def _quarantine_corrupt_images(output_dir, logf=print):
         try:
             with load_image(p):
                 pass
-        except ImageEnvironmentError as e:
+        except image_io.ImageEnvironmentError as e:
             raise RuntimeError(f"[WD14] 图片读取环境异常，未隔离图片：{e}") from e
-        except ImageDecodeError as e:
+        except image_io.ImageDecodeError as e:
             try:
                 os.makedirs(corrupt_dir, exist_ok=True)
                 shutil.move(p, os.path.join(corrupt_dir, f))
@@ -1557,7 +1558,7 @@ def _quarantine_corrupt_images(output_dir, logf=print):
 
 def _quarantine_input_corrupt(input_dir, files, logf=print):
     """只隔离明确损坏的输入图片；环境或程序异常时保留全部源文件并停止。"""
-    from kohya_core.image_io import ImageDecodeError, ImageEnvironmentError
+    image_io = _load_image_io()
     moved = []
     corrupt_dir = input_dir.rstrip("\\/") + "_corrupt"
     for name in files:
@@ -1565,9 +1566,9 @@ def _quarantine_input_corrupt(input_dir, files, logf=print):
         try:
             with load_image(p):
                 pass
-        except ImageEnvironmentError as e:
+        except image_io.ImageEnvironmentError as e:
             raise RuntimeError(f"图片读取环境异常，未隔离任何图片：{e}") from e
-        except ImageDecodeError as e:
+        except image_io.ImageDecodeError as e:
             try:
                 os.makedirs(corrupt_dir, exist_ok=True)
                 _flat = name.replace("/", "__").replace("\\", "__")
@@ -1827,10 +1828,25 @@ def normalize_caption(text: str) -> str:
     return text
 
 
+@lru_cache(maxsize=1)
+def _load_image_io():
+    """Load the pure Python helper without restoring the bundled DLL search path."""
+    import importlib.util
+
+    helper = os.path.join(_HERE, "kohya_core", "image_io.py")
+    if not os.path.isfile(helper):
+        raise RuntimeError("软件缺少图片读取文件 kohya_core/image_io.py，请完整覆盖更新软件；原图未移动。")
+    spec = importlib.util.spec_from_file_location("_kohya_preprocess_image_io", helper)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法加载软件的图片读取文件，请完整覆盖更新软件；原图未移动。")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def load_image(path):
     """完整解码并规范 EXIF 方向；透明像素按训练规则合成到白底。"""
-    from kohya_core.image_io import read_image
-    return read_image(path, alpha_background=(255, 255, 255))
+    return _load_image_io().read_image(path, alpha_background=(255, 255, 255))
 
 
 def crop_black_borders(img, threshold=12, margin=2):
