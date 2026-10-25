@@ -1,0 +1,6 @@
+# Maintainer build tool versions; third-party dependency versions remain visible
+# in the build's pip-freeze.txt artifact. No engine or model is bundled.
+pyinstaller==6.21.0
+customtkinter==6.0.0
+Pillow==12.2.0
+pywebview==6.2.1

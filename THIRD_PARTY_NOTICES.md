@@ -14,7 +14,7 @@
 | [Fizgig](https://github.com/shootthesound/Fizgig) | 第四引擎（新项目固定 v8.9.6，保留 v7.3.1 / MOSS v8.5.0 及已有 v7.0.1；Krea2、Klein 9B、Qwen-Image-2.1、H3、Anima / SDXL / Z-Image Turbo 普通 LoRA 与概念滑块，MOSS-Image Base 普通 LoRA）| Apache-2.0；MiniMax 相关 ComfyUI 派生源码遵循 GPL-3.0，归档保留其版权头与许可 |
 | [MediaPipe Selfie Multiclass](https://ai.google.dev/edge/mediapipe/solutions/vision/image_segmenter) / [LiteRT](https://github.com/google-ai-edge/LiteRT) | 可选 CPU 人物分割；首次生成学习区域时下载官方 256×256 TFLite 模型，并校验固定 SHA256；不随软件内置模型权重。 | Apache-2.0（按上游模型与运行时声明） |
 | [comfyui-rocm](https://github.com/patientx/comfyui-rocm) | Fizgig 随包的 detect_gpu.py（AMD GPU 架构探测）| GPL-3.0 |
-| [ffdkj/Danbooru_Tag-Chinese-English-Translation-Table](https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table) | 内置离线中英词典主数据（每日更新 32.5 万条；收录 post_count≥30 词条） | 仓库未附明确开源许可证，仅内置离线查询 |
+| [ffdkj/Danbooru_Tag-Chinese-English-Translation-Table](https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table) | 内置离线中英词典主数据（每日更新 32.5 万条；收录 post_count≥30 词条） | MIT；2026-10-26 已核对上游许可证，副本见 installers/tag_dict/LICENSE.ffdkj.txt |
 | [byzod/a1111-sd-webui-tagcomplete-CN](https://github.com/byzod/a1111-sd-webui-tagcomplete-CN) | 离线词典常见词覆盖/补充（Tags-zh-full-pack.csv，整合自多个社区翻译） | MIT（沿用上游） |
 | [bitsandbytes_win_rocm](https://github.com/0xDELUXA/bitsandbytes_win_rocm) | AMD ROCm Windows 用 bitsandbytes 社区轮子 | 随组件其各自许可 |
 

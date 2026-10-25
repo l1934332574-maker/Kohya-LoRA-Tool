@@ -24,7 +24,9 @@ import sys
 _project_root = os.path.dirname(modern_ui_root)
 sys.path.insert(0, _project_root)
 from build_exe.bundle_ui import write_bundle, write_worker_bundle
+from build_exe.windows_version import write_version_resource
 _generated = os.path.join(_project_root, "build_exe", "generated")
+write_version_resource(_project_root, os.path.join(_generated, "version_info.txt"))
 write_bundle(modern_ui_dist, os.path.join(_generated, "kohya_bundled_ui.py"))
 write_worker_bundle(_project_root, os.path.join(_generated, "kohya_bundled_workers.py"))
 modern_ui_datas = [(modern_ui_dist, "modern_ui/dist")]
@@ -139,6 +141,7 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
+    version=os.path.join(_generated, "version_info.txt"),
     codesign_identity=None,
     entitlements_file=None,
     icon=_icon,

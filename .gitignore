@@ -76,3 +76,6 @@ build_exe/release_*.log
 
 # Generated embedded UI recovery module (contains build outputs)
 build_exe/generated/
+
+# Unsigned CI build outputs
+build_exe/unsigned/
