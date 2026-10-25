@@ -131,7 +131,7 @@ def remember(root, image, *, origin, kind='', decision=None, source='photo'):
     atomic_json(root / MANIFEST, data)
 
 def inspect_one(image, record=None):
-    from PIL import Image, ImageStat
+    from PIL import Image, ImageOps, ImageStat
     image = Path(image); record = record or {}
     info = {'name': image.name, 'status': 'missing', 'problem': '缺少学习区域', 'coverage': None, 'decision': record.get('decision', 'default'), 'origin': record.get('origin', 'existing'), 'kind': record.get('kind', ''), 'generator': record.get('generator', '')}
     info['image_sha256'] = digest(image)
@@ -144,7 +144,7 @@ def inspect_one(image, record=None):
         # External edits are manual; preserve them, but still require geometry validation.
         manual_edit = record.get('mask_sha256') and record['mask_sha256'] != info['mask_sha256']
         mask = read_mask(path)
-        with Image.open(image) as src: w, h = src.size
+        with Image.open(image) as src: w, h = ImageOps.exif_transpose(src).size
         if abs((mask.width / mask.height) / (w / h) - 1) > .02: raise ValueError('遮罩与图片比例不一致')
         coverage = ImageStat.Stat(mask).mean[0] / 255
         info['coverage'] = round(coverage, 4)
@@ -212,9 +212,16 @@ def import_mask(source_image, output_image, *, border_box=None, crop_ratio='', c
     mask = read_mask(candidate)
     with Image.open(source) as raw:
         raw_size = raw.size; orientation = raw.getexif().get(274, 1)
-    if mask.size != raw_size: raise ValueError('原始遮罩尺寸必须与原图相同：' + source.name)
+    upright_size = raw_size[::-1] if orientation in (5, 6, 7, 8) else raw_size
     transpose = {2: Image.Transpose.FLIP_LEFT_RIGHT, 3: Image.Transpose.ROTATE_180, 4: Image.Transpose.FLIP_TOP_BOTTOM, 5: Image.Transpose.TRANSPOSE, 6: Image.Transpose.ROTATE_270, 7: Image.Transpose.TRANSVERSE, 8: Image.Transpose.ROTATE_90}
-    if orientation in transpose: mask = mask.transpose(transpose[orientation])
+    # Mask editors normally save upright pixels without the photo's EXIF flag.
+    # Prefer that convention when dimensions are ambiguous (square/180 degrees).
+    if mask.size == upright_size:
+        pass
+    elif mask.size == raw_size:
+        if orientation in transpose: mask = mask.transpose(transpose[orientation])
+    else:
+        raise ValueError('原始遮罩尺寸必须与原图或其转正尺寸相同：' + source.name)
     if border_box: mask = mask.crop(border_box)
     if crop_ratio and crop_function: mask = crop_function(mask, crop_ratio)
     with Image.open(output) as processed: size = processed.size

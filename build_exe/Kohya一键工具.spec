@@ -23,9 +23,10 @@ for _theme_name in ("light.png", "dark.png"):
 import sys
 _project_root = os.path.dirname(modern_ui_root)
 sys.path.insert(0, _project_root)
-from build_exe.bundle_ui import write_bundle
+from build_exe.bundle_ui import write_bundle, write_worker_bundle
 _generated = os.path.join(_project_root, "build_exe", "generated")
 write_bundle(modern_ui_dist, os.path.join(_generated, "kohya_bundled_ui.py"))
+write_worker_bundle(_project_root, os.path.join(_generated, "kohya_bundled_workers.py"))
 modern_ui_datas = [(modern_ui_dist, "modern_ui/dist")]
 try:
     import webview as _webview  # noqa: F401
@@ -102,7 +103,7 @@ a = Analysis(
         'kohya_core.fizgig_engine', 'kohya_core.fizgig_adapter', 'kohya_core.model_catalog',
         'kohya_core.training_resume',
         'kohya_core.h3_models', 'kohya_core.h3_dataset', 'kohya_core.multi_character',
-        'kohya_core.image_io',
+        'kohya_core.image_io', 'kohya_core.worker_files', 'kohya_bundled_workers',
         'kohya_core.moss_models', 'kohya_core.moss_multi_character',
         'gui.queue_window',
         'gui.modern_host', 'gui.lora_workbench_bridge', 'kohya_bundled_ui',

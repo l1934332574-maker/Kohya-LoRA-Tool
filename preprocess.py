@@ -70,9 +70,26 @@ def is_mask_file(path):
 def _load_loss_masks():
     import importlib.util
     path = os.path.join(_HERE, 'kohya_core', 'loss_masks.py')
-    spec = importlib.util.spec_from_file_location('_kohya_preprocess_masks', path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    if not os.path.isfile(path):
+        raise RuntimeError(
+            '预处理组件缺失：' + path + '\n'
+            '请退出软件，使用当前版本的完整安装包覆盖安装到此目录：' + _HERE + '\n'
+            '这是软件文件缺失，无需重装 Python 或训练引擎；不能跳过遮罩步骤继续训练。')
+    try:
+        spec = importlib.util.spec_from_file_location('_kohya_preprocess_masks', path)
+        if spec is None or spec.loader is None:
+            raise ImportError('无法建立遮罩组件加载器')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        if (getattr(module, 'MANIFEST', None) != '.loss_masks.json'
+                or not all(callable(getattr(module, name, None))
+                           for name in ('sync_activation', 'mask_for', 'import_mask', 'training_view'))):
+            raise ImportError('遮罩组件不完整，可能被临时兼容实现替换')
+    except Exception as exc:
+        raise RuntimeError(
+            '预处理遮罩组件无法加载：' + path + '\n'
+            '原因：' + str(exc) + '\n'
+            '请使用当前版本完整安装包覆盖安装，恢复正式组件；未跳过遮罩处理。') from exc
     return module
 
 # 全局隐藏子进程窗口：GUI 宿主无控制台，直接 subprocess 会弹黑色 cmd 窗口，

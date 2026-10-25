@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.18"
+APP_VERSION = "0.19.19"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -10579,6 +10579,8 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
     if multi_character is not None or (_multi_config or {}).get("training_kind") == "multi_character":
         from kohya_core.multi_character import prepare
         return prepare(sys.modules[__name__], project, multi_character if multi_character is not None else _multi_config.get("multi_character", {}), size, logf, report, mode=(_multi_config or {}).get("mode"))
+    from kohya_core.worker_files import ensure_worker_files
+    ensure_worker_files(KIT_DIR, logf)
     vpy = _pick_preprocess_python()
     if not vpy:
         raise RuntimeError("尚未安装任何训练引擎（Kohya / 第二引擎 / 第三引擎）。\n"

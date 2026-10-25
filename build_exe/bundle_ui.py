@@ -25,3 +25,17 @@ def write_bundle(dist, module_path):
         + 'ARCHIVE_SHA256 = ' + repr(hashlib.sha256(raw).hexdigest()) + '\n'
         + 'ARCHIVE_BASE64 = ' + repr(base64.b64encode(raw)) + '\n', encoding='utf-8')
     return module_path
+
+
+def write_worker_bundle(root, module_path):
+    """Keep exact external worker sources inside PYZ for offline repair."""
+    root, module_path = Path(root), Path(module_path)
+    files = {}
+    for name in ("preprocess.py", "kohya_core/image_io.py", "kohya_core/loss_masks.py",
+                 "kohya_core/loss_mask_worker.py"):
+        data = (root / name).read_bytes()
+        files[name] = (hashlib.sha256(data).hexdigest(), base64.b64encode(data))
+    module_path.parent.mkdir(parents=True, exist_ok=True)
+    module_path.write_text("# Generated immutable worker recovery sources.\nFILES = "
+                           + repr(files) + "\n", encoding="utf-8")
+    return module_path

@@ -1609,6 +1609,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                         log('[学习区域] 文件校验不符，已隔离，尝试下一条网络路径。')
                 if not downloaded:
                     raise RuntimeError('自动分割模型下载失败（网络不可达或文件校验失败）。已下载的分片保留；可以重试、选择本地分割模型，或打开遮罩编辑器直接手绘。')
+            from kohya_core.worker_files import ensure_worker_files
+            ensure_worker_files(self.core.KIT_DIR, log)
             command = [record['python'], str(Path(self.core.KIT_DIR) / 'kohya_core/loss_mask_worker.py'),
                        '--root', str(root), '--source', record['source'], '--model', str(model), '--kind', kind, '--mask-source', source]
             if params.get('mask_overwrite_auto'): command += ['--overwrite-auto']

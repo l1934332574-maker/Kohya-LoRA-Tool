@@ -10906,7 +10906,21 @@ def main(argv=None):
                         help="Hide the classic workspace and show only the requested popup utility")
     parser.add_argument("--utility-owner", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument("--check-ui-resources", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--check-worker-files", default=None, help=argparse.SUPPRESS)
     args, _unknown = parser.parse_known_args(argv)
+
+    if args.check_worker_files:
+        from pathlib import Path
+        import json
+        from kohya_core.worker_files import ensure_worker_files
+        log = []
+        try:
+            recovered = ensure_worker_files(core.KIT_DIR, log.append)
+            result = {"ok": True, "recovered": recovered, "log": log}
+        except Exception as exc:
+            result = {"ok": False, "error": str(exc), "log": log}
+        Path(args.check_worker_files).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        return 0 if result["ok"] else 1
 
     if args.check_ui_resources:
         from pathlib import Path
