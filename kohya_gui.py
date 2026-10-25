@@ -37,17 +37,21 @@ def _family_chain():
     return ("Arial",)
 FONT_CHAIN = _family_chain()
 
+_UI_FONT_FAMILY = None
+
 def ui_font(ft):
-    family = FONT_CHAIN[0]
-    try:
-        avail = set(tkfont.families())
-        for c in FONT_CHAIN:
-            if c in avail:
-                family = c
-                break
-    except Exception:
-        pass
-    return (family, ft[-2], ft[-1])
+    # Enumerating every installed font per label is expensive on Windows.
+    # The selected family is stable for this GUI process; sizes remain dynamic.
+    global _UI_FONT_FAMILY
+    if _UI_FONT_FAMILY is None:
+        family = FONT_CHAIN[0]
+        try:
+            avail = set(tkfont.families())
+            family = next((c for c in FONT_CHAIN if c in avail), family)
+            _UI_FONT_FAMILY = family
+        except Exception:
+            return (family, ft[-2], ft[-1])
+    return (_UI_FONT_FAMILY, ft[-2], ft[-1])
 
 FONT_TITLE = (*FONT_CHAIN, 16, "normal")
 FONT_BODY  = (*FONT_CHAIN, 13, "normal")
@@ -248,7 +252,14 @@ UPDATE_INSTALLER_FLAGS = (
 
 def _update_installer_command(setup_path):
     """Build the silent in-place upgrade command with explicit app shutdown policy."""
-    return [setup_path, *UPDATE_INSTALLER_FLAGS]
+    command = [setup_path, *UPDATE_INSTALLER_FLAGS]
+    if getattr(sys, "frozen", False):
+        # Portable installs may not match Inno's remembered installation path.
+        command.append("/DIR=" + os.path.dirname(os.path.abspath(sys.executable)))
+    log_dir = core.data_sub("logs")
+    os.makedirs(log_dir, exist_ok=True)
+    command.append("/LOG=" + os.path.join(log_dir, "update_install_%s.log" % time.strftime("%Y%m%d_%H%M%S")))
+    return command
 
 
 def _sha256_file(path):
@@ -500,8 +511,9 @@ def _export_log_text(log_text, project, env_lines=None):
     return "\n".join(L)
 
 class App:
-    def __init__(self, initial_project=None, initial_mode=None, initial_action=None, utility_only=False):
+    def __init__(self, initial_project=None, initial_mode=None, initial_action=None, utility_only=False, utility_owner=0):
         self._utility_only = bool(utility_only)
+        self._utility_owner = int(utility_owner or 0)
         self._utility_initial_action = initial_action
         self._utility_project_name = str(initial_project or "").strip()
         self.q = queue.Queue()
@@ -536,12 +548,18 @@ class App:
         self._saving = False                 # 自动保存防递归标志
         self._autosave_after = None          # 防抖定时器
 
-        self.root = ctk.CTk()
+        lightweight_tools = self._utility_only and initial_action == "tools" and not initial_project
+        self.root = tk.Tk() if lightweight_tools else ctk.CTk()
+        if self._utility_only:
+            self.root.withdraw()
         self.project_name_var = tk.StringVar()
         self.root.title(core.APP_NAME + " · v" + getattr(core, "APP_VERSION", "0.0.0"))
         self.root.geometry("1180x900")
         self.root.minsize(1040, 780)
-        self.root.configure(fg_color=BG)
+        if lightweight_tools:
+            self.root.configure(bg=BG)
+        else:
+            self.root.configure(fg_color=BG)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         try:
@@ -590,6 +608,19 @@ class App:
         self.amd_var = tk.BooleanVar(value=False)
         self.amd_env_var = tk.StringVar()
         self.train_env_var = tk.StringVar()
+        if self._utility_only and initial_action == "tools" and not initial_project:
+            # A tools popup has no training workspace. Avoid constructing and
+            # immediately hiding hundreds of unrelated controls/project cards.
+            self._gpu_info = {}
+            self.log = tk.Text(self.root)
+            self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+            self.root.after(100, self._poll)
+            self.root.after(100, self._preload_tag_dict)
+            def open_tools():
+                self.cmd_open_tools()
+                self._finish_utility_only()
+            self.root.after_idle(open_tools)
+            return
         try:
             self._gpu_info = core.detect_gpu_info()
         except Exception:
@@ -735,6 +766,22 @@ class App:
                 return
             self._utility_popup = popup
             self._utility_bound_popup = popup
+            # A transient attached to a withdrawn owner can open underneath the
+            # WebView host. Give this standalone popup a normal taskbar window.
+            popup.transient("")
+            if self._utility_owner:
+                from gui.utility_windows import set_window_owner
+                if not set_window_owner(popup.winfo_id(), self._utility_owner):
+                    self._log("[工具] 主窗口关联失败；工具仍可通过任务栏打开。")
+            def present():
+                try:
+                    if popup.winfo_exists():
+                        popup.deiconify()
+                        popup.lift()
+                        popup.focus_force()
+                except tk.TclError:
+                    pass
+            popup.after(180, present)
 
             def _close_utility(event):
                 if event.widget is popup:
@@ -5491,7 +5538,8 @@ class App:
             w = ctk.CTkToplevel(self.root)
             w.title("🧰 小工具")
             w.geometry("780x700")
-            w.transient(self.root)
+            if not self._utility_only:
+                w.transient(self.root)
             w.minsize(640, 520)
             self._tools_win = w
             body = ctk.CTkScrollableFrame(w, fg_color="transparent")
@@ -5626,7 +5674,7 @@ class App:
                           hover_color="#252a36", border_width=1, border_color=BORDER, text_color=SUB,
                           corner_radius=6, font=ui_font(FONT_HINT),
                           command=self.cmd_open_tag_dict).pack(side="right")
-            self.tools_dict_var, _dl = _status(c7, "在独立窗口查词/看热度/复制/标签篮（首次已后台预热，秒开）")
+            self.tools_dict_var, _dl = _status(c7, "在独立窗口查词、看热度、复制或收集标签")
 
             # ---------- 详细输出（默认折叠，共用一份） ----------
             dhead = ctk.CTkFrame(body, fg_color="transparent")
@@ -5662,7 +5710,7 @@ class App:
                 except Exception:
                     self._dict_win_tool = None
             import gui.tag_tools
-            self._dict_win_tool = gui.tag_tools.TagLookupWindow(self.root)
+            self._dict_win_tool = gui.tag_tools.TagLookupWindow(getattr(self, "_tools_win", None) or self.root)
         except Exception as e:
             messagebox.showerror(core.APP_NAME, "打开词典失败：%s" % e)
 
@@ -10856,7 +10904,23 @@ def main(argv=None):
                         help="Open a classic UI utility on launch")
     parser.add_argument("--utility-only", action="store_true",
                         help="Hide the classic workspace and show only the requested popup utility")
+    parser.add_argument("--utility-owner", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--check-ui-resources", default=None, help=argparse.SUPPRESS)
     args, _unknown = parser.parse_known_args(argv)
+
+    if args.check_ui_resources:
+        from pathlib import Path
+        import json
+        from gui.ui_startup import resolve_ui_index
+        log = []
+        index = Path(core.KIT_DIR) / "modern_ui" / "dist" / "index.html"
+        try:
+            resolved = resolve_ui_index(index, Path(core.data_sub("cache", "ui_recovery")), log)
+            result = {"ok": True, "recovered": resolved != index, "index": str(resolved), "log": log}
+        except Exception as exc:
+            result = {"ok": False, "error": str(exc), "log": log}
+        Path(args.check_ui_resources).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        return 0 if result["ok"] else 1
 
     if args.ui == "next":
         try:
@@ -10874,7 +10938,7 @@ def main(argv=None):
                 return 1
 
     app = App(initial_project=args.project, initial_mode=args.mode,
-              initial_action=args.action, utility_only=args.utility_only)
+              initial_action=args.action, utility_only=args.utility_only, utility_owner=args.utility_owner)
     _run_mainloop_and_destroy(app.root)
     return 0
 

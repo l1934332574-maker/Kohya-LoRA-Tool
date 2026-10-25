@@ -8,6 +8,7 @@
 kohya_gui（由 kohya_gui 在运行时惰性 import 本模块，避免启动循环依赖）。
 """
 import tkinter as tk
+from tkinter import ttk
 
 import customtkinter as ctk
 
@@ -25,9 +26,8 @@ _CAT_FILTERS = [
 ]
 _SORTS = ["默认顺序", "按热度", "按字母 A-Z"]
 
-# 结果区规模与查询节流：控件池预建复用，避免每次按键销毁/重建数百个控件
+# 查询节流；结果使用单个原生表格，避免逐条创建绘制控件
 _SEARCH_LIMIT = 40        # 单次查询返回条数上限（原来 60）
-_POOL_SIZE = 40           # 结果行控件池大小（预建，之后只改文本）
 _SEARCH_DEBOUNCE_MS = 150  # 按键防抖（中文输入法组合期会连发多次 KeyRelease）
 
 
@@ -92,8 +92,6 @@ class TagLookupWindow(object):
         self._basket = []                     # 标签篮（仅内存，不落盘）
         self._basket_win = None
         self._rows = []
-        self._pool = []                       # 结果行控件池（预建复用，避免每次按键重建）
-        self._empty_lbl = None
         self._search_after = None             # 防抖句柄
         self._last_key = None                 # 上次查询指纹（相同则跳过重绘）
         self._freq_cache = None               # 编辑器模式：标签频率缓存 (ver, records, freq)
@@ -102,7 +100,8 @@ class TagLookupWindow(object):
         self.win.title("标签中英词典 · 离线" if not self.standalone else "离线标签词典 · 中英互译 / 补全")
         self.win.geometry("820x680" if self.standalone else "760x640")
         self.win.minsize(600, 440)
-        self.win.transient(master)
+        if master.state() != "withdrawn":
+            self.win.transient(master)
         self.win.configure(fg_color=km.BG)
         self._dict = editor.get_tagdict() if hasattr(editor, "get_tagdict") else get_dict()
         self._build()
@@ -173,12 +172,37 @@ class TagLookupWindow(object):
 
         box = ctk.CTkFrame(w, fg_color=km.CARD, corner_radius=8)
         box.pack(fill="both", expand=True, padx=16, pady=(4, 10))
-        self.scroll = ctk.CTkScrollableFrame(box, fg_color="transparent")
-        self.scroll.pack(fill="both", expand=True, padx=6, pady=6)
+        # A native table draws all results in one widget. Forty CTk result
+        # cards required hundreds of Canvas redraws on each query.
+        style = ttk.Style(w)
+        style.configure("TagLookup.Treeview", background=km.CARD, fieldbackground=km.CARD,
+                        foreground=km.TXT, rowheight=30, borderwidth=0,
+                        font=km.ui_font(km.FONT_BODY))
+        style.map("TagLookup.Treeview", background=[("selected", km.ACC)],
+                  foreground=[("selected", "#ffffff")])
+        self.results = ttk.Treeview(box, columns=("tag", "translation", "count"),
+                                   show="headings", selectmode="browse", style="TagLookup.Treeview")
+        for key, title, width in (("tag", "英文标签", 265), ("translation", "中文", 280), ("count", "热度", 80)):
+            self.results.heading(key, text=title)
+            self.results.column(key, width=width, minwidth=60, stretch=key != "count")
+        scrollbar = ttk.Scrollbar(box, orient="vertical", command=self.results.yview)
+        scrollbar.pack(side="right", fill="y", pady=6)
+        self.results.configure(yscrollcommand=scrollbar.set)
+        self.results.pack(side="left", fill="both", expand=True, padx=6, pady=6)
+        self.results.bind("<Double-Button-1>", self._activate_result)
+        self.results.bind("<Return>", self._activate_result)
+        self.results.bind("<Button-3>", self._result_menu)
+        actions = ctk.CTkFrame(w, fg_color="transparent")
+        actions.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkButton(actions, text="复制所选" if self.standalone else "插入所选", width=96,
+                      command=self._activate_result).pack(side="left")
+        if self.standalone:
+            ctk.CTkButton(actions, text="加入标签篮", width=110,
+                          command=self._collect_result).pack(side="left", padx=8)
 
         foot = ctk.CTkFrame(w, fg_color="transparent")
         foot.pack(fill="x", padx=16, pady=(0, 12))
-        tip = ("双击条目或点「复制」→ 复制英文标签；右键可复制中英对照；「+」加入标签篮"
+        tip = ("双击复制英文标签；右键可复制中英对照；选中后可加入标签篮"
                if self.standalone else
                "双击条目或点「插入」→ 追加到当前图片标签末尾（重复标签自动跳过）；右键可复制中英对照")
         ctk.CTkLabel(foot, text=tip, font=km.ui_font(km.FONT_HINT), text_color=km.HINT).pack(side="left")
@@ -298,101 +322,53 @@ class TagLookupWindow(object):
         self._last_key = None
         self._clear_rows()
 
-    def _ensure_pool(self):
-        """预建结果行控件池（仅一次）；之后只改文本/命令 + 显隐，不再销毁重建。"""
-        if self._pool:
-            return
-        km = _kmod()
-        for _ in range(_POOL_SIZE):
-            rec = {}
-            row = ctk.CTkFrame(self.scroll, fg_color=km.CARD2, corner_radius=6)
-            left = ctk.CTkFrame(row, fg_color="transparent")
-            left.pack(side="left", fill="x", expand=True, padx=10, pady=4)
-            name_lbl = ctk.CTkLabel(left, text="", font=km.ui_font(km.FONT_BODY),
-                                    text_color=km.TXT, anchor="w")
-            name_lbl.pack(anchor="w")
-            sub_lbl = ctk.CTkLabel(left, text="", font=km.ui_font(km.FONT_HINT),
-                                   text_color=km.HINT, anchor="w")
-            sub_lbl.pack(anchor="w")
-            if self.standalone:
-                btn_add = ctk.CTkButton(row, text="+", width=34, height=26, fg_color="#3a4658",
-                                        hover_color="#46546a", text_color="#cfd6e2", corner_radius=6,
-                                        font=km.ui_font(km.FONT_HINT))
-                btn_add.pack(side="right", padx=(0, 8), pady=6)
-            else:
-                btn_add = None
-            main_btn = ctk.CTkButton(row, text="复制" if self.standalone else "插入",
-                                     width=56, height=26, fg_color="#3a4658", hover_color="#46546a",
-                                     text_color="#cfd6e2", corner_radius=6, font=km.ui_font(km.FONT_HINT))
-            main_btn.pack(side="right", padx=(0, 6) if self.standalone else 8, pady=6)
-            for wdg in (row, name_lbl, sub_lbl):
-                wdg.bind("<Double-Button-1>", lambda _e, r=rec: self._primary(r.get("name")))
-                wdg.bind("<Button-3>", lambda e, r=rec: self._popup(e, r.get("name"), r.get("cn")))
-            rec.update({"row": row, "name_lbl": name_lbl, "sub_lbl": sub_lbl,
-                        "add": btn_add, "main": main_btn, "name": "", "cn": ""})
-            self._pool.append(rec)
+    def _selected_result(self):
+        selected = self.results.selection()
+        if not selected:
+            return None
+        index = int(selected[0])
+        return self._rows[index] if 0 <= index < len(self._rows) else None
+
+    def _activate_result(self, _event=None):
+        row = self._selected_result()
+        if row:
+            self._primary(row[0])
+        return "break"
+
+    def _collect_result(self):
+        row = self._selected_result()
+        if row:
+            self._collect(row[0])
+
+    def _result_menu(self, event):
+        item = self.results.identify_row(event.y)
+        if item:
+            self.results.selection_set(item)
+            row = self._selected_result()
+            if row:
+                self._popup(event, row[0], row[1])
+        return "break"
 
     def _clear_rows(self):
-        for rec in self._pool:
-            if rec["row"].winfo_manager():
-                rec["row"].pack_forget()
-        self._hide_empty()
+        children = self.results.get_children()
+        if children:
+            self.results.delete(*children)
         self._rows = []
 
-    def _hide_empty(self):
-        if self._empty_lbl is not None:
-            try:
-                self._empty_lbl.pack_forget()
-            except Exception:
-                pass
-
-    def _show_empty(self, text):
-        km = _kmod()
-        if self._empty_lbl is None:
-            self._empty_lbl = ctk.CTkLabel(self.scroll, text=text, font=km.ui_font(km.FONT_HINT),
-                                           text_color=km.HINT)
-        else:
-            self._empty_lbl.configure(text=text)
-        self._empty_lbl.pack(anchor="w", padx=8, pady=8)
-
     def _fill(self, rows):
-        self._ensure_pool()
-        km = _kmod()
-        if not rows:
-            self._clear_rows()
-            self._show_empty("（没有匹配结果）")
-            return
-        self._hide_empty()
-        n = min(len(rows), _POOL_SIZE)
-        for i, rec in enumerate(self._pool):
-            if i >= n:
-                if rec["row"].winfo_manager():
-                    rec["row"].pack_forget()
-                continue
-            name, cn, cat, cnt = rows[i]
-            rec["name"] = name
-            rec["cn"] = cn
-            rec["name_lbl"].configure(text=name)
-            sub = cn if (cn and cn != name) else ""
-            extra = []
-            c = _fmt_count(cnt)
-            if c:
-                extra.append(c)
-            # 独立模式：分类已由顶部筛选器控制，逐行不再显示，省出空间
+        self._clear_rows()
+        self._rows = list(rows[:_SEARCH_LIMIT])
+        for index, (name, cn, cat, cnt) in enumerate(self._rows):
+            translation = cn or "（无中文翻译）"
             if not self.standalone:
-                cat_s = _cat_short(self._dict, cat)
-                if cat_s:
-                    extra.append(cat_s)
-            if extra:
-                sub += ("  ·  " if sub else "") + " / ".join(extra)
-            rec["sub_lbl"].configure(text=sub or "（无中文翻译）",
-                                     text_color=km.HINT if (sub and cn != name) else km.SUB)
-            rec["main"].configure(command=lambda nm=name: self._primary(nm))
-            if rec["add"] is not None:
-                rec["add"].configure(command=lambda nm=name: self._collect(nm))
-            if not rec["row"].winfo_manager():
-                rec["row"].pack(fill="x", padx=2, pady=2)
-        self._rows = rows
+                translation += " · " + _cat_short(self._dict, cat)
+            self.results.insert("", "end", iid=str(index),
+                                values=(name, translation, _fmt_count(cnt)))
+        if self._rows:
+            self.results.selection_set("0")
+            self.results.focus("0")
+        else:
+            self.hint_var.set("没有匹配结果")
 
     # ---------- 动作 ----------
     def _primary(self, name):

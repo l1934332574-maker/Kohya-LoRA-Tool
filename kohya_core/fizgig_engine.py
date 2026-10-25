@@ -18,9 +18,16 @@ import zipfile
 
 VERSION = "v7.3.1"
 LEGACY_V7 = "v7.0.1"
-SUPPORTED_V7 = (LEGACY_V7, VERSION)
+LATEST_VERSION = "v8.9.6"
+LATEST_COMMIT = "a62e644e0bd954240a26b619cf307db4ac64a390"
+LATEST_ARCHIVE_SHA256 = "676d734f272c508e7df1009fff0b3f016c68f0bb58b82cfad79b27ed7d6017ae"
+LATEST_ARCHIVE_BYTES = 21379445
+# VERSION / COMMIT retain the v7 source identity for legacy callers and caches.
+SUPPORTED_V7 = (LEGACY_V7, VERSION, LATEST_VERSION)
 MOSS_VERSION = "v8.5.0"
-SUPPORTED_STANDARD = (*SUPPORTED_V7, MOSS_VERSION)
+SUPPORTED_STANDARD = (LEGACY_V7, VERSION, MOSS_VERSION, LATEST_VERSION)
+SUPPORTED_MOSS = (MOSS_VERSION, LATEST_VERSION)
+SUPPORTED_ZIMAGE = (VERSION, LATEST_VERSION)
 MOSS_COMMIT = "75d54881e466c9b7f436e2e397437a8bdc38f2e1"
 MOSS_ARCHIVE_SHA256 = "71c9af3781c19e74ce8fe02bf04bc2561a13ea6cad8b43b3d5d0cdd1e1596ba5"
 MOSS_ARCHIVE_BYTES = 20678733
@@ -51,16 +58,50 @@ MOSS_REQUIRED = ("requirements.txt", "src/fizgig/families/train.py", "src/fizgig
                  "src/fizgig/utils/hf_cache.py", "src/fizgig/modules/offloading.py")
 
 
+LATEST_REQUIRED = tuple(dict.fromkeys((*REQUIRED, *MOSS_REQUIRED,
+    "src/fizgig/dataset/masks.py", "src/fizgig/dataset/automask.py")))
+
+
 def target_version(mode):
-    return MOSS_VERSION if mode == "moss_fz" else VERSION
+    return LATEST_VERSION
+
+
+def legacy_project_version(mode):
+    """An omitted version in an existing project must retain its original runtime."""
+    return (MOSS_VERSION if mode == "moss_fz" else VERSION if mode == "zimage_fz"
+            else LEGACY_V7 if mode in ("anima_fz", "sdxl_fz") else "v6.5.0")
+
+
+def compatible_versions(mode, multi=False):
+    if mode == "moss_fz":
+        return SUPPORTED_MOSS
+    if mode == "zimage_fz":
+        return SUPPORTED_ZIMAGE
+    if multi or mode in ("anima_fz", "sdxl_fz"):
+        return SUPPORTED_V7
+    return ("v6.5.0", *SUPPORTED_V7)
 
 
 def required_files(version):
-    return MOSS_REQUIRED if version == MOSS_VERSION else OLD_REQUIRED if version == LEGACY_V7 else REQUIRED
+    return (LATEST_REQUIRED if version == LATEST_VERSION else MOSS_REQUIRED if version == MOSS_VERSION
+            else OLD_REQUIRED if version == LEGACY_V7 else REQUIRED)
 
 
 def source_commit(version):
-    return MOSS_COMMIT if version == MOSS_VERSION else OLD_COMMIT if version == LEGACY_V7 else COMMIT
+    return (LATEST_COMMIT if version == LATEST_VERSION else MOSS_COMMIT if version == MOSS_VERSION
+            else OLD_COMMIT if version == LEGACY_V7 else COMMIT)
+
+
+def _adapter_revision(version):
+    return 5 if version == LATEST_VERSION else 4 if version == MOSS_VERSION else 2 if version == LEGACY_V7 else 3
+
+
+def _archive_identity(version):
+    if version == LATEST_VERSION:
+        return LATEST_ARCHIVE_BYTES, LATEST_ARCHIVE_SHA256
+    if version == MOSS_VERSION:
+        return MOSS_ARCHIVE_BYTES, MOSS_ARCHIVE_SHA256
+    return ARCHIVE_BYTES, ARCHIVE_SHA256
 
 
 _CONTEXT = contextvars.ContextVar("kohya_fizgig_runtime", default=None)
@@ -94,7 +135,7 @@ def source_version(source):
     source = Path(source)
     record = _read(source / ".kohya-fizgig-source.json")
     version = record.get("version")
-    if version in SUPPORTED_STANDARD and record.get("commit") == source_commit(version) and record.get("adapter") == (4 if version == MOSS_VERSION else 2 if version == LEGACY_V7 else 3):
+    if version in SUPPORTED_STANDARD and record.get("commit") == source_commit(version) and record.get("adapter") == _adapter_revision(version):
         hashes = record.get("files") or {}
         try:
             if all((source / name).is_file() and hashes.get(name) == _sha(source / name) for name in required_files(version)):
@@ -147,7 +188,7 @@ def use_runtime(core, params):
 def update_status(core):
     record = runtime(core)
     installed = Path(record["python"]).is_file() and bool(source_version(record["source"]))
-    current = installed and source_version(record["source"]) in (VERSION, MOSS_VERSION)
+    current = installed and source_version(record["source"]) == LATEST_VERSION
     candidates = dict.fromkeys([*(_registry(core).get("installs") or {}), "v6.5.0", *SUPPORTED_STANDARD])
     versions = []
     for version in candidates:
@@ -157,20 +198,22 @@ def update_status(core):
         if Path(candidate["python"]).is_file() and source_version(candidate["source"]) == version:
             versions.append(version)
     return {"installed": installed, "update_available": installed and not current,
-            "target_version": VERSION, "current_version": record.get("version") or "待识别",
+            "target_version": LATEST_VERSION, "current_version": record.get("version") or "待识别",
             "engine_dir": record["source"], "h3_supported": installed, "qwen_image_2_supported": installed,
-            "new_families_supported": current, "versions": versions, "standard_versions": list(SUPPORTED_STANDARD)}
+            "new_families_supported": installed and source_version(record["source"]) in (VERSION, MOSS_VERSION, LATEST_VERSION), "versions": versions, "standard_versions": list(SUPPORTED_STANDARD)}
 
 
-def download(core, logf, version=VERSION):
-    if version not in (VERSION, MOSS_VERSION):
+def download(core, logf, version=LATEST_VERSION):
+    if version not in (VERSION, MOSS_VERSION, LATEST_VERSION):
         raise ValueError("此版本没有自动安装通道：" + version)
-    size, digest = (MOSS_ARCHIVE_BYTES, MOSS_ARCHIVE_SHA256) if version == MOSS_VERSION else (ARCHIVE_BYTES, ARCHIVE_SHA256)
+    size, digest = _archive_identity(version)
     sources = SOURCES if version == VERSION else (
         ("魔搭国内镜像", MIRROR + "fizgig-" + version + ".zip", True),
         ("GitHub 加速镜像", "https://ghfast.top/https://github.com/shootthesound/Fizgig/archive/" + source_commit(version) + ".zip", False),
         ("GitHub 官方源", "https://codeload.github.com/shootthesound/Fizgig/zip/" + source_commit(version), False),
     )
+    if version == LATEST_VERSION:
+        sources = tuple(item for item in sources if not item[2])
     path = Path(core._engine_source_cache_dir()) / ("fizgig-%s.zip" % version)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_file() and path.stat().st_size == size and _sha(path) == digest:
@@ -192,7 +235,7 @@ def download(core, logf, version=VERSION):
     raise RuntimeError("Fizgig 国内镜像及备用源码均下载失败；原引擎仍保留，可稍后重试。")
 
 
-def _deploy(core, archive, source, version=VERSION):
+def _deploy(core, archive, source, version=LATEST_VERSION):
     source.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive) as z:
         if z.testzip() is not None:
@@ -211,7 +254,7 @@ def _deploy(core, archive, source, version=VERSION):
         raise RuntimeError("Fizgig 源码缺少新版模型家族入口。")
     _patch_helpers(source, version)
     _write(source / ".kohya-fizgig-source.json", {"version": version, "commit": source_commit(version),
-            "archive_sha256": MOSS_ARCHIVE_SHA256 if version == MOSS_VERSION else ARCHIVE_SHA256, "adapter": 4 if version == MOSS_VERSION else 3,
+            "archive_sha256": _archive_identity(version)[1], "adapter": _adapter_revision(version),
             "files": {name: _sha(source / name) for name in required_files(version)}})
 
 
@@ -281,9 +324,9 @@ def _patch_helpers(source, version=VERSION):
     state_anchor = 'state_dir = os.path.join(output_dir, f"{output_name}-{epoch:06d}-state")'
     if text.count(state_anchor) != 1 or text.count("prune_state_dirs(output_dir, output_name, keep_last_n_states)") != 1:
         raise RuntimeError("Fizgig 快照目录接口变化。")
-    text = text.replace(state_anchor, 'state_dir = os.path.join(output_dir, "snapshots", "fizgig-%s", f"{output_name}-{epoch:06d}-state")' % VERSION)
+    text = text.replace(state_anchor, 'state_dir = os.path.join(output_dir, "snapshots", "fizgig-%s", f"{output_name}-{epoch:06d}-state")' % version)
     text = text.replace("prune_state_dirs(output_dir, output_name, keep_last_n_states)",
-                        'prune_state_dirs(os.path.join(output_dir, "snapshots", "fizgig-%s"), output_name, keep_last_n_states)' % VERSION)
+                        'prune_state_dirs(os.path.join(output_dir, "snapshots", "fizgig-%s"), output_name, keep_last_n_states)' % version)
     path.write_text(text, encoding="utf-8")
 
 
@@ -359,7 +402,7 @@ def _patch_moss_source(source):
 def _env(core, record):
     env = (core._fizgig_rocm_env(record["source"], record["python"]) if record.get("backend") == "amd-rocm"
            else core.build_direct_env())
-    if record.get("version") == MOSS_VERSION:
+    if record.get("version") in SUPPORTED_MOSS:
         env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     return env
 
@@ -402,23 +445,23 @@ def cli_ready(core, record):
 
 def ensure_selected_runtime(core, version, logf=print):
     """Prepare the selected runtime; an existing legacy choice never upgrades."""
-    if version in (VERSION, MOSS_VERSION):
+    if version in (VERSION, MOSS_VERSION, LATEST_VERSION):
         return install(core, logf, version=version)
     if version not in ("v6.5.0", *SUPPORTED_STANDARD):
         raise ValueError("未接入这个 Fizgig 版本：%s" % version)
     record = runtime(core, version)
     if not Path(record["python"]).is_file() or source_version(record["source"]) != version:
-        raise RuntimeError("未检测到完整的 Fizgig %s 安装，请检查原引擎目录；也可以在项目中选择 %s 后安装。" % (version, VERSION))
+        raise RuntimeError("未检测到完整的 Fizgig %s 安装，请检查原引擎目录；也可以在项目中选择 %s 后安装。" % (version, LATEST_VERSION))
     backend = record.get("backend") or ("amd-rocm" if core.detect_gpu_vendor() == "amd" else "nvidia")
     with use_runtime(core, {"fizgig_version": version}):
         core._fizgig_verify(record["python"], record["source"], logf, backend=backend)
     core.clear_status_cache()
-    logf("[Fizgig] 已复用项目选定版本 %s；无需下载 %s。" % (version, VERSION))
+    logf("[Fizgig] 已复用项目选定版本 %s；无需下载 %s。" % (version, LATEST_VERSION))
     return record["python"]
 
 
-def install(core, logf=print, version=VERSION):
-    if version not in (VERSION, MOSS_VERSION):
+def install(core, logf=print, version=LATEST_VERSION):
+    if version not in (VERSION, MOSS_VERSION, LATEST_VERSION):
         raise ValueError("没有此版本的安装通道：" + version)
     root = Path(core.get_kohya_dir())
     root.mkdir(parents=True, exist_ok=True)

@@ -111,8 +111,8 @@ def validation_prompts(settings, *, mode=None, resolution=512):
 def parameters(core, config, params):
     if config.get("mode") not in IMAGE_MODES: raise ValueError("多角色模式请选择图像人物 LoRA 训练入口。")
     if config.get("mode", "").endswith("_fz"):
-        from .fizgig_engine import SUPPORTED_V7, MOSS_VERSION
-        allowed = (MOSS_VERSION,) if config["mode"] == "moss_fz" else SUPPORTED_V7
+        from .fizgig_engine import SUPPORTED_V7, SUPPORTED_MOSS
+        allowed = SUPPORTED_MOSS if config["mode"] == "moss_fz" else SUPPORTED_V7
         if params.get("fizgig_version") not in allowed:
             raise ValueError("此多角色入口需要 Fizgig " + " / ".join(allowed) + "，请选择兼容版本。")
     settings = normalize(config.get("multi_character", {}))
@@ -235,8 +235,25 @@ def prepare(core, project, settings, resolution, logf=print, report=None, *, mod
     for entry in result["entries"]:
         if entry["path"].resolve().is_relative_to(target): raise ValueError("原始素材不能选择项目的预处理输出目录。")
     target.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=".multi_prepare_", dir=target.parent)).resolve()
     factors = {r["id"]: r["sampling_copies"] for r in result["roles"]}
+    from . import loss_masks
+    mask_config = core.load_project(project) or {}
+    mask_enabled = loss_masks.settings(dict(mask_config.get('params') or {}, mode=mode, training_kind='multi_character'))[0] != 'off'
+    old_masks = loss_masks.manifest(target) if target.is_dir() else {"schema": 1, "images": {}}
+    # Caption edits may rename a prepared sample. Find prior masks by content and
+    # role/group, so a label correction never silently discards a painted region.
+    previous_by_content = {}
+    old_manifest_path = target / 'multi_manifest.json'
+    if old_manifest_path.is_file() and not loss_masks.linked(old_manifest_path):
+        old_rows = json.loads(old_manifest_path.read_text(encoding='utf-8')).get('images', [])
+        for old_row in old_rows:
+            name = str(old_row.get('name') or '')
+            if Path(name).name != name or not name: continue
+            previous = target / name
+            if previous.is_file() and not loss_masks.linked(previous):
+                checksum = loss_masks.digest(previous)
+                previous_by_content[(old_row.get('group_id'), checksum)] = name
+    stage = Path(tempfile.mkdtemp(prefix=".multi_prepare_", dir=target.parent)).resolve()
     manifest, written = [], 0
     try:
         for row in result["entries"]:
@@ -255,6 +272,30 @@ def prepare(core, project, settings, resolution, logf=print, report=None, *, mod
                 check_stop()
                 filename = f"multi_{identity}_{index}.png"
                 image.save(stage / filename)
+                previous_image = target / filename
+                image_sha = loss_masks.digest(stage / filename)
+                same_image = previous_image.is_file() and loss_masks.digest(previous_image) == image_sha
+                if not same_image:
+                    first_name = previous_by_content.get((row['group_id'], image_sha))
+                    if first_name:
+                        copied_name = first_name.rsplit('_', 1)[0] + '_' + str(index) + '.png'
+                        previous_image = target / copied_name
+                        if not previous_image.is_file(): previous_image = target / first_name
+                        same_image = previous_image.is_file() and loss_masks.digest(previous_image) == image_sha
+                previous_name = previous_image.name
+                previous_mask = loss_masks.mask_for(previous_image) if same_image else None
+                if same_image and previous_mask is None:
+                    previous_mask = loss_masks.mask_for(target / '.inactive_loss_masks' / previous_name) if (target / '.inactive_loss_masks').is_dir() else None
+                if same_image and previous_name in old_masks['images']:
+                    data = loss_masks.manifest(stage)
+                    data['images'][filename] = old_masks['images'][previous_name]
+                    loss_masks.atomic_json(stage / loss_masks.MANIFEST, data)
+                if previous_mask:
+                    destination = stage if mask_enabled else stage / '.inactive_loss_masks'
+                    destination.mkdir(exist_ok=True)
+                    shutil.copy2(previous_mask, destination / (Path(filename).stem + loss_masks.SUFFIX + previous_mask.suffix))
+                elif mask_enabled:
+                    loss_masks.import_mask(path, stage / filename)
                 (stage / Path(filename).with_suffix(".txt")).write_text(row["caption"], encoding="utf-8")
                 written += 1
             if written % 10 == 0 or len(manifest) + 1 == len(result["entries"]):

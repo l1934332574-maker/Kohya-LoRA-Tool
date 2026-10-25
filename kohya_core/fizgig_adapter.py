@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import re
 import time
-from .fizgig_engine import VERSION, COMMIT, MIRROR, SUPPORTED_STANDARD as SUPPORTED_V7, MOSS_VERSION, source_commit, source_version, _env, _sha, _write
+from .fizgig_engine import VERSION, COMMIT, MIRROR, SUPPORTED_STANDARD as SUPPORTED_V7, MOSS_VERSION, SUPPORTED_MOSS, SUPPORTED_ZIMAGE, LATEST_VERSION, source_commit, source_version, _env, _sha, _write
 
 FAMILIES = {"krea2_fz": "krea2", "flux2_fz": "klein", "qwen21_fz": "qwen_image21",
             "h3_fz": "minimax", "anima_fz": "anima", "sdxl_fz": "sdxl", "zimage_fz": "zimage", "moss_fz": "moss_image"}
@@ -23,8 +23,8 @@ def models_dir(core, family):
 def models(core, family, params=None):
     params = params or {}
     if family == "moss_image":
-        from .moss_models import files, settings
-        return files(core, settings(params))
+        from .moss_models import files, settings, quantized_encoder_supported
+        return files(core, settings(params), allow_quant=quantized_encoder_supported(params))
     if family == "zimage":
         from .zimage_fizgig import files, settings
         return files(core, settings(params))
@@ -70,8 +70,8 @@ def models(core, family, params=None):
 def missing(core, family, params=None):
     files = models(core, family, params)
     if family == "moss_image":
-        from .moss_models import missing as missing_moss, settings
-        return missing_moss(core, settings(params))
+        from .moss_models import missing as missing_moss, settings, quantized_encoder_supported
+        return missing_moss(core, settings(params), allow_quant=quantized_encoder_supported(params))
     if family == "zimage":
         from .zimage_fizgig import missing as missing_zimage, settings
         return missing_zimage(core, settings(params))
@@ -117,7 +117,7 @@ def _helper_configs(core, family, logf):
     return str(root), spec["repo"]
 
 
-def _validate(core, family, files):
+def _validate(core, family, files, version=None):
     required = ("dit", "te", "vae")
     if family in ("qwen_image21", "zimage") or (family == "minimax" and files.get("training_adapter")):
         required += ("training_adapter",)
@@ -132,7 +132,11 @@ def _validate(core, family, files):
             from .moss_models import validate
         else:
             from .zimage_fizgig import validate
-        for key in required: validate(files[key], key)
+        for key in required:
+            if family == "moss_image":
+                validate(files[key], key, allow_quant=version == LATEST_VERSION)
+            else:
+                validate(files[key], key)
     if family == "krea2" and core._safetensors_is_prequantized(files["dit"]):
         raise RuntimeError("Krea2 需要 bf16 RAW 底模；推理用预量化文件不能直接用于训练。")
 
@@ -171,7 +175,7 @@ def _cache_identity(core, family, files, subsets, resolution, commit=COMMIT, tra
     images = []
     for folder, _repeats, _count in subsets:
         for path in sorted(Path(folder).iterdir()):
-            if path.is_file() and path.suffix.lower() in core.FIZGIG_IMAGE_EXTS | {".mp4", ".wav", ".mp3", ".flac", ".m4a", ".txt"}:
+            if path.is_file() and not path.stem.casefold().endswith("-masklabel") and path.suffix.lower() in core.FIZGIG_IMAGE_EXTS | {".mp4", ".wav", ".mp3", ".flac", ".m4a", ".txt"}:
                 images.append(stat(path))
     signature = {"commit": commit, "family": family, "resolution": resolution, "models": assets, "files": images}
     if family == "minimax":
@@ -238,15 +242,17 @@ def preview_prompts(params, subsets):
 
 
 def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress):
+    from . import loss_masks
+    mask_mode, mask_floor = loss_masks.settings(dict(params, mode=mode))
     version = record["version"]
     commit = source_commit(version)
     if source_version(record["source"]) != version or version not in SUPPORTED_V7 or not Path(record["python"]).is_file():
         raise RuntimeError("此项目选择 Fizgig %s，请先安装或更新引擎。" % version)
     family = FAMILIES[mode]
-    if family == "moss_image" and version != MOSS_VERSION:
-        raise RuntimeError("MOSS-Image 需要 Fizgig " + MOSS_VERSION)
-    if family == "zimage" and version != VERSION:
-        raise RuntimeError("Z-Image Turbo 需要 Fizgig %s，请更新引擎。" % VERSION)
+    if family == "moss_image" and version not in SUPPORTED_MOSS:
+        raise RuntimeError("MOSS-Image 需要 Fizgig " + " / ".join(SUPPORTED_MOSS))
+    if family == "zimage" and version not in SUPPORTED_ZIMAGE:
+        raise RuntimeError("Z-Image Turbo 需要 Fizgig %s，请选择兼容版本。" % " / ".join(SUPPORTED_ZIMAGE))
     if family == "krea2":
         from .krea2_models import settings, validate_selected
         validate_selected(core, settings(params))
@@ -254,13 +260,13 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         from .h3_models import validate_selected
         validate_selected(core, params.get("h3_models"))
     files = models(core, family, params)
-    _validate(core, family, files)
+    _validate(core, family, files, version=version)
     if family == "moss_image":
         if params.get("moss_preview_base"):
             files["preview_checkpoint"] = None
         if core._sample_preview_enabled(params, vram_gb):
             from .moss_models import missing as missing_moss, settings, validate
-            errors = missing_moss(core, settings(params), preview=True, base_preview=bool(params.get("moss_preview_base")))
+            errors = missing_moss(core, settings(params), preview=True, base_preview=bool(params.get("moss_preview_base")), allow_quant=version == LATEST_VERSION)
             if errors: raise RuntimeError("；".join(errors))
             if files.get("preview_checkpoint"): validate(files["preview_checkpoint"], "preview_checkpoint")
     if family == "krea2":
@@ -283,6 +289,10 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
     if precision not in allowed:
         raise ValueError("新版 %s 支持 %s；当前精度 %s 不受支持，请重新选择。" % (family, "/".join(allowed), precision))
     train_dir = (params.get("train_data_dir") or params.get("raw_dir")) if family == "minimax" else core.dataset_train_dir("character", params.get("project"))
+    mask_report = None
+    if mask_mode != "off":
+        train_dir, mask_report = loss_masks.training_view(core, params, core.check_stop)
+        logf("[学习区域] 使用检查后的训练副本：有效 %d，排除 %d，明确整图学习 %d。" % (mask_report["valid"], mask_report["excluded"], mask_report["unmasked"]))
     if family == "minimax":
         from .h3_dataset import validate_options
         h3_training_type, _caption_method = validate_options(params)
@@ -341,6 +351,10 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         run_identity["training_adapter"] = [str(adapter_path.resolve()), adapter_path.stat().st_size, adapter_path.stat().st_mtime_ns]
     if family == "minimax":
         run_identity["training_type"] = h3_training_type
+    if family == "moss_image" and version == LATEST_VERSION:
+        run_identity["moss_clean_end"] = "60:7:30:15:2"
+    if mask_report:
+        run_identity["loss_masks"] = {"fingerprint": mask_report["fingerprint"], "mode": mask_mode, "floor": mask_floor}
     marker = output / (output_name + ".fizgig-runtime.json")
     if resume_from:
         from kohya_core.training_resume import require_state
@@ -353,7 +367,7 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
             # Old H3 runs always enabled clip stills, matching the character strategy.
             previous["training_type"] = "character"
         if previous != run_identity:
-            raise RuntimeError("续训快照的引擎、底模、训练适配器、训练类型、rank、优化器或学习率计划与当前选择不同，或缺少版本记录。请用原配置续训；添加适配器后请从头训练。")
+            raise RuntimeError("续训快照的引擎、底模、训练适配器、训练类型、rank、优化器、学习率计划或学习区域（遮罩内容 / 背景参与程度）与当前不同，或缺少版本记录。请使用原配置续训；改变这些设置后请从头训练。")
     swap_text = str(numeric("blocks_to_swap", "auto")).strip().lower()
     swap = -1 if swap_text in ("auto", "自动", "") else int(swap_text)
     if swap < -1: raise ValueError("块交换应为自动或非负整数。")
@@ -407,6 +421,10 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
            "--compile_blocks", "on" if params.get("compile") else "off",
            "--save_state", "--save_state_on_train_end", "--keep_last_n_states", "2",
            "--vae", files["vae"], "--text_encoder", files["te"]]
+    if mask_report:
+        cmd += ["--masked_training", "--mask_floor", str(mask_floor)]
+        core._record_effective(loss_masks={k: v for k, v in mask_report.items() if k != "rows"})
+        _write(output / (output_name + ".loss-masks.json"), mask_report)
     if family in ("anima", "sdxl"): cmd[cmd.index("--blocks_to_swap") + 1] = "0"
     if files.get("training_adapter"): cmd += ["--training_adapter", files["training_adapter"]]
     if adaptive: cmd += ["--adaptive_lr", "--adaptive_lr_min", str(adaptive[0]), "--adaptive_lr_max", str(adaptive[1])]
@@ -430,6 +448,10 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         logf("[MOSS 多角色] %d 个角色；保留原触发词；DOP %s。" % (len(roles), "开启：每 2 步、权重 2" if dop else "关闭"))
     if resume_from: cmd += ["--resume", str(resume_from)]
     options = []
+    if family == "moss_image" and version == LATEST_VERSION:
+        options += ["lownoise_pct=" + run_identity["moss_clean_end"]]
+        core._record_effective(moss_clean_end=run_identity["moss_clean_end"])
+        logf("[Fizgig · MOSS] Clean-end 使用新版渐变计划：60:7:30:15:2。")
     if family == "minimax":
         options += ["photo_blocks=20-49", "clip_blocks=20-49", "audio_blocks=20-49", "caption_dropout=0.05",
                     "tread=0.5@2-47", "shift=0.666667"]

@@ -207,7 +207,7 @@ def _has_dataset_images(directory):
         return False
     for root, dirs, files in os.walk(directory):
         dirs[:] = [name for name in dirs if not name.startswith(".")]
-        if any(os.path.splitext(name)[1].lower() in _DATASET_IMAGE_EXTS for name in files):
+        if any(os.path.splitext(name)[1].lower() in _DATASET_IMAGE_EXTS and not os.path.splitext(name)[0].casefold().endswith('-masklabel') for name in files):
             return True
     return False
 

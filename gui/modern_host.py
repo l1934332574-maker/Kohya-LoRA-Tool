@@ -23,13 +23,14 @@ from kohya_core.diagnostics import SessionLog, summary_lines, redact, write_bund
 from kohya_core.training_history import TrainingHistory
 from kohya_core.training_media import sample_files, image_preview, is_sample
 from kohya_core.model_catalog import catalog as model_catalog, resolve_choice
-from kohya_core.fizgig_engine import runtime as fizgig_runtime, source_version as fizgig_source_version, VERSION as FIZGIG_TARGET, SUPPORTED_STANDARD as FIZGIG_STANDARD, MOSS_VERSION, target_version as fizgig_target_version, use_runtime as fizgig_use_runtime
+from kohya_core.fizgig_engine import runtime as fizgig_runtime, source_version as fizgig_source_version, LATEST_VERSION as FIZGIG_TARGET, SUPPORTED_STANDARD as FIZGIG_STANDARD, MOSS_VERSION, SUPPORTED_MOSS, SUPPORTED_ZIMAGE, compatible_versions as fizgig_compatible_versions, legacy_project_version as fizgig_legacy_version, target_version as fizgig_target_version, use_runtime as fizgig_use_runtime
 from kohya_core.fizgig_adapter import FAMILIES as FIZGIG_FAMILIES, models as fizgig_models, missing as fizgig_missing, _validate as validate_fizgig_models
 from kohya_core.zimage_fizgig import settings as zimage_fz_settings, rows as zimage_fz_rows, validate as validate_zimage_fz_component, files as zimage_fz_files, models_dir as zimage_fz_models_dir
-from kohya_core.moss_models import settings as moss_settings, rows as moss_rows, validate as validate_moss_component, files as moss_files, models_dir as moss_models_dir, missing as moss_missing
+from kohya_core.moss_models import settings as moss_settings, rows as moss_rows, validate as validate_moss_component, files as moss_files, models_dir as moss_models_dir, missing as moss_missing, quantized_encoder_supported as moss_quantized
 from kohya_core.h3_models import settings as h3_settings, rows as h3_rows, validate as validate_h3_component, validate_selected as validate_h3_selected, training_precision as h3_training_precision, required_keys as h3_required_keys, validate_download as validate_h3_download
 from kohya_core.krea2_models import encoder_state as krea2_encoder_state, CHOICES as KREA2_ENCODER_CHOICES, settings as krea2_settings, rows as krea2_rows, files as krea2_files, missing as krea2_missing, encoder_key as krea2_encoder_key, change as change_krea2_selection, validate as validate_krea2_component, validate_selected as validate_krea2_selected
 from kohya_core.zimage_models import settings as zimage_settings, discover as zimage_components, validate_selection as validate_zimage_selection, missing as zimage_missing
+from kohya_core import loss_masks
 from kohya_core.project_config import WORKSPACE_PARAM_KEYS, BOOL_PARAM_KEYS, training_params, caption_summary, dataset_images, read_caption, normalize_batch_size, normalize_gradient_checkpointing
 
 try:
@@ -39,10 +40,10 @@ except Exception:  # pragma: no cover - desktop package may omit the optional he
 
 
 _MODERN_PROJECT_TEMPLATES = {
-    "MOSS-Image LoRA（Fizgig）": {"mode": "moss_fz", "base_type": "sdxl", "note": "Base 训练，SFT 预览；Fizgig v8.5.0 普通 LoRA。"},
+    "MOSS-Image LoRA（Fizgig）": {"mode": "moss_fz", "base_type": "sdxl", "note": "Base 训练，SFT 预览；Fizgig v8.9.6 普通 LoRA。"},
     "Z-Image Turbo LoRA（Fizgig）": {"mode": "zimage_fz", "base_type": "sdxl", "note": "Z-Image Turbo 普通 LoRA；冻结训练适配器，8 步、CFG 1 预览。"},
-    "Anima LoRA（Fizgig）": {"mode": "anima_fz", "base_type": "anima", "note": "Fizgig v7.0.1 标准 28 层 Anima，普通 LoRA；上游实验性入口。"},
-    "SDXL LoRA（Fizgig）": {"mode": "sdxl_fz", "base_type": "sdxl", "note": "Fizgig v7.0.1 完整 SDXL 底模，冻结文本编码器；上游实验性入口。"},
+    "Anima LoRA（Fizgig）": {"mode": "anima_fz", "base_type": "anima", "note": "Fizgig v8.9.6 标准 28 层 Anima，普通 LoRA；上游实验性入口。"},
+    "SDXL LoRA（Fizgig）": {"mode": "sdxl_fz", "base_type": "sdxl", "note": "Fizgig v8.9.6 完整 SDXL 底模，冻结文本编码器；上游实验性入口。"},
     "概念 LoRA（SDXL）": {"mode": "concept", "base_type": "sdxl", "note": "旧版兼容模板：SDXL 概念训练。", "visible": False},
     "Krea 2 图像 LoRA": {"mode": "krea2", "base_type": "sdxl", "note": "第二引擎 musubi；模型文件放在 models/krea2。"},
     "H3 视频 LoRA": {"mode": "video", "base_type": "sdxl", "note": "第三引擎 AI Toolkit；使用视频文件和同名字幕。"},
@@ -66,6 +67,7 @@ _MODERN_IMPORT_EXTRA_PARAMS = {
     "batch_size", "gc", "sample_prompt", "sample_seed", "global_pos", "global_neg",
     "caption_method", "caption_language", "caption_length",
     "h3_caption_replace", "h3_sync_trigger", "moss_preview_base",
+    "mask_mode", "mask_floor", "mask_overwrite_auto", "mask_source",
 }
 
 _APPEARANCE_BACKGROUND_HISTORY_LIMIT = 8
@@ -137,6 +139,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         self._task = None
         self._task_downloader = None
         self._project_name_reservations = set()
+        self._classic_utilities = {}
+        self._classic_utilities_lock = threading.Lock()
         self._picker_dirs = {}
         self._dataset_previews = {}
         self._caption_reports = {}
@@ -389,7 +393,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
 
         root_images = [
             filename for filename in os.listdir(directory)
-            if os.path.splitext(filename)[1].lower() in supported_extensions
+            if os.path.splitext(filename)[1].lower() in supported_extensions and not loss_masks.is_mask_file(filename)
             and os.path.isfile(os.path.join(directory, filename))
         ]
         if root_images:
@@ -400,7 +404,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             dirs[:] = [name for name in dirs if not name.startswith(".")]
             count += sum(
                 1 for filename in files
-                if os.path.splitext(filename)[1].lower() in supported_extensions
+                if os.path.splitext(filename)[1].lower() in supported_extensions and not loss_masks.is_mask_file(filename)
             )
         return count
 
@@ -476,6 +480,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 "loss_history": list(task.get("loss_history", [])),
                 "sampling_status": dict(task.get("sampling_status") or {}),
                 "effective_params": dict(task.get("effective_params") or {}),
+                "mask_mode": task.get("mask_mode", ""),
                 "download_result": dict(task.get("download_result") or {}),
                 "logs": logs[max(0, offset - log_offset):],
                 "next_offset": log_offset + len(logs),
@@ -569,8 +574,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             "cmd_install": ("安装 Kohya 训练内核", self.core.install_kohya),
             "cmd_install_musubi": ("安装第二引擎 · musubi", self.core.install_musubi_engine),
             "cmd_install_at": ("安装第三引擎 · AI Toolkit", self.core.install_ai_toolkit_engine),
-            "cmd_install_fizgig": ("安装 Fizgig v7.3.1", self.core.install_fizgig_engine),
-            "fizgig_engine_update": ("更新 Fizgig v7.3.1", self.core.update_fizgig_engine),
+            "cmd_install_fizgig": ("安装 Fizgig " + FIZGIG_TARGET, self.core.install_fizgig_engine),
+            "fizgig_engine_update": ("更新 Fizgig " + FIZGIG_TARGET, self.core.update_fizgig_engine),
             "fizgig_engine_rollback": ("回退 Fizgig 活动版本", self.core.rollback_fizgig_engine),
         }
         spec = installers.get(action)
@@ -584,15 +589,15 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                     raise ValueError("请先打开一个有效的 Fizgig 项目。")
                 mode = config["mode"]
                 version = str((config.get("params") or {}).get("fizgig_version") or (
-                    fizgig_target_version(mode) if mode in ("zimage_fz", "moss_fz") else "v7.0.1" if mode in ("anima_fz", "sdxl_fz") else "v6.5.0"))
+                    fizgig_legacy_version(mode)))
                 if version not in ("v6.5.0", *FIZGIG_STANDARD):
                     raise ValueError("未接入这个 Fizgig 版本。")
-                if mode == "moss_fz" and version != MOSS_VERSION:
-                    raise ValueError("MOSS-Image 需要 Fizgig " + MOSS_VERSION)
-                if mode == "zimage_fz" and version != FIZGIG_TARGET:
-                    raise ValueError("Z-Image Turbo 需要 Fizgig " + FIZGIG_TARGET)
+                if mode == "moss_fz" and version not in SUPPORTED_MOSS:
+                    raise ValueError("MOSS-Image 需要 Fizgig " + " / ".join(SUPPORTED_MOSS))
+                if mode == "zimage_fz" and version not in SUPPORTED_ZIMAGE:
+                    raise ValueError("Z-Image Turbo 需要 Fizgig " + " / ".join(SUPPORTED_ZIMAGE))
                 if mode in ("anima_fz", "sdxl_fz") and version not in FIZGIG_STANDARD:
-                    raise ValueError("Anima / SDXL Fizgig 项目需要已接入的 v7 标准入口。")
+                    raise ValueError("Anima / SDXL Fizgig 项目需要已接入的 标准训练入口。")
             except (OSError, ValueError, TypeError) as exc:
                 return {"ok": False, "error": str(exc)}
             from kohya_core.fizgig_engine import ensure_selected_runtime
@@ -647,7 +652,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             version = str(((config or {}).get("params") or {}).get("fizgig_version")
                           or ("v6.5.0" if project_name else FIZGIG_TARGET))
             if version in FIZGIG_STANDARD:
-                return ("Krea 2 模型", "Krea 2 Fizgig v7 训练文件", "KREA2_FZ_MODEL_LINKS",
+                return ("Krea 2 模型", "Krea 2 Fizgig 标准训练文件", "KREA2_FZ_MODEL_LINKS",
                         "krea2_models_dir", "krea2_fz_model_files", {"raw", "vae"})
         return specs.get(mode)
 
@@ -656,14 +661,19 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         if not spec:
             return {"ok": False, "error": "该模式没有可在新版训练页管理的模型下载列表。"}
         title, description, links_name, dir_name, files_name, required = spec
-        links = getattr(self.core, links_name, {})
+        links = dict(getattr(self.core, links_name, {}))
+        if mode == "moss_fz" and "te" in links:
+            config = self.core.load_project(str(project_name or "")) if project_name else {}
+            if moss_quantized(config):
+                entry = links["te"]
+                links["te"] = (entry[0], "Qwen3.5-9B 文本编码器（默认 BF16；可选本地 INT8 / 4-bit GPTQ）", *entry[2:])
         asset_dir = str(getattr(self.core, dir_name)())
         config = self.core.load_project(str(project_name or "")) if project_name else {}
         selection = moss_settings(config) if mode == "moss_fz" else zimage_fz_settings(config) if mode == "zimage_fz" else h3_settings(config) if mode == "h3_fz" else krea2_settings(config) if mode == "krea2_fz" else None
         if mode == "krea2_fz":
             state = krea2_rows(self.core, selection, allow_fp8=links_name == "KREA2_FZ_MODEL_LINKS")
         else:
-            state = moss_rows(self.core, selection) if mode == "moss_fz" else zimage_fz_rows(self.core, selection) if mode == "zimage_fz" else h3_rows(self.core, selection) if mode == "h3_fz" else {}
+            state = moss_rows(self.core, selection, allow_quant=moss_quantized(config)) if mode == "moss_fz" else zimage_fz_rows(self.core, selection) if mode == "zimage_fz" else h3_rows(self.core, selection) if mode == "h3_fz" else {}
         existing = ({key: row["path"] if row["present"] else None for key, row in state.items()}
                     if state else getattr(self.core, files_name)())
         required = set(required)
@@ -755,13 +765,13 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             return {"ok": False, "error": "训练必需组件不能停用。"}
         path = ""
         if action == "select":
-            state = moss_rows(self.core, moss_settings(config))[key]
+            state = moss_rows(self.core, moss_settings(config), allow_quant=moss_quantized(config))[key]
             chosen = self.choose_path("model", state["path"], "moss_component_" + key)
             if not chosen.get("ok") or chosen.get("cancelled"):
                 return chosen
             path = os.path.abspath(os.path.expanduser(str(chosen.get("path") or "").strip().strip('"')))
             try:
-                validate_moss_component(path, key)
+                validate_moss_component(path, key, allow_quant=moss_quantized(config))
             except (ValueError, OSError) as exc:
                 return {"ok": False, "error": str(exc)}
         guard = self._agent_guard()
@@ -979,7 +989,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         if mode == "krea2_fz":
             existing = krea2_files(self.core, selected_before, allow_fp8=links_name == "KREA2_FZ_MODEL_LINKS")
         else:
-            existing = moss_files(self.core, selected_before) if mode == "moss_fz" else zimage_fz_files(self.core, selected_before) if mode == "zimage_fz" else self.core.h3_fz_model_files(selected_before) if mode == "h3_fz" else getattr(self.core, files_name)()
+            existing = moss_files(self.core, selected_before, allow_quant=moss_quantized(config)) if mode == "moss_fz" else zimage_fz_files(self.core, selected_before) if mode == "zimage_fz" else self.core.h3_fz_model_files(selected_before) if mode == "h3_fz" else getattr(self.core, files_name)()
         if existing.get(key) and os.path.isfile(existing[key]):
             return {"ok": False, "error": "该模型文件已存在，无需重复下载。"}
         task_id = self._begin_task("下载模型文件", "download", mode=mode, key=key)
@@ -1035,7 +1045,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                     ok, failure = False, str(exc)
             if ok and mode == "moss_fz":
                 try:
-                    validate_moss_component(path, key)
+                    validate_moss_component(path, key, allow_quant=moss_quantized(config))
                     if project_name and key in selected_before:
                         current = self.core.load_project(project_name)
                         if current and current.get("mode") == mode and moss_settings(current).get(key) == selected_before[key]:
@@ -1112,6 +1122,10 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             task = self._task
             if not task or task.get("id") != str(task_id or "") or task.get("status") != "awaiting_review":
                 return {"ok": False, "error": "当前任务不在等待检查标签的状态。"}
+            if task.get('mask_mode'):
+                try:
+                    loss_masks.validate_report(loss_masks.report(task['dataset_directory'], kind=task['mask_mode'], source=task.get('mask_source', 'photo')))
+                except (ValueError, OSError) as exc: return {'ok': False, 'error': str(exc)}
             review_event = task.get("review_event")
             if review_event is None:
                 return {"ok": False, "error": "训练确认状态已失效，请重新启动训练。"}
@@ -1467,6 +1481,236 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             return {"ok": False, "error": "无法启动视频描述：" + redact(str(exc))}
         return {"ok": True, "task_id": task_id}
 
+    def start_mask_task(self, project_name):
+        guard = self._agent_guard()
+        if guard: return guard
+        try:
+            config = self.core.load_project(str(project_name or ''))
+            params = training_params(self.core, config, project_name)
+            if loss_masks.settings(params)[0] == 'off': raise ValueError('请先选择学习重点并保存。')
+        except (ValueError, TypeError, AttributeError) as exc:
+            return {'ok': False, 'error': str(exc)}
+        return self.start_preprocess_task(project_name)
+
+    def import_mask_model(self, project_name=''):
+        """Import the exact optional segmenter without changing any training model."""
+        import shutil
+        import tempfile
+        import webview
+        try:
+            with self._task_lock:
+                if self._task and self._task.get('status') == 'running':
+                    raise ValueError('任务运行中，请完成或停止后再选择分割模型。')
+            config = self.core.load_project(str(project_name or '')) if project_name else {}
+            specification = loss_masks.model_spec(loss_masks.source_type(config.get('params') or {}))
+            selected = self._window.create_file_dialog(
+                webview.FileDialog.OPEN, file_types=('分割模型 (*.tflite;*.onnx)',))
+            if not selected: return {'ok': True, 'cancelled': True}
+            source = Path(selected[0] if isinstance(selected, (list, tuple)) else selected)
+            if not source.is_file() or loss_masks.digest(source) != specification['sha256']:
+                raise ValueError('文件校验不符。当前选择 %s，请选择 %s 对应的原始文件。' % (specification['label'], specification['name']))
+            target = Path(self.core.data_sub('models', 'loss_masks')) / specification['name']
+            with self._task_lock:
+                if self._task and self._task.get('status') == 'running':
+                    raise ValueError('已有任务启动，请结束任务后再导入。')
+                if target.is_file() and loss_masks.digest(target) == specification['sha256']:
+                    return {'ok': True}
+                fd, temporary = tempfile.mkstemp(prefix='segmenter-', suffix='.part', dir=target.parent)
+                os.close(fd)
+                try:
+                    shutil.copyfile(source, temporary)
+                    if loss_masks.digest(Path(temporary)) != specification['sha256']:
+                        raise ValueError('复制后的模型校验失败，请重新选择。')
+                    os.replace(temporary, target)
+                finally:
+                    if os.path.isfile(temporary): os.remove(temporary)
+            return {'ok': True}
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def set_mask_options(self, project_name, source, kind):
+        guard = self._agent_guard()
+        if guard: return guard
+        try:
+            with self._task_lock:
+                if self._task and self._task.get('status') in ('running', 'awaiting_review'):
+                    raise ValueError('请先完成或退出当前任务，再切换自动识别设置。手绘修正仍可在训练确认阶段使用。')
+                config = self.core.load_project(str(project_name or ''))
+                if not config: raise ValueError('项目不存在。')
+                updates = dict(config.get('params') or {}, mask_source=str(source), mask_mode=str(kind))
+                params = training_params(self.core, dict(config, params=updates), project_name)
+                if source == 'anime' and kind not in ('person', 'existing'):
+                    raise ValueError('二次元自动模型只支持人物整体；局部区域请选择使用已有遮罩后手绘。')
+                loss_masks.settings(params)
+                config['params'] = updates
+                if not self.core.save_project(project_name, config): raise OSError('设置保存失败。')
+            return {'ok': True, 'mask_source': str(source), 'mask_kind': str(kind)}
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def _prepare_loss_masks(self, task_id, params):
+        kind, _floor = loss_masks.settings(params)
+        if kind == 'off': return None
+        root = Path(self.core.dataset_train_dir('character', params['project'])).resolve()
+        source = loss_masks.source_type(params)
+        specification = loss_masks.model_spec(source)
+        def log(line):
+            self._task_log(task_id, line)
+            match = re.search(r'\[学习区域\] (\d+)/(\d+)', str(line))
+            with self._task_lock:
+                if self._task and self._task.get('id') == task_id:
+                    self._task.update(message='正在准备学习区域…', detail=str(line))
+                    if match: self._task['progress'] = int(match[1]) / max(1, int(match[2]))
+        log('[学习区域] 正在检查已有文件，准备学习区域。')
+        record = fizgig_runtime(self.core, params['fizgig_version'])
+        reviewed = loss_masks.report(root, self.core.check_stop, kind=kind, source=source)
+        need_auto = kind != 'existing' and (bool(reviewed['issues']) or bool(params.get('mask_overwrite_auto')))
+        if not need_auto:
+            log('[学习区域] 已有区域可用，直接进入检查，不下载自动分割模型。')
+        if need_auto:
+            if source == 'anime' and kind != 'person':
+                raise ValueError('二次元自动模型只支持人物整体；脸部与头发请手绘，或先把学习重点改为人物整体。')
+            if not Path(record['python']).is_file() or fizgig_source_version(record['source']) != FIZGIG_TARGET:
+                raise ValueError('请先配置此项目的 Fizgig v8.9.6 环境，再生成学习区域。')
+            from kohya_core.fizgig_engine import _env
+            env = _env(self.core, record)
+            probe = subprocess.run([record['python'], '-c', 'import ' + specification['dependency']],
+                                   env=env, capture_output=True, timeout=60, creationflags=0x08000000 if os.name == 'nt' else 0)
+            self.core.check_stop()
+            if probe.returncode:
+                log('[学习区域] 准备 CPU 分割依赖 %s；不重新安装 PyTorch。' % specification['dependency'])
+                # Keep the engine numpy version; the optional CPU dependency must not upgrade training packages.
+                constraints = Path(self.core.data_sub('cache', 'loss_masks')) / 'constraints.txt'
+                constraints.parent.mkdir(parents=True, exist_ok=True)
+                numpy_version = subprocess.run([record['python'], '-c', 'import importlib.metadata as m; print(m.version("numpy"))'], env=env, capture_output=True, text=True, timeout=60, creationflags=0x08000000 if os.name == 'nt' else 0)
+                if numpy_version.returncode: raise RuntimeError('引擎缺少 numpy，请先修复训练环境。')
+                constraints.write_text('numpy==' + numpy_version.stdout.strip() + '\n', encoding='utf-8')
+                command = [record['python'], '-m', 'pip', 'install', '--retries', '3', '--timeout', '60',
+                           '--index-url', 'https://mirrors.ustc.edu.cn/pypi/simple/', '-c', str(constraints), specification['package']]
+                if self.core.run_stream(command, env=env, logf=log): raise RuntimeError('CPU 分割依赖安装失败；请查看日志后重试。')
+            model = Path(self.core.data_sub('models', 'loss_masks')) / specification['name']
+            model.parent.mkdir(parents=True, exist_ok=True)
+            if not model.is_file() or loss_masks.digest(model) != specification['sha256']:
+                if model.exists(): model.rename(model.with_name(model.name + '.invalid_' + str(time.time_ns())))
+                log('[学习区域] 下载 %s 模型（约 %s），完成后校验 SHA256。' % (specification['label'], specification['size']))
+                # Overseas host: honor the user's system proxy first. A failed
+                # proxy gets one bounded direct fallback; preserve resumable data.
+                downloaded = False
+                for direct in (False, True):
+                    self.core.check_stop()
+                    log('[学习区域] ' + ('按系统网络设置下载。' if not direct else '系统网络下载未成功，尝试直连。'))
+                    complete = self.core._download_with_resume(specification['url'], str(model), log, direct=direct, quick_fail=True)
+                    self.core.check_stop()
+                    if complete and model.is_file():
+                        if loss_masks.digest(model) == specification['sha256']:
+                            downloaded = True
+                            break
+                        model.rename(model.with_name(model.name + '.invalid_' + str(time.time_ns())))
+                        log('[学习区域] 文件校验不符，已隔离，尝试下一条网络路径。')
+                if not downloaded:
+                    raise RuntimeError('自动分割模型下载失败（网络不可达或文件校验失败）。已下载的分片保留；可以重试、选择本地分割模型，或打开遮罩编辑器直接手绘。')
+            command = [record['python'], str(Path(self.core.KIT_DIR) / 'kohya_core/loss_mask_worker.py'),
+                       '--root', str(root), '--source', record['source'], '--model', str(model), '--kind', kind, '--mask-source', source]
+            if params.get('mask_overwrite_auto'): command += ['--overwrite-auto']
+            if self.core.run_stream(command, env=env, logf=log): raise RuntimeError('学习区域生成失败；已完成结果保留，请查看日志。')
+        self.core.check_stop()
+        result = loss_masks.report(root, self.core.check_stop, kind=kind, source=source)
+        log('[学习区域] 格式检查通过 %d/%d，%d 张需要检查；排除 %d，明确整图学习 %d。' % (result['valid'], result['total'], result['issues'], result['excluded'], result['unmasked']))
+        with self._task_lock:
+            if self._task and self._task.get('id') == task_id:
+                self._task.update(dataset_directory=str(root), mask_mode=kind, mask_source=source, mask_report={k: v for k, v in result.items() if k != 'rows'})
+        return result
+
+    def inspect_mask_dataset(self, project_name):
+        try:
+            config = self.core.load_project(str(project_name or ''))
+            params = training_params(self.core, config, project_name)
+            kind, _ = loss_masks.settings(params)
+            if kind == 'off': raise ValueError('请先选择学习重点。')
+            root = Path(self.core.dataset_train_dir('character', project_name)).resolve()
+            result = self.inspect_dataset(str(root), recursive=True)
+            if not result.get('ok'): return result
+            with self._task_lock:
+                self._dataset_previews[result['preview_token']]['mask_project'] = str(project_name)
+            return {**result, 'mask_report': loss_masks.report(root, kind=kind, source=loss_masks.source_type(params)), 'source_kind': 'processed', 'mask_source': loss_masks.source_type(params), 'mask_kind': kind}
+        except (ValueError, TypeError, OSError) as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def _editable_mask_catalog(self, token, name):
+        catalog = self._dataset_previews.get(str(token or ''))
+        if not catalog or not catalog.get('mask_project') or name not in catalog['names']:
+            raise ValueError('请重新打开当前项目的学习区域检查。')
+        root = Path(self.core.dataset_train_dir('character', catalog['mask_project'])).resolve()
+        if catalog['root'] != root or loss_masks.linked(root): raise ValueError('只能修改本项目训练副本。')
+        params = training_params(self.core, self.core.load_project(catalog['mask_project']), catalog['mask_project'])
+        if loss_masks.settings(params)[0] == 'off': raise ValueError('学习重点已关闭，请重新打开项目。')
+        image = root / name
+        if not image.resolve().is_relative_to(root) or any(loss_masks.linked(p) for p in (image, *image.parents) if p.is_relative_to(root)):
+            raise ValueError('图片路径无效。')
+        task = self._task
+        if task and task.get('status') == 'running': raise ValueError('任务运行中不能修改学习区域，请等待检查阶段。')
+        if task and task.get('status') == 'awaiting_review' and task.get('key') != catalog['mask_project']:
+            raise ValueError('请先完成当前项目的检查。')
+        return root, image
+
+    def set_dataset_mask_decision(self, token, name, decision):
+        guard = self._agent_guard()
+        if guard: return guard
+        if decision not in ('default', 'exclude', 'unmasked'): return {'ok': False, 'error': '处理选项无效。'}
+        try:
+            with self._task_lock:
+                root, image = self._editable_mask_catalog(token, str(name))
+                data = loss_masks.manifest(root)
+                for item in loss_masks.related_images(root, image):
+                    key = item.relative_to(root).as_posix()
+                    record = data['images'].setdefault(key, {})
+                    record['decision'] = decision
+                    record['decision_image_sha256'] = loss_masks.digest(item)
+                loss_masks.atomic_json(root / loss_masks.MANIFEST, data)
+            result = self.get_dataset_preview(token, name)
+            catalog = self._dataset_previews[str(token)]
+            config = self.core.load_project(catalog['mask_project'])
+            result['mask_report'] = loss_masks.report(root, kind=(config.get('params') or {}).get('mask_mode'), source=loss_masks.source_type(config.get('params') or {}))
+            return result
+        except (ValueError, OSError) as exc: return {'ok': False, 'error': str(exc)}
+
+    def save_dataset_mask(self, token, name, data_url):
+        guard = self._agent_guard()
+        if guard: return guard
+        try:
+            if not isinstance(data_url, str) or not data_url.startswith('data:image/png;base64,') or len(data_url) > 32 * 1024 * 1024:
+                raise ValueError('遮罩需要为不超过 24 MB 的 PNG。')
+            raw = base64.b64decode(data_url.split(',', 1)[1], validate=True)
+            from PIL import Image
+            with self._task_lock:
+                root, image = self._editable_mask_catalog(token, str(name))
+                with Image.open(image) as original: size = original.size
+                with Image.open(io.BytesIO(raw)) as uploaded:
+                    if uploaded.size != size: raise ValueError('手绘遮罩需要与训练图片尺寸相同。')
+                    uploaded.load(); mask = uploaded.convert('L')
+                items = loss_masks.related_images(root, image)
+                for item in items:
+                    path = loss_masks.mask_for(item)
+                    destination = item.with_name(item.stem + loss_masks.SUFFIX + '.png')
+                    if path:
+                        import shutil
+                        backup_root = root / '.mask_backups'
+                        if loss_masks.linked(backup_root): raise ValueError('遮罩备份目录不能是链接。')
+                        backup = backup_root / str(time.time_ns())
+                        backup.mkdir(parents=True)
+                        shutil.copy2(path, backup / path.name)
+                        if path != destination:
+                            # Remove an alternative extension only after retaining its bytes.
+                            path.rename(backup / ('previous_' + path.name))
+                    loss_masks.atomic_mask(destination, mask)
+                    loss_masks.remember(root, item, origin='manual', kind='manual', decision='default')
+            result = self.get_dataset_preview(token, name)
+            catalog = self._dataset_previews[str(token)]
+            config = self.core.load_project(catalog['mask_project'])
+            result['mask_report'] = loss_masks.report(root, kind=(config.get('params') or {}).get('mask_mode'), source=loss_masks.source_type(config.get('params') or {}))
+            return result
+        except (ValueError, OSError) as exc: return {'ok': False, 'error': str(exc)}
+
     def start_preprocess_task(self, project_name):
         """Run the existing image/video preparation path in the modern task dialog."""
         project_name = str(project_name or "").strip()
@@ -1563,6 +1807,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                         args["dataset_mode"] = None
                     if config.get("training_kind") == "multi_character": args["multi_character"] = config.get("multi_character", {})
                     self.core.preprocess(lambda line: self._task_log(task_id, line), **args)
+                    mask_report = self._prepare_loss_masks(task_id, training_params(self.core, config, project_name))
                     stats = {}
                     if os.path.isfile(report_path):
                         try:
@@ -1573,6 +1818,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                     count = int(stats.get("ok", 0) or 0) + int(stats.get("skipped_existing", 0) or 0)
                     self._task_log(task_id, "[预处理] 已完成，可用图片 %d 张；可以打开标签编辑器检查结果。" % count)
                     message = "数据预处理完成；可以打开标签编辑器检查标签。"
+                    if mask_report:
+                        message = '学习区域准备完成：格式检查通过 %d/%d，%d 张需要检查。请打开学习区域检查覆盖范围。' % (mask_report['valid'], mask_report['total'], mask_report['issues'])
                 with self._task_lock:
                     if self._task and self._task.get("id") == task_id:
                         self._task.update(status="completed", message=message, progress=1.0, detail="预处理结果已保存到当前项目数据集")
@@ -1824,6 +2071,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             kind = str(params.get("at_sub_mode") or "character")
             rows.append({"label": "视频静帧增强", "value": "画风模式关闭" if kind == "style" else "含视频时启用，辅助学习人物与对象细节"})
             rows.append({"label": "训练媒体", "value": "递归读取原始目录；仅准备文本，缓存按训练类型区分"})
+        if params.get('mask_mode', 'off') != 'off':
+            rows.append({'label': '学习区域', 'value': '%s；背景参与 %g%%；问题图检查后才能训练' % (params['mask_mode'], float(params.get('mask_floor', .1)) * 100)})
         rows.append({"label": "采样失败边界", "value": "Fizgig 部分入口可停用后续预览；其他入口的采样异常仍可能中断训练，不能保证隔离"})
         return rows
 
@@ -1900,7 +2149,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         if mode == "moss_fz":
             preview_missing = moss_missing(self.core, params.get("moss_models"),
                 preview=self.core._sample_preview_enabled(params, self._safe_vram()),
-                base_preview=bool(params.get("moss_preview_base")))
+                base_preview=bool(params.get("moss_preview_base")), allow_quant=moss_quantized(params))
             if preview_missing:
                 return {"ok": False, "error": "；".join(preview_missing)}
         if mode == "krea2_fz" and params.get("krea2_models"):
@@ -1918,7 +2167,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 return {"ok": False, "error": str(exc)}
         if mode in FIZGIG_FAMILIES and params.get("fizgig_version") in FIZGIG_STANDARD:
             try:
-                validate_fizgig_models(self.core, FIZGIG_FAMILIES[mode], fizgig_models(self.core, FIZGIG_FAMILIES[mode], params))
+                validate_fizgig_models(self.core, FIZGIG_FAMILIES[mode], fizgig_models(self.core, FIZGIG_FAMILIES[mode], params), version=params.get("fizgig_version"))
             except (ValueError, RuntimeError, OSError) as exc:
                 return {"ok": False, "error": str(exc)}
         warnings = []
@@ -2040,7 +2289,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             model_path = str(krea2_files(self.core, params.get("krea2_models"),
                                          allow_fp8=params.get("fizgig_version") in FIZGIG_STANDARD).get("raw") or model_path)
         if mode == "moss_fz":
-            model_path = str(moss_files(self.core, params.get("moss_models")).get("dit") or model_path)
+            model_path = str(moss_files(self.core, params.get("moss_models"), allow_quant=moss_quantized(params)).get("dit") or model_path)
         if mode == "zimage_fz":
             model_path = str(zimage_fz_files(self.core, params.get("zimage_fz_models")).get("dit") or model_path)
         plan = {
@@ -2587,6 +2836,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                     }
                     if params.get("training_kind") == "multi_character": preprocess_args["multi_character"] = params["multi_character"]
                     self.core.preprocess(lambda line: self._task_log(task_id, line), **preprocess_args)
+                    mask_stats = self._prepare_loss_masks(task_id, params)
                     stats = {}
                     if os.path.isfile(report_path):
                         try:
@@ -2601,6 +2851,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                     label = "可用视频" if params["mode"] == "video" else "可用混合媒体样本" if params["mode"] == "h3_fz" else "可用图片"
                     raise RuntimeError("预处理后只有 %d 个%s；%s 至少需要 %d。" % (
                         processed_count, label, plan["mode_label"], plan["min_images"]))
+                mask_stats = (self._task or {}).get("mask_report") or {}
                 engine_name = plan.get("engine_label") or self._engine_label_for_mode(params["mode"])
                 review_message = ("视频字幕检查完成；确认后启动 %s。" % engine_name if params["mode"] == "video"
                                   else "H3 数据准备完成；确认标签与样本后启动 %s。" % engine_name if params["mode"] == "h3_fz"
@@ -2609,6 +2860,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                     task = self._task
                     tagger_incomplete = bool(task and task.get("id") == task_id and any(
                         "[WARN] WD14 打标后仍有" in line for line in task.get("logs", ())))
+                if mask_stats:
+                    review_message = '学习区域有效 %d/%d，%d 张需处理；请打开训练图片检查。' % (mask_stats['valid'], mask_stats['total'], mask_stats['issues']) + review_message
                 if tagger_incomplete:
                     review_message = "自动打标有缺失，部分图片使用了简短兜底标签。请打开标签编辑器核对并补齐，再决定是否继续训练。"
                 self._task_log(task_id, "[预处理] 已完成，可用数据 %d 个。请检查数据后确认是否继续训练。" % processed_count)
@@ -2617,7 +2870,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                         self._task["dataset_directory"] = params["raw_dir"] if params["mode"] in ("video", "h3_fz") else self.core.dataset_train_dir(params["mode"], project_name)
                         self._task.update(
                             status="awaiting_review",
-                            message=("自动打标有缺失，请核对标签。" if tagger_incomplete else
+                            message=("学习区域还有 %d 张问题图，请先处理。" % mask_stats["issues"] if mask_stats.get("issues") else
+                                     "自动打标有缺失，请核对标签。" if tagger_incomplete else
                                      "数据检查已完成，请确认后继续训练。" if params["mode"] in ("video", "h3_fz") else
                                      "预处理已完成，请检查图片和标签。"),
                             progress=None,
@@ -3195,14 +3449,14 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 continue
             if key == "fizgig_version" and value not in ("v6.5.0", *FIZGIG_STANDARD):
                 return {"ok": False, "error": "未接入这个 Fizgig 版本。"}
-            if key == "fizgig_version" and next_mode == "moss_fz" and value != MOSS_VERSION:
-                return {"ok": False, "error": "MOSS-Image 需要 Fizgig " + MOSS_VERSION}
-            if key == "fizgig_version" and next_mode == "zimage_fz" and value != FIZGIG_TARGET:
-                return {"ok": False, "error": "Z-Image Turbo 需要 Fizgig " + FIZGIG_TARGET}
+            if key == "fizgig_version" and next_mode == "moss_fz" and value not in SUPPORTED_MOSS:
+                return {"ok": False, "error": "MOSS-Image 需要 Fizgig " + " / ".join(SUPPORTED_MOSS)}
+            if key == "fizgig_version" and next_mode == "zimage_fz" and value not in SUPPORTED_ZIMAGE:
+                return {"ok": False, "error": "Z-Image Turbo 需要 Fizgig " + " / ".join(SUPPORTED_ZIMAGE)}
             if key == "fizgig_version" and next_mode in ("anima_fz", "sdxl_fz") and value not in FIZGIG_STANDARD:
-                return {"ok": False, "error": "Anima / SDXL Fizgig 项目需要已接入的 v7 标准入口。"}
+                return {"ok": False, "error": "Anima / SDXL Fizgig 项目需要已接入的 标准训练入口。"}
             allowed_quant = getattr(self.core, "QUANT_MODE_OPTIONS", {}).get(next_mode, ())
-            if next_mode in FIZGIG_FAMILIES and (incoming_params.get("fizgig_version") or params.get("fizgig_version") or (fizgig_target_version(next_mode) if next_mode in ("anima_fz", "sdxl_fz", "zimage_fz", "moss_fz") else "v6.5.0")) in FIZGIG_STANDARD:
+            if next_mode in FIZGIG_FAMILIES and (incoming_params.get("fizgig_version") or params.get("fizgig_version") or fizgig_legacy_version(next_mode)) in FIZGIG_STANDARD:
                 allowed_quant = (("auto", "int8", "nf4", "hqq") if next_mode == "h3_fz" else ("auto", "bf16", "int8", "nf4"))
             if key == "quant_mode" and value not in allowed_quant:
                 return {"ok": False, "error": "当前训练模式不支持量化精度「%s」。" % value}
@@ -3236,10 +3490,13 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 return {"ok": False, "error": "训练参数「%s」的格式无效。" % key}
             params[key] = value
         if next_mode in FIZGIG_FAMILIES:
-            version = params.get("fizgig_version") or (fizgig_target_version(next_mode) if next_mode in ("anima_fz", "sdxl_fz", "zimage_fz", "moss_fz") else "v6.5.0")
+            version = params.get("fizgig_version") or fizgig_legacy_version(next_mode)
             allowed_quant = ((("auto", "int8", "nf4", "hqq") if next_mode == "h3_fz" else ("auto", "bf16", "int8", "nf4"))) if version in FIZGIG_STANDARD else self.core.QUANT_MODE_OPTIONS.get(next_mode, ())
             if (params.get("quant_mode") or "auto") not in allowed_quant:
                 return {"ok": False, "error": "所选引擎版本不支持已保存的量化精度，请同时改为自动或此版本支持的精度。"}
+        try:
+            loss_masks.settings(dict(params, mode=next_mode, training_kind=config.get('training_kind')))
+        except ValueError as exc: return {'ok': False, 'error': str(exc)}
         config["params"] = params
         if config.get("training_kind") == "slider":
             try:
@@ -3303,6 +3560,16 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         return {"ok": True, "images": names[offset:offset + 100],
                 "next_offset": offset + 100 if offset + 100 < len(names) else None}
 
+    def get_dataset_thumbnail(self, token, name):
+        with self._task_lock:
+            catalog = self._dataset_previews.get(str(token or ''))
+        if not catalog or str(name or '') not in catalog['names']:
+            return {'ok': False, 'error': '图片不在本次图集中。'}
+        try:
+            return {'ok': True, **image_preview(catalog['root'], name, max_size=(128, 128))}
+        except (OSError, ValueError) as exc:
+            return {'ok': False, 'error': str(exc)}
+
     def get_dataset_preview(self, token, name):
         with self._task_lock:
             catalog = self._dataset_previews.get(str(token or ""))
@@ -3314,7 +3581,16 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 caption = read_caption(catalog["root"] / name)
             except OSError:
                 caption = ""
-            return {"ok": True, "name": name, "caption": caption, **image}
+            mask_data = {}
+            if catalog.get('mask_project'):
+                root = catalog['root']
+                record = loss_masks.manifest(root)['images'].get(str(name), {})
+                mask_data = loss_masks.preview(root / name, record)
+                with self._task_lock:
+                    active = self._task and self._task.get('status') == 'running'
+                mask_data['mask_editable'] = not bool(active)
+                mask_data['mask_balanced'] = (root / 'multi_manifest.json').is_file()
+            return {"ok": True, "name": name, "caption": caption, **image, **mask_data}
         except (OSError, ValueError) as exc:
             return {"ok": False, "error": "无法读取图片：%s" % exc}
 
@@ -3328,6 +3604,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             is_raw = task.get("mode") in ("video", "h3_fz")
         if not directory:
             return {"ok": False, "error": "图片预处理尚未完成。"}
+        if task.get('mask_mode'):
+            return self.inspect_mask_dataset(task['key'])
         return {**self.inspect_dataset(directory, recursive=is_raw, h3=is_h3), "source_kind": "raw_media" if is_raw else "processed"}
 
     @staticmethod
@@ -4003,16 +4281,17 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         except Exception as exc:
             missing = ["无法读取模型状态：%s" % exc]
         version_info = core.fizgig_engine_update_status() if mode in FIZGIG_FAMILIES else {}
-        version = str((project_config.get("params") or {}).get("fizgig_version") or (fizgig_target_version(mode) if mode in ("zimage_fz", "moss_fz") or not project_name else "v7.0.1" if mode in ("anima_fz", "sdxl_fz") else "v6.5.0"))
+        version = str((project_config.get("params") or {}).get("fizgig_version") or (fizgig_legacy_version(mode) if project_name else fizgig_target_version(mode)))
         engine_detail = ""
         if mode in FIZGIG_FAMILIES:
             record = fizgig_runtime(core, version)
             engine_ready = Path(record["python"]).is_file() and fizgig_source_version(record["source"]) == version
             engine_detail = "未检测到完整的 Fizgig %s 安装，请检查此版本的源码与运行环境。" % version
             if engine_ready:
-                with fizgig_use_runtime(core, {"fizgig_version": version}):
-                    engine_status = core.fizgig_engine_status()
-                    engine_ready, engine_detail = bool(engine_status[0]), str(engine_status[1])
+                # Navigation checks the installed files only. Importing torch here
+                # costs several seconds on every project open; training performs
+                # the full runtime/GPU check before starting the worker.
+                engine_detail = "已安装 Fizgig %s；开始训练时检查运行环境与 GPU。" % version
             engine_update_available = version != fizgig_target_version(mode)
         supports = {
             key: bool(core.param_supports(key, mode))
@@ -4023,6 +4302,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             for key in ("optimizer", "compile", "global_pos", "global_neg"):
                 supports[key] = key != "global_neg" or mode != "zimage_fz"
             supports["blocks_to_swap"] = mode in ("krea2_fz", "flux2_fz", "qwen21_fz", "h3_fz", "zimage_fz", "moss_fz")
+        supports['loss_masks'] = mode in loss_masks.MODES and version == FIZGIG_TARGET and project_config.get('training_kind') != 'slider'
         quant_modes = list(getattr(core, "QUANT_MODE_OPTIONS", {}).get(mode, ()))
         if mode in FIZGIG_FAMILIES and version in FIZGIG_STANDARD:
             quant_modes = ["auto", "int8", "nf4", "hqq"] if mode == "h3_fz" else ["auto", "bf16", "int8", "nf4"]
@@ -4144,6 +4424,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             "fizgig_engine_detail": engine_detail,
             "fizgig_versions": version_info.get("versions", []),
             "fizgig_standard_versions": list(FIZGIG_STANDARD),
+            "fizgig_compatible_versions": list(fizgig_compatible_versions(mode, project_config.get("training_kind") == "multi_character")),
             "zimage_components": self.get_model_downloads(mode, project_name) if mode == "zimage_fz" else None,
             "moss_components": self.get_model_downloads(mode, project_name) if mode == "moss_fz" else None,
             "fizgig_target_version": fizgig_target_version(mode),
@@ -4430,13 +4711,31 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         }
 
     def _spawn_classic(self, *arguments):
+        from gui.utility_windows import allow_foreground, raise_process_window
         root = _app_root()
-        if getattr(sys, "frozen", False):
-            command = [sys.executable, "--ui=classic", *arguments]
-        else:
-            entry = Path(sys.argv[0]).resolve()
-            command = [sys.executable, str(entry), "--ui=classic", *arguments]
-        return subprocess.Popen(command, cwd=str(root), close_fds=True)
+        key = tuple(arguments)
+        with self._classic_utilities_lock:
+            previous = self._classic_utilities.get(key)
+            if previous is not None and previous.poll() is None:
+                allow_foreground(previous.pid)
+                raise_process_window(previous.pid)
+                return previous
+            if getattr(sys, "frozen", False):
+                command = [sys.executable, "--ui=classic", *arguments]
+            else:
+                entry = Path(sys.argv[0]).resolve()
+                command = [sys.executable, str(entry), "--ui=classic", *arguments]
+            if self._window is not None:
+                try:
+                    handle = self._window.native.Handle
+                    owner = int(handle.ToInt64()) if hasattr(handle, "ToInt64") else int(handle)
+                    command += ["--utility-owner", str(owner)]
+                except (AttributeError, TypeError, ValueError):
+                    pass
+            process = subprocess.Popen(command, cwd=str(root), close_fds=True)
+            self._classic_utilities[key] = process
+            allow_foreground(process.pid)
+            return process
 
     def get_log_export_status(self, export_id):
         """Report completion separately from the background export request."""
@@ -4713,7 +5012,7 @@ def launch(core, dev=False, debug=False, engine_groups=(), short_mode_labels=Non
             "新版训练页运行组件尚未安装。开发环境请运行 `python -m pip install -r requirements-ui.txt`。"
         ) from exc
 
-    from gui.ui_startup import StartupMonitor, check_page_assets
+    from gui.ui_startup import StartupMonitor, resolve_ui_index
 
     startup = StartupMonitor(core)
     root = _app_root()
@@ -4722,7 +5021,7 @@ def launch(core, dev=False, debug=False, engine_groups=(), short_mode_labels=Non
         url = os.environ.get("KOHYA_UI_DEV_URL", "http://127.0.0.1:5173")
     else:
         try:
-            check_page_assets(index, startup._log)
+            index = resolve_ui_index(index, Path(core.data_sub("cache", "ui_recovery")), startup._log)
         except Exception as exc:
             startup.record("asset_check_failed", exc)
             raise RuntimeError("%s\n\n启动诊断：%s" % (exc, startup.path)) from exc

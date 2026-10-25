@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onUnmounted, ref, watch } from 'vue'
+import DatasetImageBrowser from './DatasetImageBrowser.vue'
 import type { ModernTaskStatus } from '../bridge'
 
 const props = defineProps<{
@@ -66,7 +67,9 @@ async function start() {
   starting.value = true
   startError.value = ''
   try {
-    const result = props.action === 'preprocess'
+    const result = props.action === 'masks'
+      ? await api.start_mask_task(props.projectName ?? '')
+      : props.action === 'preprocess'
       ? await api.start_preprocess_task(props.projectName ?? '')
       : props.action === 'video_caption'
         ? await api.start_video_caption_task(props.projectName ?? '')
@@ -127,12 +130,12 @@ onUnmounted(stopPolling)
     <div v-if="open && !minimized" class="task-backdrop">
       <section class="task-dialog" role="dialog" aria-modal="true" :aria-labelledby="`task-title-${action}`">
         <header class="task-header">
-          <div><span class="task-kicker">{{ action==='agent_task'?'助手执行任务':action==='preprocess' || action==='video_caption'?'数据准备':'训练环境设置' }}</span><h2 :id="`task-title-${action}`">{{ title }}</h2></div>
+          <div><span class="task-kicker">{{ action==='agent_task'?'助手执行任务':action==='masks' || action==='preprocess' || action==='video_caption'?'数据准备':'训练环境设置' }}</span><h2 :id="`task-title-${action}`">{{ title }}</h2></div>
           <button v-if="running()" class="task-button" type="button" @click="minimized=true">最小化</button><button class="task-close" type="button" aria-label="关闭" :disabled="running() || starting" @click="close">×</button>
         </header>
         <p class="task-description">{{ description }}</p>
         <template v-if="!taskId">
-          <div class="task-note">{{ action === 'video_caption' ? '使用 Qwen2.5-VL 抽帧描述视频；首次使用会下载约 6~7GB 模型。已有同名字幕跳过，H3 混合媒体项目包含子文件夹。下载、处理进度和失败原因会显示在此窗口。' : action === 'preprocess' ? '只处理当前项目的数据并生成标签，不会启动训练。完成后可打开标签编辑器检查。日志会显示在此窗口和主页运行日志中。' : '安装操作会在后台运行，并复用软件现有的安装与检测流程。日志会显示在此窗口和主页运行日志中。' }}</div>
+          <div class="task-note">{{ action === 'masks' ? '首次自动生成会准备约 16 MB 分割模型和 CPU 依赖。原图保留；已有手绘区域不覆盖。进度与失败原因显示在此窗口。' : action === 'video_caption' ? '使用 Qwen2.5-VL 抽帧描述视频；首次使用会下载约 6~7GB 模型。已有同名字幕跳过，H3 混合媒体项目包含子文件夹。下载、处理进度和失败原因会显示在此窗口。' : action === 'preprocess' ? '只处理当前项目的数据并生成标签，不会启动训练。完成后可打开标签编辑器检查。日志会显示在此窗口和主页运行日志中。' : '安装操作会在后台运行，并复用软件现有的安装与检测流程。日志会显示在此窗口和主页运行日志中。' }}</div>
           <div v-if="startError" class="task-state failed" role="alert">{{ startError }}</div>
           <footer class="task-actions">
             <button class="task-button" type="button" :disabled="starting" @click="close">稍后再说</button>
@@ -146,7 +149,9 @@ onUnmounted(stopPolling)
           </div>
           <progress v-if="state?.progress!=null" class="task-progress" :value="state.progress" max="1" aria-label="任务进度"></progress>
           <p v-if="state?.detail" class="task-description">{{ state.detail }}</p>
-          <pre class="task-log" aria-live="polite">{{ lines().length ? lines().join('\n') : (action === 'preprocess' ? '等待预处理日志…' : '等待任务日志…') }}</pre>
+          <details v-if="action === 'masks'"><summary>查看详细日志</summary><pre class="task-log">{{ lines().join('\n') }}</pre></details>
+          <pre v-else class="task-log" aria-live="polite">{{ lines().length ? lines().join('\n') : (action === 'preprocess' ? '等待预处理日志…' : '等待任务日志…') }}</pre>
+          <DatasetImageBrowser v-if="action === 'masks' && !running() && taskId" :project-name="projectName" :desktop="true" :show-masks="true" />
           <footer class="task-actions">
             <button v-if="running()" class="task-button" type="button" @click="cancel">停止任务</button>
             <button class="task-button primary" type="button" :disabled="running()" @click="close">{{ running() ? '运行中…' : '完成' }}</button>

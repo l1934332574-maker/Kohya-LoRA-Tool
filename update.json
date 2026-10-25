@@ -1,7 +1,7 @@
 {
-  "version": "v0.19.17",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.19.17/Setup.exe",
+  "version": "v0.19.18",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.19.18/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "setup_sha256": "3e8af73afbf32338f77d1ff78d7b6608b1b81faa70dfdcec4733cf5a2e4e229a",
-  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.19.17 · 预处理热修复（2026-10-23）\n- 修复 v0.19.15 / v0.19.16 数据预处理提示 `No module named 'kohya_core'`，恢复图集处理。"
+  "setup_sha256": "49649856e0a3592b02cda0e085d05b4331225c26390c23ed63b4fa8e9e36743d",
+  "notes": "⚠ 安装若被 Windows / 杀软拦截：本项目安装包未做代码签名，属常见误报，不是病毒。蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」；安全中心报「检测到威胁」→ 到「保护历史记录」选「允许在设备上」；360 / 火绒把安装目录加进信任区。\n\nv0.19.18 · 遮罩训练与界面修复（2026-10-25）\n- 更新 Fizgig v8.9.6，保留旧项目引擎选择，改进 MOSS 文本编码器支持。\n- 新增遮罩编辑器与二次元 / 真人自动识别，可手绘修正，并在训练前检查学习区域。\n- 加快旧项目打开、小工具启动和离线词典显示，修复工具窗口遮挡及重复打开。\n- 更新时明确安装目录并记录日志；界面 JS、CSS 缺失或版本混用时支持离线恢复。"
 }

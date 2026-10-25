@@ -14,6 +14,7 @@ import ModernKohyaWorkspace from './components/ModernKohyaWorkspace.vue'
 import ModernEngineWorkspace from './components/ModernEngineWorkspace.vue'
 import SliderWorkspace from './components/SliderWorkspace.vue'
 import ModernTaskDialog from './components/ModernTaskDialog.vue'
+import MaskEditor from './components/MaskEditor.vue'
 import ModernTrainingDialog from './components/ModernTrainingDialog.vue'
 import TrainingHistoryDialog from './components/TrainingHistoryDialog.vue'
 import ModelDownloadDialog from './components/ModelDownloadDialog.vue'
@@ -40,6 +41,7 @@ import {
   type AppearancePreset,
 } from './bridge'
 
+const maskEditor = ref<InstanceType<typeof MaskEditor> | null>(null)
 const data = ref<BootstrapData | null>(null)
 const logs = ref<string[]>([])
 const loading = ref(true)
@@ -110,7 +112,7 @@ const logExportError = ref('')
 const setupDialogOpen = ref(false)
 const setupAction = ref('')
 const setupFizgigProject = ref('')
-const setupFizgigVersion = ref('v7.3.1')
+const setupFizgigVersion = ref('v8.9.6')
 const historyDialogOpen = ref(false)
 const trainingDialogRef = ref<{ expand: () => void; attach: (id: string) => Promise<void> } | null>(null)
 const setupDialogRef = ref<{ attach: (id: string) => Promise<void> } | null>(null)
@@ -220,7 +222,7 @@ const guideSteps = computed(() => {
   if (workspaceKind.value !== 'slider' || !workspaceOpen.value) return modeWorkspace.value?.guide_steps ?? []
   const settings = workspaceConfig.value?.slider
   return [
-    {id:'fizgig', label:'① 训练环境', button:'配置', action:'cmd_install_fizgig', check:'fizgig', tip:'Fizgig v7.3.1。', done:Boolean(modeWorkspace.value?.engine_ready)},
+    {id:'fizgig', label:'① 训练环境', button:'配置', action:'cmd_install_fizgig', check:'fizgig', tip:'Fizgig v8.9.6。', done:Boolean(modeWorkspace.value?.engine_ready)},
     {id:'base', label:'② 选择底模', button:'选择', action:'cmd_pick_model_type', check:'base', tip:'SDXL / 标准 28 层 Anima。', done:Boolean(workspaceConfig.value?.base_model)},
     {id:'goal', label:'③ 训练目标', button:'设置', action:'cmd_pick_raw', check:'goal', tip:'设置目标与数据来源。', done:Boolean(settings?.name && settings?.neutral)},
   ]
@@ -355,8 +357,8 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
     h3_fz: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['fizgig', '② 安装第四引擎', '去安装', 'cmd_install_fizgig', '安装第四引擎 Fizgig。'], ['h3_fz_models', '③ 下载 H3 Fizgig 模型', '去下载', 'cmd_dl_h3_fz_models', '官方 int8 DiT、文本编码器、视频 VAE 必需；独立音频需音频 VAE，可选适配器和 Turbo LoRA。'], ['raw', '④ 选择混合媒体文件夹', '去选文件夹', 'cmd_pick_raw', '图片、视频和音频可放在同一目录或子目录；每个媒体都需要同名 .txt。']],
     video: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['at', '② 安装第三引擎', '去安装', 'cmd_install_at', '安装第三引擎 AI Toolkit。'], ['h3_models', '③ 下载 H3 模型', '去下载', 'cmd_dl_h3_models', '检查 H3 主模型、文本编码器和视频 VAE。'], ['raw', '④ 选择视频文件夹', '去选文件夹', 'cmd_pick_raw', '选择包含 mp4 视频和同名 txt 字幕的数据集文件夹。']],
     qwen_image: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['at', '② 安装第三引擎', '去安装', 'cmd_install_at', '安装第三引擎 AI Toolkit。'], ['at_model', '③ Qwen-Image 模型', '查看说明', 'cmd_at_model_help', '查看模型选择、显存和本地组件说明。'], ['raw', '④ 选择图片文件夹', '去选文件夹', 'cmd_pick_raw', '选择原始图片文件夹（15~30 张人物/风格图片）。']],
-    moss_fz: [['env','① 环境准备','去准备','cmd_env','准备 Python / Git。'],['fizgig','② Fizgig v8.5.0','配置环境','cmd_install_fizgig','安装 MOSS-Image 训练引擎。'],['moss_models','③ 模型与组件','查看配置','cmd_dl_moss_models','Base 训练，SFT 预览。'],['raw','④ 图集与标签','去选择','cmd_pick_raw','选择训练图片。']],
-    zimage_fz: [['env', '① 环境准备', '去准备', 'cmd_env', '准备 Python / Git。'], ['fizgig', '② Fizgig 训练引擎', '去安装', 'cmd_install_fizgig', '安装 Fizgig v7.3.1。'], ['zimage_fz_models', '③ 模型与训练组件', '查看配置', 'cmd_dl_zimage_fz_models', '选择 Turbo 底模、Qwen3-4B、FLUX.1 VAE 和训练适配器。'], ['raw', '④ 图集与标签', '去选择', 'cmd_pick_raw', '选择训练图片文件夹。']],
+    moss_fz: [['env','① 环境准备','去准备','cmd_env','准备 Python / Git。'],['fizgig','② Fizgig v8.9.6','配置环境','cmd_install_fizgig','安装 MOSS-Image 训练引擎。'],['moss_models','③ 模型与组件','查看配置','cmd_dl_moss_models','Base 训练，SFT 预览。'],['raw','④ 图集与标签','去选择','cmd_pick_raw','选择训练图片。']],
+    zimage_fz: [['env', '① 环境准备', '去准备', 'cmd_env', '准备 Python / Git。'], ['fizgig', '② Fizgig 训练引擎', '去安装', 'cmd_install_fizgig', '安装 Fizgig v8.9.6。'], ['zimage_fz_models', '③ 模型与训练组件', '查看配置', 'cmd_dl_zimage_fz_models', '选择 Turbo 底模、Qwen3-4B、FLUX.1 VAE 和训练适配器。'], ['raw', '④ 图集与标签', '去选择', 'cmd_pick_raw', '选择训练图片文件夹。']],
     zimage: [['env', '① 环境准备', '去准备', 'cmd_env', '安装 Git 和 Python（只需一次）。'], ['at', '② 安装第三引擎', '去安装', 'cmd_install_at', '安装第三引擎 AI Toolkit。'], ['at_model', '③ Z-Image 模型', '查看说明', 'cmd_at_model_help', '查看模型选择、显存和本地组件说明。'], ['raw', '④ 选择图片文件夹', '去选文件夹', 'cmd_pick_raw', '选择原始图片文件夹（15~30 张人物/风格图片）。']],
   }
   const guide_steps = (demoGuideSpecs[mode] ?? []).map(([id, label, button, action, tip]) => ({ id, label, button, action, check: id, tip, done: false, persistent: mode === 'krea2_fz' && id === 'krea2_models' }))
@@ -372,8 +374,8 @@ function demoModeWorkspace(mode: string): ModeWorkspaceData {
     defaults: preset, presets: { [mode]: { sdxl: preset } }, is_video: ['video', 'h3_fz'].includes(mode), is_step_based: stepBased,
     has_training_submode: ['krea2', 'krea2_at', 'krea2_fz', 'qwen21_fz', 'flux2', 'flux2_fz'].includes(mode),
     ...(mode === 'moss_fz' ? {
-      fizgig_version: 'v8.5.0', fizgig_target_version: 'v8.5.0', fizgig_versions: [],
-      fizgig_standard_versions: ['v7.0.1', 'v7.3.1', 'v8.5.0'], engine_key: 'fizgig_ok', has_training_submode: true,
+      fizgig_version: 'v8.9.6', fizgig_target_version: 'v8.9.6', fizgig_versions: [],
+      fizgig_standard_versions: ['v7.0.1', 'v7.3.1', 'v8.5.0', 'v8.9.6'], engine_key: 'fizgig_ok', has_training_submode: true,
       missing_models: ['MOSS-Image Base', 'Qwen3.5-9B', 'FLUX.2 VAE'],
       moss_components: {
         ok: true, title: 'MOSS-Image 训练组件',
@@ -578,7 +580,7 @@ async function saveDialog() {
         previewConfigs.value = { ...previewConfigs.value, [name]: imported ?? {
           mode, base_type: baseType, at_sub_mode: createGoal.value === 'multi_character' ? 'character' : createGoal.value, model_choice: createChoice.value,
           training_kind: createGoal.value === 'multi_character' ? 'multi_character' : createGoal.value === 'slider' ? 'slider' : 'standard',
-          params: mode.endsWith('_fz') ? { fizgig_version: mode === 'moss_fz' ? 'v8.5.0' : 'v7.3.1' } : {},
+          params: mode.endsWith('_fz') ? { fizgig_version: 'v8.9.6' } : {},
         } }
         data.value!.projects = [project, ...projects.value]
         appendLog(imported
@@ -1002,7 +1004,7 @@ async function onGuideAction(step: GuideStep) {
       if (patch && !(await saveKohyaConfig(patch))) return
     }
     setupFizgigProject.value = action === 'cmd_install_fizgig' ? workspaceProject.value?.name || '' : ''
-    setupFizgigVersion.value = setupFizgigProject.value ? modeWorkspace.value?.fizgig_version || 'v7.3.1' : 'v7.3.1'
+    setupFizgigVersion.value = setupFizgigProject.value ? modeWorkspace.value?.fizgig_version || 'v8.9.6' : 'v8.9.6'
     setupAction.value = action
     agentTaskTitle.value = ''
     setupDialogOpen.value = true
@@ -1327,7 +1329,7 @@ async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
     if (activeWorkspaceRef.value?.isBusy?.()) return showToast('正在保存引擎版本，请稍候。')
     if (patch && Object.keys(patch).length && (await saveKohyaConfig(patch)) === false) return
     setupFizgigProject.value = action === 'cmd_install_fizgig' ? workspaceProject.value?.name || '' : ''
-    setupFizgigVersion.value = setupFizgigProject.value ? modeWorkspace.value?.fizgig_version || 'v7.3.1' : 'v7.3.1'
+    setupFizgigVersion.value = setupFizgigProject.value ? modeWorkspace.value?.fizgig_version || 'v8.9.6' : 'v8.9.6'
     setupAction.value = action
     agentTaskTitle.value = ''
     setupDialogOpen.value = true
@@ -1340,7 +1342,13 @@ async function runWorkspaceAction(action: string, patch?: ProjectConfig) {
   if (action === 'training_history') { historyDialogOpen.value = true; return }
   if (!workspaceProject.value) return showToast('请先打开一个项目。')
   if (patch && Object.keys(patch).length && (await saveKohyaConfig(patch)) === false) return
-  if (action === 'preprocess' || action === 'video_caption') {
+  if (action === 'mask_editor') {
+    if (preview.value || !window.pywebview?.api) return showToast('请在桌面版打开遮罩编辑器。')
+    await nextTick()
+    await maskEditor.value?.show()
+    return
+  }
+  if (action === 'preprocess' || action === 'video_caption' || action === 'masks') {
     if (preview.value || !window.pywebview?.api) return showToast('浏览器预览中，这个操作不会触碰本机数据。')
     setupAction.value = action
     agentTaskTitle.value = ''
@@ -1638,12 +1646,13 @@ watch(appearanceDialogOpen, (open) => { if (!open) appearanceFontPreview.value =
       <span v-if="preview && !workspaceOpen" class="preview-pill">界面预览 · 不写入项目 / 不启动训练</span>
     </main>
 
+    <MaskEditor v-if="workspaceProject && !preview" ref="maskEditor" :project-name="workspaceProject.name" hide-launcher @updated="refreshGuideState" />
     <ModernTaskDialog
       ref="setupDialogRef"
       :open="setupDialogOpen"
-      :title="agentTaskTitle || (setupAction === 'video_caption' ? '视频 AI 自动描述' : setupAction === 'preprocess' ? '数据预处理' : setupAction === 'cmd_env' ? '环境准备（Git / Python）' : setupAction === 'cmd_install' ? '安装 Kohya 训练内核' : setupAction === 'cmd_install_musubi' ? '安装第二引擎 · musubi' : setupAction === 'cmd_install_at' ? '安装第三引擎 · AI Toolkit' : setupAction === 'fizgig_engine_rollback' ? '回退 Fizgig 活动版本' : setupAction === 'fizgig_engine_update' ? '更新 Fizgig v7.3.1' : '配置 Fizgig ' + setupFizgigVersion)"
+      :title="agentTaskTitle || (setupAction === 'masks' ? '生成并检查学习区域' : setupAction === 'video_caption' ? '视频 AI 自动描述' : setupAction === 'preprocess' ? '数据预处理' : setupAction === 'cmd_env' ? '环境准备（Git / Python）' : setupAction === 'cmd_install' ? '安装 Kohya 训练内核' : setupAction === 'cmd_install_musubi' ? '安装第二引擎 · musubi' : setupAction === 'cmd_install_at' ? '安装第三引擎 · AI Toolkit' : setupAction === 'fizgig_engine_rollback' ? '回退 Fizgig 活动版本' : setupAction === 'fizgig_engine_update' ? '更新 Fizgig v8.9.6' : '配置 Fizgig ' + setupFizgigVersion)"
       :action="setupAction"
-      :description="setupAction === 'agent_task' ? '助手已启动此任务；这里显示软件的实际执行进度与日志。' : setupAction === 'video_caption' ? '为当前项目的视频生成英文描述，并保存为视频旁的同名 .txt 字幕。' : setupAction === 'preprocess' ? '调用现有预处理器处理当前项目图集和标签；只预处理，不启动训练。' : setupAction === 'cmd_env' ? '检测并准备 Git 与兼容版本的 Python。此项通常只需要完成一次。' : '安装过程会复用现有训练内核安装逻辑；已安装的部分会检测并复用。'"
+      :description="setupAction === 'masks' ? '准备项目训练副本，并生成学习区域；请在完成后检查覆盖范围。' : setupAction === 'agent_task' ? '助手已启动此任务；这里显示软件的实际执行进度与日志。' : setupAction === 'video_caption' ? '为当前项目的视频生成英文描述，并保存为视频旁的同名 .txt 字幕。' : setupAction === 'preprocess' ? '调用现有预处理器处理当前项目图集和标签；只预处理，不启动训练。' : setupAction === 'cmd_env' ? '检测并准备 Git 与兼容版本的 Python。此项通常只需要完成一次。' : '安装过程会复用现有训练内核安装逻辑；已安装的部分会检测并复用。'"
       :project-name="setupAction === 'cmd_install_fizgig' ? setupFizgigProject : workspaceProject?.name ?? ''"
       @close="setupDialogOpen = false"
       @finished="refreshGuideState"
@@ -1678,7 +1687,7 @@ watch(appearanceDialogOpen, (open) => { if (!open) appearanceFontPreview.value =
       @changed="refreshGuideState"
       @notify="showToast"
     />
-    <LoRAWorkbench v-if="loraWorkbenchMounted" :open="loraWorkbenchOpen" :desktop="!preview" :project-name="workspaceProject?.name || ''" @close="loraWorkbenchOpen = false" @notify="showToast" @environment="loraWorkbenchOpen = false; setupFizgigProject = ''; setupFizgigVersion = 'v7.3.1'; setupAction = 'cmd_install_fizgig'; setupDialogOpen = true" />
+    <LoRAWorkbench v-if="loraWorkbenchMounted" :open="loraWorkbenchOpen" :desktop="!preview" :project-name="workspaceProject?.name || ''" @close="loraWorkbenchOpen = false" @notify="showToast" @environment="loraWorkbenchOpen = false; setupFizgigProject = ''; setupFizgigVersion = 'v8.9.6'; setupAction = 'cmd_install_fizgig'; setupDialogOpen = true" />
     <PromptReverseDialog :open="promptReverseOpen" :desktop="!preview" @close="promptReverseOpen = false" @notify="showToast" />
     <ExternalMcpDialog :open="externalMcpOpen" :desktop="!preview" @close="externalMcpOpen = false" @changed="pollExternalMcp" @notify="showToast" />
     <EnvironmentDialog

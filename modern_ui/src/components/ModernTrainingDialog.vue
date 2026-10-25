@@ -4,6 +4,7 @@ import type { ModernTaskStatus, TrainingPlan, SliderSettings } from '../bridge'
 import TrainingMetrics from './TrainingMetrics.vue'
 import TrainingSampleGallery from './TrainingSampleGallery.vue'
 import DatasetImageBrowser from './DatasetImageBrowser.vue'
+import MaskEditor from './MaskEditor.vue'
 
 const props = defineProps<{
   open: boolean
@@ -405,6 +406,7 @@ onUnmounted(stopPolling)
             <span>{{ plan?.mode === 'video' ? '请确认视频字幕和训练数据后继续。' : plan?.mode === 'h3_fz' ? '请检查原图、标签和媒体描述后继续；媒体格式在引擎缓存阶段校验。' : '请检查预处理后的图片和标签；需要时打开标签编辑器修改，回来后确认继续训练。' }}</span>
           </div>
           <TrainingMetrics :metrics="state?.metrics" :history="state?.loss_history" />
+          <MaskEditor v-if="awaitingReview && state?.mask_mode" :project-name="projectName" />
           <DatasetImageBrowser v-if="awaitingReview && (!isRawMediaMode || plan?.mode === 'h3_fz')" :task-id="taskId" :directory="plan?.raw_dir" :desktop="true" :recursive="plan?.mode === 'h3_fz'" :raw-media="plan?.mode === 'h3_fz'" />
           <details v-if="effectiveSummary.length" class="train-effective"><summary>引擎启动后记录的生效参数</summary><div v-for="row in effectiveSummary" :key="row.label"><span>{{ row.label }}</span><strong>{{ row.value }}</strong></div><p>这里记录工具已解析的设置；引擎内部再次调整以日志为准。学习率不是保证不变的实时值。</p></details>
           <section v-if="!awaitingReview" class="train-sample" aria-label="训练采样预览">

@@ -336,7 +336,8 @@ class TrainingAgent:
         params = training_params(self.bridge.core, config, name)
         allowed = {key: LABELS[key] for key in LABELS if self.bridge.core.param_supports(key, mode)}
         quant = list(getattr(self.bridge.core, 'QUANT_MODE_OPTIONS', {}).get(mode, ()))
-        if params.get('fizgig_version') in ('v7.0.1', 'v7.3.1'):
+        from .fizgig_engine import SUPPORTED_STANDARD
+        if params.get('fizgig_version') in SUPPORTED_STANDARD:
             quant = ['auto', 'int8', 'nf4', 'hqq'] if mode == 'h3_fz' else ['auto', 'bf16', 'int8', 'nf4']
             for key in ('optimizer', 'compile', 'global_pos', 'global_neg'):
                 if key in LABELS: allowed[key] = LABELS[key]
@@ -386,10 +387,11 @@ class TrainingAgent:
                  for mode in getattr(core, 'MODE_KEYS', ())]
         for row in modes:
             if row['mode'].endswith('_fz'):
-                row['new_project_version'] = 'v7.3.1'
+                from .fizgig_engine import target_version
+                row['new_project_version'] = target_version(row['mode'])
                 row['quant_modes'] = ['auto', 'int8', 'nf4', 'hqq'] if row['mode'] == 'h3_fz' else ['auto', 'bf16', 'int8', 'nf4']
                 row['assistant_params'] += [key for key in ('optimizer', 'compile', 'global_pos', 'global_neg') if key in LABELS and key not in row['assistant_params']]
-                row['note'] = '新项目使用 v7.3.1；旧项目按 project 中的版本与量化选项处理。'
+                row['note'] = '新项目使用 v8.9.6；旧项目按 project 中的版本与量化选项处理。'
         with self.bridge._task_lock:
             task = self.bridge._task or {}
             task_state = {key: task.get(key) for key in ('id', 'kind', 'status', 'key', 'message')}

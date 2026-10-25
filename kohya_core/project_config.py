@@ -13,11 +13,12 @@ WORKSPACE_PARAM_KEYS = (
     'caption_method', 'caption_language', 'caption_length',
     'pixai_character', 'pixai_copyright', 'pixai_style', 'pixai_threshold',
     'h3_caption_replace', 'h3_sync_trigger', 'moss_preview_base',
+    'mask_mode', 'mask_floor', 'mask_overwrite_auto', 'mask_source',
 )
 BOOL_PARAM_KEYS = frozenset(('strong_bind', 'clean_concept', 'sample_preview',
                             'compile', 'overwrite', 'keep_user_captions', 'amd_mode',
                             'pixai_character', 'pixai_copyright', 'pixai_style',
-                            'h3_caption_replace', 'h3_sync_trigger', 'moss_preview_base'))
+                            'h3_caption_replace', 'h3_sync_trigger', 'moss_preview_base', 'mask_overwrite_auto'))
 
 
 def normalize_learning_rate(value):
@@ -107,6 +108,11 @@ def training_params(core, config, project_name):
         'te_lr': str(normalize_learning_rate(value('te_lr', '1.5e-4' if kohya else '1e-4'))),
         'crop_ratio': core.normalize_crop_ratio(value('crop_ratio', '')),
     }
+    params['mask_source'] = str(value('mask_source', 'photo') or 'photo')
+    params['mask_mode'] = str(value('mask_mode', 'off') or 'off')
+    params['mask_floor'] = value('mask_floor', .1)
+    from .loss_masks import settings as mask_settings
+    mask_settings(params)
     params['gc'] = normalize_gradient_checkpointing(value('gc', 'auto'))
     for key in ('optimizer', 'quant_mode', 'fizgig_qwen_preset'):
         params[key] = str(value(key, 'auto') or 'auto')
@@ -163,13 +169,14 @@ def training_params(core, config, project_name):
 def dataset_images(directory, recursive=False, image_extensions=None):
     """Match the preprocessor's root-first scan without following image or directory links."""
     from preprocess import IMAGE_EXTS
+    from .loss_masks import is_mask_file
     extensions = set(IMAGE_EXTS if image_extensions is None else image_extensions)
     def linked(path):
         return path.is_symlink() or getattr(path, "is_junction", lambda: False)()
     root = Path(directory)
     if not root.is_dir():
         raise OSError("图片文件夹不存在。")
-    images = [path for path in root.iterdir() if path.is_file() and not linked(path) and path.suffix.lower() in extensions]
+    images = [path for path in root.iterdir() if path.is_file() and not linked(path) and path.suffix.lower() in extensions and not is_mask_file(path)]
     if recursive or not images:
         images = []
         import os
@@ -177,7 +184,7 @@ def dataset_images(directory, recursive=False, image_extensions=None):
         for folder, dirs, files in os.walk(root, onerror=errors.append):
             parent = Path(folder)
             dirs[:] = [name for name in dirs if not name.startswith('.') and not linked(parent / name)]
-            images.extend(parent / name for name in files if (parent / name).is_file() and not linked(parent / name) and Path(name).suffix.lower() in extensions)
+            images.extend(parent / name for name in files if (parent / name).is_file() and not linked(parent / name) and Path(name).suffix.lower() in extensions and not is_mask_file(name))
         if errors:
             raise errors[0]
     return sorted(images, key=lambda path: path.relative_to(root).as_posix().casefold())

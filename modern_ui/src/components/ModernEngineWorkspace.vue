@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import TrainingFocusControl from './TrainingFocusControl.vue'
 import OutputDirectoryControl from './OutputDirectoryControl.vue'
 import { computed, reactive, ref, watch } from 'vue'
 import type { ModeWorkspaceData, ProjectCard, ProjectConfig } from '../bridge'
@@ -48,16 +49,19 @@ const draft = reactive({
   blocks_to_swap: '', pixai_character: false, pixai_copyright: false, pixai_style: false, pixai_threshold: '.17', wd14_model: 'swinv2-v3', sample_preview_mode: 'auto', fast_tier: 'auto', fizgig_qwen_preset: 'auto',
   // ★ 2026-09-27：批大小（留空 = 自动 1）/ 梯度检查点（auto / on / off）
   caption_method: 'wd14', caption_language: 'zh', caption_length: 'brief',
-  batch_size: '', gc: 'auto',
+  batch_size: '', gc: 'auto', mask_mode: 'off', mask_source: 'photo', mask_floor: '0.1', mask_overwrite_auto: false,
   moss_preview_base: false, h3_caption_replace: false, h3_sync_trigger: true, strong_bind: true, clean_concept: true, compile: false, overwrite: false, keep_user_captions: false, amd_mode: false,
 })
 
 const isKrea2 = computed(() => props.mode === 'krea2_fz')
 const componentVersionPending = computed(() => draft.fizgig_version !== props.details.fizgig_version)
 const isFizgig = computed(() => props.mode.endsWith('_fz'))
-const isV7 = computed(() => isFizgig.value && (props.details.fizgig_standard_versions || ['v7.0.1', 'v7.3.1']).includes(draft.fizgig_version))
+const isV7 = computed(() => isFizgig.value && (props.details.fizgig_standard_versions || ['v7.0.1', 'v7.3.1', 'v8.5.0', 'v8.9.6']).includes(draft.fizgig_version))
 const supported = (key: string) => key === 'global_neg' && props.mode === 'zimage_fz' ? false : isFizgig.value && ['optimizer','compile','global_pos','global_neg'].includes(key) ? isV7.value : Boolean(props.details.supports?.[key])
-const versions = computed(() => [...new Set([draft.fizgig_version, ...(props.details.fizgig_versions || []), props.details.fizgig_target_version || 'v7.3.1'])].filter(v => v && (props.mode === 'moss_fz' ? v === 'v8.5.0' : v === 'v8.5.0' ? false : props.mode === 'zimage_fz' ? v === 'v7.3.1' : (!(isMulti.value || ['anima_fz','sdxl_fz'].includes(props.mode)) || ['v7.0.1','v7.3.1'].includes(v)))))
+const versions = computed(() => {
+  const allowed = props.details.fizgig_compatible_versions || (props.mode === 'moss_fz' ? ['v8.5.0', 'v8.9.6'] : props.mode === 'zimage_fz' ? ['v7.3.1', 'v8.9.6'] : isMulti.value || ['anima_fz', 'sdxl_fz'].includes(props.mode) ? ['v7.0.1', 'v7.3.1', 'v8.9.6'] : ['v6.5.0', 'v7.0.1', 'v7.3.1', 'v8.9.6'])
+  return [...new Set([draft.fizgig_version, ...(props.details.fizgig_versions || []), props.details.fizgig_target_version || 'v8.9.6'])].filter(v => v && allowed.includes(v))
+})
 const legacyFizgigQuant: Record<string, string[]> = { krea2_fz:['auto','fp8','int8','nf4','bf16'], flux2_fz:['auto','fp8','int8','nf4'], qwen21_fz:['auto','bf16','int8','nf4'], h3_fz:['auto','int8','nf4','hqq'] }
 const quantModes = computed(() => isV7.value ? (props.mode === 'h3_fz' ? ['auto','int8','nf4','hqq'] : ['auto','bf16','int8','nf4']) : isFizgig.value ? legacyFizgigQuant[props.mode] || [] : props.details.quant_modes?.length ? props.details.quant_modes : ['auto', 'fp8', 'int8', 'nf4'])
 const defaults = computed(() => props.details.defaults ?? {})
@@ -125,6 +129,10 @@ function hydrate(config?: ProjectConfig | null) {
     const hydratedValue = value(params[key], styledDefault === undefined ? (key === 'optimizer' || key === 'quant_mode' || key === 'gc' ? 'auto' : '') : String(styledDefault))
     draft[key] = (key === 'wd14_model' ? normalizeWd14Model(hydratedValue) : key === 'gc' ? normalizeGradientCheckpointing(hydratedValue) : key === 'sample_seed' ? hydratedValue || '1234' : hydratedValue) as never
   }
+  draft.mask_source = String(params.mask_source || 'photo')
+  draft.mask_mode = String(params.mask_mode || 'off')
+  draft.mask_floor = String(params.mask_floor ?? .1)
+  draft.mask_overwrite_auto = Boolean(params.mask_overwrite_auto)
   draft.pixai_threshold = String(params.pixai_threshold ?? '.17')
   for (const key of ['pixai_character', 'pixai_copyright', 'pixai_style'] as const) draft[key] = Boolean(params[key])
   draft.caption_method = String(params.caption_method || 'wd14')
@@ -190,6 +198,9 @@ function makePatch(): ProjectConfig {
   for (const key of ['pixai_character', 'pixai_copyright', 'pixai_style', 'pixai_threshold'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
+  for (const key of ['mask_mode', 'mask_floor', 'mask_overwrite_auto', 'mask_source'] as const) {
+    if (dirty.has(`params.${key}`)) params[key] = draft[key]
+  }
   if (dirty.has('params.fizgig_version')) params.fizgig_version = draft.fizgig_version
   for (const key of ['caption_method', 'caption_language', 'caption_length'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
@@ -230,6 +241,11 @@ async function browseModel() {
   if (path) { draft.base_model=path; markRoot('base_model') }
 }
 async function onVersionChange() {
+  if (draft.mask_mode !== 'off' && draft.fizgig_version !== 'v8.9.6') {
+    draft.fizgig_version = props.details.fizgig_version || 'v8.9.6'
+    emit('notify', '旧引擎不支持学习区域。请先把学习重点设为整张图片，再切换版本。')
+    return
+  }
   if (switchingVersion.value) return
   markParam('fizgig_version')
   if (!quantModes.value.includes(draft.quant_mode)) { draft.quant_mode='auto'; markParam('quant_mode') }
@@ -347,6 +363,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
           <button v-if="!isKrea2" class="engine-button compact" type="button" @click="requestAction(modelAction)">{{ ['zimage_fz','moss_fz'].includes(mode) ? '配置模型 / 组件' : '打开模型目录' }}</button>
         </section>
 
+        <div v-if="isMulti"><TrainingFocusControl v-if="supported('loss_masks') || draft.mask_mode !== 'off'" :project-name="project.name" :desktop="desktop" :multi="isMulti" :mode="draft.mask_mode" :source="draft.mask_source" :floor="draft.mask_floor" :overwrite-auto="draft.mask_overwrite_auto" :disabled="Boolean(componentBusy || componentVersionPending)" @change="(key, value) => { Object.assign(draft, { [key]: value }); markParam(key) }" @generate="requestAction('masks')" @edit="requestAction('mask_editor')" /></div>
         <div class="engine-card-grid" :class="{multi:isMulti}">
           <section v-if="!isMulti" class="engine-card">
             <header class="engine-card-heading"><span>{{ isKrea2 ? '02' : '01' }}</span><div><h2>{{ isKrea2 ? '图集、标签与训练方式' : '数据与训练方式' }}</h2><small>按当前模式显示适用项目</small></div></header>
@@ -361,6 +378,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
               <label v-if="supported('crop_ratio') && !isH3Fizgig" class="engine-field" :title="legacyTooltips.cropRatio"><span>预处理裁切比例</span><CropRatioField v-model="draft.crop_ratio" input-class="engine-input" @update:model-value="markParam('crop_ratio')" /></label>
               <label v-if="supported('reg_dir')" class="engine-field" :title="legacyTooltips.regDir"><span>正则数据集（可选）</span><input v-model="draft.reg_dir" class="engine-input" placeholder="选择正则图片文件夹" @input="markRoot('reg_dir')" /></label>
             </div>
+            <TrainingFocusControl v-if="supported('loss_masks') || draft.mask_mode !== 'off'" :project-name="project.name" :desktop="desktop" :multi="isMulti" :mode="draft.mask_mode" :source="draft.mask_source" :floor="draft.mask_floor" :overwrite-auto="draft.mask_overwrite_auto" :disabled="Boolean(componentBusy || componentVersionPending)" @change="(key, value) => { Object.assign(draft, { [key]: value }); markParam(key) }" @generate="requestAction('masks')" @edit="requestAction('mask_editor')" />
             <p v-if="officialQwenPreset" class="engine-hint">本模式 rank、alpha 和学习率由下方官方预设接管；页面保留的旧值不参与训练。</p>
             <p v-else-if="!isVideo" class="engine-hint">选择后从当前模式预设重算学习率：动漫降低 15%，写实提高 15%；不保证更清晰或更自然。</p>
             <button v-if="details.has_training_submode && !isStyle && !isH3Fizgig" class="engine-switch" :disabled="draft.caption_method === 'natural'" :title="legacyTooltips.strongBind" :class="{ active: draft.strong_bind }" type="button" role="switch" :aria-checked="draft.strong_bind" @click="draft.strong_bind = !draft.strong_bind; markParam('strong_bind')"><i></i><span><strong>强绑定</strong><small>自动把 trigger + 训练集 100% 一致的特征词固定到标签开头</small></span></button>

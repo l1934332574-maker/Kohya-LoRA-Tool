@@ -18,6 +18,14 @@ if not os.path.isfile(os.path.join(modern_ui_dist, "index.html")):
 for _theme_name in ("light.png", "dark.png"):
     if not os.path.isfile(os.path.join(modern_ui_dist, "themes", _theme_name)):
         raise RuntimeError(f"现代 UI 内置主题图片缺失：{os.path.join(modern_ui_dist, 'themes', _theme_name)}")
+# Carry the recovery bytes in PYZ as well as the normal external files. An
+# interrupted in-place update can otherwise strand index.html without its hashes.
+import sys
+_project_root = os.path.dirname(modern_ui_root)
+sys.path.insert(0, _project_root)
+from build_exe.bundle_ui import write_bundle
+_generated = os.path.join(_project_root, "build_exe", "generated")
+write_bundle(modern_ui_dist, os.path.join(_generated, "kohya_bundled_ui.py"))
 modern_ui_datas = [(modern_ui_dist, "modern_ui/dist")]
 try:
     import webview as _webview  # noqa: F401
@@ -41,7 +49,7 @@ _icon = _icon_path if os.path.isfile(_icon_path) else None
 
 a = Analysis(
     ['..\\kohya_gui.py'],
-    pathex=['..'],
+    pathex=['..', _generated],
     binaries=[],
     datas=[
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "lora_workbench_worker.py"), "kohya_core"),
@@ -56,6 +64,8 @@ a = Analysis(
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "pixai_assets.json"), "kohya_core"),
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "pixai_worker.py"), "kohya_core"),
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "image_io.py"), "kohya_core"),
+        (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "loss_masks.py"), "kohya_core"),
+        (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "loss_mask_worker.py"), "kohya_core"),
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "ram_assets.json"), "kohya_core"),
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "qwen_vl_assets.json"), "kohya_core"),
         (os.path.join(os.path.dirname(SPEC), "..", "kohya_core", "ram_worker.py"), "kohya_core"),
@@ -95,7 +105,7 @@ a = Analysis(
         'kohya_core.image_io',
         'kohya_core.moss_models', 'kohya_core.moss_multi_character',
         'gui.queue_window',
-        'gui.modern_host', 'gui.lora_workbench_bridge',
+        'gui.modern_host', 'gui.lora_workbench_bridge', 'kohya_bundled_ui',
         'kohya_core.qwen21_diffusers_compat',
     ],
     hookspath=[],

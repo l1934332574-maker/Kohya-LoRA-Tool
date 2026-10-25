@@ -11,7 +11,8 @@
 | [RAM++](https://github.com/xinyu1205/recognize-anything) / [官方权重](https://huggingface.co/xinyu1205/recognize-anything-plus-model) | 可选下载的本地真实照片关键词模型（固定模型权重、推理源码、标签列表和 BERT 词表，逐文件 SHA256 校验；独立环境运行） | Apache-2.0；内含 Salesforce BERT/ViT 代码 BSD-3-Clause、Microsoft Swin 代码 MIT；原版权头与许可随源码保留 |
 | [PixAI Tagger v1.0](https://huggingface.co/pixai-labs/pixai-tagger-v1.0) | 可选二次元打标模型；训练与独立图片反推共用固定提交权重、配置及官方 tagger_pipeline.py，逐文件 SHA256 校验，独立环境运行。官方推理源码包含 SAM3 / ViTDet 与旋转位置编码来源说明，原文件保留这些说明。 | Apache-2.0（按模型仓库声明）；所含第三方实现遵循各自许可 |
 | [WD14 tagger](https://huggingface.co/SmilingWolf) | 人物模式自动打标（tag_images_by_wd14_tagger.py + wd-v1-4-moat-tagger-v2 模型） | 模型遵循其各自许可 |
-| [Fizgig](https://github.com/shootthesound/Fizgig) | 第四引擎（固定 v7.3.1 / MOSS 专用 v8.5.0，兼容已有 v7.0.1；Krea2、Klein 9B、Qwen-Image-2.1、H3、Anima / SDXL / Z-Image Turbo 普通 LoRA 与概念滑块，MOSS-Image Base 普通 LoRA）| Apache-2.0；MiniMax 相关 ComfyUI 派生源码遵循 GPL-3.0，归档保留其版权头与许可 |
+| [Fizgig](https://github.com/shootthesound/Fizgig) | 第四引擎（新项目固定 v8.9.6，保留 v7.3.1 / MOSS v8.5.0 及已有 v7.0.1；Krea2、Klein 9B、Qwen-Image-2.1、H3、Anima / SDXL / Z-Image Turbo 普通 LoRA 与概念滑块，MOSS-Image Base 普通 LoRA）| Apache-2.0；MiniMax 相关 ComfyUI 派生源码遵循 GPL-3.0，归档保留其版权头与许可 |
+| [MediaPipe Selfie Multiclass](https://ai.google.dev/edge/mediapipe/solutions/vision/image_segmenter) / [LiteRT](https://github.com/google-ai-edge/LiteRT) | 可选 CPU 人物分割；首次生成学习区域时下载官方 256×256 TFLite 模型，并校验固定 SHA256；不随软件内置模型权重。 | Apache-2.0（按上游模型与运行时声明） |
 | [comfyui-rocm](https://github.com/patientx/comfyui-rocm) | Fizgig 随包的 detect_gpu.py（AMD GPU 架构探测）| GPL-3.0 |
 | [ffdkj/Danbooru_Tag-Chinese-English-Translation-Table](https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table) | 内置离线中英词典主数据（每日更新 32.5 万条；收录 post_count≥30 词条） | 仓库未附明确开源许可证，仅内置离线查询 |
 | [byzod/a1111-sd-webui-tagcomplete-CN](https://github.com/byzod/a1111-sd-webui-tagcomplete-CN) | 离线词典常见词覆盖/补充（Tags-zh-full-pack.csv，整合自多个社区翻译） | MIT（沿用上游） |
@@ -38,3 +39,7 @@ Fizgig 的国内源码镜像保留固定提交的原始归档、许可证与声�
 ## Z-Image Turbo 组件
 
 Fizgig 的 Z-Image 实现改编自 Tongyi-MAI 的 Apache-2.0 参考源码，原始版权头和许可随固定引擎归档保留。Turbo 权重与 Qwen3-4B、FLUX.1 VAE 的单文件分发来自 `Comfy-Org/z_image_turbo`；训练适配器来自 `ShootTheSound/Fizgig-Z-Image-Turbo-Training-Adapter` 的固定提交。分词器与 VAE 配置来自 `Tongyi-MAI/Z-Image-Turbo` 的固定提交，来源与逐文件 hash 记录在 `kohya_core/fizgig_helpers.json`。模型、适配器分别遵循其上游仓库的许可；本工具仅按需下载，不随安装包附带大型模型权重。
+
+## 二次元学习区域
+
+按需下载 SkyTNT 的 [Anime Segmentation](https://github.com/SkyTNT/anime-segmentation) 人物前景分割 ONNX，使用其 RGB 归一化、等比例缩放与居中补边推理流程。上游代码为 Apache-2.0；模型来源为作者的 `skytnt/anime-seg` 仓库，固定提交 `493cb60893f47441b26ec4fb9a306bce9e342982`、文件 `isnetis.onnx`，SHA256 `f15622d853e8260172812b657053460e20806f04b9e05147d49af7bed31a6e99`。模型只按需下载，不附带在安装包内。CPU 推理使用 ONNX Runtime。

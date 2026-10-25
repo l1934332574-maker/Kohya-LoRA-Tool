@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Kohya-SS LoRA 数据集预处理脚本（Windows / 通用）
@@ -62,6 +62,18 @@ import subprocess
 import sys
 import time
 import traceback
+
+def is_mask_file(path):
+    return os.path.splitext(os.path.basename(path))[0].casefold().endswith('-masklabel')
+
+@lru_cache(maxsize=1)
+def _load_loss_masks():
+    import importlib.util
+    path = os.path.join(_HERE, 'kohya_core', 'loss_masks.py')
+    spec = importlib.util.spec_from_file_location('_kohya_preprocess_masks', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 # 全局隐藏子进程窗口：GUI 宿主无控制台，直接 subprocess 会弹黑色 cmd 窗口，
 # 这里统一加 CREATE_NO_WINDOW（0x08000000），WD14 打标等子进程全部后台静默运行。
@@ -911,6 +923,11 @@ def run_wd14_tagger(output_dir, logf=print, script=None, batch_size=4, thresh=0.
     - library 路径修复：把 sd-scripts 根目录加进 PYTHONPATH 并作为工作目录；
     - 坏图隔离：打标前校验输出图片，损坏的移走，避免一张坏图中断整批打标。
     """
+    if any(is_mask_file(name) for name in os.listdir(output_dir)):
+        # Third-party WD14 scripts enumerate every image themselves. Use our
+        # explicit target list so a mask cannot be captioned as a training photo.
+        logf('[WD14] 图集含学习区域，使用同模型的内置 ONNX 打标，排除遮罩文件。')
+        return _run_wd14_onnx_isolated(output_dir, logf=logf, threshold=thresh, model_key=model_key)
     script = script or find_wd14_tagger()
     if not script:
         logf("[WD14] 未找到 kohya 官方打标脚本，跳过自动打标")
@@ -1002,7 +1019,7 @@ def _fill_missing_captions(output_dir, fallback, logf=print):
     """给输出目录里没有 .txt 的图片补一份兜底 caption。"""
     n = 0
     for f in sorted(os.listdir(output_dir)):
-        if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
+        if (os.path.splitext(f)[1].lower() not in IMAGE_EXTS or is_mask_file(f)):
             continue
         stem = os.path.splitext(f)[0]
         txt = os.path.join(output_dir, stem + ".txt")
@@ -1019,7 +1036,7 @@ def _imgs_no_txt(output_dir):
     """输出目录里没有同名 .txt 的图片文件名。"""
     out = []
     for f in sorted(os.listdir(output_dir)):
-        if os.path.splitext(f)[1].lower() in IMAGE_EXTS and not os.path.isfile(
+        if os.path.splitext(f)[1].lower() in IMAGE_EXTS and not is_mask_file(f) and not os.path.isfile(
                 os.path.join(output_dir, os.path.splitext(f)[0] + ".txt")):
             out.append(f)
     return out
@@ -1068,7 +1085,7 @@ def _purge_placeholder_captions(output_dir, fallback, trigger, logf=print):
     """自愈：删掉上次打标失败留下的兜底 caption（如 1girl, solo），让 WD14 重新打标。"""
     n = 0
     for f in sorted(os.listdir(output_dir)):
-        if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
+        if (os.path.splitext(f)[1].lower() not in IMAGE_EXTS or is_mask_file(f)):
             continue
         txt = os.path.join(output_dir, os.path.splitext(f)[0] + ".txt")
         if not os.path.isfile(txt):
@@ -1530,7 +1547,7 @@ def _quarantine_corrupt_images(output_dir, logf=print):
     moved = 0
     corrupt_dir = output_dir.rstrip("\\/") + "_corrupt"
     for f in sorted(os.listdir(output_dir)):
-        if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
+        if (os.path.splitext(f)[1].lower() not in IMAGE_EXTS or is_mask_file(f)):
             continue
         p = os.path.join(output_dir, f)
         try:
@@ -1849,7 +1866,7 @@ def load_image(path):
     return _load_image_io().read_image(path, alpha_background=(255, 255, 255))
 
 
-def crop_black_borders(img, threshold=12, margin=2):
+def crop_black_borders(img, threshold=12, margin=2, return_box=False):
     """裁剪四周纯黑/近黑边框。返回 (新图, 是否裁剪)。"""
     import numpy as np
 
@@ -1858,7 +1875,7 @@ def crop_black_borders(img, threshold=12, margin=2):
     rows = np.any(mask, axis=1)
     cols = np.any(mask, axis=0)
     if not rows.any() or not cols.any():
-        return img, False
+        return (img, False, None) if return_box else (img, False)
     ys = np.where(rows)[0]
     xs = np.where(cols)[0]
     y0, y1 = int(ys[0]), int(ys[-1])
@@ -1868,7 +1885,7 @@ def crop_black_borders(img, threshold=12, margin=2):
     y1 = min(img.height - 1, y1 + margin)
     x1 = min(img.width - 1, x1 + margin)
     box = (x0, y0, x1 + 1, y1 + 1)
-    return img.crop(box), True
+    return (img.crop(box), True, box) if return_box else (img.crop(box), True)
 
 
 def _corner_rects(width, height, corner, w_frac, h_frac):
@@ -2131,6 +2148,7 @@ def main():
 
         description="Kohya-SS LoRA 数据集预处理：缩放 + 去黑边/水印 + 画风过滤 / 人物WD14打标 + 触发词 + 正则数据集"
     )
+    parser.add_argument("--loss-masks", action="store_true", help="导入并保留同名学习区域（仅项目训练副本）")
     parser.add_argument("--input", required=True, help="原始图片文件夹")
     parser.add_argument("--output", default="./dataset/train", help="输出文件夹（默认 ./dataset/train）")
     parser.add_argument("--size", type=int, default=768, help="长边目标像素（默认 768）")
@@ -2268,6 +2286,9 @@ def main():
     if os.path.abspath(input_dir) == output_dir:
         print("[WARN] 输入与输出是同一文件夹，将在原位置覆盖处理。")
 
+    if os.path.abspath(input_dir) == output_dir and (args.loss_masks or any(is_mask_file(n) for n in os.listdir(input_dir))):
+        raise ValueError('图集包含学习区域时，需要独立的项目训练副本，不能把原图目录设为输出；原文件未改动。')
+    _load_loss_masks().sync_activation(output_dir, args.loss_masks)
     mode = args.mode
     trigger = (args.trigger or "").strip()
     style_caption = normalize_caption(args.caption)
@@ -2280,14 +2301,14 @@ def main():
     # （用户常把图按角色/风格分在子目录里，选中"上层图集文件夹"也能直接处理）
     files = sorted(
         f for f in os.listdir(input_dir)
-        if os.path.splitext(f)[1].lower() in IMAGE_EXTS
+        if os.path.splitext(f)[1].lower() in IMAGE_EXTS and not is_mask_file(f)
     )
     if not files:
         files = []
         for _root, _dirs, _fs in os.walk(input_dir):
             _dirs[:] = [d for d in _dirs if not d.startswith(".")]
             for _f in _fs:
-                if os.path.splitext(_f)[1].lower() in IMAGE_EXTS:
+                if os.path.splitext(_f)[1].lower() in IMAGE_EXTS and not is_mask_file(_f):
                     files.append(os.path.relpath(os.path.join(_root, _f), input_dir).replace(os.sep, "/"))
         files.sort()
         if files:
@@ -2394,7 +2415,7 @@ def main():
         raw_img = os.path.join(input_dir, _rel)
         out_img = os.path.join(output_dir, stem + ".png")
         out_txt = os.path.join(output_dir, stem + ".txt")
-        if os.path.exists(out_img) and not args.overwrite:
+        if os.path.exists(out_img) and not args.overwrite and not (args.loss_masks and _load_loss_masks().mask_for(raw_img)):
             if _keep_user_caps and not args.no_caption:
                 try:
                     sync_preserved_caption(raw_img, out_txt)
@@ -2461,8 +2482,9 @@ def main():
                 if wm:
                     watermarked += 1
 
+            border_box = None
             if not args.no_remove_black_borders:
-                img, c = crop_black_borders(img, threshold=args.black_threshold, margin=args.margin)
+                img, c, border_box = crop_black_borders(img, threshold=args.black_threshold, margin=args.margin, return_box=True)
                 if c:
                     cropped += 1
 
@@ -2473,6 +2495,13 @@ def main():
                 allow_upscale=not args.no_upscale,
             )
             img.save(out_img, format="PNG", optimize=True)
+            # Apply exactly the image's EXIF, border and ratio crops to its raw mask.
+            try:
+                if args.loss_masks:
+                    _load_loss_masks().import_mask(raw_img, out_img, border_box=border_box,
+                                                  crop_ratio=_crop_ratio, crop_function=crop_to_ratio)
+            except Exception as exc:
+                raise ValueError('遮罩导入失败，请检查原图同名 -masklabel 文件：%s' % exc) from exc
 
             if (args.wd14_model == "pixai-v1" and args.overwrite and not _keep_user_caps
                     and not args.no_caption and not (mode == "style" and style_caption.strip())
@@ -2545,7 +2574,7 @@ def main():
     _tagger_label = "PixAI" if args.wd14_model == "pixai-v1" else "WD14"
     if args.wd14_model == "pixai-v1" and not args.no_wd14 and not _keep_user_caps:
         for _name in os.listdir(output_dir):
-            if os.path.splitext(_name)[1].lower() not in IMAGE_EXTS:
+            if (os.path.splitext(_name)[1].lower() not in IMAGE_EXTS or is_mask_file(_name)):
                 continue
             _sidecar = os.path.join(output_dir, os.path.splitext(_name)[0] + ".txt")
             if os.path.isfile(_sidecar):
@@ -2617,7 +2646,7 @@ def main():
                     print(f"[概念清洗] 统计 100% 一致标签失败（忽略）: {_e}")
             _removed_cnt, _n_changed = {}, 0
             for _f in sorted(os.listdir(output_dir)):
-                if os.path.splitext(_f)[1].lower() not in IMAGE_EXTS:
+                if (os.path.splitext(_f)[1].lower() not in IMAGE_EXTS or is_mask_file(_f)):
                     continue
                 _t = os.path.join(output_dir, os.path.splitext(_f)[0] + ".txt")
                 if not os.path.isfile(_t):
@@ -2654,7 +2683,7 @@ def main():
         if trigger:
             n_trig = 0
             for f in sorted(os.listdir(output_dir)):
-                if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
+                if (os.path.splitext(f)[1].lower() not in IMAGE_EXTS or is_mask_file(f)):
                     continue
                 t = os.path.join(output_dir, os.path.splitext(f)[0] + ".txt")
                 if os.path.isfile(t):
@@ -2712,7 +2741,7 @@ def main():
             # 对全部 txt 过滤人物/五官标签（WD14 打的也过滤，保留画风/内容标签）
             n_f = 0
             for f in sorted(os.listdir(output_dir)):
-                if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
+                if (os.path.splitext(f)[1].lower() not in IMAGE_EXTS or is_mask_file(f)):
                     continue
                 t = os.path.join(output_dir, os.path.splitext(f)[0] + ".txt")
                 if os.path.isfile(t):
@@ -2732,7 +2761,7 @@ def main():
     if mode == "style" and not args.no_caption and not _natural and (ok + skipped) and trigger:
         n_trig = 0
         for f in sorted(os.listdir(output_dir)):
-            if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
+            if (os.path.splitext(f)[1].lower() not in IMAGE_EXTS or is_mask_file(f)):
                 continue
             t = os.path.join(output_dir, os.path.splitext(f)[0] + ".txt")
             if os.path.isfile(t):
@@ -2748,7 +2777,7 @@ def main():
         fb = style_fb if mode == "style" else DEFAULT_CHARACTER_CAPTION
         n_fill = 0
         for f in sorted(os.listdir(output_dir)):
-            if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
+            if (os.path.splitext(f)[1].lower() not in IMAGE_EXTS or is_mask_file(f)):
                 continue
             t = os.path.join(output_dir, os.path.splitext(f)[0] + ".txt")
             need = False
@@ -2775,7 +2804,7 @@ def main():
         try:
             _caps = set()
             for _f in sorted(os.listdir(output_dir)):
-                if os.path.splitext(_f)[1].lower() not in IMAGE_EXTS:
+                if (os.path.splitext(_f)[1].lower() not in IMAGE_EXTS or is_mask_file(_f)):
                     continue
                 _t = os.path.join(output_dir, os.path.splitext(_f)[0] + ".txt")
                 if os.path.isfile(_t):

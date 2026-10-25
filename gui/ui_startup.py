@@ -76,6 +76,72 @@ def check_page_assets(index: Path, log):
     log.append("页面资源检查通过；引用 %s 项，校验 %s 项。" % (len(local_paths), len(hashes)))
 
 
+def resolve_ui_index(index: Path, cache: Path, log, bundle=None):
+    """Use matching installed assets, or restore this EXE's embedded UI offline.
+
+    Never repair in place while another instance might still serve that directory.
+    The cache path is immutable for each build; publish it only after validation.
+    """
+    if bundle is None and getattr(sys, "frozen", False):
+        import kohya_bundled_ui as bundle
+    try:
+        check_page_assets(index, log)
+        if bundle is not None:
+            manifest = index.parent / "ui-manifest.json"
+            if hashlib.sha256(manifest.read_bytes()).hexdigest() != bundle.BUILD_ID:
+                raise RuntimeError("页面资源与当前 EXE 的构建版本不同。")
+        return index
+    except (OSError, ValueError, RuntimeError) as exc:
+        if bundle is None:
+            raise
+        log.append("安装目录页面不可用，尝试从当前 EXE 离线恢复：" + str(exc))
+    import base64
+    import io
+    import tempfile
+    import zipfile
+    import shutil
+    raw = base64.b64decode(bundle.ARCHIVE_BASE64, validate=True)
+    if hashlib.sha256(raw).hexdigest() != bundle.ARCHIVE_SHA256:
+        raise RuntimeError("EXE 内置页面校验失败，请使用完整安装包覆盖安装。")
+    cache = Path(cache).resolve()
+    cache.mkdir(parents=True, exist_ok=True)
+    destination = cache / bundle.BUILD_ID
+
+    def valid(folder):
+        check_page_assets(folder / "index.html", log)
+        if hashlib.sha256((folder / "ui-manifest.json").read_bytes()).hexdigest() != bundle.BUILD_ID:
+            raise RuntimeError("缓存页面与 EXE 不匹配。")
+
+    if destination.is_dir():
+        try:
+            valid(destination)
+            log.append("已使用当前版本的离线恢复页面。")
+            return destination / "index.html"
+        except (OSError, ValueError, RuntimeError):
+            # Retain the broken cache for diagnosis; use a fresh destination.
+            destination = cache / (bundle.BUILD_ID + "_" + str(time.time_ns()))
+    stage = Path(tempfile.mkdtemp(prefix=".ui_recovery_", dir=cache))
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            for member in archive.infolist():
+                target = (stage / member.filename).resolve()
+                if not target.is_relative_to(stage) or "\\" in member.filename or member.is_dir():
+                    raise RuntimeError("内置页面归档路径无效。")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(archive.read(member))
+        valid(stage)
+        try:
+            stage.rename(destination)
+        except OSError:
+            # A second instance may have finished publishing the same build.
+            valid(destination)
+        log.append("页面已从 EXE 离线恢复；项目、模型和训练环境不受影响。")
+        return destination / "index.html"
+    finally:
+        if stage.is_dir():
+            shutil.rmtree(stage)
+
+
 class _StartupLogHandler(logging.Handler):
     def __init__(self, monitor):
         super().__init__(logging.WARNING)

@@ -104,13 +104,25 @@ export interface H3DatasetSummary {
   missing_videos?: string[]; missing_audio?: string[]; missing_trigger?: string[];
 }
 
+export interface LossMaskReport {
+  rows?: Array<{ name: string; status: string; decision: string; problem?: string }>
+  total: number; valid: number; issues: number; excluded: number; unmasked: number; fingerprint: string
+}
+export interface DatasetPreview {
+  ok: boolean; data_url?: string; name?: string; width?: number; height?: number; caption?: string; error?: string
+  mask_report?: LossMaskReport; mask_data_url?: string; mask_edit_data_url?: string; overlay_data_url?: string; mask_editable?: boolean; mask_balanced?: boolean
+  status?: string; problem?: string; warning?: string; coverage?: number | null; decision?: string
+}
 export interface DatasetSummary {
+  mask_source?: string
+  mask_kind?: string
   ok: boolean
   images?: number
   captioned?: number
   empty_captions?: number
   missing_captions?: number
   keep_user_captions?: boolean
+  mask_report?: LossMaskReport
   preview_token?: string
   preview_images?: string[]
   next_offset?: number | null
@@ -258,7 +270,14 @@ export interface DesktopApi {
   inspect_dataset(directory: string, recursive?: boolean, h3?: boolean): Promise<DatasetSummary>
   inspect_task_dataset(task_id: string): Promise<DatasetSummary>
   list_dataset_preview(token: string, offset?: number): Promise<{ ok: boolean; images?: string[]; next_offset?: number | null; error?: string }>
-  get_dataset_preview(token: string, name: string): Promise<{ ok: boolean; data_url?: string; name?: string; width?: number; height?: number; caption?: string; error?: string }>
+  get_dataset_preview(token: string, name: string): Promise<DatasetPreview>
+  import_mask_model(project_name: string): Promise<{ ok: boolean; cancelled?: boolean; error?: string }>
+  get_dataset_thumbnail(token: string, name: string): Promise<{ ok: boolean; data_url?: string; error?: string }>
+  inspect_mask_dataset(project_name: string): Promise<DatasetSummary>
+  set_mask_options(project_name: string, source: string, kind: string): Promise<DatasetSummary>
+  start_mask_task(project_name: string): Promise<{ ok: boolean; task_id?: string; error?: string }>
+  set_dataset_mask_decision(token: string, name: string, decision: string): Promise<DatasetPreview>
+  save_dataset_mask(token: string, name: string, data_url: string): Promise<DatasetPreview>
   get_assistant_service(): Promise<{ ok: boolean; error?: string; settings?: CaptionServiceSettings; request?: { id: string; project: string; status: string } | null }>
   save_assistant_service(settings: CaptionServiceSettings & { api_key?: string; clear_key?: boolean }): Promise<{ ok: boolean; error?: string; settings?: CaptionServiceSettings }>
   start_assistant_request(project: string, options: { question: string; include_logs: boolean; allow_remote: boolean }): Promise<{ ok: boolean; error?: string; id?: string }>
@@ -384,6 +403,7 @@ export interface TrainingMetrics {
 export interface TrainingMetricPoint { step: number; loss: number }
 
 export interface ModernTaskStatus {
+  mask_mode?: string
   ok: boolean
   kind?: string
   project_name?: string
@@ -512,6 +532,7 @@ export interface ModeWorkspaceData {
   fizgig_engine_detail?: string
   fizgig_versions?: string[]
   fizgig_standard_versions?: string[]
+  fizgig_compatible_versions?: string[]
   moss_components?: ModelDownloadList | null
   zimage_components?: ModelDownloadList | null
   fizgig_target_version?: string

@@ -554,7 +554,7 @@ PY_MAX = (3, 13, 0)
 #   风格预设「动漫」rank 32 互相打架。现在统一由 _apply_presets() 按模式+底模填。
 #   （FLUX.2 人物 的 base_type 是占位值：flux2 模式的底模控件本就隐藏，取哪档结果相同。）
 PROJECT_TEMPLATES = {
-    "MOSS-Image LoRA（Fizgig）": {"mode": "moss_fz", "base_type": "sdxl", "note": "Base 训练，SFT 预览；Fizgig v8.5.0 普通 LoRA。"},
+    "MOSS-Image LoRA（Fizgig）": {"mode": "moss_fz", "base_type": "sdxl", "note": "Base 训练，SFT 预览；Fizgig v8.9.6 普通 LoRA。"},
     "自定义": {
         "mode": "character",
         "base_type": "sdxl",
@@ -641,7 +641,7 @@ for _key in ("global_pos", "global_neg", "quant_mode", "blocks_to_swap", "optimi
     PARAM_SCOPE[_key] = (*PARAM_SCOPE[_key], "moss_fz")
 GUIDE_STEPS["moss_fz"] = [
     {"id":"env", "label":"① 环境准备", "btn":"去准备", "check":"env", "act":"cmd_env", "tip":"准备 Python / Git。"},
-    {"id":"fizgig", "label":"② Fizgig v8.5.0", "btn":"配置环境", "check":"fizgig", "act":"cmd_install_fizgig", "tip":"MOSS-Image 使用独立版本源码。"},
+    {"id":"fizgig", "label":"② Fizgig v8.9.6", "btn":"配置环境", "check":"fizgig", "act":"cmd_install_fizgig", "tip":"MOSS-Image 使用独立版本源码。"},
     {"id":"models", "label":"③ 模型与组件", "btn":"查看配置", "check":"moss_models", "act":"cmd_dl_moss_models", "tip":"训练 Base、Qwen3.5-9B、FLUX.2 VAE；SFT 供预览。"},
     {"id":"raw", "label":"④ 图集与标签", "btn":"去选择", "check":"raw", "act":"cmd_pick_raw", "tip":"选择训练图片并检查描述。"},
 ]

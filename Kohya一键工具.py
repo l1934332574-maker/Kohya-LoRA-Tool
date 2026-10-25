@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.17"
+APP_VERSION = "0.19.18"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -2286,7 +2286,7 @@ def _musubi_dataset_precheck(train_dir, label, logf):
         sub_files, unsupported = [], []
         for root, _dirs, files in os.walk(train_dir):
             for fn in files:
-                if not fn.lower().endswith(IMAGE_EXTS):
+                if not (fn.lower().endswith(IMAGE_EXTS) and not _is_loss_mask(fn)):
                     continue
                 fp = os.path.join(root, fn)
                 if root != train_dir:
@@ -4091,6 +4091,10 @@ def h3_fz_missing_models(require_audio=False, model_settings=None, require_adapt
     return missing(sys.modules[__name__], model_settings, require_audio, require_adapter)
 
 
+def _is_loss_mask(path):
+    return os.path.splitext(os.path.basename(path))[0].casefold().endswith("-masklabel")
+
+
 FIZGIG_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".avif"}
 
 
@@ -4137,7 +4141,7 @@ def _fizgig_qwen_image_subsets(folder, fallback_repeats=1):
         count = 0
         for name in os.listdir(image_dir):
             path = os.path.join(image_dir, name)
-            if not os.path.isfile(path) or os.path.splitext(name)[1].lower() not in FIZGIG_IMAGE_EXTS:
+            if not os.path.isfile(path) or _is_loss_mask(name) or os.path.splitext(name)[1].lower() not in FIZGIG_IMAGE_EXTS:
                 continue
             count += 1
             caption = os.path.splitext(path)[0] + ".txt"
@@ -10529,7 +10533,7 @@ def scan_user_captions(folder):
         for root, dirs, files in os.walk(folder):
             dirs[:] = [d for d in dirs if not d.startswith(".")]
             for fn in files:
-                if not fn.lower().endswith(IMAGE_EXTS):
+                if not (fn.lower().endswith(IMAGE_EXTS) and not _is_loss_mask(fn)):
                     continue
                 total += 1
                 txt = os.path.join(root, os.path.splitext(fn)[0] + ".txt")
@@ -10698,6 +10702,11 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
             cmd += ["--caption", style_caption.strip()]
         if dedup:
             cmd.append("--dedup")
+    _loss_config = (load_project(project) or {}) if project else {}
+    _loss_params = dict((_loss_config.get('params') or {}), **(pixai_options or {}))
+    from kohya_core.loss_masks import settings as _mask_settings
+    _mask_mode, _mask_floor = _mask_settings(dict(_loss_params, mode=_loss_config.get('mode', ''), training_kind=_loss_config.get('training_kind')))
+    if _mask_mode != 'off': cmd.append('--loss-masks')
     if wd14_model:
         cmd += ["--wd14-model", str(wd14_model)]
     # 裁切比例：crop_ratio 优先；旧调用 square_crop=True 等价 --crop-ratio 1:1
@@ -12247,7 +12256,7 @@ def count_images_in(folder):
     if not os.path.isdir(folder):
         return 0
     return sum(1 for f in os.listdir(folder)
-               if f.lower().endswith(IMAGE_EXTS))
+               if (f.lower().endswith(IMAGE_EXTS) and not _is_loss_mask(f)))
 
 
 def count_images(folder):
@@ -12257,7 +12266,7 @@ def count_images(folder):
     n = 0
     for root, dirs, files in os.walk(folder):
         dirs[:] = [d for d in dirs if not d.startswith(".")]
-        n += sum(1 for f in files if f.lower().endswith(IMAGE_EXTS))
+        n += sum(1 for f in files if (f.lower().endswith(IMAGE_EXTS) and not _is_loss_mask(f)))
     return n
 
 
@@ -12311,7 +12320,7 @@ def list_dataset_images(train_dir, image_extensions=None):
         dirs[:] = [d for d in dirs if not d.startswith(".") and not os.path.islink(os.path.join(root, d))
                    and not getattr(os.path, "isjunction", lambda _: False)(os.path.join(root, d))]
         for f in sorted(files):
-            if not f.lower().endswith(extensions):
+            if not f.lower().endswith(extensions) or _is_loss_mask(f):
                 continue
             img = os.path.join(root, f)
             if os.path.islink(img):
@@ -12686,7 +12695,7 @@ def make_global_caption_dataset(train_dir, mode, global_pos, natural=False):
         except Exception:
             continue
         for f in files:
-            if not f.lower().endswith(IMAGE_EXTS):
+            if not (f.lower().endswith(IMAGE_EXTS) and not _is_loss_mask(f)):
                 continue
             stem = os.path.splitext(f)[0]
             src_img = os.path.join(root, f)
