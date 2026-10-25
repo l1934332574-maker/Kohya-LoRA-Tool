@@ -66,6 +66,10 @@ def main():
     compiler = Path(os.environ.get("ISCC_PATH", r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"))
     if not compiler.is_file():
         raise RuntimeError("Inno Setup compiler not found: " + str(compiler))
+    # Hosted Windows runners do not include community language files.
+    language = compiler.parent / "Languages/ChineseSimplified.isl"
+    if not language.is_file():
+        shutil.copy2(ROOT / "build_exe/installer/languages/ChineseSimplified.isl", language)
     run([compiler, "/O" + str(output), "/FSetup-unsigned", installer])
     portable = output / ("KohyaLoraTool_v" + version + "_unsigned_portable.zip")
     with zipfile.ZipFile(portable, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
