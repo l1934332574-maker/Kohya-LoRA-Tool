@@ -70,6 +70,10 @@ python kohya_gui.py
 
 </details>
 
+## Code signing policy
+
+Signing preparation is in progress; current releases are unsigned. [Policy](docs/CODE_SIGNING.md) · [Privacy](docs/PRIVACY.md).
+
 ## License
 
 [MIT](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md)

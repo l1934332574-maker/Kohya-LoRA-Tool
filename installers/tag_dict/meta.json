@@ -7,7 +7,9 @@
     {
       "name": "ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table",
       "url": "https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table",
-      "note": "每日更新 32.5 万条中英对照；本词典收录 post_count>=30 的行。仓库未附带明确开源许可证。"
+      "note": "MIT 许可；许可证于 2026-10-26 核对，副本见 LICENSE.ffdkj.txt。词典收录 post_count>=30 的行。",
+      "license": "MIT",
+      "license_commit": "8fb4eb79225828bd7d401a5c0a2ad03d79c8a4e1"
     },
     {
       "name": "byzod/a1111-sd-webui-tagcomplete-CN Tags-zh-full-pack.csv",
@@ -15,5 +17,5 @@
       "note": "A1111 tagcomplete 中文整合包（MIT 许可，整合自多个社区翻译来源）；用于覆盖常见词并补充 ffdkj 缺失词条。"
     }
   ],
-  "license_note": "翻译词条整理自多个社区来源，仅用于本地离线查询；具体授权见 THIRD_PARTY_NOTICES.md 与各来源仓库。"
+  "license_note": "来源项目的授权声明见 THIRD_PARTY_NOTICES.md；ffdkj MIT 许可证副本随词典分发。"
 }
