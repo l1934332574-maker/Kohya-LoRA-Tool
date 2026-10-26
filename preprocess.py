@@ -1590,35 +1590,45 @@ def _quarantine_corrupt_images(output_dir, logf=print):
     return moved
 
 
-def _quarantine_input_corrupt(input_dir, files, logf=print):
-    """只隔离明确损坏的输入图片；环境或程序异常时保留全部源文件并停止。"""
+def _output_image_stems(files):
+    """Keep legacy names where unique; avoid collisions after unifying extensions."""
+    import hashlib
+    stems = {name: os.path.splitext(name.replace('/', '__').replace('\\', '__'))[0] for name in files}
+    counts = {}
+    for stem in stems.values():
+        counts[stem.casefold()] = counts.get(stem.casefold(), 0) + 1
+    occupied = {stem.casefold() for stem in stems.values()}
+    for name, stem in list(stems.items()):
+        if counts[stem.casefold()] > 1:
+            candidate = stem + '_' + hashlib.sha256(name.encode('utf-8')).hexdigest()
+            while candidate.casefold() in occupied:
+                candidate += '_'
+            stems[name] = candidate
+            occupied.add(candidate.casefold())
+    return stems
+
+
+def _check_input_images(input_dir, files, output_dir, logf=print):
+    """Try both decoders, report all unreadable originals, and never move sources."""
     image_io = _load_image_io()
-    moved = []
-    corrupt_dir = input_dir.rstrip("\\/") + "_corrupt"
-    for name in files:
-        p = os.path.join(input_dir, name.replace("/", os.sep))
+    errors, recovered = [], []
+    for index, name in enumerate(files, 1):
+        path = os.path.join(input_dir, name.replace("/", os.sep))
         try:
-            with load_image(p):
-                pass
-        except image_io.ImageEnvironmentError as e:
-            raise RuntimeError(f"图片读取环境异常，未隔离任何图片：{e}") from e
-        except image_io.ImageDecodeError as e:
-            try:
-                os.makedirs(corrupt_dir, exist_ok=True)
-                _flat = name.replace("/", "__").replace("\\", "__")
-                shutil.move(p, os.path.join(corrupt_dir, _flat))
-                _t = os.path.join(input_dir, os.path.splitext(name.replace("/", os.sep))[0] + ".txt")
-                if os.path.isfile(_t):
-                    shutil.move(_t, os.path.join(corrupt_dir, os.path.splitext(_flat)[0] + ".txt"))
-                moved.append(name)
-                logf(f"[隔离损坏图片] {name}（{e}）→ {corrupt_dir}")
-            except OSError as move_error:
-                logf(f"[ERROR] 图片确认为损坏，但隔离失败，原文件仍保留：{name}（{move_error}）")
-        except Exception as e:
-            raise RuntimeError(f"检查图片时遇到非图片解码异常，未隔离任何图片：{e}") from e
-    if moved:
-        logf(f"[INFO] 已隔离 {len(moved)} 张确认损坏的图片到 {corrupt_dir}（可从原图重新下载/修复后再放回）")
-    return moved
+            with load_image(path) as image:
+                if image.info.get('kohya_decoder') == 'windows':
+                    recovered.append(path)
+                    logf(f"[图片修复] 已用 Windows 备用解码恢复：{name}，原图未修改。")
+        except image_io.ImageEnvironmentError as exc:
+            raise RuntimeError(f"图片读取环境异常，原图和标签未移动：{exc}") from exc
+        except image_io.ImageDecodeError as exc:
+            errors.append({'source': path, 'error': str(exc)})
+            logf(f"[图片检查] 暂时无法转换：{name}；继续检查其余图片。")
+        if index % 20 == 0 or index == len(files):
+            logf(f"[图片检查] {index}/{len(files)}，备用解码恢复 {len(recovered)} 张，待处理 {len(errors)} 张。")
+    return image_io.finish_image_batch(
+        os.path.join(output_dir, 'image_normalization.json'), total=len(files), recovered=recovered, errors=errors)
+
 
 def _probe_wd14_deps(py):
     """**真实**探测 py 能否 import torch + onnxruntime，并区分四种情况。
@@ -2300,11 +2310,8 @@ def main():
         print(f"[ERROR] 输入文件夹不存在: {input_dir}")
         sys.exit(1)
     os.makedirs(output_dir, exist_ok=True)
-    if os.path.abspath(input_dir) == output_dir:
-        print("[WARN] 输入与输出是同一文件夹，将在原位置覆盖处理。")
-
-    if os.path.abspath(input_dir) == output_dir and (args.loss_masks or any(is_mask_file(n) for n in os.listdir(input_dir))):
-        raise ValueError('图集包含学习区域时，需要独立的项目训练副本，不能把原图目录设为输出；原文件未改动。')
+    if os.path.normcase(os.path.realpath(input_dir)) == os.path.normcase(os.path.realpath(output_dir)):
+        raise ValueError('预处理需要独立的项目训练副本，请选择与原图不同的输出目录；原图和标签未修改。')
     _load_loss_masks().sync_activation(output_dir, args.loss_masks)
     mode = args.mode
     trigger = (args.trigger or "").strip()
@@ -2336,11 +2343,8 @@ def main():
         return
 
     print(f"[INFO] 找到 {len(files)} 张图片")
-    # 预处理前提前扫描隔离损坏图片（待办四十八）：明确提示是哪张图坏，避免裸 PIL traceback
-    _removed = _quarantine_input_corrupt(input_dir, files, print)
-    if _removed:
-        _rs = set(_removed)
-        files = [f for f in files if f not in _rs]
+    print("[INFO] 自动转换为标准 PNG 训练副本；保留原图、标签及来源遮罩。")
+    image_preparation = _check_input_images(input_dir, files, output_dir, print)
     print(f"[INFO] 缩放目标: 长边 {args.size}px（取整到 {args.multiple} 的倍数）")
     print(f"[INFO] 去黑边: {'开' if not args.no_remove_black_borders else '关'}")
     print(f"[INFO] 去水印: {'开(' + args.wm_corner + ')' if not args.no_remove_watermark else '关'}")
@@ -2374,6 +2378,8 @@ def main():
             print("[INFO] WD14 自动打标: 关（保留原图自带 .txt 或使用兜底 caption）")
     print()
 
+    output_stems = _output_image_stems(files)
+    processing_errors = []
     ok = skipped = failed = 0
     dups = corrupt = too_small = blurry = 0
     blurry_warned = 0
@@ -2428,17 +2434,30 @@ def main():
         # name 可能是相对路径（子文件夹递归时用 / 分隔）；输出名用 __ 扁平化，避免重名
         _rel = name.replace("/", os.sep)
         _flat = name.replace("/", "__").replace("\\", "__")
-        stem = os.path.splitext(_flat)[0]
+        stem = output_stems[name]
         raw_img = os.path.join(input_dir, _rel)
         out_img = os.path.join(output_dir, stem + ".png")
         out_txt = os.path.join(output_dir, stem + ".txt")
-        if os.path.exists(out_img) and not args.overwrite and not (args.loss_masks and _load_loss_masks().mask_for(raw_img)):
+        reuse_existing = os.path.exists(out_img) and not args.overwrite
+        if reuse_existing:
+            try:
+                # Downstream taggers must be able to read the copy without WIC.
+                from PIL import Image
+                with Image.open(out_img) as existing:
+                    existing.load()
+                    reuse_existing = existing.format == 'PNG' and existing.mode == 'RGB'
+            except (OSError, ValueError, SyntaxError):
+                reuse_existing = False
+            if not reuse_existing:
+                print(f"[图片修复] 重新生成无法直接使用的训练副本：{os.path.basename(out_img)}")
+        if reuse_existing and not (args.loss_masks and _load_loss_masks().mask_for(raw_img)):
             if _keep_user_caps and not args.no_caption:
                 try:
                     sync_preserved_caption(raw_img, out_txt)
                 except Exception as exc:
                     failed += 1
                     print(f"  [描述失败] {name}: {exc}")
+                    processing_errors.append({'source': raw_img, 'error': str(exc)})
                     continue
             # 原先这里是**纯静默 continue**：重跑时（典型场景：先单独点了「数据预处理」，
             # 再点「一键开始训练」——后者自带预处理，会把同一批图重跑一遍）
@@ -2457,9 +2476,12 @@ def main():
             seen_hashes[h] = name
         try:
             img = load_image(raw_img)
+            source_geometry = {'size': img.info['kohya_source_size'],
+                               'orientation': img.info['kohya_source_orientation']}
         except Exception as e:
             corrupt += 1
-            print(f"  [损坏] {name}: {e}")
+            print(f"  [无法读取] {name}: {e}")
+            processing_errors.append({'source': raw_img, 'error': str(e)})
             if os.environ.get("PREPROCESS_DEBUG"):
                 traceback.print_exc()
             continue
@@ -2511,12 +2533,13 @@ def main():
                 img, target=args.size, multiple=args.multiple,
                 allow_upscale=not args.no_upscale,
             )
-            img.save(out_img, format="PNG", optimize=True)
+            _load_image_io().save_normalized_png(img, out_img)
             # Apply exactly the image's EXIF, border and ratio crops to its raw mask.
             try:
                 if args.loss_masks:
                     _load_loss_masks().import_mask(raw_img, out_img, border_box=border_box,
-                                                  crop_ratio=_crop_ratio, crop_function=crop_to_ratio)
+                                                  crop_ratio=_crop_ratio, crop_function=crop_to_ratio,
+                                                  source_geometry=source_geometry)
             except Exception as exc:
                 raise ValueError('遮罩导入失败，请检查原图同名 -masklabel 文件：%s' % exc) from exc
 
@@ -2570,8 +2593,13 @@ def main():
         except Exception as e:
             failed += 1
             print(f"  [FAIL] {name}: {e}")
+            processing_errors.append({'source': raw_img, 'error': str(e)})
             if os.environ.get("PREPROCESS_DEBUG"):
                 traceback.print_exc()
+
+    _load_image_io().finish_image_batch(
+        os.path.join(output_dir, 'image_normalization.json'), total=len(files),
+        recovered=image_preparation['recovered'], errors=processing_errors)
 
     # 跳过汇总：重跑（典型：先单独点「数据预处理」，再点「一键开始训练」——
     # 后者自带预处理会把同一批图重跑一遍）时全部图都会被跳过。
@@ -2874,6 +2902,8 @@ def main():
                 "skipped_existing": skipped,
                 "duplicates": dups,
                 "corrupt": corrupt,
+                "image_recovered": len(image_preparation["recovered"]),
+                "image_report": os.path.join(output_dir, "image_normalization.json"),
                 "too_small": too_small,
                 "blurry": blurry,  # 保持旧字段表示因模糊检测跳过的数量
                 "blurry_warned": blurry_warned,

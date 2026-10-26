@@ -27,6 +27,13 @@ except Exception:
 FAILED = []
 
 
+def _destroy_test_root(root):
+    # Test windows are torn down before their delayed preload/update callbacks.
+    for callback in root.tk.splitlist(root.tk.call("after", "info")):
+        root.after_cancel(callback)
+    root.destroy()
+
+
 def check(name, fn):
     try:
         fn()
@@ -179,9 +186,9 @@ def test_yaml():
     d = yaml.safe_load(open(cfg, encoding="utf-8"))
     p0 = d["config"]["process"][0]
     _ram8 = core.detect_ram_gb() or 0
-    _exp8 = 384 if _ram8 < 32 else 512
+    _exp8 = 1024  # Explicit user resolution is preserved by the current contract.
     if p0["datasets"][0]["resolution"] != [_exp8, _exp8]:
-        raise AssertionError("Z-Image 8G 分辨率钳制不符: %s (ram %sG)" % (p0["datasets"][0]["resolution"], _ram8))
+        raise AssertionError("Z-Image 8G 未保留指定分辨率: %s (ram %sG)" % (p0["datasets"][0]["resolution"], _ram8))
     if p0["train"].get("disable_sampling") is not True:
         raise AssertionError("Z-Image 8G 未关闭采样")
     if p0["train"].get("timestep_type") != "weighted":
@@ -192,7 +199,7 @@ def test_yaml():
         raise AssertionError("Z-Image 8G 未开层交换")
     # 16G 不启用快跑档（保持原行为，避免误伤现有配置）
     cfg = os.path.join(tmp, "zimage_16g.yaml")
-    core.write_at_image_yaml(dict(params, resolution="1024"), core.AT_IMAGE_MODELS["zimage"], vd, tmp, cfg, vram_gb=16)
+    core.write_at_image_yaml(dict(params, resolution="1024", fast_tier="off", sample_preview=True), core.AT_IMAGE_MODELS["zimage"], vd, tmp, cfg, vram_gb=16)
     d = yaml.safe_load(open(cfg, encoding="utf-8"))
     p0 = d["config"]["process"][0]
     if p0["datasets"][0]["resolution"] != [1024, 1024] or p0["train"].get("disable_sampling") is True or p0["model"].get("layer_offloading") is True:
@@ -205,9 +212,9 @@ def test_yaml():
     if p0["train"].get("disable_sampling") is not True or p0["model"].get("layer_offloading") is not True:
         raise AssertionError("Z-Image 16G fast_tier=on 未生效")
     if p0["datasets"][0]["resolution"] != [_exp8, _exp8]:
-        raise AssertionError("Z-Image 16G fast_tier=on 分辨率钳制不符")
+        raise AssertionError("Z-Image 16G fast_tier=on 未保留指定分辨率")
     cfg = os.path.join(tmp, "zimage_8g_off.yaml")
-    core.write_at_image_yaml(dict(params, resolution="1024", fast_tier="off"), core.AT_IMAGE_MODELS["zimage"], vd, tmp, cfg, vram_gb=8)
+    core.write_at_image_yaml(dict(params, resolution="1024", fast_tier="off", sample_preview=True), core.AT_IMAGE_MODELS["zimage"], vd, tmp, cfg, vram_gb=8)
     d = yaml.safe_load(open(cfg, encoding="utf-8"))
     p0 = d["config"]["process"][0]
     if p0["train"].get("disable_sampling") is True or p0["model"].get("layer_offloading") is True:
@@ -221,8 +228,8 @@ def test_yaml():
     p0 = d["config"]["process"][0]
     if p0["train"].get("disable_sampling") is not True or p0["model"].get("layer_offloading") is not True:
         raise AssertionError("Qwen fast_tier=on 未生效")
-    if p0["datasets"][0]["resolution"] != [512, 512]:
-        raise AssertionError("Qwen fast_tier=on 分辨率钳制不符")
+    if p0["datasets"][0]["resolution"] != [1024, 1024]:
+        raise AssertionError("Qwen fast_tier=on 未保留指定分辨率")
     # H3 yaml
     cfg = os.path.join(tmp, "h3.yaml")
     core.write_h3_train_yaml(params, vd, tmp, cfg)
@@ -246,8 +253,8 @@ def test_yaml():
             p0 = d["config"]["process"][0]
             if p0["model"]["arch"] != "krea2" or p0["model"]["qtype"] != "qint8":
                 raise AssertionError("Krea2(AT) 16G yaml 档位不符")
-            if p0["datasets"][0]["resolution"] != [512, 512]:
-                raise AssertionError("Krea2(AT) 16G 未按快档压到 512")
+            if p0["datasets"][0]["resolution"] != [1024, 1024]:
+                raise AssertionError("Krea2(AT) 16G 未保留指定分辨率")
             if p0["train"].get("disable_sampling") is not True or "sample" not in p0:
                 raise AssertionError("Krea2(AT) 16G 需保留 sample 段 + disable_sampling（引擎 cache_sample_prompts 会崩）")
             if p0.get("sample", {}).get("negative_prompt") != "lowres, bad anatomy, worst quality, low quality, blurry, jpeg artifacts, signature, watermark":
@@ -264,7 +271,7 @@ def test_yaml():
                                          vd, tmp, cfg, vram_gb=_v)
                 d = yaml.safe_load(open(cfg, encoding="utf-8"))
                 p0 = d["config"]["process"][0]
-                if p0["model"]["qtype"] != "qint8" or p0["datasets"][0]["resolution"] != [512, 512]:
+                if p0["model"]["qtype"] != "qint8" or p0["datasets"][0]["resolution"] != [1024, 1024]:
                     raise AssertionError("Krea2(AT) %sG 未走省显存档（阈值悬崖）" % _v)
                 if p0["model"].get("layer_offloading") is not True:
                     raise AssertionError("Krea2(AT) %sG 缺少 layer_offloading（死区）" % _v)
@@ -368,40 +375,12 @@ def test_monitor_sampling_and_fizgig_resume():
     mon2.on_line("steps:  50%| | 600/1200 [00:20<04:00, 4.17s/it, loss=0.11]")
     s6 = mon2.snapshot()
     assert s6.get("step") == 1400 and s6.get("total") == 2000, s6
-    # Fizgig 断点查找：{name}-NNNNNN-state；有最终 LoRA 视为跑完不提示
-    import tempfile, os as _os, json
-    d = tempfile.mkdtemp()
-    for ep in ("000001", "000002"):
-        st = _os.path.join(d, "krea2_fizgig_lora-%s-state" % ep)
-        _os.makedirs(st, exist_ok=True)
-        with open(_os.path.join(st, "training_state.json"), "w", encoding="utf-8") as f:
-            json.dump({"epoch": int(ep), "global_step": int(ep) * 152}, f)
-    found = core.find_fizgig_state(d, "krea2_fizgig_lora")
-    assert found and found.endswith("krea2_fizgig_lora-000002-state"), found
-    open(_os.path.join(d, "krea2_fizgig_lora.safetensors"), "wb").write(b"x")
-    assert core.find_fizgig_state(d, "krea2_fizgig_lora") is None, "跑完仍提示续训"
-    # 旧成品 + 更新的新断点 → 仍应提示（修 find_fizgig_state 一刀切 bug，2026-09-08）
-    st3 = _os.path.join(d, "krea2_fizgig_lora-000003-state")
-    _os.makedirs(st3, exist_ok=True)
-    with open(_os.path.join(st3, "training_state.json"), "w", encoding="utf-8") as f:
-        json.dump({"epoch": 3, "global_step": 456}, f)
-    _os.utime(st3, (9000, 9000))
-    _os.utime(_os.path.join(d, "krea2_fizgig_lora.safetensors"), (1000, 1000))
-    assert core.find_fizgig_state(d, "krea2_fizgig_lora") is not None, "旧成品+新断点未提示续训"
-    # Kohya 按步数保存的断点：有 -step…-state 且无成品 → 提示续训；成品已生成 → 不提示
-    import tempfile as _tf2, os as _os2
-    d2 = _tf2.mkdtemp()
-    st2 = _os2.path.join(d2, "character_lora-step00000400-state")
-    _os2.makedirs(st2, exist_ok=True)
-    assert core.find_latest_state(d2, "character_lora") is not None, "中断点应提示续训"
-    _os2.utime(st2, (2000, 2000))
-    with open(_os2.path.join(d2, "character_lora.safetensors"), "wb") as f:
-        f.write(b"x")
-    _os2.utime(_os2.path.join(d2, "character_lora.safetensors"), (3000, 3000))
-    assert core.find_latest_state(d2, "character_lora") is None, "跑完仍提示续训(kohya)"
-    # 旧成品 + 更新的新中断 → 仍应提示（只看最终成品 vs 断点 mtime）
-    _os2.utime(st2, (9000, 9000))
-    assert core.find_latest_state(d2, "character_lora") is not None, "旧成品+新中断未提示续训(kohya)"
+    # Snapshot discovery requires complete native state, including weights/RNG.
+    import unittest
+    from tests.test_resume_state import ResumeStateTests
+    result = unittest.TestResult()
+    unittest.defaultTestLoader.loadTestsFromTestCase(ResumeStateTests).run(result)
+    assert result.wasSuccessful(), result.errors + result.failures
 
 
 def test_lora_naming():
@@ -1233,7 +1212,7 @@ def test_wd14_selector_visible():
             "默认值不是新模型（%s）" % _app.wd14_model_var.get()
     finally:
         try:
-            _app.root.destroy()
+            _destroy_test_root(_app.root)
         except Exception:
             pass
     print("WD14_SELECTOR_VISIBLE_OK")
@@ -1495,7 +1474,7 @@ def test_env_locations_ui():
         _app.root.update_idletasks()
     finally:
         try:
-            _app.root.destroy()
+            _destroy_test_root(_app.root)
         except Exception:
             pass
     print("ENV_LOCATIONS_UI_OK")
@@ -1543,9 +1522,13 @@ def test_fizgig_quant_swap_vram_table():
                core._fizgig_quant_swap(v, "auto", "nvidia")[:2], \
                "%sG：手动 int8 与自动档结果不一致（指定 int8 不该引入劣化 ✗）" % v
 
-    # <10G：int8 装不下 → 必须自动改用 NF4，而不是给个跑不动的组合 ✗
-    f, s, d = core._fizgig_quant_swap(8, "int8", backend="nvidia")
-    assert "--quantize_4bit" in f and s == 0 and d, "小显存手动 int8 没自动改用 NF4"
+    # <10G：显式 int8 不可用应拒绝，不能擅自更换用户精度。
+    try:
+        core._fizgig_quant_swap(8, "int8", backend="nvidia")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Explicit unsupported int8 must be rejected, not silently changed")
 
     # AMD ROCm ≥18G 的实测档位（int8 + 0）必须保留 ✓ —— 它有 7900 XT 实测依据 ✓
     f, s, d = core._fizgig_quant_swap(20, "auto", backend="amd-rocm")
@@ -1589,7 +1572,7 @@ def test_adv_rows_mode_gating():
             _app._on_mode_change()
             _app.root.update_idletasks()
             for name in ("quant", "swap"):
-                want = m in _K2F2
+                want = C.param_supports("quant_mode" if name == "quant" else "blocks_to_swap", m)
                 assert _shown(name) == want, \
                     "%s（%s）：%s 可见性 = %s，应为 %s" % (C.MODE_LABELS[m], m, name, _shown(name), want)
             want_c = C.param_supports("compile", m)
@@ -1611,7 +1594,7 @@ def test_adv_rows_mode_gating():
                 "compile 跑到「附加全局提示词」后面去了 ✗（重排副作用）"
     finally:
         try:
-            _app.root.destroy()
+            _destroy_test_root(_app.root)
         except Exception:
             pass
     print("ADV_ROWS_MODE_GATING_OK")
@@ -1654,7 +1637,7 @@ def test_steps_summary_and_intervals():
                 assert "UNet+文本编码器" not in _txt, "%s：出现实际配置不会执行的训练目标 → %s" % (label, _txt)
     finally:
         try:
-            _app.root.destroy()
+            _destroy_test_root(_app.root)
         except Exception:
             pass
 
@@ -1845,6 +1828,9 @@ def test_param_scope_matches_code():
         "write_at_image_yaml": ("qwen_image", "zimage"),
         "write_krea2_at_yaml": ("krea2_at",),
         "_fizgig_sample_epochs": ("krea2_fz", "flux2_fz"),
+        "resolve_batch_size": ("style", "character", "concept", "krea2", "flux2"),
+        "train_qwen21_fizgig": ("qwen21_fz",),
+        "_train_qwen21_fizgig_legacy": ("qwen21_fz",),
     }
 
     src = os.path.join(ROOT, "Kohya一键工具.py")
@@ -1876,7 +1862,7 @@ def test_param_scope_matches_code():
     for i, ln in enumerate(lines, start=1):
         norm = ln.replace("'", '"')
         for k in gui_keys:
-            if ('params.get("' + k + '"') in norm or ('params["' + k + '"]') in norm:
+            if ('.get("' + k + '"') in norm or ('params["' + k + '"]') in norm:
                 f = owner(i)
                 if f in ENTRY_MODES:
                     actual.setdefault(k, set()).update(ENTRY_MODES[f])
@@ -2221,8 +2207,8 @@ def test_fizgig_sample_interval_is_epochs():
     # 留空/0 → 沿用「约每 100 步」启发式（每轮 100 步 → 1 轮）
     assert core._fizgig_sample_epochs({}, 100, 40) == 1, "留空时应是每 1 轮"
     assert core._fizgig_sample_epochs({"sample_interval": 0}, 100, 40) == 1
-    # 超过总轮数 → 限制在总轮数（避免一次都不出）
-    assert core._fizgig_sample_epochs({"sample_interval": 100}, 100, 40) == 40
+    # 超过总轮数仍保留明确填写的采样间隔。
+    assert core._fizgig_sample_epochs({"sample_interval": 100}, 100, 40) == 100
     # 每轮不是 100 步时，留空仍约每 100 步
     assert core._fizgig_sample_epochs({}, 25, 40) == 4
 
@@ -2313,68 +2299,18 @@ def test_interval_values_are_scoped_by_unit():
 
 
 def test_fizgig_int8_vram_guard():
-    """16G 卡跑 Krea2(Fizgig)：必须把分辨率压到 512，并在引擎确认时告警。
+    """Low-memory recommendations must not overwrite explicit resolution."""
+    import Kohya一键工具 as core
+    logs = []
+    assert core._fizgig_clamp_resolution(15.67, 768, ("--quant_int8",), logs.append) == 768
+    assert logs and "512" in "\n".join(logs) and "768" in "\n".join(logs)
+    real = "[int8] W8A8 base is fully resident; block swap can't reduce its footprint; forcing blocks_to_swap=0."
+    assert core._warn_fizgig_int8_resident(real, logs.append)
+    assert not core._warn_fizgig_int8_resident("ordinary log", logs.append)
+    assert not core._warn_fizgig_int8_resident("", logs.append)
+    for vram, resolution in ((24.0,768),(19.9,768),(16.0,512),(None,768),(19.0,1024),(12.0,768)):
+        assert core._fizgig_clamp_resolution(vram, resolution, ("--quant_int8",), lambda _:None) == resolution
 
-    ★ 2026-09-21 用户实测（5060 Ti 16G / Krea2 Fizgig / 768px / int8，日志 v0.17.8）：
-      「每次建新项目练，一样设置时间越来越长，好几次 11 小时；删项目重来几次才变 3 小时；
-        而且步数越跑越慢」
-
-      根因（引擎原文，日志 L175）：
-        `[int8] W8A8 base is fully resident … block swap can't reduce its footprint;
-         forcing blocks_to_swap=0` ✗
-      → int8 底模**必须全驻留显存**，工具按显存配的 blocks_to_swap **被引擎强制改回 0** ✗
-      → 需 ~18G，而 16G 卡装不下 → 溢出到系统内存 / 硬盘页面文件 ✗
-      → 实测 8~19 s/it（2052 步 ≈ 11 小时 ✗）
-      用户三个现象全部由此解释：
-        · 时间越来越长 = 换页程度随内存/磁盘状态变 ✓
-        · 删项目才变快 = 释放磁盘后页面文件有地方写 ✓
-        · 越跑越慢     = 换页随时间恶化 ✓
-      —— 与「新建项目」无关 ✓
-
-    判据：
-      ① **int8** + ≤19G（取整）+ >512 → 压到 512 ✓ 且**必须打印说明**（不许静默改 ✗）
-         ⚠️ 2026-09-22 修：本保护**只对 int8 生效** ✗ —— NF4（底模仅 ~5.6G）/ FP8 档
-            砍分辨率纯属白丢画质 ✗（由 test_fizgig_clamp_resolution_only_for_int8 覆盖 ✓）
-      ② 显存够（≥20）或已是 512 / 显存未知 → **不动** ✓
-      ③ 引擎那条原文出现时必须告警 ✓ 且要澄清「与新建项目无关」✓
-      ④ 普通日志 / 空日志 → 不许误报 ✗
-    """
-    import Kohya一键工具 as core        # noqa: E402
-
-    # ★ 2026-09-22 改：本函数现在**只对 int8 生效** ✗（NF4 底模仅 ~5.6G，768 放得下 ✓）
-    #   → 这里显式传 int8 档位 ✓；「NF4 不该被降」由 test_fizgig_clamp_resolution_only_for_int8 覆盖 ✓
-    _I8 = ("--quant_int8", "bf16")
-    # ① 用户实况：DXGI 报 15.67G、分辨率 768
-    _logs = []
-    assert core._fizgig_clamp_resolution(15.673828125, 768, _I8, _logs.append) == 512, \
-        "16G 卡 + int8 + 768px 必须降到 512 ✗（否则 int8 溢出 → 越跑越慢）"
-    _t = "\n".join(_logs)
-    assert "512" in _t, "降了但没打印说明 ✗（静默改用户设置）"
-    assert "越跑越慢" in _t, "没说清后果 ✗"
-
-    # ② 不该动的情况
-    for _vram, _reso, _want, _desc in ((24.0, 768, 768, "24G 卡不动"),
-                                       (19.9, 768, 768, "≈20G 档不动"),
-                                       (16.0, 512, 512, "已是 512 不动"),
-                                       (None, 768, 768, "显存未知不猜"),
-                                       (19.0, 1024, 512, "19G 中间档 + 1024 → 512"),
-                                       (12.0, 768, 512, "12G + 768 → 512")):
-        assert core._fizgig_clamp_resolution(_vram, _reso, _I8, lambda s: None) == _want, \
-            "%s ✗（得到 %s）" % (_desc, core._fizgig_clamp_resolution(_vram, _reso, _I8, lambda s: None))
-
-    # ③ 用用户日志里的**逐字原文**
-    _real = ("INFO:fizgig.krea2.trainer:[int8] W8A8 base is fully resident (staged quantise -> GPU) "
-             "— block swap can't reduce its footprint; forcing blocks_to_swap=0.")
-    _l2 = []
-    assert core._warn_fizgig_int8_resident(_real, _l2.append), "真实日志原文没被识别 ✗"
-    _t2 = "\n".join(_l2)
-    assert "18G" in _t2, "没说明需要多少显存 ✗"
-    assert "与「新建项目」无关" in _t2, "没澄清用户的核心困惑 ✗"
-
-    # ④ 不许误报
-    assert not core._warn_fizgig_int8_resident("普通日志", lambda s: None), "普通日志误报 ✗"
-    assert not core._warn_fizgig_int8_resident("", lambda s: None), "空日志误报 ✗"
-    print("FIZGIG_INT8_VRAM_GUARD_OK")
 
 
 def test_save_interval_is_epochs_for_krea2():
@@ -2517,29 +2453,15 @@ def test_env_selftest_catches_broken_env():
 
 
 def test_fizgig_clamp_resolution_only_for_int8():
-    """Krea2(Fizgig) 的分辨率钳制**只该对 int8 生效** ✗
+    """Keep explicit resolution for every precision; warn only for risky int8."""
+    import Kohya一键工具 as core
+    for flags in (("--quant_int8", "bf16"), ("--quantize_4bit",), ()):
+        logs = []
+        assert core._fizgig_clamp_resolution(15.67, 768, flags, logs.append) == 768
+        assert bool(logs) == ("--quant_int8" in flags)
+    assert core._fizgig_clamp_resolution(24, 768, ("--quant_int8",)) == 768
+    assert core._fizgig_clamp_resolution(None, 768, ("--quant_int8",)) == 768
 
-    ★ 2026-09-22 修：原先不看量化方式，≤19G 一律把分辨率砍到 512 ✗ ——
-      于是**连 NF4 用户也被砍** ✗。可 NF4 底模只 ~5.6GB ✓
-      （`_fizgig_quant_swap` 的注释与本函数原来的提示都写着 ✓），
-      16G 卡上 NF4 + 768px **完全放得下** ✓ → 砍到 512 纯属**白丢画质** ✗
-      ★ 为什么该降的是 int8：它的底模必须**全驻留**（引擎强制 blocks_to_swap=0 ✗），
-      需 ~18G 常驻 > 16G ✗ → 溢出换页 → 越跑越慢 ✗（实测 8~19 s/it）
-    判据：int8 且 ≤19G → 降 512 ✓；**其余任何档位**（NF4 / fp8 / ≥20G / 本来 ≤512）→ **原样** ✓
-    """
-    import Kohya一键工具 as core     # noqa: E402
-
-    _sil = lambda *a, **k: None       # noqa: E731
-    _i8 = ["--quant_int8", "bf16"]
-    _nf4 = ["--quantize_4bit"]
-    assert core._fizgig_clamp_resolution(15.67, 768, _i8, _sil) == 512, "int8 + 16G 该降到 512"
-    assert core._fizgig_clamp_resolution(15.67, 768, _nf4, _sil) == 768, \
-        "NF4 + 16G 被误降到 512 ✗ —— NF4 底模只 ~5.6G，768 放得下（本次修复点）"
-    assert core._fizgig_clamp_resolution(15.67, 768, [], _sil) == 768, "fp8 档不该被降"
-    assert core._fizgig_clamp_resolution(24.0, 768, _i8, _sil) == 768, "24G 装得下 int8，不该降"
-    assert core._fizgig_clamp_resolution(15.67, 512, _i8, _sil) == 512, "本来就是 512，保持"
-    assert core._fizgig_clamp_resolution(None, 768, _i8, _sil) == 768, "显存未知时不猜"
-    print("FIZGIG_CLAMP_ONLY_INT8_OK")
 
 
 def test_at_image_custom_model():
@@ -2725,14 +2647,14 @@ def main():
     check("界面提示的适用范围与代码一致", test_param_scope_matches_code)
     check("改过的标签能通过「重新处理」生效", test_preprocess_overwrite_picks_up_changed_captions)
     check("环境自检能抓到「包装不全」", test_env_selftest_catches_broken_env)
-    check("Fizgig 分辨率钳制只对 int8 生效", test_fizgig_clamp_resolution_only_for_int8)
+    check("Fizgig 保留指定分辨率，仅对 int8 风险告警", test_fizgig_clamp_resolution_only_for_int8)
     check("第三引擎可自定义模型（默认不变+能恢复）", test_at_image_custom_model)
     check("Qwen-Image-2.1 可选择现有 safetensors 权重文件", test_at_image_qwen21_single_file)
     check("选了新打标模型就不能偷偷用旧模型", test_wd14_respects_selected_model)
     check("Anima 指定 Qwen3：选错要拦、能恢复默认、失效要说", test_anima_qwen3_pick_guards)
     check("Fizgig 采样间隔按「轮」算（填 10 = 每 10 轮）", test_fizgig_sample_interval_is_epochs)
     check("步/轮间隔值分别记忆，切换模式不偷换单位", test_interval_values_are_scoped_by_unit)
-    check("16G 档防 int8 溢出：降 512 + 告警", test_fizgig_int8_vram_guard)
+    check("16G int8 风险告警，不覆盖指定分辨率", test_fizgig_int8_vram_guard)
     check("保存间隔按「轮」+ 超总轮数要警告", test_save_interval_is_epochs_for_krea2)
     check("自带 Python / Git：选文件夹 → 识别 → 校验 → 采用", test_env_paths_custom)
     check("自带环境入口可见且能打开", test_env_locations_ui)

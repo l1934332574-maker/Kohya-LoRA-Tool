@@ -381,7 +381,7 @@ class LocalModelTests(unittest.TestCase):
         core._sample_seed = lambda *_: 42
         core._record_effective = lambda **_kw: None
         core._fizgig_warmup_log_filter = lambda logf: logf
-        record = {"source": str(self.root / "source"), "python": sys.executable}
+        record = {"version": "v7.3.1", "source": str(self.root / "source"), "python": sys.executable}
         with self.mocked_checks(), patch.object(adapter, "source_version", return_value=VERSION), \
                 patch.object(adapter, "_env", return_value={}), patch.object(adapter, "_helper_configs", return_value=None):
             adapter.train_lora(core, record, logs.append, "krea2_fz", params, 8, None, None)

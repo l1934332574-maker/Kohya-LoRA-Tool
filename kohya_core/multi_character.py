@@ -221,7 +221,7 @@ def public_scan(value, *, mode=None, resolution=512):
 def prepare(core, project, settings, resolution, logf=print, report=None, *, mode=None):
     """Build a complete new flat dataset, then replace only the managed project directory."""
     from PIL import Image
-    from .image_io import read_image
+    from .image_io import read_image, save_normalized_png, finish_image_batch, ImageDecodeError
     check_stop = core.check_stop
     result = scan(settings, check_stop, mode=mode, resolution=resolution)
     resolution = int(resolution)
@@ -243,6 +243,8 @@ def prepare(core, project, settings, resolution, logf=print, report=None, *, mod
     # Caption edits may rename a prepared sample. Find prior masks by content and
     # role/group, so a label correction never silently discards a painted region.
     previous_by_content = {}
+    previous_by_pixels = None
+    old_rows = []
     old_manifest_path = target / 'multi_manifest.json'
     if old_manifest_path.is_file() and not loss_masks.linked(old_manifest_path):
         old_rows = json.loads(old_manifest_path.read_text(encoding='utf-8')).get('images', [])
@@ -255,23 +257,40 @@ def prepare(core, project, settings, resolution, logf=print, report=None, *, mod
                 previous_by_content[(old_row.get('group_id'), checksum)] = name
     stage = Path(tempfile.mkdtemp(prefix=".multi_prepare_", dir=target.parent)).resolve()
     manifest, written = [], 0
+    image_errors, recovered_images = [], []
+    image_report = target.parent / "image_normalization.json"
+    logf("[多角色] 自动转换为标准 PNG 训练副本，原图和标签保留。")
     try:
         for row in result["entries"]:
             check_stop()
             path = row["path"]
             source_stat = path.stat()
             identity = hashlib.sha256(json.dumps([row["group_id"], str(path.resolve()), source_stat.st_size, source_stat.st_mtime_ns, row["caption"], resolution], ensure_ascii=False).encode()).hexdigest()[:24]
-            image = read_image(path)
+            try:
+                image = read_image(path, alpha_background=(255, 255, 255))
+                if min(image.size) < 64:
+                    image.close()
+                    raise ImageDecodeError(f"图片尺寸过小，请检查：{path.name}。")
+            except ImageDecodeError as exc:
+                image_errors.append({"source": str(path), "group_id": row["group_id"], "error": str(exc)})
+                logf(f"[图片检查] 暂时无法转换：{path.name}；继续检查其余图片。")
+                continue
+            if image.info.get('kohya_decoder') == 'windows':
+                recovered_images.append(str(path))
+                logf(f"[图片修复] 已用 Windows 备用解码恢复：{path.name}，原图未修改。")
             width, height = image.size
             scale = min(1.0, resolution / max(width, height))
             size = (max(8, int(width * scale) // 8 * 8), max(8, int(height * scale) // 8 * 8))
-            if min(width, height) < 64: raise ValueError(f"图片尺寸过小，请检查：{path.name}。")
-            image = image.resize(size, Image.Resampling.LANCZOS)
+            source_geometry = {'size': image.info['kohya_source_size'],
+                               'orientation': image.info['kohya_source_orientation']}
+            resized = image.resize(size, Image.Resampling.LANCZOS)
+            image.close()
+            image = resized
             copies = factors[row["group_id"]]
             for index in range(copies):
                 check_stop()
                 filename = f"multi_{identity}_{index}.png"
-                image.save(stage / filename)
+                save_normalized_png(image, stage / filename)
                 previous_image = target / filename
                 image_sha = loss_masks.digest(stage / filename)
                 same_image = previous_image.is_file() and loss_masks.digest(previous_image) == image_sha
@@ -282,27 +301,67 @@ def prepare(core, project, settings, resolution, logf=print, report=None, *, mod
                         previous_image = target / copied_name
                         if not previous_image.is_file(): previous_image = target / first_name
                         same_image = previous_image.is_file() and loss_masks.digest(previous_image) == image_sha
+                if not same_image and old_rows:
+                    # New clean PNGs intentionally drop source metadata. Preserve
+                    # reviewed masks when pixels match even if PNG bytes differ.
+                    if previous_by_pixels is None:
+                        previous_by_pixels = {}
+                        for old_row in old_rows:
+                            old_name = str(old_row.get('name') or '')
+                            old_path = target / old_name
+                            if not old_name or Path(old_name).name != old_name or not old_path.is_file() or loss_masks.linked(old_path):
+                                continue
+                            try:
+                                with read_image(old_path, alpha_background=(255, 255, 255)) as old_image:
+                                    key = (old_row.get('group_id'), old_image.size, hashlib.sha256(old_image.tobytes()).hexdigest())
+                                previous_by_pixels[key] = old_name
+                            except ImageDecodeError:
+                                continue
+                    key = (row['group_id'], image.size, hashlib.sha256(image.tobytes()).hexdigest())
+                    first_name = previous_by_pixels.get(key)
+                    if first_name:
+                        copied_name = first_name.rsplit('_', 1)[0] + '_' + str(index) + '.png'
+                        previous_image = target / copied_name
+                        if not previous_image.is_file() or loss_masks.linked(previous_image):
+                            previous_image = target / first_name
+                        else:
+                            try:
+                                with read_image(previous_image, alpha_background=(255, 255, 255)) as old_image:
+                                    equal_pixels = old_image.size == image.size and old_image.tobytes() == image.tobytes()
+                            except ImageDecodeError:
+                                equal_pixels = False
+                            if not equal_pixels: previous_image = target / first_name
+                        same_image = True
                 previous_name = previous_image.name
                 previous_mask = loss_masks.mask_for(previous_image) if same_image else None
                 if same_image and previous_mask is None:
                     previous_mask = loss_masks.mask_for(target / '.inactive_loss_masks' / previous_name) if (target / '.inactive_loss_masks').is_dir() else None
                 if same_image and previous_name in old_masks['images']:
                     data = loss_masks.manifest(stage)
-                    data['images'][filename] = old_masks['images'][previous_name]
+                    record = dict(old_masks['images'][previous_name])
+                    previous_sha = loss_masks.digest(previous_image)
+                    if record.get('image_sha256') == previous_sha:
+                        record['image_sha256'] = image_sha
+                    if record.get('decision_image_sha256') == previous_sha:
+                        record['decision_image_sha256'] = image_sha
+                    data['images'][filename] = record
                     loss_masks.atomic_json(stage / loss_masks.MANIFEST, data)
                 if previous_mask:
                     destination = stage if mask_enabled else stage / '.inactive_loss_masks'
                     destination.mkdir(exist_ok=True)
                     shutil.copy2(previous_mask, destination / (Path(filename).stem + loss_masks.SUFFIX + previous_mask.suffix))
                 elif mask_enabled:
-                    loss_masks.import_mask(path, stage / filename)
+                    loss_masks.import_mask(path, stage / filename, source_geometry=source_geometry)
                 (stage / Path(filename).with_suffix(".txt")).write_text(row["caption"], encoding="utf-8")
                 written += 1
             if written % 10 == 0 or len(manifest) + 1 == len(result["entries"]):
                 logf(f"[多角色] 整理素材 {len(manifest) + 1}/{len(result['entries'])}，已写入 {written} 个样本。")
             manifest.append({"name": f"multi_{identity}_0.png", "group_id": row["group_id"],
                              "roles": row["roles"], "sampling_copies": copies, "original_size": [width, height], "size": list(size)})
+            image.close()
         check_stop()
+        finish_image_batch(image_report, total=len(result['entries']),
+                           recovered=recovered_images, errors=image_errors)
         (stage / "multi_manifest.json").write_text(json.dumps({"images": manifest, "roles": result["roles"]}, ensure_ascii=False, indent=2), encoding="utf-8")
         backup = None
         if target.exists():
@@ -332,7 +391,7 @@ def prepare(core, project, settings, resolution, logf=print, report=None, *, mod
              "布局坐标按本次采样尺寸生成；在出图工具中保持相同宽高，整段 JSON 作为正向提示词。\n"
              "DOP " + ("已开启" if settings.get("moss", {}).get("dop") else "未开启") + "；触发词保留原样，不做自动拼接或改名。\n" if mode == "moss_fz" else "") +
             "\n".join(result["warnings"]), encoding="utf-8")
-        stats = {"ok": written, "skipped_existing": 0, "unique_images": result["images"], "multi_character": {k: result[k] for k in ("roles", "warnings", "validation")}}
+        stats = {"ok": written, "skipped_existing": 0, "image_recovered": len(recovered_images), "image_report": str(image_report), "unique_images": result["images"], "multi_character": {k: result[k] for k in ("roles", "warnings", "validation")}}
         if report: Path(report).write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
         for warning in result["warnings"]: logf("[多角色] 提醒：" + warning)
         logf(f"[多角色] {len(result['settings']['roles'])} 个角色，{result['images']} 张原图，均衡后 {written} 个训练样本；保留完整构图。")

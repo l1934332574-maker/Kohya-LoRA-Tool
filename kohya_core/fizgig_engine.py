@@ -262,6 +262,8 @@ def _patch_helpers(source, version=VERSION):
     """Use prepared local configs; patches are pinned, narrow, and fail closed."""
     if version == MOSS_VERSION:
         return _patch_moss_source(source)
+    if version == LATEST_VERSION:
+        _patch_latest_offloading(source)
     patches = {
         "src/fizgig/anima/driver.py": [
             ('AutoTokenizer.from_pretrained(HELPER, subfolder="tokenizer")',
@@ -329,6 +331,81 @@ def _patch_helpers(source, version=VERSION):
                         'prune_state_dirs(os.path.join(output_dir, "snapshots", "fizgig-%s"), output_name, keep_last_n_states)' % version)
     path.write_text(text, encoding="utf-8")
 
+
+
+def _patch_latest_offloading(source):
+    """Keep mixed BF16/INT8 blocks on separate storage in the v8.9.6 offloader."""
+    import ast
+    path = Path(source) / "src/fizgig/modules/offloading.py"
+    text = path.read_text(encoding="utf-8")
+    marker = "# KOHYA_TOOL_PATCH: mixed block storage v1"
+    if marker in text:
+        return False
+    tree = ast.parse(text)
+    nodes = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+             and n.name in ("swap_weight_devices_no_cuda", "swap_weight_devices_cuda")]
+    if (len(nodes) != 2 or text.count("def _streamed_linears(") != 1
+            or text.count("class Offloader:") != 1):
+        raise RuntimeError("Fizgig 块交换接口变化，已停止训练；引擎文件未改动。")
+    lines = text.splitlines(keepends=True)
+    for node in sorted(nodes, key=lambda n: n.lineno, reverse=True):
+        first = next((n for n in node.body if isinstance(n, ast.Assert)), None)
+        if first is None:
+            raise RuntimeError("Fizgig 块交换入口变化，已停止训练。")
+        indent = " " * first.col_offset
+        guard = [
+            "if not _kohya_swap_storage_compatible(layer_to_cpu, layer_to_cuda):",
+            "    _synchronize_device(device)",
+            '    weighs_to_device(layer_to_cpu, torch.device("cpu"))',
+            "    weighs_to_device(layer_to_cuda, device)",
+            "    _synchronize_device(device)",
+            "    return None",
+        ]
+        lines[first.end_lineno:first.end_lineno] = [indent + line + "\n" for line in guard]
+    helper = marker + "\n" + '''def _kohya_swap_storage_compatible(layer_a, layer_b):
+    a, b = _streamed_linears(layer_a), _streamed_linears(layer_b)
+    return a.keys() == b.keys() and all(
+        a[name].weight.shape == module.weight.shape
+        and a[name].weight.dtype == module.weight.dtype
+        for name, module in b.items())
+
+
+'''
+    updated = "".join(lines).replace("class Offloader:", helper + "class Offloader:", 1)
+    compile(updated, str(path), "exec")
+    temporary = path.with_name(path.name + ".kohya-tmp-" + str(os.getpid()))
+    try:
+        temporary.write_text(updated, encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists(): temporary.unlink()
+    return True
+
+
+def ensure_preview_offloading(record, log=print):
+    """Apply the software compatibility fix to an already verified installed source."""
+    if record.get("version") != LATEST_VERSION:
+        return False
+    source = Path(record["source"])
+    if source_version(source) != LATEST_VERSION:
+        raise RuntimeError("Fizgig 源码校验未通过；已停止处理预览兼容补丁。")
+    path = source / "src/fizgig/modules/offloading.py"
+    previous = path.read_bytes()
+    if "# KOHYA_TOOL_PATCH: mixed block storage v1" in previous.decode("utf-8"):
+        return False
+    marker_path = source / ".kohya-fizgig-source.json"
+    marker = _read(marker_path)
+    backup = path.with_name(path.name + ".kohya-mixed-storage.bak")
+    if not backup.exists(): backup.write_bytes(previous)
+    try:
+        _patch_latest_offloading(source)
+        marker["files"]["src/fizgig/modules/offloading.py"] = _sha(path)
+        _write(marker_path, marker)
+    except BaseException:
+        path.write_bytes(previous)
+        raise
+    log("[Fizgig] 已补齐混合精度块交换保护；保留原引擎版本，无需重新下载。")
+    return True
 
 
 def _patch_moss_offloading(source):
@@ -404,6 +481,11 @@ def _env(core, record):
            else core.build_direct_env())
     if record.get("version") in SUPPORTED_MOSS:
         env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+        if sys.platform == "win32":
+            # Avoid mapping every BF16 Qwen shard at once on Windows. The
+            # upstream file reader loads streamed layers only when needed.
+            env.setdefault("FIZGIG_TE_FROM_FILE", "1")
+            env.setdefault("PYTHONFAULTHANDLER", "1")
     return env
 
 

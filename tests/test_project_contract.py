@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from gui.modern_host import ModernUIBridge
+from tests.bridge_fixture import ModernUIBridge
 from kohya_core import paths, queue
 from kohya_core.project_config import caption_summary
 from kohya_core.training_history import TrainingHistory
@@ -32,7 +32,7 @@ class ProjectContractTests(unittest.TestCase):
                 patch.dict(sys.modules, {'Kohya一键工具': contract_core()}):
             result = queue.params_from_project('example')
         for key, value in self.project()['params'].items():
-            expected = 2 if key == 'batch_size' else value
+            expected = 2 if key == 'batch_size' else ('\u5f00\u542f' if key == 'gc' else value)
             self.assertEqual(result.get(key), expected, key)
 
     def test_all_modern_training_paths_preserve_user_captions(self):

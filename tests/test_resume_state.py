@@ -10,6 +10,12 @@ from types import SimpleNamespace
 from tests.test_anima_component_integrity import legacy
 
 
+def complete_state(path, engine='musubi'):
+    names = ('lora.safetensors', 'optimizer.pt', 'rng.pt') if engine == 'fizgig' else ('model.safetensors', 'optimizer.bin', 'scheduler.bin', 'random_states_0.pkl')
+    for name in names: (path/name).write_bytes(b'state fixture')
+    if engine == 'fizgig': (path/'training_state.json').write_text('{"epoch":1,"global_step":100}')
+
+
 class ResumeStateTests(unittest.TestCase):
     def test_musubi_resume_patch_starts_after_saved_epoch(self):
         archive = Path(__file__).resolve().parents[1] / "installers" / "musubi-tuner" / "musubi-tuner-main.zip"
@@ -31,9 +37,10 @@ class ResumeStateTests(unittest.TestCase):
                 "        # KOHYA_TOOL_PATCH: musubi resume epoch", 1
             )[1].split("        noise_scheduler", 1)[0]
             runtime = {
-                "args": SimpleNamespace(resume=str(root / "krea2_lora-000007-state"), max_train_steps=1664),
+                "args": SimpleNamespace(resume=str(root / "krea2_lora-000007-state"), max_train_steps=1664, gradient_accumulation_steps=1),
                 "num_train_epochs": 16,
                 "num_update_steps_per_epoch": 104,
+                "train_dataloader": range(104),
                 "os": os,
                 "logger": SimpleNamespace(info=lambda *args: None),
                 "accelerator": SimpleNamespace(is_local_main_process=True),
@@ -55,9 +62,11 @@ class ResumeStateTests(unittest.TestCase):
             second = output / f"{name}-000002-state"
             for state in (first, second):
                 state.mkdir()
-                (state / "optimizer.bin").write_bytes(b"state")
+                complete_state(state)
             stamp = time.time() - 60
             os.utime(second, (stamp, stamp))
+            for file in second.iterdir(): os.utime(file, (stamp, stamp))
+            for file in first.iterdir(): os.utime(file, (stamp - 60, stamp - 60))
 
             self.assertEqual(legacy.find_musubi_state(str(output), name), str(second))
             self.assertEqual(legacy.resume_step_from(str(second), steps_per_epoch=120), 240)
@@ -81,13 +90,14 @@ class ResumeStateTests(unittest.TestCase):
                 new_state = output / f"{name}-{new_suffix}-state"
                 for state in (old_state, new_state):
                     state.mkdir()
-                    if marker:
-                        (state / marker).write_bytes(b"state")
+                    complete_state(state, name)
                 final = output / f"{name}.safetensors"
                 final.write_bytes(b"finished")
                 os.utime(old_state, (base_time, base_time))
                 os.utime(final, (base_time + 10, base_time + 10))
                 os.utime(new_state, (base_time + 20, base_time + 20))
+                for file in old_state.iterdir(): os.utime(file, (base_time, base_time))
+                for file in new_state.iterdir(): os.utime(file, (base_time + 20, base_time + 20))
                 self.assertEqual(finder(str(output), name), str(new_state))
 
 

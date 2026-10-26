@@ -199,7 +199,7 @@ def preview(image, record=None):
     except Exception: pass  # The diagnostic above is shown next to the original.
     return result
 
-def import_mask(source_image, output_image, *, border_box=None, crop_ratio='', crop_function=None):
+def import_mask(source_image, output_image, *, border_box=None, crop_ratio='', crop_function=None, source_geometry=None):
     """Replay photo geometry on a raw sidecar, then save beside the managed copy."""
     from PIL import Image
     source, output = Path(source_image), Path(output_image)
@@ -210,8 +210,12 @@ def import_mask(source_image, output_image, *, border_box=None, crop_ratio='', c
     old = manifest(output.parent)['images'].get(output.name, {})
     if current and (old.get('origin') != 'auto' or digest(current) != old.get('mask_sha256')): return
     mask = read_mask(candidate)
-    with Image.open(source) as raw:
-        raw_size = raw.size; orientation = raw.getexif().get(274, 1)
+    if source_geometry is None:
+        with Image.open(source) as raw:
+            raw_size = raw.size; orientation = raw.getexif().get(274, 1)
+    else:
+        raw_size = tuple(source_geometry['size'])
+        orientation = source_geometry['orientation']
     upright_size = raw_size[::-1] if orientation in (5, 6, 7, 8) else raw_size
     transpose = {2: Image.Transpose.FLIP_LEFT_RIGHT, 3: Image.Transpose.ROTATE_180, 4: Image.Transpose.FLIP_TOP_BOTTOM, 5: Image.Transpose.TRANSPOSE, 6: Image.Transpose.ROTATE_270, 7: Image.Transpose.TRANSVERSE, 8: Image.Transpose.ROTATE_90}
     # Mask editors normally save upright pixels without the photo's EXIF flag.

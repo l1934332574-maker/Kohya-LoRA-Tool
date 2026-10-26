@@ -61,6 +61,8 @@ class FakeRoot:
 
 
 class FakePopup:
+    transient = Mock()
+    after = Mock()
     exists = True
 
     def bind(self, _sequence, callback, add=None):
@@ -111,6 +113,7 @@ class LabelEditorUtilityScopeTests(unittest.TestCase):
         app = App.__new__(App)
         app.current_project = "9.26饭团anima"
         app._utility_only = True
+        app._utility_owner = 0
         app._utility_project_name = "9.26饭团anima"
         app._collect_params = Mock(return_value={"mode": "style"})
         app._label_editor = None
@@ -135,6 +138,7 @@ class LabelEditorUtilityScopeTests(unittest.TestCase):
         app = App.__new__(App)
         app.current_project = None
         app._utility_only = True
+        app._utility_owner = 0
         app._utility_project_name = ""
         app._collect_params = Mock(return_value={"mode": "style"})
         app._label_editor = None
@@ -169,6 +173,7 @@ class LabelEditorUtilityScopeTests(unittest.TestCase):
         popup = FakePopup()
         app = App.__new__(App)
         app._utility_only = True
+        app._utility_owner = 0
         app.root = root
         app._find_utility_popup = lambda: popup if popup.exists else None
 
@@ -211,6 +216,7 @@ class LabelEditorUtilityScopeTests(unittest.TestCase):
 
         app = App.__new__(App)
         app._utility_only = True
+        app._utility_owner = 0
         app.root = root
         app._find_utility_popup = lambda: popup if popup.winfo_exists() else None
         app._finish_utility_only()

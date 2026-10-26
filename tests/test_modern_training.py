@@ -11,7 +11,9 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kohya_core.configs import PROJECT_TEMPLATES
-from gui.modern_host import ModernUIBridge, _ensure_web_asset_mimetypes
+from gui.modern_host import _ensure_web_asset_mimetypes
+from tests.bridge_fixture import ModernUIBridge
+from tests.test_anima_component_integrity import _write_safetensors
 
 
 class FakeStopRequested(Exception):
@@ -85,15 +87,15 @@ class FakeCore:
         return True, "ready", "at-python"
 
     @staticmethod
-    def at_image_info(_mode):
+    def at_image_info(_mode, _settings=None):
         return {"arch": "qwen_image", "label": "Qwen-Image-2512", "model_id": "Qwen/Qwen-Image-2512", "size": "40GB", "min_vram": 16}
 
     @staticmethod
-    def at_image_custom_get(_mode):
+    def at_image_custom_get(_mode, _settings=None):
         return {}
 
     @staticmethod
-    def at_image_model_ready(_mode):
+    def at_image_model_ready(_mode, _settings=None):
         return True
 
     @staticmethod
@@ -114,7 +116,7 @@ class FakeCore:
         return str(path)
 
     @staticmethod
-    def at_image_local_dir(_mode):
+    def at_image_local_dir(_mode, _settings=None):
         return "models/qwen"
 
     @staticmethod
@@ -233,6 +235,12 @@ class AvifCountingCore(FakeCore):
 
 
 class ProjectCreationCore:
+    @staticmethod
+    def system_status(): return {}
+    @staticmethod
+    def detect_gpu_vendor(): return 'nvidia'
+    @staticmethod
+    def fizgig_engine_update_status(): return {'versions': []}
     PRESET_VERSION = 3
     MODE_LABELS = {"style": "画风", "character": "人物", "concept": "概念"}
     BASE_TYPE_LABELS = {"sdxl": "SDXL", "sd15": "SD1.5", "flux": "FLUX.1", "anima": "Anima"}
@@ -320,6 +328,7 @@ class ModernTrainingTests(unittest.TestCase):
             }
             core = SimpleNamespace(
                 FLUX2_MODEL_LINKS=links,
+                model_url_list=lambda url: [url],
                 flux2_models_dir=lambda: temp,
                 flux2_model_files=lambda: {},
             )
@@ -402,7 +411,8 @@ class ModernTrainingTests(unittest.TestCase):
         core = ProjectCreationCore()
         names = [item["name"] for item in ModernUIBridge(core).bootstrap()["templates"]]
 
-        self.assertEqual(names[:5], ["自定义", "SD1.5", "SDXL", "FLUX.1", "Anima"])
+        self.assertTrue(names[0].startswith("MOSS-Image"))
+        self.assertEqual(names[1:6], ["自定义", "SD1.5", "SDXL", "FLUX.1", "Anima"])
         self.assertNotIn("人物 LoRA（SDXL）", names)
         self.assertNotIn("画风 LoRA（SDXL）", names)
         self.assertNotIn("画风 LoRA（SD1.5）", names)
@@ -488,7 +498,7 @@ class ModernTrainingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             core = FakeCore(temp)
             base_model = Path(temp) / "anima-base-v1.0.safetensors"
-            base_model.write_bytes(b"test fixture")
+            _write_safetensors(base_model, [("test.weight", 0, 1)])
             core.project = {
                 "mode": "character", "base_type": "anima", "base_model": str(base_model),
                 "raw_dir": str(core.raw), "trigger": "test_anima", "unet_only": True,
@@ -594,7 +604,7 @@ class ModernTrainingTests(unittest.TestCase):
             core = FakeCore(temp)
             core.detected_base_type = "sdxl"
             base_model = Path(temp) / "sdxl-base.safetensors"
-            base_model.write_bytes(b"fixture")
+            _write_safetensors(base_model, [("test.weight", 0, 1)])
             core.project = {
                 "mode": "character", "base_type": "sdxl", "base_model": str(base_model),
                 "raw_dir": str(core.raw), "trigger": "subject", "params": {"rank": "24", "max_epochs": "3"},
@@ -610,7 +620,7 @@ class ModernTrainingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             core = FakeCore(temp)
             base_model = Path(temp) / "anima-base-v1.0.safetensors"
-            base_model.write_bytes(b"test fixture")
+            _write_safetensors(base_model, [("test.weight", 0, 1)])
             resume_state = str(Path(temp) / "output" / "anima-demo" / "character_lora-step00000200-state")
             core.resume_state = resume_state
             core.project = {
@@ -666,7 +676,7 @@ class ModernTrainingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             core = FakeCore(temp)
             base_model = Path(temp) / "anima-base-v1.0.safetensors"
-            base_model.write_bytes(b"test fixture")
+            _write_safetensors(base_model, [("test.weight", 0, 1)])
             bridge = ModernUIBridge(core)
             config = {
                 "mode": "character", "base_type": "anima", "base_model": str(base_model),
@@ -688,7 +698,7 @@ class ModernTrainingTests(unittest.TestCase):
             for index in range(15):
                 (raw / f"sample-{index:02d}.avif").write_bytes(b"avif fixture")
             base_model = Path(temp) / "anima-base-v1.0.safetensors"
-            base_model.write_bytes(b"test fixture")
+            _write_safetensors(base_model, [("test.weight", 0, 1)])
             core.project = {
                 "mode": "character", "base_type": "anima", "base_model": str(base_model),
                 "raw_dir": str(raw), "trigger": "test_anima", "unet_only": True, "params": {},
@@ -775,7 +785,7 @@ class ModernTrainingTests(unittest.TestCase):
             project_actions = (
                 "label_editor", "export_config", "readme", "at_model_help",
                 "at_engine_update", "anima_components", "krea2_guide", "flux2_guide",
-                "h3_guide", "video_caption_stub", "video_caption", "amd_env",
+                "h3_guide", "video_caption_stub", "amd_env",
             )
             global_actions = ("tools", "check_update", "data_dir", "queue", "env_locations")
             messages = {}
@@ -807,6 +817,7 @@ class ModernTrainingTests(unittest.TestCase):
             before = len(launched)
             self.assertFalse(bridge.run_action("mode:character")["ok"])
             self.assertFalse(bridge.run_action("train")["ok"])
+            self.assertFalse(bridge.run_action("video_caption", "demo")["ok"])
             self.assertEqual(len(launched), before)
 
     def test_preprocess_action_uses_modern_task_workflow(self):

@@ -5,7 +5,7 @@
 ; 默认安装到用户文档目录 {userdocs}\KohyaLoraTool，避开 Program Files 权限问题
 ; ============================================================
 #define MyAppName "KohyaLoraTool"
-#define MyAppVersion "0.19.19"
+#define MyAppVersion "0.19.20"
 #define MyAppExeName "Kohya一键工具.exe"
 #define MyAppDir "..\dist\Kohya一键工具"
 
@@ -49,6 +49,7 @@ Name: "startmenu"; Description: "创建开始菜单快捷方式"; GroupDescripti
 Name: "launch"; Description: "安装完成后立即启动软件"; GroupDescription: "附加任务："; Flags: checkedonce
 
 [Files]
+Source: "{#MyAppDir}\installation-exe.sha256"; Flags: dontcopy
 Source: "{#MyAppDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
@@ -57,7 +58,7 @@ Name: "{group}\{#MyAppName}（经典界面）"; Filename: "{app}\{#MyAppExeName}
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent; Tasks: launch
+Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent; Tasks: launch; Check: InstallationVerified
 
 
 ;
@@ -68,6 +69,7 @@ Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: no
 [Code]
 var
   AMDInfoPage: TWizardPage;
+  PackageVerified: Boolean;
 
 procedure InitializeWizard;
 var
@@ -89,4 +91,43 @@ begin
     '● 升级时请保持原安装位置。检测到旧版本时会覆盖程序文件，项目和训练环境仍保留在数据目录。' + #13#10 +
     '  不用先卸载；若安装位置变更，请先备份原数据目录。' + #13#10 + #13#10 +
     '● 安装完成后首次运行，按左侧新手引导 ①②③④ 一步步来即可。';
+end;
+
+
+function InstallationVerified: Boolean;
+begin
+  Result := PackageVerified;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ExitCode: Integer;
+  ReportPath: String;
+  Parameters: String;
+  ExpectedHash: AnsiString;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    PackageVerified := False;
+    ExtractTemporaryFile('installation-exe.sha256');
+    if not LoadStringFromFile(ExpandConstant('{tmp}\installation-exe.sha256'), ExpectedHash) then
+      RaiseException('无法读取安装包的程序校验值。');
+    if CompareText(GetSHA256OfFile(ExpandConstant('{app}\{#MyAppExeName}')),
+      Trim(String(ExpectedHash))) <> 0 then
+      RaiseException('主程序未被完整替换。请退出软件所有窗口后重新安装，并保留安装日志。');
+    ReportPath := ExpandConstant('{app}\installation-check.json');
+    if FileExists(ReportPath) then
+      if not DeleteFile(ReportPath) then
+        RaiseException('无法清除旧的安装检查报告，请退出软件后重新安装。');
+    Parameters := '--check-installation ' + AddQuotes(ReportPath) +
+      ' --expected-version {#MyAppVersion}';
+    Log('Running installed package verification: ' + ReportPath);
+    if not Exec(ExpandConstant('{app}\{#MyAppExeName}'), Parameters,
+      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
+      RaiseException('无法启动安装后的组件检查。请保留安装日志，退出软件所有窗口后重新安装。');
+    if (ExitCode <> 0) or (not FileExists(ReportPath)) then
+      RaiseException('安装后的组件检查失败。请保留 installation-check.json 和安装日志，退出软件所有窗口后重新安装。');
+    PackageVerified := True;
+    Log('Installed package verification passed.');
+  end;
 end;

@@ -42,9 +42,10 @@ class MossIntegrationTests(unittest.TestCase):
 
     def test_new_version_does_not_change_existing_targets(self):
         self.assertEqual(engine.VERSION, 'v7.3.1')
-        self.assertEqual(engine.SUPPORTED_V7, ('v7.0.1','v7.3.1'))
-        self.assertEqual(engine.target_version('moss_fz'), 'v8.5.0')
-        self.assertEqual(engine.target_version('krea2_fz'), 'v7.3.1')
+        self.assertEqual(engine.SUPPORTED_V7[:2], ('v7.0.1','v7.3.1'))
+        self.assertIn(engine.LATEST_VERSION, engine.SUPPORTED_V7)
+        self.assertEqual(engine.target_version('moss_fz'), engine.LATEST_VERSION)
+        self.assertEqual(engine.target_version('krea2_fz'), engine.LATEST_VERSION)
         self.assertIn('v8.5.0', engine.SUPPORTED_STANDARD)
 
     def test_moss_source_marker_checks_all_deployed_files(self):
@@ -159,7 +160,7 @@ class MossIntegrationTests(unittest.TestCase):
                 result=bridge.create_project('new-moss',model_choice={'model':'moss_image','variant':'moss_base','engine':'fizgig'})
             self.assertTrue(result['ok'],result)
             saved=core.save_project.call_args.args[1]
-            self.assertEqual((saved['mode'],saved['params']['fizgig_version']),('moss_fz','v8.5.0'))
+            self.assertEqual((saved['mode'],saved['params']['fizgig_version']),('moss_fz',engine.LATEST_VERSION))
 
     def test_download_fallback_completes_once(self):
         done=[]

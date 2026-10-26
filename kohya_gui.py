@@ -230,16 +230,11 @@ def _run_mainloop_and_destroy(root):
                 # WM_DELETE_WINDOW may already have destroyed the classic root.
                 pass
 
-# 安装包目前未做代码签名（签名证书年费数千元），Windows / 第三方杀软常报
-# "无法识别的应用" 或 "检测到威胁"。这段提示放在「发现新版本」确认框里，
-# 让用户装之前就知道怎么放行，而不是被拦后一头雾水。
+# 区分系统信誉提示、杀毒检测与安装失败，不能仅凭未签名认定误报。
 UPDATE_AV_HINT = (
-    "⚠ 安装时若 Windows 提示「已保护你的电脑」或杀软报风险：\n"
-    "  这是未签名程序的常见误报，不是病毒。\n"
-    "  · 蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」\n"
-    "  · 安全中心报「检测到威胁」→ 保护历史记录里点「允许在设备上」\n"
-    "  · 360 / 火绒 → 把安装目录加进信任区\n"
-    "  万一被拦截，本软件不会退出，会保留当前版本并告诉你怎么办。"
+    "安装器需要关闭正在运行的软件窗口，请先保存操作、结束训练。\n"
+    "如果更新失败，请保留安装日志；若安全软件有拦截提示，也请保留检测名称和记录。\n"
+    "未签名提示不能证明文件有害，也不能据此认定检测一定是误报。"
 )
 
 # Inno Setup: close every running instance that holds files being replaced,
@@ -5493,8 +5488,24 @@ class App:
             except Exception:
                 pass
             return
-        self._log(f"[更新] 安装器启动后立即退出（退出码 {rc}），本次未安装")
-        self._update_blocked_help(dest, "安装器启动后立即退出（退出码 %s）" % rc)
+        if rc == 0 and getattr(sys, "frozen", False):
+            from pathlib import Path
+            import json
+            report = Path(sys.executable).parent / "installation-check.json"
+            try:
+                result = json.loads(report.read_text(encoding="utf-8"))
+                verified = (result.get("ok") is True
+                            and result.get("version") == str(ver).lstrip("v")
+                            and Path(result["install_dir"]).resolve() == Path(sys.executable).parent.resolve())
+            except (OSError, ValueError, KeyError, TypeError):
+                verified = False
+            if verified:
+                self._log("[更新] 安装完成，版本与组件检查通过；请重新打开软件。")
+                messagebox.showinfo(core.APP_NAME, "更新完成，组件检查通过。请关闭当前窗口，重新打开软件。")
+                self.root.destroy()
+                return
+        self._log(f"[更新] 安装器已退出（退出码 {rc}），需核对安装日志与安装后的组件检查结果")
+        self._update_blocked_help(dest, "未取得有效的安装完成检查结果（退出码 %s）" % rc)
 
     def _update_blocked_help(self, dest, reason):
         """更新被拦截/失败：保留当前版本，告诉用户手动怎么装 + 怎么放行。"""
@@ -5503,18 +5514,16 @@ class App:
             self._set_busy(False)
         except Exception:
             pass
-        self._log("[更新] 当前版本 v%s 保持原样，未做任何改动" % core.APP_VERSION)
+        self._log("[更新] 尚未确认安装结果，请保留安装日志并检查实际安装版本。")
         self._log("[更新] 安装包位置：%s" % dest)
         try:
             go = messagebox.askyesno(
                 core.APP_NAME,
                 "更新未能继续（%s）。\n\n"
-                "你的当前版本完好无损，可以继续使用。\n\n"
-                "最常见的原因是 Windows 或杀毒软件拦截了未签名的安装包 —— 这是误报，不是病毒。\n"
-                "请手动双击安装包，看到提示时这样放行：\n"
-                "  · 蓝框「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」\n"
-                "  · 安全中心报「检测到威胁」→ 保护历史记录里点「允许在设备上」\n"
-                "  · 360 / 火绒 → 把安装包或安装目录加进信任区\n\n"
+                "本次安装结果尚未确认；安装器可能已经替换部分程序文件。\n\n"
+                "请先退出软件的所有窗口，再手动运行完整安装包并保持原安装目录。\n"
+                "若仍然失败，请提供数据目录 logs 中的 update_install 日志。\n"
+                "如果安全软件有检测记录，请一并提供；不能仅凭启动失败判断为误报。\n\n"
                 "现在打开安装包所在文件夹吗？\n%s" % (reason, dest))
             if go:
                 try:
@@ -10907,7 +10916,39 @@ def main(argv=None):
     parser.add_argument("--utility-owner", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument("--check-ui-resources", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--check-worker-files", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--check-installation", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--expected-version", default=None, help=argparse.SUPPRESS)
     args, _unknown = parser.parse_known_args(argv)
+
+    if args.check_installation:
+        from pathlib import Path
+        import hashlib
+        import json
+        log = []
+        result = {"ok": False, "version": core.APP_VERSION,
+                  "executable": sys.executable, "install_dir": core.KIT_DIR, "log": log}
+        try:
+            if args.expected_version != core.APP_VERSION:
+                raise RuntimeError("安装后的程序版本不符：预期 %s，实际 %s" %
+                                   (args.expected_version, core.APP_VERSION))
+            from kohya_core.worker_files import ensure_worker_files
+            from gui.ui_startup import check_page_assets
+            import kohya_bundled_ui
+            import kohya_bundled_workers
+            result["recovered"] = ensure_worker_files(core.KIT_DIR, log.append)
+            index = Path(core.KIT_DIR) / "modern_ui" / "dist" / "index.html"
+            # Installation must contain its matching assets, not merely work
+            # through the runtime UI cache recovery fallback.
+            check_page_assets(index, log)
+            manifest = index.parent / "ui-manifest.json"
+            if hashlib.sha256(manifest.read_bytes()).hexdigest() != kohya_bundled_ui.BUILD_ID:
+                raise RuntimeError("安装后的页面资源与 EXE 版本不一致。")
+            result["ok"] = True
+        except Exception as exc:
+            result["error"] = str(exc)
+        Path(args.check_installation).write_text(
+            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        return 0 if result["ok"] else 1
 
     if args.check_worker_files:
         from pathlib import Path

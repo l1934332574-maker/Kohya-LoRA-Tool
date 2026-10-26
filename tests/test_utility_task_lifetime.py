@@ -36,6 +36,8 @@ class Root:
 
 
 class Popup:
+    transient = Mock()
+    after = Mock()
     def bind(self, sequence, callback, add=None):
         self.on_destroy = callback
 
@@ -48,6 +50,7 @@ class UtilityTaskLifetimeTests(unittest.TestCase):
         app = App.__new__(App)
         app.root = Root()
         app._utility_only = True
+        app._utility_owner = 0
         app._utility_final_check_done = True
         app._find_utility_popup = Mock(return_value=None)
         app._log = Mock()
@@ -209,6 +212,7 @@ class UtilityTaskLifetimeTests(unittest.TestCase):
                     app = App.__new__(App)
                     app.root = root
                     app._utility_only = True
+                    app._utility_owner = 0
                     app._utility_final_check_done = True
                     app._log = Mock()
                     app._scan_base_models = Mock()

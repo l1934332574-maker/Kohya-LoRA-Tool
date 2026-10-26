@@ -248,6 +248,8 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
     commit = source_commit(version)
     if source_version(record["source"]) != version or version not in SUPPORTED_V7 or not Path(record["python"]).is_file():
         raise RuntimeError("此项目选择 Fizgig %s，请先安装或更新引擎。" % version)
+    from .fizgig_engine import ensure_preview_offloading
+    ensure_preview_offloading(record, logf)
     family = FAMILIES[mode]
     if family == "moss_image" and version not in SUPPORTED_MOSS:
         raise RuntimeError("MOSS-Image 需要 Fizgig " + " / ".join(SUPPORTED_MOSS))

@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from gui.modern_host import ModernUIBridge
+from tests.bridge_fixture import ModernUIBridge
 
 
 class AppearanceSettingsCore:

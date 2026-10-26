@@ -29,6 +29,13 @@ def main():
             state[key.replace('vision_multi', 'tagging_head')] = state.pop(key)
     loaded = model.load_state_dict(state, strict=False)
     missing_parameters = set(loaded.missing_keys) & {name for name, _ in model.named_parameters()}
+    # The SHA-verified official checkpoint omits this scalar. Upstream's
+    # strict=False loader retains RAM_plus.__init__'s log(1 / 0.07), which
+    # generate_tag uses for description reweighting. Keep that exact default;
+    # all other missing inference parameters must still fail explicitly.
+    if 'reweight_scale' in missing_parameters:
+        missing_parameters.remove('reweight_scale')
+        print('[RAM++] 官方权重未提供 reweight_scale，沿用模型自带默认值。', flush=True)
     if missing_parameters:
         raise RuntimeError('RAM++ checkpoint is missing inference parameters: ' + ', '.join(sorted(missing_parameters)[:5]))
     del checkpoint, state

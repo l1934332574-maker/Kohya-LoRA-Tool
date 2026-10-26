@@ -14,7 +14,16 @@ import time
 def ensure_worker_files(kit_dir, log=print):
     if not getattr(sys, "frozen", False):
         return []
-    import kohya_bundled_workers as bundle
+    try:
+        import kohya_bundled_workers as bundle
+    except ModuleNotFoundError as exc:
+        if exc.name != "kohya_bundled_workers":
+            raise
+        raise RuntimeError(
+            "当前程序缺少内置组件恢复模块，可能是更新不完整或仍在运行旧程序。"
+            "请退出软件所有窗口，用完整安装包覆盖原目录后重新打开。"
+            "若通过软件内更新，请保留数据目录 logs 中的 update_install 日志。"
+        ) from exc
     root = Path(kit_dir).resolve()
     recovered = []
     for name, (expected, encoded) in bundle.FILES.items():
