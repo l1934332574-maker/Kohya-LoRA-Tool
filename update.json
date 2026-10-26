@@ -1,7 +1,7 @@
 {
-  "version": "v0.19.21",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.19.21/Setup.exe",
+  "version": "v0.19.22",
+  "setup_url": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "setup_sha256": "66a4d0c935a69eb84ffe071a58dee326db3c75596c2388faf478581014785d14",
-  "notes": "安装若被拦截，请保留检测名称和安装日志；未签名提示不能单独证明文件有害，也不能据此认定杀毒检测一定是误报。\n\nv0.19.21 · 预处理热修复（2026-10-26）\n- 修复打开项目、扫描图集后提示 `kohya_bundled_workers` 缺失，导致无法开始预处理的问题。\n- 加强打包与安装检查，覆盖图集扫描后的组件加载流程。\n\n本次仅更新软件，训练引擎保持不变。"
+  "setup_sha256": "45345b877afa5e620c9fbefa75231e643475703f8b209d67edf442bb1ed43919",
+  "notes": "安装若被拦截，请保留检测名称和安装日志；未签名提示不能单独证明文件有害，也不能据此认定杀毒检测一定是误报。\n\nv0.19.22 · 训练启动热修复（2026-10-27）\n- 修复检查标签并确认继续后，可能一直停留在“正在启动训练引擎”的问题，适用于多角色及普通训练。\n\n本次仅更新软件，训练引擎保持不变。"
 }

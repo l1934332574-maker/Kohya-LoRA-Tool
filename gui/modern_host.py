@@ -2879,13 +2879,18 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                             progress=None,
                             detail=review_message,
                         )
-                while not review_event.wait(0.1):
+                while True:
+                    review_event.wait(0.1)
                     with self._task_lock:
-                        if not self._task or self._task.get("id") != task_id or self._task.get("status") != "awaiting_review":
+                        if not self._task or self._task.get("id") != task_id:
                             return
-                with self._task_lock:
-                    if not self._task or self._task.get("id") != task_id or self._task.get("status") != "running":
-                        return
+                        # Confirmation may arrive after wait timed out. Read
+                        # the event and status together under the same lock
+                        # used by continue_training / cancel_task.
+                        if self._task.get("status") == "running" and review_event.is_set():
+                            break
+                        if self._task.get("status") != "awaiting_review":
+                            return
                 self._task_log(task_id, "[训练] 正在启动 %s…" % engine_name)
                 with self._task_lock:
                     if self._task and self._task.get("id") == task_id:
