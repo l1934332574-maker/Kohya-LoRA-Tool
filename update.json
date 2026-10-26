@@ -1,7 +1,7 @@
 {
-  "version": "v0.19.20",
-  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.19.20/Setup.exe",
+  "version": "v0.19.21",
+  "setup_url": "https://github.com/l1934332574-maker/Kohya-LoRA-Tool/releases/download/v0.19.21/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "setup_sha256": "5e16420fe27ce3e734797ca35490ef0efd290f2738cc80331362071317b2442e",
-  "notes": "安装若被拦截，请保留检测名称和安装日志；未签名提示不能单独证明文件有害，也不能据此认定杀毒检测一定是误报。\n\nv0.19.20 · 稳定性修复（2026-10-26）\n- 改进图片读取与预处理，训练副本统一保存为 PNG，保留原图和已有标签。\n- 修复更新后组件缺失、版本混用的问题，加强安装完整性检查与自动恢复。\n- 修复 MOSS 文本编码器加载及训练采样的兼容性问题。\n\n本次仅更新软件，训练引擎版本保持不变。"
+  "setup_sha256": "66a4d0c935a69eb84ffe071a58dee326db3c75596c2388faf478581014785d14",
+  "notes": "安装若被拦截，请保留检测名称和安装日志；未签名提示不能单独证明文件有害，也不能据此认定杀毒检测一定是误报。\n\nv0.19.21 · 预处理热修复（2026-10-26）\n- 修复打开项目、扫描图集后提示 `kohya_bundled_workers` 缺失，导致无法开始预处理的问题。\n- 加强打包与安装检查，覆盖图集扫描后的组件加载流程。\n\n本次仅更新软件，训练引擎保持不变。"
 }

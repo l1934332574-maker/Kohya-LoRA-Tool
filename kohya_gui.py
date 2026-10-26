@@ -10931,11 +10931,22 @@ def main(argv=None):
             if args.expected_version != core.APP_VERSION:
                 raise RuntimeError("安装后的程序版本不符：预期 %s，实际 %s" %
                                    (args.expected_version, core.APP_VERSION))
+            # Follow the GUI order: scan a project before importing recovery
+            # modules. Eager imports here used to hide sys.path corruption.
+            import tempfile
+            from kohya_core.project_config import dataset_images
+            with tempfile.TemporaryDirectory(prefix="kohya-install-scan-") as temporary:
+                fixture = Path(temporary) / "project-scan.png"
+                Image.new("RGB", (8, 8), (90, 140, 190)).save(fixture)
+                if dataset_images(temporary) != [fixture]:
+                    raise RuntimeError("安装后的项目图集扫描检查失败。")
             from kohya_core.worker_files import ensure_worker_files
             from gui.ui_startup import check_page_assets
             import kohya_bundled_ui
             import kohya_bundled_workers
             result["recovered"] = ensure_worker_files(core.KIT_DIR, log.append)
+            result["project_scan"] = True
+            log.append("项目图集扫描与后续内置组件加载检查通过。")
             index = Path(core.KIT_DIR) / "modern_ui" / "dist" / "index.html"
             # Installation must contain its matching assets, not merely work
             # through the runtime UI cache recovery fallback.

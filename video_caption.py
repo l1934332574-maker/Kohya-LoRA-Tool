@@ -21,8 +21,12 @@ _HERE = _os.path.dirname(_os.path.abspath(__file__))
 # ⚠️ 必须**条件成立才剔除** ✗：仅当本目录确实含打包版 C 扩展时才动手 ✓
 #   （开发环境下本目录就是项目根，还放着 kohya_core 等本地包 ——
 #    无条件剔除会把它们也屏蔽掉，直接 import 失败 ✓）
-if any(_glob2.glob(_os.path.join(_HERE, _p))
-       for _p in ("python3*.dll", "_socket.pyd", "_ctypes.pyd")):
+# The GUI imports this module while scanning project images. Keep the frozen
+# bundle root on sys.path so PyInstaller can load later modules from PYZ.
+# Only an external Python worker must avoid this directory's bundled DLLs.
+if not getattr(_sys, "frozen", False) and any(
+        _glob2.glob(_os.path.join(_HERE, _p))
+        for _p in ("python3*.dll", "_socket.pyd", "_ctypes.pyd")):
     _sys.path[:] = [p for p in _sys.path
                     if _os.path.normcase(_os.path.abspath(p or _os.getcwd())) != _os.path.normcase(_HERE)]
 

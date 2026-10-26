@@ -3,9 +3,33 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
+
+
+def verify_frozen_project_scan(source_root, package_root):
+    """Check lazy bundled imports after the real GUI dataset scan order."""
+    source_root, package_root = Path(source_root).resolve(), Path(package_root).resolve()
+    source = (source_root / "Kohya一键工具.py").read_text(encoding="utf-8-sig")
+    version = re.search(r'APP_VERSION\s*=\s*"([^"\n]+)"', source).group(1)
+    with tempfile.TemporaryDirectory(prefix="kohya-frozen-imports-") as temporary:
+        work = Path(temporary)
+        report = work / "installation.json"
+        env = dict(os.environ, APPDATA=str(work / "appdata"), LOCALAPPDATA=str(work / "localappdata"))
+        run = subprocess.run(
+            [str(package_root / "Kohya一键工具.exe"), "--check-installation", str(report),
+             "--expected-version", version],
+            cwd=work, env=env, capture_output=True, timeout=60,
+        )
+        if not report.is_file():
+            raise RuntimeError("打包程序未生成项目扫描与组件加载检查报告；退出码：" + str(run.returncode))
+        result = json.loads(report.read_text(encoding="utf-8"))
+        if (run.returncode != 0 or not result.get("ok") or not result.get("project_scan")
+                or result.get("version") != version):
+            raise RuntimeError("打包程序的项目扫描与组件加载检查失败：" + str(result.get("error", result)))
+    print("打包主程序已核对：项目图集扫描后仍能加载内置恢复组件。", flush=True)
 
 
 def verify_external_image_io(source_root, package_root, worker_python=None):
@@ -22,6 +46,7 @@ def verify_external_image_io(source_root, package_root, worker_python=None):
     if not any(package_root.glob("python3*.dll")):
         raise RuntimeError("发布验证必须使用包含 Python 动态库的完整安装包目录")
 
+    verify_frozen_project_scan(source_root, package_root)
     from PIL import Image
     with tempfile.TemporaryDirectory(prefix="kohya-package-images-") as temporary:
         work = Path(temporary)

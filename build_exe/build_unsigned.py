@@ -61,6 +61,8 @@ def main():
     # The maintained installer may use this value to confirm replacement.
     (package / "installation-exe.sha256").write_text(sha256(package / "Kohya一键工具.exe"), encoding="ascii")
     (package / "kohya_dir.txt").write_text("", encoding="utf-8")
+    from release_package_checks import verify_frozen_project_scan
+    verify_frozen_project_scan(ROOT, package)
     output = ROOT / "build_exe/unsigned"
     output.mkdir(parents=True, exist_ok=True)
     compiler = Path(os.environ.get("ISCC_PATH", r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"))
