@@ -31,6 +31,7 @@ const props = defineProps<{
   choosePath: (kind: BrowseKind, currentPath?: string, memoryKey?: string) => Promise<string | null>
 }>()
 const emit = defineEmits<{
+  continue: [patch: ProjectConfig]
   back: [patch: ProjectConfig]
   notify: [message: string]
   save: [patch: ProjectConfig]
@@ -297,6 +298,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
       <div class="engine-heading-copy"><h1>{{ isMulti ? '多角色 LoRA · ' + details.label : details.label + '训练' }}</h1><span>项目：{{ project.name }}</span></div>
       </div>
       <div class="engine-actions">
+        <button class="engine-button" type="button" :disabled="componentBusy || switchingVersion" @click="emit('continue', makePatch())">已有 LoRA 追加训练</button>
         <button v-if="desktop && details.engine_update_available" class="engine-update-button" type="button" :title="isFizgig ? '可选安装新版；项目继续使用当前所选版本。' : legacyTooltips.engineUpdate" :disabled="componentBusy || switchingVersion" @click="requestAction(engineUpdateAction)"><span class="update-arrow">↗</span> {{ isFizgig ? '可选升级引擎' : '引擎更新可用' }}</button>
         <button v-if="desktop" class="engine-button" type="button" :disabled="componentBusy || switchingVersion" @click="save">{{ dirty.size ? '保存修改 · 未保存' : '设置已保存' }}</button>
         <!-- ★ 2026-10-02：与左侧栏重复的「一键开始训练」已移除 ✗（同一动作，只保留侧栏那个）-->

@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.22"
+APP_VERSION = "0.19.23"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -3448,6 +3448,10 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
         "--seed", "42",
         "--output_dir", out_dir, "--output_name", output_name,
     ]
+    if params.get("initial_lora") and not resume_from:
+        cmd += ["--network_weights=" + str(params["initial_lora"])]
+        logf("[追加训练] 继承可训练 LoRA 权重；新优化器与训练计数：" + str(params["initial_lora"]))
+        _record_effective(initial_lora=params["initial_lora"], training_origin=params.get("training_origin"))
     if resume_from:
         if not _patch_musubi_resume_epoch(get_kohya_dir(), logf):
             raise RuntimeError("当前 musubi 版本无法安全恢复训练轮次；请先更新第二引擎，原有断点不会删除。")
@@ -3527,6 +3531,8 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
 
     # 训练命令同样带 KREA2_TOKENIZER_DIR/HF_ENDPOINT/RDNA2 FP16 环境（缓存步骤已带；
     # 采样预览加载文本编码器时必须用本地 tokenizer，否则国内直连 HF 拉 tokenizer 会 SSL 失败）
+    from kohya_core.lora_continue import native_command
+    cmd = native_command(cmd, mt_dir, out_dir, params, resume_from)
     rc = run_stream(cmd, cwd=mt_dir, env=_k2env, logf=logf, collect=_log_tail)
     if rc != 0 and _compile_ok and _log_mentions_compile_failure(_log_tail):
         # v0.11.2：运行期编译崩溃（TritonMissing 等）→ 自动去掉 --compile 用 SDPA 重试一次（latents 已缓存，重试快）
@@ -3698,6 +3704,10 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
         "--seed", "42",
         "--output_dir", out_dir, "--output_name", output_name,
     ]
+    if params.get("initial_lora") and not resume_from:
+        cmd += ["--network_weights=" + str(params["initial_lora"])]
+        logf("[追加训练] 继承可训练 LoRA 权重；新优化器与训练计数：" + str(params["initial_lora"]))
+        _record_effective(initial_lora=params["initial_lora"], training_origin=params.get("training_origin"))
     if resume_from:
         if not _patch_musubi_resume_epoch(get_kohya_dir(), logf):
             raise RuntimeError("当前 musubi 版本无法安全恢复训练轮次；请先更新第二引擎，原有断点不会删除。")
@@ -3764,6 +3774,8 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
 
     # 训练命令同样带 KREA2_TOKENIZER_DIR/HF_ENDPOINT/RDNA2 FP16 环境（缓存步骤已带；
     # 采样预览加载文本编码器时必须用本地 tokenizer，否则国内直连 HF 拉 tokenizer 会 SSL 失败）
+    from kohya_core.lora_continue import native_command
+    cmd = native_command(cmd, mt_dir, out_dir, params, resume_from)
     rc = run_stream(cmd, cwd=mt_dir, env=_k2env, logf=logf, collect=_log_tail)
     if rc != 0 and _flux2_compile_ok and _log_mentions_compile_failure(_log_tail):
         # v0.11.2：运行期编译崩溃（TritonMissing 等）→ 自动去掉 --compile 用 SDPA 重试一次（latents 已缓存，重试快）
@@ -7691,7 +7703,8 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
         "        type: \"lora\"\n"
         "        linear: " + str(rank) + "\n"
         "        linear_alpha: " + str(alpha) + "\n"
-        "      save:\n"
+        + ("        pretrained_lora_path: " + _yq(params["initial_lora"]) + "\n" if params.get("initial_lora") else "")
+        + "      save:\n"
         "        dtype: float16\n"
         "        save_every: " + str(_save_every) + "\n"
         "        max_step_saves_to_keep: 5\n"
@@ -8430,7 +8443,8 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
         "        type: \"lora\"\n"
         "        linear: " + str(rank) + "\n"
         "        linear_alpha: " + str(alpha) + "\n"
-        "      save:\n"
+        + ("        pretrained_lora_path: " + _yq(params["initial_lora"]) + "\n" if params.get("initial_lora") else "")
+        + "      save:\n"
         "        dtype: float16\n"
         "        save_every: " + str(_save_every) + "\n"
         "        max_step_saves_to_keep: 5\n"
@@ -8943,7 +8957,7 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
         if reso > 512:
             logf("[Krea2(AT)] ⚠ 当前显存建议 512px；保留你设置的 %dpx，若显存不足请调低。" % reso)
         # 16G 档：rank/alpha 仍为旧默认 16/16 时，自动升到社区激进档 32/32
-        if rank == 16 and alpha == 16:
+        if rank == 16 and alpha == 16 and not params.get("initial_lora"):
             rank, alpha = 32, 32
 
     train_dir = os.path.abspath(train_dir).replace("\\", "/")
@@ -9012,7 +9026,8 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
         "        type: \"lora\"\n"
         "        linear: " + str(rank) + "\n"
         "        linear_alpha: " + str(alpha) + "\n"
-        "      save:\n"
+        + ("        pretrained_lora_path: " + _yq(params["initial_lora"]) + "\n" if params.get("initial_lora") else "")
+        + "      save:\n"
         "        dtype: float16\n"
         "        save_every: " + str(int(params.get("save_every") or 200)) + "\n"
         "        max_step_saves_to_keep: 5\n"
@@ -9139,6 +9154,7 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
         if not _amd_ok:
             raise RuntimeError("第三引擎 AMD 环境未就绪：\n" + _amd_detail)
         logf("[第三引擎] AMD ROCm 后端已确认：%s" % _amd_detail)
+    from kohya_core.lora_continue import native_command
     kdir = get_kohya_dir()
     at_dir = _at_dirs()[1]
     _ensure_venv_hf_sitecustomize(os.path.dirname(os.path.dirname(vpy)), logf)
@@ -9228,7 +9244,7 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
                 logf("[Krea2] 仍 OOM，改用更大分层交换（%.0f%%，会稍慢）最后兜底…" % (_new_off * 100))
                 write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=vpy, logf=logf,
                                     vram_gb=vram_gb, force_offload=_new_off)
-        rc = run_stream([vpy, os.path.join(at_dir, "run.py"), cfg_path], cwd=at_dir, env=env, logf=logf, collect=_log_tail)
+        rc = run_stream(native_command([vpy, os.path.join(at_dir, "run.py"), cfg_path], at_dir, out_dir, params, resume_from, "toolkit.network_mixins"), cwd=at_dir, env=env, logf=logf, collect=_log_tail)
         if rc == 0:
             break
         if not _log_mentions_start_oom(_log_tail):
@@ -9269,6 +9285,7 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
         if not _amd_ok:
             raise RuntimeError("第三引擎 AMD 环境未就绪：\n" + _amd_detail)
         logf("[第三引擎] AMD ROCm 后端已确认：%s" % _amd_detail)
+    from kohya_core.lora_continue import native_command
     kdir = get_kohya_dir()
     at_dir = _at_dirs()[1]
     _ensure_venv_hf_sitecustomize(os.path.dirname(os.path.dirname(vpy)), logf)
@@ -9408,7 +9425,7 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
         except Exception:
             pass
     logf("[训练] 启动 AI Toolkit 训练（首次要下载/加载大模型，请耐心等待）…")
-    rc = run_stream([vpy, os.path.join(at_dir, "run.py"), cfg_path], cwd=at_dir, env=env, logf=logf, collect=_log_tail)
+    rc = run_stream(native_command([vpy, os.path.join(at_dir, "run.py"), cfg_path], at_dir, out_dir, params, resume_from, "toolkit.network_mixins"), cwd=at_dir, env=env, logf=logf, collect=_log_tail)
     if rc != 0:
         _diagnose_optimizer_failure(None, "\n".join(_log_tail), logf)
         raise RuntimeError(f"训练结束，退出码 {rc}，请查看上方日志")
@@ -12605,7 +12622,15 @@ def find_fizgig_state(output_dir, output_name, version=None, family=None, epochs
         return None
     pat = re.compile(r"^" + re.escape(output_name) + r"-(\d{6})-state$")
     candidates = []
-    for _d in (output_dir, os.path.join(output_dir, "snapshots"), os.path.join(output_dir, "snapshots", "fizgig-v7.0.1"), os.path.join(output_dir, "snapshots", "fizgig-v7.3.1"), os.path.join(output_dir, "snapshots", "fizgig-v8.5.0")):
+    snapshots = os.path.join(output_dir, "snapshots")
+    directories = [output_dir, snapshots]
+    # The writer namespaces snapshots by engine version. Discover those folders
+    # instead of maintaining a second, easily outdated list of engine versions.
+    if os.path.isdir(snapshots):
+        with os.scandir(snapshots) as entries:
+            directories.extend(entry.path for entry in entries
+                               if entry.name.startswith("fizgig-") and entry.is_dir())
+    for _d in directories:
         if not os.path.isdir(_d):
             continue
         for f in os.listdir(_d):
@@ -12623,18 +12648,18 @@ def find_fizgig_state(output_dir, output_name, version=None, family=None, epochs
                     with open(os.path.join(p, "training_state.json"), encoding="utf-8") as stream:
                         state_meta = json.load(stream)
                     identity = state_meta.get("kohya_runtime") or {}
-                    if version in ("v7.0.1", "v7.3.1", "v8.5.0"):
+                    if version != "v6.5.0":
                         if identity.get("version") != version or (family and identity.get("family") != family):
                             continue
                         completed = bool(state_meta.get("kohya_complete")) and (epochs is None or int(state_meta.get("epoch", 0)) >= int(epochs))
-                    elif identity.get("version") in ("v7.0.1", "v7.3.1", "v8.5.0"):
+                    elif identity.get("version") and identity.get("version") != version:
                         continue
                 except (OSError, ValueError, TypeError, AttributeError):
                     continue
             candidates.append((state_timestamp(p), int(m.group(1)), p, completed))
     try:
         final = os.path.join(output_dir, output_name + ".safetensors")
-        if version not in ("v7.0.1", "v7.3.1", "v8.5.0") and os.path.isfile(final):
+        if version in (None, "", "v6.5.0") and os.path.isfile(final):
             final_mtime = os.path.getmtime(final)
             candidates = [(stamp, epoch, path, completed) for stamp, epoch, path, completed in candidates
                           if stamp > final_mtime]
@@ -14389,6 +14414,10 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
         f"--network_dim={rank}", f"--network_alpha={alpha}",
         f"--learning_rate={unet_lr}",
     ]
+    if params.get("initial_lora") and not resume_from:
+        cmd += ["--network_weights=" + str(params["initial_lora"])]
+        logf("[追加训练] 继承可训练 LoRA 权重；新优化器与训练计数：" + str(params["initial_lora"]))
+        _record_effective(initial_lora=params["initial_lora"], training_origin=params.get("training_origin"))
     if family == "sd":
         cmd += [f"--unet_lr={unet_lr}"]
         if train_te:
@@ -14605,6 +14634,8 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
             else:
                 logf(f"[训练] 采样预览：每 {_sample_n} 步用当前 LoRA 出图（输出目录）")
 
+    from kohya_core.lora_continue import native_command
+    cmd = native_command(cmd, sds, out_dir, params, resume_from)
     model_path = os.path.join(out_dir, output_name + ".safetensors")
     model_before = _file_signature(model_path)
     try:

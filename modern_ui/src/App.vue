@@ -17,6 +17,7 @@ import ModernTaskDialog from './components/ModernTaskDialog.vue'
 import MaskEditor from './components/MaskEditor.vue'
 import ModernTrainingDialog from './components/ModernTrainingDialog.vue'
 import TrainingHistoryDialog from './components/TrainingHistoryDialog.vue'
+import LoRAContinueDialog from './components/LoRAContinueDialog.vue'
 import ModelDownloadDialog from './components/ModelDownloadDialog.vue'
 import EnvironmentDialog from './components/EnvironmentDialog.vue'
 import ExternalMcpDialog from './components/ExternalMcpDialog.vue'
@@ -113,6 +114,26 @@ const setupDialogOpen = ref(false)
 const setupAction = ref('')
 const setupFizgigProject = ref('')
 const setupFizgigVersion = ref('v8.9.6')
+const continueOpen = ref(false)
+const continueSource = ref({ project: '', run: '', sample: '', refine: false })
+function openContinue(project: string, run = '', sample = '', refine = false) {
+  if (trainingActive.value) return showToast('请先结束当前训练。')
+  continueSource.value = { project, run, sample, refine }
+  continueOpen.value = true
+}
+async function continueWorkspace(patch: ProjectConfig) {
+  if (!workspaceProject.value) return
+  if (await saveKohyaConfig(patch)) openContinue(workspaceProject.value.name)
+}
+async function continueCreated(name: string) {
+  continueOpen.value = false; historyDialogOpen.value = false; trainingDialogOpen.value = false
+  const api = window.pywebview?.api
+  if (!api || !data.value) return
+  data.value.projects = await api.list_projects()
+  const project = projects.value.find(item => item.name === name)
+  if (project) await openProject(project)
+  showToast('已创建独立追加训练项目，检查设置后点击一键开始训练。')
+}
 const historyDialogOpen = ref(false)
 const trainingDialogRef = ref<{ expand: () => void; attach: (id: string) => Promise<void> } | null>(null)
 const setupDialogRef = ref<{ attach: (id: string) => Promise<void> } | null>(null)
@@ -1532,7 +1553,7 @@ watch(appearanceDialogOpen, (open) => { if (!open) appearanceFontPreview.value =
         v-if="!loading && !loadError && workspaceOpen && workspaceProject && workspaceKind === 'slider'"
         :key="`slider-workspace-${workspaceProject.name}`" :project="workspaceProject" :config="workspaceConfig"
         :details="modeWorkspace" :desktop="!preview" :choose-path="chooseWorkspacePath" :ref="setActiveWorkspace"
-        @back="returnWorkspace" @notify="showToast" @save="saveKohyaConfig" @train="startModernTraining" @classic-action="runWorkspaceAction"
+        @back="returnWorkspace" @notify="showToast" @save="saveKohyaConfig" @train="startModernTraining" @continue="continueWorkspace" @classic-action="runWorkspaceAction"
       />
       <ModernQwenWorkspace
         v-else-if="!loading && !loadError && workspaceOpen && workspaceProject && workspaceKind === 'qwen'"
@@ -1549,7 +1570,7 @@ watch(appearanceDialogOpen, (open) => { if (!open) appearanceFontPreview.value =
         @back="returnWorkspace"
         @notify="showToast"
         @save="saveKohyaConfig"
-        @train="startModernTraining"
+        @train="startModernTraining" @continue="continueWorkspace"
         @classic-action="runWorkspaceAction"
       />
       <ModernKohyaWorkspace
@@ -1564,7 +1585,7 @@ watch(appearanceDialogOpen, (open) => { if (!open) appearanceFontPreview.value =
         @back="returnWorkspace"
         @notify="showToast"
         @save="saveKohyaConfig"
-        @train="startModernTraining"
+        @train="startModernTraining" @continue="continueWorkspace"
         @classic-action="runWorkspaceAction"
       />
       <ModernEngineWorkspace
@@ -1582,7 +1603,7 @@ watch(appearanceDialogOpen, (open) => { if (!open) appearanceFontPreview.value =
         @back="returnWorkspace"
         @notify="showToast"
         @save="saveKohyaConfig"
-        @train="startModernTraining"
+        @train="startModernTraining" @continue="continueWorkspace"
         @classic-action="runWorkspaceAction"
       />
       <div v-else-if="!loading && !loadError" key="home" class="home-view">
@@ -1668,12 +1689,14 @@ watch(appearanceDialogOpen, (open) => { if (!open) appearanceFontPreview.value =
       @notify="showToast"
       @retry="exportLog()"
     />
-    <TrainingHistoryDialog :open="historyDialogOpen" :project-name="workspaceProject?.name || ''" @close="historyDialogOpen = false" @restored="restoredTrainingSettings" @notify="showToast" />
+    <TrainingHistoryDialog :open="historyDialogOpen" :project-name="workspaceProject?.name || ''" @close="historyDialogOpen = false" @restored="restoredTrainingSettings" @notify="showToast" @continue="(project, run) => openContinue(project, run)" />
+    <LoRAContinueDialog :open="continueOpen" :project-name="continueSource.project" :run-id="continueSource.run" :sample="continueSource.sample" :refine="continueSource.refine" @close="continueOpen = false" @created="continueCreated" />
     <ModernTrainingDialog
       ref="trainingDialogRef"
       :open="trainingDialogOpen"
       :project-name="trainingProjectName"
       :plan="trainingPlan"
+      @refine="(run, sample) => openContinue(trainingProjectName, run, sample, true)"
       @close="trainingDialogOpen = false"
       @active="trainingActive = $event"
       @finished="refreshGuideState"

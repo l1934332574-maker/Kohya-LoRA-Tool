@@ -332,7 +332,7 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
     if optimizer not in ("adamw", "adamw8bit"):
         raise ValueError("Fizgig 普通 LoRA 当前支持 AdamW / AdamW8bit 优化器。")
     adaptive = None
-    if family == "qwen_image21":
+    if family == "qwen_image21" and not params.get("initial_lora"):
         preset = str(params.get("fizgig_qwen_preset") or "auto")
         if preset == "auto": preset = "style" if params.get("at_sub_mode") == "style" else "fast"
         if preset not in ("fast", "standard", "style"): raise ValueError("未知 Qwen 训练预设。")
@@ -357,6 +357,8 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         run_identity["moss_clean_end"] = "60:7:30:15:2"
     if mask_report:
         run_identity["loss_masks"] = {"fingerprint": mask_report["fingerprint"], "mode": mask_mode, "floor": mask_floor}
+    if params.get("initial_lora"):
+        run_identity["initial_lora_sha256"] = params.get("training_origin", {}).get("sha256")
     marker = output / (output_name + ".fizgig-runtime.json")
     if resume_from:
         from kohya_core.training_resume import require_state
@@ -492,6 +494,10 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
             monitored("[Fizgig] 注意：项目含外部引擎的 .sample_override.json，非空覆盖设置可能替代上述采样参数；请核对后续 [sample override] 日志。")
         monitored("[Fizgig] 预览：每 %s 轮，%spx，%s 步，CFG %s；开始时不额外采样；最后一轮仅在满足间隔时采样。文件在项目 output 中。" % (sample_epochs, resolution, steps, cfg))
     for option in options: cmd += ["--family_option", option]
+    from .lora_continue import fizgig_command
+    cmd = fizgig_command(cmd, source, output, params, resume_from)
+    if params.get("initial_lora"):
+        core._record_effective(initial_lora=params["initial_lora"], training_origin=params.get("training_origin"))
     _write(marker, run_identity)
     core._record_effective(engine="Fizgig", engine_version=version, family=family, network_type="lora",
         rank=rank, alpha=alpha, epochs=epochs, unet_lr=lr, resolution=resolution, total_steps=total,

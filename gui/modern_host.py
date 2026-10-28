@@ -1991,6 +1991,12 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         config = self.core.load_project(project_name) if project_name else None
         if not isinstance(config, dict):
             return {"ok": False, "error": "项目不存在或配置文件已损坏。"}
+        if config.get("initial_lora"):
+            try:
+                from kohya_core.lora_continue import validate
+                validate(config, self._classic_training_params(config, project_name))
+            except (ValueError, OSError, TypeError, KeyError) as exc:
+                return {"ok": False, "error": str(exc)}
         if config.get("training_kind") == "slider":
             try:
                 from kohya_core.slider_training import prepare
@@ -2052,9 +2058,13 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         kohya = mode in ("style", "character", "concept")
         train_te = kohya and params.get("train_text_encoder", True) and params.get("base_type") != "anima"
         rows = [{"label": "文本编码器训练", "value": "参与训练；起始学习率 %s" % params.get("te_lr") if train_te else "不参与训练；其学习率不生效"}]
+        if params.get("initial_lora"):
+            rows += [{"label": "初始 LoRA", "value": params["initial_lora"]},
+                     {"label": "追加训练", "value": "继承可训练权重；轮数 / 步数从 0 计算，使用新优化器。"},
+                     {"label": "来源项目", "value": str(params.get("training_origin", {}).get("project", ""))}]
         if mode in FIZGIG_FAMILIES and params.get("fizgig_version") in FIZGIG_STANDARD:
             rows += [{"label": "引擎版本", "value": "Fizgig %s · 普通 LoRA" % params.get("fizgig_version")},
-                     {"label": "学习率计划", "value": "Qwen 官方预设接管" if mode == "qwen21_fz" else "constant；无学习率预热"}]
+                     {"label": "学习率计划", "value": "constant；追加训练保留来源 rank / alpha 与设定学习率" if params.get("initial_lora") else "Qwen 官方预设接管" if mode == "qwen21_fz" else "constant；无学习率预热"}]
         elif kohya or mode in ("krea2_fz", "flux2_fz"):
             rows += [{"label": "学习率计划", "value": "cosine（余弦衰减）；输入的是起始学习率"},
                      {"label": "学习率预热", "value": "120 步；与模型加载、缓存及编译预热不同"}]
@@ -2771,7 +2781,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         getattr(self.core, "reset_effective", lambda: None)()
         root_keys = ("mode", "base_type", "at_sub_mode", "concept_type", "fast_tier", "trigger",
                      "raw_dir", "reg_dir", "base_model", "style_preset", "style_caption",
-                     "train_env", "unet_only", "global_pos", "global_neg", "at_model", "krea2_models", "zimage_fz_models", "moss_models", "training_kind", "multi_character", "output_dir")
+                     "train_env", "unet_only", "global_pos", "global_neg", "at_model", "krea2_models", "zimage_fz_models", "moss_models", "training_kind", "multi_character", "output_dir", "initial_lora", "training_origin", "h3_models")
         record_config = {key: config[key] for key in root_keys if key in config}
         stored_params = config.get("params") if isinstance(config.get("params"), dict) else {}
         record_config["params"] = {key: value for key, value in stored_params.items() if key in WORKSPACE_PARAM_KEYS}
@@ -2838,6 +2848,8 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                     }
                     if params.get("training_kind") == "multi_character": preprocess_args["multi_character"] = params["multi_character"]
                     self.core.preprocess(lambda line: self._task_log(task_id, line), **preprocess_args)
+                    from kohya_core.lora_continue import inherit_masks
+                    inherit_masks(self.core, params, lambda line: self._task_log(task_id, line))
                     mask_stats = self._prepare_loss_masks(task_id, params)
                     stats = {}
                     if os.path.isfile(report_path):
@@ -4457,6 +4469,51 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         value = str(value or "")
         value = re.sub(r"[\U0001f000-\U0001faff\u2600-\u27bf\ufe0e\ufe0f\u200d]+", "", value)
         return value.replace("提示：提示：", "提示：").strip()
+
+    def lora_continue_sources(self, project_name, run_id="", sample=""):
+        try:
+            from kohya_core.lora_continue import check_mode, checkpoints
+            run = self._history_store().get(run_id) if run_id else None
+            if run_id and not run:
+                raise ValueError("来源训练记录不存在。")
+            project = str(run.get("project_name") if run else project_name)
+            config = run.get("config") if run else self.core.load_project(project)
+            if not isinstance(config, dict):
+                raise ValueError("来源项目或训练记录不存在。")
+            check_mode(config)
+            output = run.get("output_dir") if run else self.core.data_sub("output", project)
+            rows, matched = checkpoints(output, sample)
+            normalized = (run or {}).get("normalized_params") or self._classic_training_params(config, project)
+            return {"ok": True, "project_name": project, "checkpoints": rows, "matched": matched,
+                    "resolution": normalized.get("resolution", 512), "learning_rate": normalized.get("unet_lr", "1e-4"),
+                    "uses_steps": config.get("mode") in ("qwen_image", "zimage"),
+                    "warning": "此采样图未能唯一对应到仍存在的检查点，请手动选择原权重。" if sample and not matched else ""}
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def create_lora_continue_project(self, project_name, options):
+        guard = self._agent_guard()
+        if guard:
+            return guard
+        try:
+            from kohya_core.lora_continue import create
+            if not isinstance(options, dict):
+                raise ValueError("追加训练设置无效。")
+            with self._task_lock:
+                if self._task and self._task.get("status") in ("running", "awaiting_review"):
+                    raise ValueError("请先结束当前训练，再创建追加训练任务。")
+            run_id = str(options.get("run_id") or "")
+            run = self._history_store().get(run_id) if run_id else None
+            if run_id and not run:
+                raise ValueError("来源训练记录不存在。")
+            project = str(run.get("project_name") if run else project_name)
+            config = run.get("config") if run else self.core.load_project(project)
+            if not isinstance(config, dict):
+                raise ValueError("来源项目不存在。")
+            name, _ = create(self.core, config, project, options, run)
+            return {"ok": True, "project_name": name}
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            return {"ok": False, "error": str(exc)}
 
     def create_project(self, name, template_name="自定义", config_json="", mode_override=None, model_choice=None, training_type="character"):
         guard = self._agent_guard()

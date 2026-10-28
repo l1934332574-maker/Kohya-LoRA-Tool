@@ -55,7 +55,7 @@ def main():
     from PyInstaller.archive.readers import CArchiveReader
     archive = CArchiveReader(str(package / "Kohya一键工具.exe"))
     pyz = archive.open_embedded_archive(next(name for name in archive.toc if name.endswith(".pyz")))
-    for name in ("kohya_bundled_ui", "kohya_bundled_workers", "kohya_core.worker_files", "fractions"):
+    for name in ("kohya_bundled_ui", "kohya_bundled_workers", "kohya_core.worker_files", "kohya_core.lora_continue", "fractions"):
         if name not in pyz.toc:
             raise RuntimeError("Missing EXE component: " + name)
     # The maintained installer may use this value to confirm replacement.

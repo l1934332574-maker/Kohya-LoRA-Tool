@@ -2,6 +2,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import type { TrainingSampleEntry, ModernTaskSample } from '../bridge'
 const props = defineProps<{ taskId: string; active: boolean; settings?: Record<string, unknown> }>()
+const emit = defineEmits<{ refine: [run: string, sample: string] }>()
 const opened = ref(false)
 const entries = ref<TrainingSampleEntry[]>([])
 const selectedA = ref('')
@@ -88,8 +89,8 @@ onUnmounted(() => { generation++; stop() })
       <details v-if="settings?.sample_prompt"><summary>本次记录的采样提示词</summary><p>{{ settings.sample_prompt }}</p></details>
       <p v-if="warning" class="gallery-warning">{{ warning }} <button class="gallery-button" type="button" @click="load('a', selectedA); load('b', selectedB)">重试图片</button></p>
       <div v-if="entries.length" class="gallery-compare">
-        <div><label>图片 A<select v-model="selectedA"><option value="">选择图片</option><option v-for="entry in entries" :key="entry.version" :value="entry.name">{{ timeLabel(entry.modified) }} · {{ entry.name }}</option></select></label><button v-if="imageA?.data_url" class="gallery-image" type="button" aria-label="放大图片 A" @click="enlarged = 'a'"><img :src="imageA.data_url" :alt="selectedA"></button><small v-if="imageA">{{ imageA.width }} × {{ imageA.height }}</small></div>
-        <div><label>图片 B<select v-model="selectedB"><option value="">选择图片</option><option v-for="entry in entries" :key="entry.version" :value="entry.name">{{ timeLabel(entry.modified) }} · {{ entry.name }}</option></select></label><button v-if="imageB?.data_url" class="gallery-image" type="button" aria-label="放大图片 B" @click="enlarged = 'b'"><img :src="imageB.data_url" :alt="selectedB"></button><small v-if="imageB">{{ imageB.width }} × {{ imageB.height }}</small></div>
+        <div><label>图片 A<select v-model="selectedA"><option value="">选择图片</option><option v-for="entry in entries" :key="entry.version" :value="entry.name">{{ timeLabel(entry.modified) }} · {{ entry.name }}</option></select></label><button v-if="imageA?.data_url" class="gallery-image" type="button" aria-label="放大图片 A" @click="enlarged = 'a'"><img :src="imageA.data_url" :alt="selectedA"></button><button v-if="imageA" class="gallery-button" type="button" :disabled="active" @click="emit('refine', taskId, selectedA)">从此检查点高清精修</button><small v-if="imageA">{{ imageA.width }} × {{ imageA.height }}</small></div>
+        <div><label>图片 B<select v-model="selectedB"><option value="">选择图片</option><option v-for="entry in entries" :key="entry.version" :value="entry.name">{{ timeLabel(entry.modified) }} · {{ entry.name }}</option></select></label><button v-if="imageB?.data_url" class="gallery-image" type="button" aria-label="放大图片 B" @click="enlarged = 'b'"><img :src="imageB.data_url" :alt="selectedB"></button><button v-if="imageB" class="gallery-button" type="button" :disabled="active" @click="emit('refine', taskId, selectedB)">从此检查点高清精修</button><small v-if="imageB">{{ imageB.width }} × {{ imageB.height }}</small></div>
       </div>
       <p v-else>本次尚未发现图片采样。视频和音频产物请到项目输出目录查看。</p>
     </template>

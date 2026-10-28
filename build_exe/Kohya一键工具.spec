@@ -93,7 +93,7 @@ a = Analysis(
         'kohya_core.captioning', 'kohya_core.prompt_reverse', 'kohya_core.ram_caption',
         'kohya_core.prompt_reverse_models', 'kohya_core.qwen_vl_caption', 'kohya_core.pixai_caption',
         'kohya_core.assistant',
-        'kohya_core.training_agent',
+        'kohya_core.training_agent', 'kohya_core.lora_continue',
         'kohya_core.mcp_server', 'kohya_core.mcp_tools',
         'kohya_core.agent_transport',
         'kohya_core.agent_models',

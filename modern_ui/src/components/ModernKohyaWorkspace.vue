@@ -25,6 +25,7 @@ const props = defineProps<{
   choosePath: (kind: BrowseKind, currentPath?: string, memoryKey?: string) => Promise<string | null>
 }>()
 const emit = defineEmits<{
+  continue: [patch: ProjectConfig]
   back: [patch: ProjectConfig]
   notify: [message: string]
   save: [patch: ProjectConfig]
@@ -302,6 +303,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.size > 0, startTraining, guideActi
       <div class="kohya-heading-copy"><h1>{{ isMulti ? '多角色 LoRA · Kohya' : 'Kohya LoRA 训练' }}</h1><span>项目：{{ props.project.name }}</span></div>
       </div>
       <div class="kohya-toolbar-actions">
+        <button class="kohya-button" type="button" @click="emit('continue', makePatch())">已有 LoRA 追加训练</button>
         <button class="kohya-button" type="button" :title="legacyTooltips.readme" @click="emit('classicAction', 'readme')">训练说明</button>
         <!-- ★★ 2026-10-02：训练页右上角的「一键开始训练」已移除 ✗ ——
              它与左侧栏那个走的是**同一个动作**（App.vue 里都是

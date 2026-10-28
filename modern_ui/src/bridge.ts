@@ -260,6 +260,8 @@ export interface DesktopApi {
   get_caption_report(task_id: string): Promise<{ ok: boolean; report?: CaptionReport; error?: string }>
   list_training_runs(project_name?: string): Promise<{ ok: boolean; runs?: TrainingRunSummary[]; error?: string }>
   get_training_run(run_id: string): Promise<{ ok: boolean; run?: TrainingRun; error?: string }>
+  lora_continue_sources(project_name: string, run_id?: string, sample?: string): Promise<{ok: boolean; error?: string; checkpoints?: Array<{path: string; name: string}>; matched?: string; warning?: string; resolution?: number; learning_rate?: string | number; uses_steps?: boolean}>
+  create_lora_continue_project(project_name: string, options: {source_path: string; run_id?: string; sample?: string; kind: string; resolution: number; epochs: number; steps: number; learning_rate: string}): Promise<{ok: boolean; error?: string; project_name?: string}>
   restore_training_run(run_id: string, project_name: string): Promise<{ ok: boolean; error?: string }>
   inspect_slider_pairs(project_name: string, settings: SliderSettings): Promise<{ok: boolean; error?: string; pairs?: Array<{positive: string; negative: string}>; positive_files?: string[]; negative_files?: string[]; train_count?: number; holdout_count?: number; warnings?: string[]}>
   get_slider_results(project_name: string, run_id?: string): Promise<SliderResults>

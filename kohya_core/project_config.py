@@ -163,6 +163,8 @@ def training_params(core, config, project_name):
     if config.get('training_kind') == 'multi_character':
         from .multi_character import parameters
         params = parameters(core, config, params)
+    params["initial_lora"] = str(config.get("initial_lora") or "")
+    params["training_origin"] = config.get("training_origin") or {}
     return params
 
 

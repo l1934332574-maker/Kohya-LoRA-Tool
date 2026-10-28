@@ -11,7 +11,7 @@ const props = defineProps<{
   projectName: string
   plan: TrainingPlan | null
 }>()
-const emit = defineEmits<{ close: []; finished: []; active: [value: boolean]; notify: [message: string] }>()
+const emit = defineEmits<{ close: []; finished: []; active: [value: boolean]; notify: [message: string]; refine: [run: string, sample: string] }>()
 
 const minimized = ref(false)
 const taskId = ref('')
@@ -416,7 +416,7 @@ onUnmounted(stopPolling)
             <p v-else class="train-sample-empty">{{ sampleEmptyText }}</p>
             <p v-if="sampleFailure" class="train-sample-warning">引擎报告采样失败：{{ sampleFailure }}</p>
             <p v-else-if="sampleWarning" class="train-sample-warning">{{ sampleWarning }}</p>
-            <TrainingSampleGallery :task-id="taskId" :active="running" :settings="state?.effective_params" />
+            <TrainingSampleGallery :task-id="taskId" :active="running" :settings="state?.effective_params" @refine="(run, sample) => emit('refine', run, sample)" />
           </section>
           <div ref="logElement" class="train-log" role="log" aria-live="polite">
             <div v-if="!logEntries.length" class="train-log-line tone-muted">等待训练日志…</div>

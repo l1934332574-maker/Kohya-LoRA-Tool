@@ -26,6 +26,7 @@ const props = defineProps<{
   saveModel: (selection: QwenModelSelection) => Promise<QwenModelSaveResult>
 }>()
 const emit = defineEmits<{
+  continue: [patch: ProjectConfig]
   back: [patch: ProjectConfig]
   notify: [message: string]
   save: [patch: ProjectConfig]
@@ -435,6 +436,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         </div>
       </div>
       <div class="qwen-toolbar-actions">
+        <button class="qwen-button" type="button" @click="emit('continue', makePatch())">已有 LoRA 追加训练</button>
         <button v-if="desktop && details?.engine_update_available" class="qwen-engine-update" type="button" :title="legacyTooltips.engineUpdate" @click="requestAction('at_engine_update')"><span class="update-arrow">↗</span> 引擎更新可用</button>
         <button class="qwen-button subtle" type="button" :title="legacyTooltips.modelHelp" @click="requestAction('at_model_help')">{{ mode === 'zimage' ? '模型 / 出图说明' : '模型 / 显存说明' }}</button>
         <button class="qwen-button" type="button" :title="legacyTooltips.modelPath" @click="openModelDialog">{{ desktop ? '模型设置' : '选择训练模型' }}</button>

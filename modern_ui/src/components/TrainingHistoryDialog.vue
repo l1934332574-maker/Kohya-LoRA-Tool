@@ -4,7 +4,7 @@ import type { TrainingRun, TrainingRunSummary } from '../bridge'
 import TrainingMetrics from './TrainingMetrics.vue'
 
 const props = defineProps<{ open: boolean; projectName: string }>()
-const emit = defineEmits<{ close: []; restored: []; notify: [message: string] }>()
+const emit = defineEmits<{ close: []; restored: []; notify: [message: string]; continue: [project: string, run: string] }>()
 const runs = ref<TrainingRunSummary[]>([])
 const selected = ref<TrainingRun | null>(null)
 const loading = ref(false)
@@ -81,6 +81,7 @@ watch(() => props.open, (open) => { if (open) void load(); else { ++request; loa
             <h3>本次设置</h3><dl><template v-for="[label, value] in settings" :key="String(label)"><dt>{{ label }}</dt><dd>{{ value ?? '自动' }}</dd></template></dl>
             <p class="history-muted">这里保存的是提交给引擎的设置；自动项以本次训练日志为准。恢复设置不会启动训练，路径沿用当前项目。</p>
             <button v-if="projectName && selected.project_name === projectName" type="button" :disabled="restoring || selected.status === 'running' || selected.status === 'awaiting_review'" @click="restore">{{ restoring ? '恢复中…' : '恢复本次训练设置' }}</button>
+            <button type="button" :disabled="['running', 'awaiting_review'].includes(selected.status)" @click="emit('continue', selected.project_name, selected.id)">从本次结果继续</button>
             <details v-if="selected.logs?.length"><summary>本次日志末尾（最多 300 行）</summary><pre>{{ selected.logs.join('\n') }}</pre></details>
           </template>
           <p v-else>选择一次训练，查看设置、曲线和结果。</p>

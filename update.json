@@ -1,7 +1,7 @@
 {
-  "version": "v0.19.22",
+  "version": "v0.19.23",
   "setup_url": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
   "setup_url_cn": "https://modelscope.cn/models/FGtiancai/Kohya-LoRA-Tool/resolve/master/Setup.exe",
-  "setup_sha256": "45345b877afa5e620c9fbefa75231e643475703f8b209d67edf442bb1ed43919",
-  "notes": "安装若被拦截，请保留检测名称和安装日志；未签名提示不能单独证明文件有害，也不能据此认定杀毒检测一定是误报。\n\nv0.19.22 · 训练启动热修复（2026-10-27）\n- 修复检查标签并确认继续后，可能一直停留在“正在启动训练引擎”的问题，适用于多角色及普通训练。\n\n本次仅更新软件，训练引擎保持不变。"
+  "setup_sha256": "e74aa72dc98deab1bf039bd8018037d86bb793f20e98543f37e4a48d3147e523",
+  "notes": "安装若被拦截，请保留检测名称和安装日志；未签名提示不能单独证明文件有害，也不能据此认定杀毒检测一定是误报。\n\nv0.19.23 · LoRA 追加训练（2026-10-28）\n- 新增已有 LoRA 追加训练和高分辨率精修，可从训练记录或采样检查点创建独立项目。\n- 修复部分 Fizgig 训练状态无法自动发现的问题。\n\n本次仅更新软件，训练引擎保持不变。"
 }
