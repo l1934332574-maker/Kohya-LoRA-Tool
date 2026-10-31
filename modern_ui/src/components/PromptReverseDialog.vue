@@ -2,6 +2,7 @@
 import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import type { CaptionServiceSettings, PromptReverseReport } from '../bridge'
 import UiIcon from './UiIcon.vue'
+import MossLayoutPreview from './MossLayoutPreview.vue'
 import PixaiTagOptions from './PixaiTagOptions.vue'
 
 const props = defineProps<{ open: boolean; desktop: boolean }>()
@@ -10,6 +11,8 @@ const dialogRef = ref<HTMLElement | null>(null)
 let previousFocus: HTMLElement | null = null
 const path = ref('')
 const method = ref<'natural' | 'wd14' | 'ram' | 'qwen_vl' | 'pixai'>('wd14')
+const copyOriginals = ref(true)
+const outputFormat = ref<'text' | 'moss_layout'>('text')
 const language = ref<'zh' | 'en'>('zh')
 const length = ref<'brief' | 'detailed'>('brief')
 const device = ref<'auto' | 'cpu'>('auto')
@@ -155,7 +158,7 @@ async function start() {
   if (method.value === 'natural' && remote.value && !allowRemote.value) { message.value = '请确认允许发送图片到所选在线视觉服务。'; return }
   starting.value = true
   try {
-    const result = await api.start_prompt_reverse({ path:path.value, method:method.value, language:language.value, length:length.value,
+    const result = await api.start_prompt_reverse({ path:path.value, method:method.value, language:language.value, length:length.value, output_format:outputFormat.value,
       wd14_model:wd14Model.value, threshold:method.value === 'ram' ? ramThreshold.value : threshold.value, allow_remote:allowRemote.value, device:device.value, ...pixaiOptions })
     if (!result.ok || !result.task_id) { message.value = result.error || '反推未启动。'; return }
     revision++; stopPolling(); taskId.value = result.task_id; resultTaskId.value = result.task_id; report.value = null; edits.value = {}; thumbnails.value = {}; page.value = 0
@@ -172,6 +175,20 @@ async function copy(text: string) {
   try { await navigator.clipboard.writeText(text); emit('notify','提示词已复制。') }
   catch { message.value = '无法访问剪贴板，请选中文本后手动复制。' }
 }
+async function copyItems(items: typeof generated.value) {
+  try {
+    const values: string[] = []
+    for (const item of items) {
+      const value = edits.value[item.name] || item.caption || ''
+      if (item.output_format === 'moss_layout') {
+        const result = await window.pywebview?.api.compile_moss_layout(value)
+        if (!result?.ok || !result.text) throw new Error(result?.error || '布局转换失败。')
+        values.push(result.text)
+      } else values.push(value)
+    }
+    await copy(values.join('\n\n'))
+  } catch (error) { message.value = error instanceof Error ? error.message : '布局转换失败。' }
+}
 async function exportText() {
   const api = window.pywebview?.api
   if (!api || exporting.value || !generated.value.length) return
@@ -179,7 +196,7 @@ async function exportText() {
   try {
     const chosen = await api.choose_path('folder', outputPath.value, 'prompt_reverse_output')
     if (!chosen.ok || !chosen.path) { if (chosen.error) message.value = chosen.error; return }
-    const result = await api.export_prompt_reverse(resultTaskId.value, generated.value.map(item => ({ name:item.name, caption:edits.value[item.name] ?? item.caption ?? '' })), chosen.path)
+    const result = await api.export_prompt_reverse(resultTaskId.value, generated.value.map(item => ({ name:item.name, caption:edits.value[item.name] ?? item.caption ?? '' })), chosen.path, generated.value.some(item => item.output_format === 'moss_layout') && copyOriginals.value)
     if (!result.ok) { message.value = result.error || '导出失败。'; return }
     outputPath.value = result.directory || chosen.path
     message.value = `已导出 ${result.written} 个 TXT：${outputPath.value}`
@@ -187,6 +204,8 @@ async function exportText() {
   } catch { message.value = '导出失败，请检查输出文件夹权限。' }
   finally { exporting.value = false }
 }
+watch(outputFormat, value => { if (value === 'moss_layout' && !['natural','qwen_vl'].includes(method.value)) method.value = 'qwen_vl' })
+watch(method, value => { if (!['natural','qwen_vl'].includes(value)) outputFormat.value = 'text' })
 watch(() => props.open, async open => {
   revision++; stopPolling()
   if (!open) { previousFocus?.focus(); return }
@@ -224,6 +243,8 @@ onUnmounted(() => { revision++; modelRevision++; stopPolling() })
             <div class="actions"><button type="button" :disabled="busy || starting" @click="choose('image')">选择图片</button><button type="button" :disabled="busy || starting" @click="choose('folder')">选择文件夹</button></div>
             <p>文件夹包含子文件夹，一次最多 500 张。原图和旁边已有的标签文件均保留。</p>
             <label>生成方式<select v-model="method" :disabled="busy || starting"><option value="wd14">二次元关键词 · 本地 WD14</option><option value="pixai">二次元关键词 · 本地 PixAI v1.0</option><option value="ram">真实照片关键词 · 本地 RAM++</option><option value="qwen_vl">详细画面描述 · 本地 Qwen3-VL 社区版</option><option value="natural">中文 / 英文描述 · 视觉服务</option></select></label>
+            <label>输出格式<select v-model="outputFormat" :disabled="busy"><option value="text">文字提示词 / 关键词</option><option value="moss_layout">MOSS JSON 布局（实验）</option></select></label>
+            <p v-if="outputFormat === 'moss_layout'">识别当前原图的主体与位置，用于 MOSS 训练。生成后可检查和调整框；需要视觉模型。</p>
             <template v-if="method === 'wd14'">
               <label>打标模型<select v-model="wd14Model" :disabled="busy"><option value="swinv2-v3">swinv2-v3（推荐）</option><option value="moat-v2">moat-v2</option></select></label>
               <label>关键词阈值<input v-model.number="threshold" type="number" min="0.01" max="0.99" step="0.05" :disabled="busy" /></label>
@@ -269,12 +290,12 @@ onUnmounted(() => { revision++; modelRevision++; stopPolling() })
               <p v-else>图片发送到本机视觉服务。此入口不会自动下载视觉模型；训练前请在服务中检查显存释放。</p>
             </template>
             <button class="primary" type="button" :disabled="busy || starting || saving || !path.trim() || (isLocal && !localModel.ready)" @click="start">{{ busy ? (downloadingModel ? '正在下载模型…' : '正在反推…') : starting ? '正在启动…' : '开始反推' }}</button>
-            <div v-if="busy" class="running" role="status"><p>{{ detail || '正在准备模型或等待视觉服务…' }}</p><progress v-if="progress !== null" :value="progress" max="1"></progress><button type="button" @click="stop">{{ downloadingModel ? '停止下载' : '停止反推' }}</button><small>关闭窗口后，已启动的任务会继续执行。</small></div>
+            <div v-if="busy" class="running" role="status"><p class="running-status"><span class="spinner" aria-hidden="true"></span>{{ detail || message || '正在准备模型或等待视觉服务…' }}</p><progress v-if="progress !== null" :value="progress" max="1" aria-label="已完成图片进度"></progress><small v-if="!downloadingModel && report">进度条显示已完成的图片数量；单张图片识别和生成时会显示当前状态。</small><button type="button" @click="stop">{{ downloadingModel ? '停止下载' : '停止反推' }}</button><small>关闭窗口后，已启动的任务会继续执行。</small></div>
           </section>
           <section class="reverse-results" aria-label="反推结果">
-            <div class="result-heading"><strong>反推结果 <small v-if="report">{{ report.generated }} / {{ report.total }} 张{{ report.failed ? ` · ${report.failed} 张失败` : '' }}</small></strong><div class="actions"><button type="button" :disabled="!generated.length" @click="copy(generated.map(item => edits[item.name] || item.caption || '').join('\n\n'))">复制全部</button><button type="button" :disabled="busy || exporting || !generated.length" @click="exportText">{{ exporting ? '导出中…' : '导出 TXT' }}</button></div></div>
+            <label v-if="generated.some(item => item.output_format === 'moss_layout')" class="check"><input v-model="copyOriginals" type="checkbox" :disabled="busy || exporting">导出时复制原图与布局标签，可直接作为 MOSS 训练图集</label><div class="result-heading"><strong>反推结果 <small v-if="report">{{ report.generated }} / {{ report.total }} 张{{ report.failed ? ` · ${report.failed} 张失败` : '' }}</small></strong><div class="actions"><button type="button" :disabled="!generated.length" @click="copyItems(generated)">复制全部</button><button type="button" :disabled="busy || exporting || !generated.length" @click="exportText">{{ exporting ? '导出中…' : '导出 TXT' }}</button></div></div>
             <div v-if="!report?.items.length" class="empty"><UiIcon name="image" /><h3>从图片开始</h3><p>生成后可以逐张查看、编辑和复制。导出时选择独立文件夹，每张图片对应一个 TXT。</p></div>
-            <article v-for="item in visible" :key="item.name" class="result-card"><img v-if="thumbnails[item.name]" :src="thumbnails[item.name]" :alt="item.name" /><div><header><strong>{{ item.name }}</strong><button v-if="item.status === 'generated'" type="button" @click="copy(edits[item.name] || '')">复制</button></header><textarea v-if="item.status === 'generated'" v-model="edits[item.name]" :readonly="busy" rows="5" maxlength="8192" :aria-label="`${item.name} 的提示词`"></textarea><p v-else class="error">{{ item.error }}</p></div></article>
+            <article v-for="item in visible" :key="item.name" class="result-card"><img v-if="thumbnails[item.name]" :src="thumbnails[item.name]" :alt="item.name" /><div><header><strong>{{ item.name }}</strong><button v-if="item.status === 'generated'" type="button" @click="copyItems([item])">复制</button></header><p v-if="item.warning" class="feedback">{{ item.warning }}</p><MossLayoutPreview v-if="item.output_format === 'moss_layout'" :text="edits[item.name] || ''" :image="thumbnails[item.name]" :readonly="busy" @change="edits[item.name] = $event" /><textarea v-if="item.status === 'generated'" v-model="edits[item.name]" :readonly="busy" rows="5" :maxlength="32768" :aria-label="`${item.name} 的提示词`"></textarea><p v-else class="error">{{ item.error }}</p></div></article>
             <div v-if="pageCount > 1" class="pagination"><button :disabled="page === 0" @click="page--">上一页</button><span>{{ page + 1 }} / {{ pageCount }}</span><button :disabled="page + 1 >= pageCount" @click="page++">下一页</button></div>
           </section>
         </main>
@@ -284,5 +305,5 @@ onUnmounted(() => { revision++; modelRevision++; stopPolling() })
   </Transition>
 </template>
 <style scoped>
-.reverse-dialog{width:min(1120px,calc(100vw - 36px));max-height:92vh;display:flex;flex-direction:column;color:var(--text);background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 20px 80px #0005;overflow:hidden}.reverse-dialog>header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:20px 24px;border-bottom:1px solid var(--border)}h2{margin:0;font-size:21px}p{margin:0;color:var(--hint);font-size:12px;line-height:1.7;overflow-wrap:anywhere}.reverse-dialog>header p{margin-top:5px}.reverse-layout{display:grid;grid-template-columns:320px minmax(0,1fr);min-height:0;overflow:auto}.reverse-options{display:flex;flex-direction:column;gap:13px;padding:20px;border-right:1px solid var(--border);background:var(--bg)}label{display:grid;gap:7px;font-size:12px}input:not([type=checkbox]),select,textarea{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);padding:9px;font:inherit}textarea{resize:vertical;line-height:1.65}.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}button{border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text);padding:8px 11px;font:inherit;font-size:12px;cursor:pointer}button:hover:enabled{border-color:var(--hint)}button:disabled{opacity:.5;cursor:default}.primary{background:var(--accent);color:var(--tone-f0f1f3)}.actions{display:flex;gap:8px;flex-wrap:wrap}.check{display:flex;align-items:flex-start;gap:8px;line-height:1.6}.check input{flex:none;accent-color:var(--accent);margin-top:3px}summary{cursor:pointer;font-size:12px;padding:7px 0}details[open]{display:grid;gap:12px}small{font-size:11px;color:var(--hint)}.model-title{font-size:13px;display:flex;align-items:center;justify-content:space-between}.running{display:grid;gap:9px}progress{width:100%;accent-color:var(--accent)}.reverse-results{min-width:0;padding:20px;display:flex;flex-direction:column;gap:14px}.result-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:13px}.result-heading small{display:block;margin-top:5px}.empty{min-height:280px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center}.empty svg{width:36px;height:36px;color:var(--hint)}.empty h3{margin:0;font-size:16px}.empty p{max-width:340px}.result-card{display:flex;align-items:start;gap:14px;padding:12px;border:1px solid var(--border);border-radius:8px}.result-card>img{width:110px;height:140px;object-fit:contain;border-radius:5px;background:var(--bg)}.result-card>div{min-width:0;flex:1}.result-card header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px}.result-card strong{font-size:12px;overflow-wrap:anywhere}.pagination{display:flex;align-items:center;justify-content:center;gap:14px;font-size:12px}.reverse-dialog>footer{padding:12px 20px;border-top:1px solid var(--border)}.feedback{color:var(--text);margin-bottom:6px}.error{color:var(--tone-d4b06a)}.icon-button{padding:7px;display:grid;place-items:center}.icon-button svg{width:18px;height:18px}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}@media(max-width:760px){.reverse-layout{grid-template-columns:1fr}.reverse-options{border-right:0;border-bottom:1px solid var(--border)}.result-card>img{width:80px;height:100px}.reverse-dialog>header{padding:15px}}
+.reverse-dialog{width:min(1120px,calc(100vw - 36px));max-height:92vh;display:flex;flex-direction:column;color:var(--text);background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 20px 80px #0005;overflow:hidden}.reverse-dialog>header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:20px 24px;border-bottom:1px solid var(--border)}h2{margin:0;font-size:21px}p{margin:0;color:var(--hint);font-size:12px;line-height:1.7;overflow-wrap:anywhere}.reverse-dialog>header p{margin-top:5px}.reverse-layout{display:grid;grid-template-columns:320px minmax(0,1fr);min-height:0;overflow:auto}.reverse-options{display:flex;flex-direction:column;gap:13px;padding:20px;border-right:1px solid var(--border);background:var(--bg)}label{display:grid;gap:7px;font-size:12px}input:not([type=checkbox]),select,textarea{box-sizing:border-box;width:100%;min-width:0;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);padding:9px;font:inherit}textarea{resize:vertical;line-height:1.65}.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}button{border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text);padding:8px 11px;font:inherit;font-size:12px;cursor:pointer}button:hover:enabled{border-color:var(--hint)}button:disabled{opacity:.5;cursor:default}.primary{background:var(--accent);color:var(--tone-f0f1f3)}.actions{display:flex;gap:8px;flex-wrap:wrap}.check{display:flex;align-items:flex-start;gap:8px;line-height:1.6}.check input{flex:none;accent-color:var(--accent);margin-top:3px}summary{cursor:pointer;font-size:12px;padding:7px 0}details[open]{display:grid;gap:12px}small{font-size:11px;color:var(--hint)}.model-title{font-size:13px;display:flex;align-items:center;justify-content:space-between}.running{display:grid;gap:9px}.running-status{display:flex;align-items:center;gap:8px}.spinner{flex:none;width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:reverse-spin .8s linear infinite}@keyframes reverse-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.spinner{animation:none}}progress{width:100%;accent-color:var(--accent)}.reverse-results{min-width:0;padding:20px;display:flex;flex-direction:column;gap:14px}.result-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:13px}.result-heading small{display:block;margin-top:5px}.empty{min-height:280px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center}.empty svg{width:36px;height:36px;color:var(--hint)}.empty h3{margin:0;font-size:16px}.empty p{max-width:340px}.result-card{display:flex;align-items:start;gap:14px;padding:12px;border:1px solid var(--border);border-radius:8px}.result-card>img{width:110px;height:140px;object-fit:contain;border-radius:5px;background:var(--bg)}.result-card>div{min-width:0;flex:1}.result-card header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px}.result-card strong{font-size:12px;overflow-wrap:anywhere}.pagination{display:flex;align-items:center;justify-content:center;gap:14px;font-size:12px}.reverse-dialog>footer{padding:12px 20px;border-top:1px solid var(--border)}.feedback{color:var(--text);margin-bottom:6px}.error{color:var(--tone-d4b06a)}.icon-button{padding:7px;display:grid;place-items:center}.icon-button svg{width:18px;height:18px}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}@media(max-width:760px){.reverse-layout{grid-template-columns:1fr}.reverse-options{border-right:0;border-bottom:1px solid var(--border)}.result-card>img{width:80px;height:100px}.reverse-dialog>header{padding:15px}}
 </style>

@@ -24,6 +24,10 @@ class CaptionServiceError(CaptionError):
     pass
 
 
+class CaptionTruncatedError(CaptionServiceError):
+    pass
+
+
 def _atomic_bytes(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -221,13 +225,13 @@ def _image_data(image):
     return base64.b64encode(buffer.getvalue()).decode('ascii')
 
 
-def describe_image(config, image, language, length, stop, prompt=None, timeout=90):
+def describe_image(config, image, language, length, stop, prompt=None, timeout=90, max_tokens=None, response_schema=None):
     image_data = _image_data(image)
     prompt = prompt or _prompt(language, length)
     if config['provider'] == 'ollama':
         payload = {'model': config['model'], 'stream': False, 'keep_alive': '5m',
                    'messages': [{'role': 'user', 'content': prompt, 'images': [image_data]}],
-                   'options': {'temperature': 0.1, 'num_predict': 180 if length == 'brief' else 420}}
+                   'options': {'temperature': 0.1, 'num_predict': max_tokens or (180 if length == 'brief' else 420)}}
         response = _post(config['base_url'] + '/api/chat', payload, '', stop, timeout=timeout)
         if not isinstance(response, dict):
             raise CaptionServiceError('描述服务返回格式无效。')
@@ -235,14 +239,16 @@ def describe_image(config, image, language, length, stop, prompt=None, timeout=9
         if not isinstance(message, dict):
             raise CaptionServiceError('描述服务返回消息格式无效。')
         if response.get('done_reason') == 'length':
-            raise CaptionServiceError('描述被服务截断；请使用简短描述。')
+            raise CaptionTruncatedError('描述被服务截断；请使用简短描述。')
         text = message.get('content')
     else:
         payload = {'model': config['model'], 'stream': False, 'temperature': 0.1,
-                   'max_tokens': 180 if length == 'brief' else 420,
+                   'max_tokens': max_tokens or (180 if length == 'brief' else 420),
                    'messages': [{'role': 'user', 'content': [
                        {'type': 'text', 'text': prompt},
                        {'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + image_data}}]}]}
+        if response_schema is not None:
+            payload['response_format'] = {'type': 'json_object', 'schema': response_schema}
         response = _post(config['base_url'] + '/chat/completions', payload, config['api_key'], stop, timeout=timeout)
         if not isinstance(response, dict):
             raise CaptionServiceError('描述服务返回格式无效。')
@@ -255,12 +261,12 @@ def describe_image(config, image, language, length, stop, prompt=None, timeout=9
         if choice.get('finish_reason') == 'content_filter':
             raise CaptionServiceError('服务未提供图片描述，不写入拒绝提示或兜底文本。')
         if choice.get('finish_reason') == 'length':
-            raise CaptionServiceError('描述被服务截断；请使用简短描述或调整服务输出限制。')
+            raise CaptionTruncatedError('描述被服务截断；请使用简短描述或调整服务输出限制。')
         message = choice.get('message') or {}
         if not isinstance(message, dict) or message.get('refusal'):
             raise CaptionServiceError('服务没有提供有效图片描述。')
         text = message.get('content')
-    if not isinstance(text, str) or not text.strip() or len(text) > 8192:
+    if not isinstance(text, str) or not text.strip() or len(text) > (32768 if max_tokens else 8192):
         raise CaptionServiceError('视觉服务未返回有效描述；不会写入兜底文本。')
     text = text.strip()
     if text.startswith('<think>') and '</think>' in text:

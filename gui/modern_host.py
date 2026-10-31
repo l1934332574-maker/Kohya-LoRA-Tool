@@ -1268,7 +1268,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             try:
                 generate(self.core, selection, service, report, lambda line: self._task_log(task_id, line), progress, publish)
                 report["status"] = "failed" if report["failed"] or report.get("error") else "completed"
-                message = report.get("error") or "反推完成：生成 %d 张，失败 %d 张。结果可以编辑、复制或导出。" % (report["generated"], report["failed"])
+                message = report.get("error") or ("反推结束：生成 %d 张，失败 %d 张。请检查失败原因。" if report["failed"] else "反推完成：生成 %d 张，失败 %d 张。结果可以编辑、复制或导出。") % (report["generated"], report["failed"])
             except self.core.StopRequested:
                 report["status"], message = "cancelled", "已停止反推，已生成的结果保留；已发出的在线请求可能仍在执行。"
             except Exception as exc:
@@ -1299,7 +1299,15 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         except (OSError, ValueError):
             return {"ok": False, "error": "无法读取这张图片。"}
 
-    def export_prompt_reverse(self, task_id, items, directory):
+    def compile_moss_layout(self, text):
+        try:
+            import json
+            from kohya_core.moss_layout import compile_layout
+            return {"ok": True, "text": compile_layout(json.loads(str(text)))}
+        except (ValueError, TypeError, KeyError) as exc:
+            return {"ok": False, "error": "布局无效，请检查框和 JSON：" + str(exc)}
+
+    def export_prompt_reverse(self, task_id, items, directory, copy_images=False):
         guard = self._agent_guard()
         if guard:
             return guard
@@ -1310,7 +1318,7 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         if not report:
             return {"ok": False, "error": "反推结果已过期，请重新生成。"}
         try:
-            files = export_report(report, items, directory)
+            files = export_report(report, items, directory, copy_images=copy_images)
             return {"ok": True, "directory": str(Path(directory).resolve()), "written": len(files), "files": files}
         except CaptionError as exc:
             return {"ok": False, "error": str(exc)}
@@ -1991,6 +1999,13 @@ class ModernUIBridge(LoRAWorkbenchBridge):
         config = self.core.load_project(project_name) if project_name else None
         if not isinstance(config, dict):
             return {"ok": False, "error": "项目不存在或配置文件已损坏。"}
+        try:
+            from kohya_core.lr_schedule import resolve
+            mode_for_schedule = str(config.get("mode") or "")
+            resolve(self._classic_training_params(config, project_name),
+                    "cosine" if mode_for_schedule in ("character", "style", "concept", "krea2_fz", "flux2_fz") and not str((config.get("params") or {}).get("fizgig_version", "")).startswith("v8") else "constant", 0)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
         if config.get("initial_lora"):
             try:
                 from kohya_core.lora_continue import validate
@@ -2085,6 +2100,14 @@ class ModernUIBridge(LoRAWorkbenchBridge):
             rows.append({"label": "训练媒体", "value": "递归读取原始目录；仅准备文本，缓存按训练类型区分"})
         if params.get('mask_mode', 'off') != 'off':
             rows.append({'label': '学习区域', 'value': '%s；背景参与 %g%%；问题图检查后才能训练' % (params['mask_mode'], float(params.get('mask_floor', .1)) * 100)})
+        from kohya_core.lr_schedule import resolve as resolve_schedule
+        spec, custom = resolve_schedule(params, "cosine" if kohya else "constant", 120 if kohya else 0)
+        if custom:
+            rows = [row for row in rows if row.get("label") not in ("学习率计划", "学习率预热")]
+            description = spec["lr_scheduler"]
+            if mode == "qwen21_fz": description += "；自定义调度关闭 Qwen 自适应学习率"
+            rows += [{"label": "学习率计划", "value": description},
+                     {"label": "学习率预热", "value": str(spec["lr_warmup_steps"]) + " 步"}]
         rows.append({"label": "采样失败边界", "value": "Fizgig 部分入口可停用后续预览；其他入口的采样异常仍可能中断训练，不能保证隔离"})
         return rows
 
@@ -3479,6 +3502,9 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                 allowed_quant = (("auto", "int8", "nf4", "hqq") if next_mode == "h3_fz" else ("auto", "bf16", "int8", "nf4"))
             if key == "quant_mode" and value not in allowed_quant:
                 return {"ok": False, "error": "当前训练模式不支持量化精度「%s」。" % value}
+            if key == "lr_warmup_steps" and value is None:
+                params.pop(key, None)
+                continue
             if key == "sample_preview" and value is None:
                 params.pop(key, None)
                 continue
@@ -3496,6 +3522,12 @@ class ModernUIBridge(LoRAWorkbenchBridge):
                     return {"ok": False, "error": "PixAI 内容标签阈值需要为 0.01 到 0.99。"}
             if key == "fizgig_qwen_preset" and value not in ("auto", "fast", "standard", "style"):
                 return {"ok": False, "error": "Qwen-Image-2.1 训练预设无效。"}
+            if key in ("lr_scheduler", "lr_warmup_steps"):
+                try:
+                    from kohya_core.lr_schedule import normalize
+                    normalize({**params, **incoming_params})
+                except ValueError as exc:
+                    return {"ok": False, "error": str(exc)}
             if key in ("batch_size", "gc"):
                 try:
                     value = normalize_batch_size(value) if key == "batch_size" else normalize_gradient_checkpointing(value)

@@ -339,6 +339,11 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
         rank = alpha = 8 if preset == "fast" else 16
         lr = 1.5e-4 if preset == "style" else 1e-4
         if preset != "style": adaptive = (2e-4, 4e-4) if preset == "fast" else (1e-4, 2e-4)
+    from .lr_schedule import resolve as resolve_schedule
+    lr_spec, custom_schedule = resolve_schedule(params)
+    if custom_schedule:
+        adaptive = None
+        lr = float(numeric("unet_lr", 1e-4))
     proj = core._sanitize_dirname(params.get("project")) or mode
     output = Path(core.data_sub("output", proj)); output.mkdir(parents=True, exist_ok=True)
     output_name = core._sanitize_dirname(params.get("output_name")) or core.output_name_for(mode, params.get("style_preset"))
@@ -348,6 +353,8 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
                     "model_mtime_ns": model_path.stat().st_mtime_ns,
                     "rank": rank, "alpha": alpha, "optimizer": optimizer,
                     "learning_rate": lr, "adaptive_lr": list(adaptive) if adaptive else None}
+    if custom_schedule:
+        run_identity["lr_schedule"] = lr_spec
     if family == "zimage" or (family == "minimax" and files.get("training_adapter")):
         adapter_path = Path(files["training_adapter"])
         run_identity["training_adapter"] = [str(adapter_path.resolve()), adapter_path.stat().st_size, adapter_path.stat().st_mtime_ns]
@@ -494,6 +501,9 @@ def train_lora(core, record, logf, mode, params, vram_gb, resume_from, progress)
             monitored("[Fizgig] 注意：项目含外部引擎的 .sample_override.json，非空覆盖设置可能替代上述采样参数；请核对后续 [sample override] 日志。")
         monitored("[Fizgig] 预览：每 %s 轮，%spx，%s 步，CFG %s；开始时不额外采样；最后一轮仅在满足间隔时采样。文件在项目 output 中。" % (sample_epochs, resolution, steps, cfg))
     for option in options: cmd += ["--family_option", option]
+    from .lr_schedule import command as schedule_command
+    cmd, lr_spec = schedule_command(cmd, params, source=Path(source) / "src/fizgig/families/train.py")
+    core._record_effective(**lr_spec)
     from .lora_continue import fizgig_command
     cmd = fizgig_command(cmd, source, output, params, resume_from)
     if params.get("initial_lora"):

@@ -48,7 +48,7 @@ def main():
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / name, destination)
     required = ("_tcl_data/init.tcl", "_tk_data/tk.tcl", "kohya_core/image_io.py",
-                "kohya_core/loss_masks.py", "kohya_core/loss_mask_worker.py", "preprocess.py")
+                "kohya_core/loss_masks.py", "kohya_core/moss_layout.py", "kohya_core/loss_mask_worker.py", "preprocess.py")
     for name in required:
         if not (package / name).is_file():
             raise RuntimeError("Missing package component: " + name)

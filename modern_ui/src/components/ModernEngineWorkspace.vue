@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import LearningRateSchedule from './LearningRateSchedule.vue'
 import TrainingFocusControl from './TrainingFocusControl.vue'
 import OutputDirectoryControl from './OutputDirectoryControl.vue'
 import { computed, reactive, ref, watch } from 'vue'
@@ -50,6 +51,7 @@ const draft = reactive({
   blocks_to_swap: '', pixai_character: false, pixai_copyright: false, pixai_style: false, pixai_threshold: '.17', wd14_model: 'swinv2-v3', sample_preview_mode: 'auto', fast_tier: 'auto', fizgig_qwen_preset: 'auto',
   // ★ 2026-09-27：批大小（留空 = 自动 1）/ 梯度检查点（auto / on / off）
   caption_method: 'wd14', caption_language: 'zh', caption_length: 'brief',
+  lr_scheduler: 'auto', lr_warmup_steps: '',
   batch_size: '', gc: 'auto', mask_mode: 'off', mask_source: 'photo', mask_floor: '0.1', mask_overwrite_auto: false,
   moss_preview_base: false, h3_caption_replace: false, h3_sync_trigger: true, strong_bind: true, clean_concept: true, compile: false, overwrite: false, keep_user_captions: false, amd_mode: false,
 })
@@ -124,7 +126,7 @@ function hydrate(config?: ProjectConfig | null) {
   configuredParams.clear()
   Object.keys(params).forEach((key) => configuredParams.add(key))
   const preset = presetFor()
-  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'sample_seed', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model', 'fizgig_qwen_preset'] as const) {
+  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'lr_scheduler', 'lr_warmup_steps', 'sample_seed', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model', 'fizgig_qwen_preset'] as const) {
     const defaultValue = preset[key] === undefined ? defaults.value[key] : preset[key]
     const styledDefault = key === 'unet_lr' || key === 'te_lr' ? styledPresetValue(key, draft.style_preset) : defaultValue
     const hydratedValue = value(params[key], styledDefault === undefined ? (key === 'optimizer' || key === 'quant_mode' || key === 'gc' ? 'auto' : '') : String(styledDefault))
@@ -206,7 +208,7 @@ function makePatch(): ProjectConfig {
   for (const key of ['caption_method', 'caption_language', 'caption_length'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
-  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'sample_seed', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model', 'fizgig_qwen_preset'] as const) {
+  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'video_steps', 'video_frames', 'save_every', 'sample_interval', 'lr_scheduler', 'lr_warmup_steps', 'sample_seed', 'optimizer', 'crop_ratio', 'sample_prompt', 'noise_offset', 'min_snr_gamma', 'quant_mode', 'blocks_to_swap', 'batch_size', 'gc', 'wd14_model', 'fizgig_qwen_preset'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
   for (const key of ['strong_bind', 'clean_concept', 'compile', 'overwrite', 'keep_user_captions', 'amd_mode', 'h3_caption_replace', 'h3_sync_trigger', 'moss_preview_base'] as const) {
@@ -426,6 +428,7 @@ const isAmdGpu = computed(() => String(props.details.gpu_vendor || '').toLowerCa
             <label class="engine-field" :title="intervalTooltip('save_every')"><span>模型保存间隔（{{ intervalUnit('save_every') }}）</span><input v-model="draft.save_every" class="engine-input" type="number" min="0" placeholder="使用默认" @input="markParam('save_every')" /></label>
             <label class="engine-field" :title="intervalTooltip('sample_interval')"><span>采样预览间隔（{{ intervalUnit('sample_interval') }}）</span><input v-model="draft.sample_interval" class="engine-input" type="number" min="0" placeholder="使用默认" @input="markParam('sample_interval')" /></label>
             <label v-if="supported('optimizer')" class="engine-field" :title="legacyTooltips.optimizer"><span>优化器</span><select v-model="draft.optimizer" class="engine-select" @change="markParam('optimizer')"><option value="auto">自动</option><option value="adamw">AdamW</option><option value="adamw8bit">AdamW8bit</option><option v-if="!isFizgig" value="lion">Lion</option></select></label>
+<LearningRateSchedule :scheduler="draft.lr_scheduler" :warmup="draft.lr_warmup_steps" :mode="mode" :version="draft.fizgig_version" :optimizer="draft.optimizer" @change="(key, value) => { if (key === 'lr_scheduler' || key === 'lr_warmup_steps') { draft[key] = value; markParam(key) } }" />
             <label v-if="supported('batch_size')" class="engine-field" :title="legacyTooltips.batchSize"><span>批大小（留空 = 自动）</span><input v-model="draft.batch_size" class="engine-input" type="number" min="1" max="8" placeholder="自动（1）" @input="markParam('batch_size')" /></label>
             <label v-if="supported('gc')" class="engine-field" :title="legacyTooltips.gradientCheckpointing"><span>梯度检查点</span><select v-model="draft.gc" class="engine-select" @change="markParam('gc')"><option value="auto">自动（按显存）</option><option value="开启">开启（省显存，较慢）</option><option value="关闭">关闭（更快，更吃显存）</option></select></label>
             <label v-if="isV7" class="engine-field wide-field"><span>预览正向补充词</span><input v-model="draft.global_pos" class="engine-input" @input="markRoot('global_pos')" /></label>

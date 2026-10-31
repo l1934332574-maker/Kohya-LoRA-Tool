@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import platform
+import re
 import socket
 import stat
 import subprocess
@@ -17,10 +18,10 @@ import urllib.request
 import uuid
 import zipfile
 
-from .captioning import CaptionError, CaptionServiceError, describe_image
+from .captioning import CaptionError, CaptionServiceError, CaptionTruncatedError, describe_image
 from .diagnostics import redact
 from .prompt_reverse_models import _manifest, _valid, model_root, status
-from .prompt_reverse import reverse_prompt
+from .prompt_reverse import reverse_prompt, image_prompt, result_item
 
 
 def _extract(archive, destination):
@@ -67,6 +68,22 @@ def _stop_process(process, reader):
         process.stdout.close()
 
 
+def _report_model_activity(state, line):
+    """Forward actual llama.cpp activity; never estimate image completion."""
+    prompt = re.search(r'prompt processing,.*?progress\s*=\s*([0-9.]+)', line)
+    generated = re.search(r'n_gen\s*=\s*(\d+).*?tg\s*=\s*([0-9.]+)\s*t/s', line)
+    if prompt:
+        message = '正在识别图片（输入处理 %d%%）' % max(0, min(100, round(float(prompt.group(1)) * 100)))
+    elif generated:
+        message = '正在生成内容（已生成 %s 个词元，%s 个/秒）' % generated.groups()
+    else:
+        return
+    with state['lock']:
+        callback = state.get('callback')
+        if callback:
+            callback(message)
+
+
 @contextmanager
 def _server(core, executable, model, projector, backend, workspace, log, progress):
     with socket.socket() as listener:
@@ -80,7 +97,7 @@ def _server(core, executable, model, projector, backend, workspace, log, progres
     env.update(HF_HUB_OFFLINE='1', LLAMA_LOG_COLORS='0')
     command = [str(executable), '-m', str(model), '--mmproj', str(projector), '--host', '127.0.0.1',
                '--port', str(port), '--api-key-file', str(key_file), '--alias', 'kohya-photo-qwen',
-               '--ctx-size', '4096', '--parallel', '1', '--batch-size', '512', '--ubatch-size', '128',
+               '--ctx-size', '8192', '--no-context-shift', '--parallel', '1', '--batch-size', '512', '--ubatch-size', '128',
                '--image-max-tokens', '1024', '--jinja', '--no-webui', '--n-gpu-layers',
                'auto' if backend == 'vulkan' else '0']
     if backend == 'vulkan':
@@ -88,6 +105,7 @@ def _server(core, executable, model, projector, backend, workspace, log, progres
     else:
         command += ['--no-mmproj-offload', '--threads', str(max(1, min(os.cpu_count() or 4, 8)))]
     process, reader = None, None
+    activity = {'lock': threading.Lock(), 'callback': None}
     url = 'http://127.0.0.1:%d' % port
     try:
         log('[反推] 正在加载 Qwen3-VL 4B（%s）…' % ('自动加速 / Vulkan' if backend == 'vulkan' else 'CPU'))
@@ -101,7 +119,8 @@ def _server(core, executable, model, projector, backend, workspace, log, progres
                 for line in process.stdout:
                     text = redact(line.rstrip()).replace(key, '<REDACTED>')
                     log('[本地视觉] ' + text)
-            except (OSError, ValueError):
+                    _report_model_activity(activity, text)
+            except (OSError, ValueError) as exc:
                 pass
         reader = threading.Thread(target=read_output, daemon=True, name='local-vision-log')
         reader.start()
@@ -120,7 +139,7 @@ def _server(core, executable, model, projector, backend, workspace, log, progres
             time.sleep(.2)
         core.check_stop()
         yield {'provider': 'compatible', 'base_url': url + '/v1', 'model': 'kohya-photo-qwen',
-               'api_key': key, 'local': True}, process
+               'api_key': key, 'local': True, '_activity': activity}, process
     except OSError as exc:
         raise CaptionError('本地视觉运行组件无法启动（%s），请检查完整安装包和系统运行库。' % type(exc).__name__) from exc
     finally:
@@ -141,6 +160,50 @@ def _description_prompt(language, length):
     return prompt
 
 
+def _layout_schema(image):
+    from .image_io import read_image
+    with read_image(image) as pixels:
+        width, height = pixels.size
+    item = {'type':'object', 'properties': {
+        'label': {'type':'string', 'enum':['character', 'object', 'text']},
+        'caption': {'type':'string'},
+        'bbox': {'type':'array', 'items':{'type':'number'}, 'minItems':4, 'maxItems':4},
+        'text': {'type':'string'},
+    }, 'required':['label','caption','bbox'], 'additionalProperties':False}
+    return {'type':'object', 'properties': {
+        'width': {'type':'integer', 'const':width}, 'height': {'type':'integer', 'const':height},
+        'bbox_coord_space': {'type':'string', 'const':'abs'}, 'bbox_format': {'type':'string', 'const':'xyxy'},
+        'summary': {'type':'object', 'properties':{'caption':{'type':'string'}}, 'required':['caption'], 'additionalProperties':False},
+        'items': {'type':'array', 'items':item, 'minItems':1, 'maxItems':16},
+    }, 'required':['width','height','bbox_coord_space','bbox_format','summary','items'], 'additionalProperties':False}
+
+
+def _retry_layout(core, selection, service, image, caption, signature, first_error, log, progress, done, report, item):
+    reason = redact(str(first_error))[:200]
+    log('[反推] MOSS 布局首次校验未通过（%s），正在重新识别一次。' % reason)
+    progress(done - 1, report['total'], {'name': '格式需要修正，正在重新识别 · ' + item['name']})
+    retry_prompt = (image_prompt(selection, image) +
+        ' Your previous JSON failed validation: ' + reason +
+        '. Return a complete corrected JSON. Each text item must contain a non-empty text field with only legible literal characters; '
+        'do not include uncertain text items, and keep every box within the specified image dimensions. '
+        'Each label must be exactly character, object, or text in English, not a translated word or object name.')
+    caption = describe_image(service, image, selection['language'], selection['length'], core.check_stop,
+                             prompt=retry_prompt, timeout=360, max_tokens=-1, response_schema=_layout_schema(image))
+    core.check_stop()
+    if signature != [image.stat().st_size, image.stat().st_mtime_ns]:
+        raise CaptionError('反推期间图片已修改，请重新生成。')
+    try:
+        return result_item(selection, image, caption)
+    except ValueError as retry_error:
+        try:
+            parsed = result_item(selection, image, caption, repair_model_output=True)
+        except ValueError:
+            log('[反推] 重新识别后仍无法通过校验：' + redact(str(retry_error))[:200])
+            raise retry_error
+        log('[反推] ' + parsed.get('warning', '已修正区域，请检查。'))
+        return parsed
+
+
 def _caption_images(core, selection, service, process, report, log, progress, publish):
     failures = 0
     for done, image in enumerate(selection['images'], 1):
@@ -149,22 +212,47 @@ def _caption_images(core, selection, service, process, report, log, progress, pu
             raise CaptionError('本地视觉进程已退出；已生成的结果保留。')
         item = {'name': image.relative_to(selection['root']).as_posix()}
         signature = None
+        activity = service.get('_activity')
+        if activity:
+            with activity['lock']:
+                activity['callback'] = lambda message: progress(done - 1, report['total'], {'name': message + ' · ' + item['name']})
         try:
             signature = [image.stat().st_size, image.stat().st_mtime_ns]
             progress(done - 1, report['total'], {'name': '描述 ' + item['name']})
             caption = describe_image(service, image, selection['language'], selection['length'], core.check_stop,
-                                     prompt=_description_prompt(selection['language'], selection['length']), timeout=360)
+                                     prompt=(image_prompt(selection, image)
+                                             if selection.get('output_format') == 'moss_layout' else _description_prompt(selection['language'], selection['length'])), timeout=360,
+                                     max_tokens=-1, response_schema=_layout_schema(image) if selection.get('output_format') == 'moss_layout' else None)
             core.check_stop()
             if signature != [image.stat().st_size, image.stat().st_mtime_ns]:
                 raise CaptionError('反推期间图片已修改，请重新生成。')
-            item.update(status='generated', caption=caption)
+            try:
+                parsed = result_item(selection, image, caption)
+            except ValueError as first_error:
+                if selection.get('output_format') != 'moss_layout':
+                    raise
+                try:
+                    parsed = result_item(selection, image, caption, repair_model_output=True)
+                except ValueError:
+                    parsed = None
+                if parsed is not None:
+                    log('[反推] ' + parsed.get('warning', '已保留未识别文字的区域，请检查。'))
+                else:
+                    parsed = _retry_layout(core, selection, service, image, caption, signature, first_error, log, progress, done, report, item)
+            if selection.get('output_format') == 'moss_layout' and len(parsed['layout']['items']) >= 16:
+                notice = '自动识别最多保留 16 个区域，可能遗漏细节；请检查并按需编辑布局。'
+                parsed['warning'] = ' '.join(filter(None, (parsed.get('warning'), notice)))
+            item.update(parsed)
             failures = 0
         except CaptionError as exc:
-            item.update(status='failed', error=str(exc))
+            item.update(status='failed', error=('本地视觉模型的上下文已用满，输出未完成；请减少画面区域数量或换用更大上下文的视觉服务。' if isinstance(exc, CaptionTruncatedError) else str(exc)))
             if isinstance(exc, CaptionServiceError):
                 failures += 1
-        except (OSError, ValueError):
-            item.update(status='failed', error='无法读取这张图片，请检查文件。')
+        except (OSError, ValueError) as exc:
+            item.update(status='failed', error=('MOSS JSON 格式或坐标无效：' + redact(str(exc))[:240]) if selection.get('output_format') == 'moss_layout' else '无法读取这张图片，请检查文件。')
+        if activity:
+            with activity['lock']:
+                activity['callback'] = None
         item['image_signature'] = signature
         report['items'].append(item)
         report['failed' if item['status'] == 'failed' else 'generated'] += 1

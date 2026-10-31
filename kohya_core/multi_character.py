@@ -158,6 +158,16 @@ def scan(value, check_stop=lambda: None, *, mode=None, resolution=512):
             seen[key] = label
             try: caption = read_caption(image)
             except FileNotFoundError: caption = ""
+            if caption and caption.lstrip().startswith('{'):
+                if mode != 'moss_fz':
+                    raise ValueError('MOSS JSON 标签只能在 MOSS 模式训练。')
+                from .moss_layout import parse
+                from .image_io import read_image
+                with read_image(image) as pixels:
+                    layout = parse(caption, pixels.size)
+                if not group and not _contains(caption, row['trigger']):
+                    layout['summary']['caption'] = row['trigger'] + '. ' + layout['summary']['caption']
+                caption = json.dumps(layout, ensure_ascii=False, separators=(',', ':'))
             if caption:
                 wrong = [r["trigger"] for rid, r in role_map.items() if rid not in member_ids and _contains(caption, r["trigger"])]
                 if wrong: raise ValueError(f"{image.name} 的标签含未分配的角色触发词：{', '.join(wrong)}。")
@@ -352,7 +362,11 @@ def prepare(core, project, settings, resolution, logf=print, report=None, *, mod
                     shutil.copy2(previous_mask, destination / (Path(filename).stem + loss_masks.SUFFIX + previous_mask.suffix))
                 elif mask_enabled:
                     loss_masks.import_mask(path, stage / filename, source_geometry=source_geometry)
-                (stage / Path(filename).with_suffix(".txt")).write_text(row["caption"], encoding="utf-8")
+                caption = row["caption"]
+                if caption.lstrip().startswith('{'):
+                    from .moss_layout import transform
+                    caption = transform(caption, (width, height), (0, 0, width, height), size)
+                (stage / Path(filename).with_suffix(".txt")).write_text(caption, encoding="utf-8")
                 written += 1
             if written % 10 == 0 or len(manifest) + 1 == len(result["entries"]):
                 logf(f"[多角色] 整理素材 {len(manifest) + 1}/{len(result['entries'])}，已写入 {written} 个样本。")

@@ -310,7 +310,21 @@ def snapshot_inputs(core, config, project, output):
         if caption.is_symlink() or not caption.is_file() or not caption.read_bytes().strip():
             raise ValueError("来源图片缺少训练标签：" + name + "；请先补齐原图同名文本。")
         shutil.copyfile(image, destination)
-        shutil.copyfile(caption, destination.with_suffix(".txt"))
+        content = caption.read_text(encoding='utf-8-sig')
+        if content.lstrip().startswith('{'):
+            from .moss_layout import parse
+            from .image_io import read_image
+            with read_image(image) as pixels:
+                raw_size = pixels.size
+            if caption.parent == old_train:
+                original_caption = image.with_suffix('.txt')
+                if not original_caption.is_file():
+                    raise ValueError('MOSS 精修需要原图尺寸的 JSON 标签，不能从已裁切的训练标签推测坐标。')
+                layout = parse(original_caption.read_text(encoding='utf-8-sig'), raw_size)
+                content = json.dumps(layout, ensure_ascii=False)
+            destination.with_suffix('.txt').write_text(content, encoding='utf-8')
+        else:
+            shutil.copyfile(caption, destination.with_suffix(".txt"))
         from . import loss_masks
         previous_image = old_train / (stems[name] + ".png")
         if previous_image.is_file():
@@ -470,7 +484,7 @@ def snapshot_multi_inputs(core, config, project, output):
         path = row["path"]
         old_name = "multi_" + multi_identity(row, origin["resolution"]) + "_0.png"
         caption_path = old_train / Path(old_name).with_suffix(".txt")
-        caption = caption_path.read_text(encoding="utf-8-sig").strip() if caption_path.is_file() else row["caption"]
+        caption = row["caption"] if row["caption"].lstrip().startswith("{") else (caption_path.read_text(encoding="utf-8-sig").strip() if caption_path.is_file() else row["caption"])
         destination = folders[row["group_id"]] / (str(index) + path.suffix.lower())
         shutil.copy2(path, destination)
         destination.with_suffix(".txt").write_text(caption, encoding="utf-8")

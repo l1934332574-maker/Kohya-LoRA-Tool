@@ -13,7 +13,7 @@ WORKSPACE_PARAM_KEYS = (
     'caption_method', 'caption_language', 'caption_length',
     'pixai_character', 'pixai_copyright', 'pixai_style', 'pixai_threshold',
     'h3_caption_replace', 'h3_sync_trigger', 'moss_preview_base',
-    'mask_mode', 'mask_floor', 'mask_overwrite_auto', 'mask_source',
+    'mask_mode', 'mask_floor', 'mask_overwrite_auto', 'mask_source', 'lr_scheduler', 'lr_warmup_steps',
 )
 BOOL_PARAM_KEYS = frozenset(('strong_bind', 'clean_concept', 'sample_preview',
                             'compile', 'overwrite', 'keep_user_captions', 'amd_mode',
@@ -113,6 +113,9 @@ def training_params(core, config, project_name):
     params['mask_floor'] = value('mask_floor', .1)
     from .loss_masks import settings as mask_settings
     mask_settings(params)
+    from .lr_schedule import normalize as normalize_schedule
+    kind, warmup = normalize_schedule(stored)
+    params['lr_scheduler'], params['lr_warmup_steps'] = kind, warmup
     params['gc'] = normalize_gradient_checkpointing(value('gc', 'auto'))
     for key in ('optimizer', 'quant_mode', 'fizgig_qwen_preset'):
         params[key] = str(value(key, 'auto') or 'auto')

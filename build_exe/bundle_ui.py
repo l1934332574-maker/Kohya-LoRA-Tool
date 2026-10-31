@@ -31,7 +31,7 @@ def write_worker_bundle(root, module_path):
     """Keep exact external worker sources inside PYZ for offline repair."""
     root, module_path = Path(root), Path(module_path)
     files = {}
-    for name in ("preprocess.py", "kohya_core/image_io.py", "kohya_core/loss_masks.py",
+    for name in ("preprocess.py", "kohya_core/image_io.py", "kohya_core/loss_masks.py", "kohya_core/moss_layout.py",
                  "kohya_core/loss_mask_worker.py"):
         data = (root / name).read_bytes()
         files[name] = (hashlib.sha256(data).hexdigest(), base64.b64encode(data))

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import LearningRateSchedule from './LearningRateSchedule.vue'
 import OutputDirectoryControl from './OutputDirectoryControl.vue'
 import { computed, reactive, ref, watch } from 'vue'
 import type { ModeWorkspaceData, ProjectCard, ProjectConfig } from '../bridge'
@@ -45,6 +46,7 @@ const draft = reactive({
   save_every: '', sample_interval: '', sample_seed: '1234', sample_prompt: '', optimizer: 'auto', strong_bind: false, clean_concept: true,
   sample_preview_mode: 'auto', unet_only: false, compile: false, crop_ratio: '', noise_offset: '', min_snr_gamma: '',
   caption_method: 'wd14', caption_language: 'zh', caption_length: 'brief',
+  lr_scheduler: 'auto', lr_warmup_steps: '',
   batch_size: '', gc: 'auto', pixai_character: false, pixai_copyright: false, pixai_style: false, pixai_threshold: '.17', wd14_model: 'swinv2-v3', overwrite: false, keep_user_captions: false, amd_mode: false, train_env: '',
 })
 
@@ -116,7 +118,7 @@ function hydrate(config?: ProjectConfig | null) {
   configuredParams.clear()
   Object.keys(params).forEach((key) => configuredParams.add(key))
   const preset = presetFor(currentModeKey.value, draft.base_type)
-  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'save_every', 'sample_interval', 'sample_seed', 'sample_prompt', 'optimizer', 'crop_ratio', 'noise_offset', 'min_snr_gamma', 'wd14_model', 'batch_size', 'gc'] as const) {
+  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'save_every', 'sample_interval', 'lr_scheduler', 'lr_warmup_steps', 'sample_seed', 'sample_prompt', 'optimizer', 'crop_ratio', 'noise_offset', 'min_snr_gamma', 'wd14_model', 'batch_size', 'gc'] as const) {
     const presetValue = preset[key] === undefined ? '' : key === 'unet_lr' || key === 'te_lr' ? styledPresetValue(key, currentModeKey.value, draft.base_type, get(config?.style_preset) || '自定义') : String(preset[key])
     const value = get(params[key]) || presetValue || (demo ? demoValues[key] ?? (key === 'optimizer' || key === 'gc' ? 'auto' : '') : key === 'optimizer' || key === 'gc' ? 'auto' : '')
     draft[key] = key === 'wd14_model' ? normalizeWd14Model(value) : key === 'gc' ? normalizeGradientCheckpointing(value) : key === 'sample_seed' ? value || '1234' : value
@@ -207,7 +209,7 @@ function makePatch(): ProjectConfig {
   for (const key of ['caption_method', 'caption_language', 'caption_length'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
-  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'save_every', 'sample_interval', 'sample_seed', 'sample_prompt', 'optimizer', 'crop_ratio', 'noise_offset', 'min_snr_gamma', 'wd14_model', 'batch_size', 'gc'] as const) {
+  for (const key of ['rank', 'alpha', 'unet_lr', 'te_lr', 'repeats', 'max_epochs', 'resolution', 'save_every', 'sample_interval', 'lr_scheduler', 'lr_warmup_steps', 'sample_seed', 'sample_prompt', 'optimizer', 'crop_ratio', 'noise_offset', 'min_snr_gamma', 'wd14_model', 'batch_size', 'gc'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = draft[key]
   }
   if (dirty.has('params.strong_bind')) params.strong_bind = draft.strong_bind
@@ -380,6 +382,7 @@ defineExpose({ hasUnsavedChanges: () => dirty.size > 0, startTraining, guideActi
             </div>
             <Transition name="kohya-accordion">
               <div v-if="advancedOpen" class="advanced-grid">
+<LearningRateSchedule :scheduler="draft.lr_scheduler" :warmup="draft.lr_warmup_steps" :mode="project.mode"  :optimizer="draft.optimizer" @change="(key, value) => { if (key === 'lr_scheduler' || key === 'lr_warmup_steps') { draft[key] = value; markParam(key) } }" />
                 <label v-if="supports('batch_size')" class="kohya-field"><span>批大小（1–8）</span><input v-model="draft.batch_size" class="kohya-input" type="number" min="1" max="8" placeholder="默认 1；增大需要更多显存" @input="markParam('batch_size')" /></label>
                 <label v-if="supports('gc')" class="kohya-field"><span>梯度检查点</span><select v-model="draft.gc" class="kohya-select" @change="markParam('gc')"><option value="auto">按显存自动</option><option value="开启">开启（省显存）</option><option value="关闭">关闭（显存充足时更快）</option></select></label>
                 <label class="kohya-field" :title="intervalTooltip('save_every')"><span>模型保存间隔（{{ intervalUnit('save_every') }}）</span><input v-model="draft.save_every" class="kohya-input" type="text" placeholder="沿用自动值" @input="markParam('save_every')" /></label>

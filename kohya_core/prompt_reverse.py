@@ -24,7 +24,12 @@ def prepare(options):
     if not str(options.get('path') or '').strip() or not path.exists() or path.is_symlink():
         raise CaptionError('请选择有效的图片或图片文件夹。')
     path = path.resolve()
+    output_format = options.get('output_format', 'text')
+    if output_format not in ('text', 'moss_layout'):
+        raise CaptionError('反推输出格式无效。')
     method = options.get('method', 'natural')
+    if output_format == 'moss_layout' and method not in ('natural', 'qwen_vl'):
+        raise CaptionError('MOSS 布局需要本地 Qwen 视觉模型或视觉服务。关键词模型不提供框坐标。')
     if method not in ('natural', 'wd14', 'ram', 'qwen_vl', 'pixai'):
         raise CaptionError('请选择关键词模型或画面描述方式。')
     language, length = caption_options(options.get('language', 'zh'), options.get('length', 'brief'))
@@ -64,8 +69,32 @@ def prepare(options):
     if not images:
         raise CaptionError('这个文件夹没有支持的图片。')
     images.sort(key=lambda image: image.relative_to(root).as_posix().casefold())
-    return {'path': str(path), 'root': root, 'images': images, 'method': method, 'language': language,
+    return {'path': str(path), 'root': root, 'images': images, 'output_format': output_format, 'method': method, 'language': language,
             'length': length, 'wd14_model': model, 'threshold': threshold, 'device': device, 'pixai_options': pixai}
+
+
+def image_prompt(selection, image):
+    if selection.get('output_format') == 'moss_layout':
+        from .image_io import read_image
+        from .moss_layout import prompt
+        with read_image(image) as pixels:
+            return prompt(pixels.size, selection['language'])
+    return reverse_prompt(selection['language'], selection['length'])
+
+
+def result_item(selection, image, text, repair_model_output=False):
+    if selection.get('output_format') == 'moss_layout':
+        import json
+        from .image_io import read_image
+        from .moss_layout import parse, compile_layout, repair_model_layout
+        warning = ''
+        with read_image(image) as pixels:
+            if repair_model_output:
+                text, warning = repair_model_layout(text, pixels.size)
+            draft = parse(text, pixels.size)
+        return {'status': 'generated', 'caption': json.dumps(draft, ensure_ascii=False, indent=2),
+                'layout': draft, 'compiled_caption': compile_layout(draft), 'output_format': 'moss_layout', 'warning': warning}
+    return {'status': 'generated', 'caption': text}
 
 
 def reverse_prompt(language, length):
@@ -180,18 +209,19 @@ def generate(core, selection, service, report, log, progress, publish):
                     item.update(keywords[image])
                 else:
                     text = describe_image(service, image, selection['language'], selection['length'], core.check_stop,
-                                          prompt=reverse_prompt(selection['language'], selection['length']))
+                                          prompt=image_prompt(selection, image),
+                                          max_tokens=3072 if selection.get('output_format') == 'moss_layout' else None)
                     core.check_stop()
                     if signature != [image.stat().st_size, image.stat().st_mtime_ns]:
                         raise CaptionError('反推期间图片已修改，请重新生成。')
-                    item.update(status='generated', caption=text)
+                    item.update(result_item(selection, image, text))
                     consecutive_failures = 0
             except CaptionError as exc:
                 item.update(status='failed', error=str(exc))
                 if isinstance(exc, CaptionServiceError): consecutive_failures += 1
             except (OSError, ValueError) as exc:
                 from .image_io import ImageDecodeError, ImageEnvironmentError
-                message = str(exc)[:300] if isinstance(exc, (ImageDecodeError, ImageEnvironmentError)) else '无法读取这张图片，请检查文件。'
+                message = str(exc)[:300] if selection.get('output_format') == 'moss_layout' or isinstance(exc, (ImageDecodeError, ImageEnvironmentError)) else '无法读取这张图片，请检查文件。'
                 item.update(status='failed', error=message)
             item['image_signature'] = signature
             report['items'].append(item)
@@ -211,7 +241,9 @@ def generate(core, selection, service, report, log, progress, publish):
     return report
 
 
-def export_report(report, items, directory):
+def export_report(report, items, directory, copy_images=False):
+    if not isinstance(copy_images, bool):
+        raise CaptionError('复制原图选项无效。')
     destination = Path(str(directory or '')).resolve()
     if not directory or not destination.is_dir() or destination.is_symlink():
         raise CaptionError('请选择有效的输出文件夹。')
@@ -225,24 +257,46 @@ def export_report(report, items, directory):
             raise CaptionError('结果不属于这次反推任务，或包含重复文件。')
         name, text = item['name'], item.get('caption')
         seen.add(name)
-        if not isinstance(text, str) or not text.strip() or len(text) > 8192:
-            raise CaptionError('导出文本需要为 1 到 8192 个字符。')
+        if not isinstance(text, str) or not text.strip() or len(text) > 32768:
+            raise CaptionError('导出文本需要为 1 到 32768 个字符。')
         target = (destination / Path(name).with_suffix('.txt')).resolve()
         if not target.is_relative_to(destination) or target == (source / Path(name).with_suffix('.txt')).resolve():
             raise CaptionError('请选择独立的输出文件夹，以保留原图旁已有的标签文件。')
         if target in [value[0] for value in pending]:
             raise CaptionError('同名不同扩展名图片会共用文本文件，请先分开导出。')
-        pending.append((target, text))
+        if accepted[name].get('output_format') == 'moss_layout':
+            import json
+            from .moss_layout import parse
+            try:
+                draft = parse(text, (accepted[name]['layout']['width'], accepted[name]['layout']['height']))
+            except (ValueError, KeyError) as exc:
+                raise CaptionError('布局无效，请检查框和 JSON：' + str(exc)) from exc
+            text = json.dumps(draft, ensure_ascii=False, separators=(',', ':'))
+        original_image = source / name
+        if copy_images and (not original_image.is_file() or original_image.is_symlink() or accepted[name].get('image_signature') != [original_image.stat().st_size, original_image.stat().st_mtime_ns]):
+            raise CaptionError('原图已改变，不能导出错配的训练标签，请重新反推。')
+        pending.append((target, text, accepted[name].get('output_format') == 'moss_layout', original_image))
     written = []
-    for target, text in pending:
+    for target, text, layout, original_image in pending:
         target.parent.mkdir(parents=True, exist_ok=True)
         # An existing file is retained, including a file created by another task.
         original = target
         for attempt in range(100):
             candidate = original if attempt == 0 else original.with_name(original.stem + '.prompt-' + uuid.uuid4().hex[:8] + '.txt')
+            companion = candidate.with_suffix('.layout.json')
+            copied_image = candidate.with_suffix(original_image.suffix.lower())
+            if (layout and companion.exists()) or (copy_images and copied_image.exists()):
+                continue
             try:
                 with candidate.open('x', encoding='utf-8') as stream:
                     stream.write(text.strip() + '\n')
+                if layout:
+                    with companion.open('x', encoding='utf-8') as stream:
+                        stream.write(text.strip() + '\n')
+                if copy_images:
+                    import shutil
+                    with original_image.open('rb') as src, copied_image.open('xb') as dst:
+                        shutil.copyfileobj(src, dst)
                 written.append(str(candidate))
                 break
             except FileExistsError:

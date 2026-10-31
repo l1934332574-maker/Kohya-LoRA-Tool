@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import LearningRateSchedule from './LearningRateSchedule.vue'
 import OutputDirectoryControl from './OutputDirectoryControl.vue'
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import type { ModeWorkspaceData, ProjectCard, ProjectConfig, QwenModelChoice, QwenModelSaveResult, QwenModelSelection, QwenModelSetup } from '../bridge'
@@ -78,6 +79,7 @@ const trainingDraft = reactive({
   video_steps: '',
   save_every: '',
   sample_interval: '',
+  lr_scheduler: 'auto', lr_warmup_steps: '',
   sample_seed: '1234',
   optimizer: 'auto',
   sample_prompt: '',
@@ -190,7 +192,7 @@ function hydrateConfig(config?: ProjectConfig | null) {
   Object.keys(params).forEach((key) => configuredParams.add(key))
   const preset = presetFor()
   const demoValues: Record<string, string> = { rank: '16', alpha: '16', unet_lr: '1e-4', resolution: '512', video_steps: '2000', save_every: '200', sample_interval: '250' }
-  for (const key of ['crop_ratio', 'rank', 'alpha', 'unet_lr', 'resolution', 'video_steps', 'save_every', 'sample_interval', 'sample_seed', 'optimizer', 'sample_prompt', 'wd14_model'] as const) {
+  for (const key of ['crop_ratio', 'rank', 'alpha', 'unet_lr', 'resolution', 'video_steps', 'save_every', 'sample_interval', 'lr_scheduler', 'lr_warmup_steps', 'sample_seed', 'optimizer', 'sample_prompt', 'wd14_model'] as const) {
     const defaultValue = preset[key] === undefined ? '' : key === 'unet_lr' ? styledPresetValue(key, trainingDraft.style_preset) : String(preset[key])
     const value = text(params[key]) || defaultValue || (demo ? demoValues[key] ?? (key === 'optimizer' ? 'auto' : '') : key === 'optimizer' ? 'auto' : '')
     trainingDraft[key] = key === 'wd14_model' ? normalizeWd14Model(value) : key === 'sample_seed' ? value || '1234' : value
@@ -252,7 +254,7 @@ function makePatch(): ProjectConfig {
   for (const key of ['caption_method', 'caption_language', 'caption_length'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = trainingDraft[key]
   }
-  for (const key of ['crop_ratio', 'rank', 'alpha', 'unet_lr', 'resolution', 'video_steps', 'save_every', 'sample_interval', 'sample_seed', 'optimizer', 'sample_prompt', 'wd14_model'] as const) {
+  for (const key of ['crop_ratio', 'rank', 'alpha', 'unet_lr', 'resolution', 'video_steps', 'save_every', 'sample_interval', 'lr_scheduler', 'lr_warmup_steps', 'sample_seed', 'optimizer', 'sample_prompt', 'wd14_model'] as const) {
     if (dirty.has(`params.${key}`)) params[key] = trainingDraft[key]
   }
   for (const key of ['strong_bind', 'clean_concept', 'overwrite', 'keep_user_captions', 'amd_mode'] as const) {
@@ -527,6 +529,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                 <label class="qwen-field" :title="legacyTooltips.sampleIntervalSteps"><span class="field-caption">采样预览间隔（步）</span><input v-model="trainingDraft.sample_interval" class="qwen-input" type="number" min="0" placeholder="留空 / 0 使用默认 250 步" @input="markParam('sample_interval')" /></label>
                 <label class="qwen-field" :title="legacyTooltips.optimizer"><span class="field-caption">优化器</span><select v-model="trainingDraft.optimizer" class="qwen-select" @change="markParam('optimizer')"><option value="auto">自动</option><option value="adamw">AdamW</option><option value="adamw8bit">AdamW8bit</option><option value="lion">Lion</option></select></label>
                 <label class="qwen-field advanced-prompt" :title="legacyTooltips.samplePrompt"><span class="field-caption">采样预览提示词</span><input v-model="trainingDraft.sample_prompt" class="qwen-input" placeholder="留空自动生成；填写后整句生效" @input="markParam('sample_prompt')" /></label>
+<LearningRateSchedule :scheduler="trainingDraft.lr_scheduler" :warmup="trainingDraft.lr_warmup_steps" :mode="mode || 'qwen_image'"  :optimizer="trainingDraft.optimizer" @change="(key, value) => { if (key === 'lr_scheduler' || key === 'lr_warmup_steps') { trainingDraft[key] = value; markParam(key) } }" />
               <label class="qwen-field" title="各次采样使用同一个正整数种子，便于比较不同训练阶段。固定种子不保证不同引擎或不同提示词的图片可直接比较。"><span>固定采样种子</span><input v-model="trainingDraft.sample_seed" class="qwen-input" type="number" min="1" max="4294967295" placeholder="默认 1234" @input="markParam('sample_seed')" /></label>
                 <button class="reset-preset" type="button" :title="legacyTooltips.resetPreset" @click="resetPreset">恢复预设</button>
               </div></div>

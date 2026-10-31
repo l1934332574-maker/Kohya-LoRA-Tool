@@ -161,7 +161,7 @@ export interface CaptionReport {
   items: Array<{ name: string; status: string; caption?: string; error?: string }>;
 }
 
-export interface PromptReverseItem { name: string; status: string; caption?: string; error?: string }
+export interface PromptReverseItem { name: string; status: string; caption?: string; error?: string; output_format?: string; warning?: string; layout?: {width: number; height: number} }
 export interface PromptReverseReport {
   task_id: string; directory: string; path: string; method: 'natural' | 'wd14' | 'ram' | 'qwen_vl' | 'pixai'; language: 'zh' | 'en'; length: 'brief' | 'detailed';
   status: string; total: number; generated: number; failed: number; items: PromptReverseItem[]; error?: string;
@@ -248,12 +248,13 @@ export interface DesktopApi {
   start_lora_workbench(action: 'inspect' | 'analyze' | 'profile' | 'preview' | 'explore' | 'export' | 'compress', options: LoRAWorkbenchOptions): Promise<{ ok: boolean; error?: string; task_id?: string; cancelled?: boolean }>
   get_lora_workbench_result(task_id: string): Promise<{ ok: boolean; error?: string; task?: LoRAWorkbenchTask | null; report?: LoRAWorkbenchReport | null }>
   get_lora_workbench_image(task_id: string, name: string): Promise<{ ok: boolean; error?: string; data_url?: string }>
-  start_prompt_reverse(options: { path: string; method: 'natural' | 'wd14' | 'ram' | 'qwen_vl' | 'pixai'; language: 'zh' | 'en'; length: 'brief' | 'detailed'; wd14_model: string; threshold: number; allow_remote: boolean; device?: 'auto' | 'cpu'; pixai_character?: boolean; pixai_copyright?: boolean; pixai_style?: boolean; pixai_threshold?: string | number }): Promise<{ ok: boolean; task_id?: string; error?: string }>
+  start_prompt_reverse(options: { output_format?: 'text' | 'moss_layout'; path: string; method: 'natural' | 'wd14' | 'ram' | 'qwen_vl' | 'pixai'; language: 'zh' | 'en'; length: 'brief' | 'detailed'; wd14_model: string; threshold: number; allow_remote: boolean; device?: 'auto' | 'cpu'; pixai_character?: boolean; pixai_copyright?: boolean; pixai_style?: boolean; pixai_threshold?: string | number }): Promise<{ ok: boolean; task_id?: string; error?: string }>
   get_prompt_reverse(task_id?: string): Promise<{ ok: boolean; task_id: string; report?: PromptReverseReport | null; task?: { id: string; kind?: string; model_key?: 'ram' | 'qwen_vl' | 'pixai'; status: string; message: string; detail: string; progress: number | null } | null }>
   get_prompt_reverse_model(model?: 'ram' | 'qwen_vl' | 'pixai'): Promise<{ ok: boolean; ready?: boolean; name?: string; directory?: string; size_bytes?: number; language?: string; error?: string }>
   download_prompt_reverse_model(model?: 'ram' | 'qwen_vl' | 'pixai'): Promise<{ ok: boolean; task_id?: string; error?: string }>
   get_prompt_reverse_image(task_id: string, name: string): Promise<{ ok: boolean; data_url?: string; error?: string }>
-  export_prompt_reverse(task_id: string, items: Array<{ name: string; caption: string }>, directory: string): Promise<{ ok: boolean; directory?: string; written?: number; error?: string }>
+  compile_moss_layout(text: string): Promise<{ok: boolean; text?: string; error?: string}>
+  export_prompt_reverse(task_id: string, items: Array<{ name: string; caption: string }>, directory: string, copy_images?: boolean): Promise<{ ok: boolean; directory?: string; written?: number; error?: string }>
   get_caption_service(): Promise<{ ok: boolean; settings?: CaptionServiceSettings; task?: { id: string; status: string; project_name: string }; error?: string }>
   save_caption_service(settings: CaptionServiceSettings & { api_key?: string; clear_key?: boolean }): Promise<{ ok: boolean; settings?: CaptionServiceSettings; error?: string }>
   start_caption_task(project_name: string, options: { directory: string; language: string; length: string; preview: boolean; replace: boolean; allow_remote: boolean; retry_task_id?: string }): Promise<{ ok: boolean; task_id?: string; error?: string }>

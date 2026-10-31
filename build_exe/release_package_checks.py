@@ -37,7 +37,7 @@ def verify_external_image_io(source_root, package_root, worker_python=None):
     source_root = Path(source_root).resolve()
     package_root = Path(package_root).resolve()
     for relative in ("preprocess.py", "kohya_core/image_io.py",
-                     "kohya_core/loss_masks.py", "kohya_core/loss_mask_worker.py"):
+                     "kohya_core/loss_masks.py", "kohya_core/moss_layout.py", "kohya_core/loss_mask_worker.py"):
         source, packaged = source_root / relative, package_root / relative
         if not packaged.is_file():
             raise RuntimeError("发布包缺少独立预处理文件：" + relative)

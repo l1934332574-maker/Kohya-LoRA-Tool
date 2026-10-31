@@ -162,7 +162,7 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "Kohya-SS LoRA 一键工具（画风 / 人物）"
 # 应用版本号：安装包/窗口标题/关于 共用；发布新包时同步更新这里和 installer.iss
-APP_VERSION = "0.19.23"
+APP_VERSION = "0.19.24"
 
 # ---------- 配色主题（Material 浅色） ----------
 INDIGO = "#5B5FE6"
@@ -3532,6 +3532,10 @@ def train_krea2(logf=print, mode="krea2", params=None, vram_gb=None, resume_from
     # 训练命令同样带 KREA2_TOKENIZER_DIR/HF_ENDPOINT/RDNA2 FP16 环境（缓存步骤已带；
     # 采样预览加载文本编码器时必须用本地 tokenizer，否则国内直连 HF 拉 tokenizer 会 SSL 失败）
     from kohya_core.lora_continue import native_command
+    from kohya_core.lr_schedule import command as schedule_command, guard_resume as schedule_guard
+    schedule_guard(params, out_dir, resume_from, "constant", 0)
+    cmd, _lr_spec = schedule_command(cmd, params, "constant", 0)
+    _record_effective(**_lr_spec)
     cmd = native_command(cmd, mt_dir, out_dir, params, resume_from)
     rc = run_stream(cmd, cwd=mt_dir, env=_k2env, logf=logf, collect=_log_tail)
     if rc != 0 and _compile_ok and _log_mentions_compile_failure(_log_tail):
@@ -3775,6 +3779,10 @@ def train_flux2(logf=print, mode="flux2", params=None, vram_gb=None, resume_from
     # 训练命令同样带 KREA2_TOKENIZER_DIR/HF_ENDPOINT/RDNA2 FP16 环境（缓存步骤已带；
     # 采样预览加载文本编码器时必须用本地 tokenizer，否则国内直连 HF 拉 tokenizer 会 SSL 失败）
     from kohya_core.lora_continue import native_command
+    from kohya_core.lr_schedule import command as schedule_command, guard_resume as schedule_guard
+    schedule_guard(params, out_dir, resume_from, "constant", 0)
+    cmd, _lr_spec = schedule_command(cmd, params, "constant", 0)
+    _record_effective(**_lr_spec)
     cmd = native_command(cmd, mt_dir, out_dir, params, resume_from)
     rc = run_stream(cmd, cwd=mt_dir, env=_k2env, logf=logf, collect=_log_tail)
     if rc != 0 and _flux2_compile_ok and _log_mentions_compile_failure(_log_tail):
@@ -7759,6 +7767,9 @@ def write_h3_train_yaml(params, video_dir, out_dir, cfg_path, vpy=None, logf=pri
                       sample_interval=_sample_every, sample_interval_unit="steps",
                       sample_steps=20, sample_sampler="flowmatch", sample_walk_seed=False,
                       lr_scheduler="engine_default", lr_warmup_steps="engine_default")
+    from kohya_core.lr_schedule import yaml_config as schedule_yaml
+    text, _lr_spec = schedule_yaml(text, params)
+    _record_effective(**_lr_spec)
     os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
     with open(cfg_path, "w", encoding="utf-8") as f:
         f.write(text)
@@ -8500,6 +8511,9 @@ def write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=None, lo
                       sample_interval=_sample_every, sample_interval_unit="steps",
                       sample_steps=20, sample_sampler="flowmatch", sample_walk_seed=False,
                       lr_scheduler="engine_default", lr_warmup_steps="engine_default")
+    from kohya_core.lr_schedule import yaml_config as schedule_yaml
+    text, _lr_spec = schedule_yaml(text, params)
+    _record_effective(**_lr_spec)
     os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
     with open(cfg_path, "w", encoding="utf-8") as f:
         f.write(text)
@@ -9087,6 +9101,9 @@ def write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=None, logf=pri
                       sample_interval=_sample_every, sample_interval_unit="steps",
                       sample_steps=20, sample_sampler="flowmatch", sample_walk_seed=False,
                       lr_scheduler="engine_default", lr_warmup_steps="engine_default")
+    from kohya_core.lr_schedule import yaml_config as schedule_yaml
+    text, _lr_spec = schedule_yaml(text, params)
+    _record_effective(**_lr_spec)
     os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
     with open(cfg_path, "w", encoding="utf-8") as f:
         f.write(text)
@@ -9212,6 +9229,8 @@ def train_krea2_at(logf=print, mode="krea2_at", params=None, vram_gb=None, resum
     out_dir = data_sub("output", proj)
     os.makedirs(out_dir, exist_ok=True)
     cfg_path = os.path.join(KIT_DIR, "configs", "krea2_at_train.yaml")
+    from kohya_core.lr_schedule import guard_resume as schedule_guard
+    schedule_guard(params, out_dir, resume_from)
     write_krea2_at_yaml(params, train_dir, out_dir, cfg_path, vpy=vpy, logf=logf, vram_gb=vram_gb)
     steps = _krea2_at_steps(params, train_dir)
     _n_img = count_images(train_dir)
@@ -9382,6 +9401,8 @@ def train_at_image(logf=print, mode="qwen_image", params=None, vram_gb=None, res
         info["model_id"] = at_image_local_dir(mode, _model_settings).replace("\\", "/")
 
     cfg_path = os.path.join(KIT_DIR, "configs", mode + "_train.yaml")
+    from kohya_core.lr_schedule import guard_resume as schedule_guard
+    schedule_guard(params, out_dir, resume_from)
     write_at_image_yaml(params, info, train_dir, out_dir, cfg_path, vpy=vpy, logf=logf, vram_gb=vram_gb)
     steps = int(params.get("video_steps", 2000))
     logf(f"[{info['label']}] 数据集: {train_dir}（{count_images(train_dir)} 张）")
@@ -10665,6 +10686,8 @@ def preprocess(logf=print, input_dir=None, size=512, mode="style", trigger="",
         "--output", out, "--size", str(size), "--mode", mode,
         "--repeats", str(repeats),
     ]
+    if (_multi_config or {}).get("mode") == "moss_fz":
+        cmd += ["--moss-layout"]
     if caption_method == "natural":
         cmd += ["--caption-format", "natural"]
     # ⚠️ 输出目录里已有同名图片时，preprocess.py 默认**整张跳过**（含打标）✗
@@ -14635,6 +14658,10 @@ def train(logf=print, base_model=None, mode="style", params=None, vram_gb=None, 
                 logf(f"[训练] 采样预览：每 {_sample_n} 步用当前 LoRA 出图（输出目录）")
 
     from kohya_core.lora_continue import native_command
+    from kohya_core.lr_schedule import command as schedule_command, guard_resume as schedule_guard
+    schedule_guard(params, out_dir, resume_from, "cosine", 120)
+    cmd, _lr_spec = schedule_command(cmd, params, "cosine", 120)
+    _record_effective(**_lr_spec)
     cmd = native_command(cmd, sds, out_dir, params, resume_from)
     model_path = os.path.join(out_dir, output_name + ".safetensors")
     model_before = _file_signature(model_path)

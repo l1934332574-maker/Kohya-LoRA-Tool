@@ -71,6 +71,17 @@ def is_mask_file(path):
     return os.path.splitext(os.path.basename(path))[0].casefold().endswith('-masklabel')
 
 @lru_cache(maxsize=1)
+def _load_moss_layout():
+    import importlib.util
+    path = os.path.join(_HERE, 'kohya_core', 'moss_layout.py')
+    spec = importlib.util.spec_from_file_location('_kohya_moss_layout', path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError('MOSS 布局预处理组件缺失，请使用完整安装包恢复。')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+@lru_cache(maxsize=1)
 def _load_loss_masks():
     import importlib.util
     path = os.path.join(_HERE, 'kohya_core', 'loss_masks.py')
@@ -462,6 +473,14 @@ def filter_concept_tags(text, concept_type, extra_remove=None):
 
 
 def insert_trigger(caption: str, trigger: str) -> str:
+    if caption.lstrip().startswith('{'):
+        value = json.loads(caption)
+        summary = value.get('summary')
+        if not isinstance(summary, dict) or not isinstance(summary.get('caption'), str):
+            raise ValueError('MOSS JSON 缺少 summary.caption，不能插入触发词。')
+        if trigger and trigger not in summary['caption']:
+            summary['caption'] = trigger + '. ' + summary['caption']
+        return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
     """人物模式：把 trigger 触发词插入 caption 第一行。
 
     - trigger 为空 -> 原样返回；
@@ -2256,6 +2275,7 @@ def main():
                         help="按 宽:高 比例居中裁切后再缩放，如 3:4 / 9:16 / 1:1（默认不裁切，长边缩放保比例；范围 1:2~2:1）")
     parser.add_argument("--report", default=None,
                         help="JSON 报告输出路径（含 ok/重复/模糊/过小/损坏 计数）")
+    parser.add_argument("--moss-layout", action="store_true", help="保留 MOSS JSON 描述并同步图片坐标")
     parser.add_argument("--caption-format", choices=("tags", "natural"), default="tags",
                         help="自然语言文本原样同步，跳过关键词清洗、强绑定和兜底")
     args = parser.parse_args()
@@ -2382,6 +2402,24 @@ def main():
             print("[INFO] WD14 自动打标: 关（保留原图自带 .txt 或使用兜底 caption）")
     print()
 
+    _layout_files = set()
+    for name in files:
+        sidecar = os.path.splitext(os.path.join(input_dir, name))[0] + '.txt'
+        if os.path.isfile(sidecar):
+            with open(sidecar, 'rb') as stream:
+                raw_header = stream.read(4096)
+            encoding = 'utf-16' if raw_header.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8-sig'
+            if raw_header.decode(encoding, errors='ignore').lstrip().startswith('{'):
+                _layout_files.add(name)
+    if _layout_files:
+        if not args.moss_layout:
+            raise ValueError('检测到 MOSS JSON 标签，请在 MOSS 训练入口导入。')
+        _keep_user_caps = True
+        _natural = True
+        args.no_strong_bind = True
+        args.no_wd14 = True
+        print('[MOSS 布局] 保留结构化标签；按图片裁切和缩放同步框坐标。')
+    layout_geometry = {}
     output_stems = _output_image_stems(files)
     processing_errors = []
     ok = skipped = failed = 0
@@ -2406,7 +2444,14 @@ def main():
         caption = raw.decode(encoding).strip()
         if not caption:
             raise ValueError("同名文本为空，请先补齐")
-        if trigger:
+        if caption.lstrip().startswith('{'):
+            if not args.moss_layout:
+                raise ValueError('MOSS JSON 标签只适用于 MOSS 训练。')
+            geometry = layout_geometry.get(source_image)
+            if geometry is None:
+                raise ValueError('缺少 MOSS 图片变换记录，请重新预处理。')
+            caption = _load_moss_layout().transform(caption, *geometry, trigger=trigger)
+        elif trigger:
             if _natural and caption.splitlines()[0].strip() != trigger:
                 caption = trigger + "\n" + caption
             elif not _natural:
@@ -2442,7 +2487,7 @@ def main():
         raw_img = os.path.join(input_dir, _rel)
         out_img = os.path.join(output_dir, stem + ".png")
         out_txt = os.path.join(output_dir, stem + ".txt")
-        reuse_existing = os.path.exists(out_img) and not args.overwrite
+        reuse_existing = os.path.exists(out_img) and not args.overwrite and name not in _layout_files
         if reuse_existing:
             try:
                 # Downstream taggers must be able to read the copy without WIC.
@@ -2480,6 +2525,7 @@ def main():
             seen_hashes[h] = name
         try:
             img = load_image(raw_img)
+            layout_source_size = img.size
             source_geometry = {'size': img.info['kohya_source_size'],
                                'orientation': img.info['kohya_source_orientation']}
         except Exception as e:
@@ -2531,12 +2577,17 @@ def main():
                 if c:
                     cropped += 1
 
+            layout_box = border_box or (0, 0, img.width, img.height)
             if _crop_ratio:
+                before_width, before_height = img.size
                 img = crop_to_ratio(img, _crop_ratio)
+                dx, dy = (before_width - img.width) // 2, (before_height - img.height) // 2
+                layout_box = (layout_box[0] + dx, layout_box[1] + dy, layout_box[0] + dx + img.width, layout_box[1] + dy + img.height)
             img = resize_to_multiple(
                 img, target=args.size, multiple=args.multiple,
                 allow_upscale=not args.no_upscale,
             )
+            layout_geometry[raw_img] = (layout_source_size, layout_box, img.size)
             _load_image_io().save_normalized_png(img, out_img)
             # Apply exactly the image's EXIF, border and ratio crops to its raw mask.
             try:
